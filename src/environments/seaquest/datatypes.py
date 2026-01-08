@@ -14,7 +14,13 @@ class ConceptObs:
     # This is the "Expert" view.
     global_features: chex.Array  # Shape: [Batch, N_Globals]
 
-    # --- 2. Tactical Detail (For Instance Selector & Full-Access Meta) ---
+    # --- 2. Capabilities (For Sub-Policies) ---
+    # Standardized vector defining what the agent CAN do right now. TODO: this might be an issue with transferability, further investigation needed.
+    # [Can_Fire, Has_Speed_Boost, Is_Invulnerable, ...]
+    # This allows the sub-policy to learn "Don't fire if Can_Fire=0"
+    capabilities: chex.Array # Shape: [Batch, N_Caps]
+
+    # --- 3. Tactical Detail (For Instance Selector & Full-Access Meta) ---
     # The raw object list. 
     # Shape: [Batch, Max_Objs, Obj_Feats] (x, y, vx, vy, type_id, ...)
     objects: chex.Array 

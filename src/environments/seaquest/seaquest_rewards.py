@@ -23,6 +23,7 @@ IDX_SSUB = 33
 REWARD_SCALE = 10.0       # High scale because inputs are normalized small numbers
 BONUS_SUCCESS = 1.0       # Collection / Kill / Refill
 PENALTY_FAILURE = -1.0    # Collision
+AIM_BONUS_SCALE = 0.1    # Small shaping reward for good aim
 
 def compute_rewards(obs_st, next_obs_st, state, next_state):
     """
@@ -56,7 +57,8 @@ def compute_rewards(obs_st, next_obs_st, state, next_state):
     # 1.0 if event happened, 0.0 otherwise
     is_triggered = (events == consts.EVENT_TRIGGERED).astype(jnp.float32)
     
-    # --- CRITICAL FIX: Local Shaping Mask ---
+    # TODO: maybe pull this into the event detection step and only give the reward event once in cases where its really necessary! 
+    # --- Local Shaping Mask ---
     # If an event triggered (Object Died/Collected), its next position is garbage (teleported).
     # We must mask shaping for THAT specific object on THIS specific frame.
     # mask = 1.0 (Normal), 0.0 (Event happened, ignore distance)
@@ -71,20 +73,33 @@ def compute_rewards(obs_st, next_obs_st, state, next_state):
     # Apply Mask HERE
     dist_delta = (dists_curr - dists_next) * REWARD_SCALE * valid_shaping_mask
     
-    # B. Y-Alignment Delta (for Destroy)
-    p_y = p_pos[1]
-    p_y_next = p_next_pos[1]
-    t_y = t_pos[:, 1]
-    t_y_next = t_next_pos[:, 1]
+    # B. Cosine Similarity Alignment (for Destroy)
+    def get_cosine_similarity(target_pos, p_pos):
+        """
+        Calculates alignment between (Target - Player) and Shooting_Vector.
+        """
+        rel_vec = target_pos - p_pos
+        # Avoid division by zero with a small epsilon
+        dist = jnp.linalg.norm(rel_vec) + 1e-6
+        rel_vec_norm = rel_vec / dist
+        
+        # Dot product with the game-specific shooting vector
+        # Seaquest: [1, 0], Phoenix: [0, -1]
+        alignment = jnp.dot(rel_vec_norm, consts.SHOOTING_VECTOR)
+        return alignment
     
-    dy_curr = jnp.abs(p_y - t_y)
-    dy_next = jnp.abs(p_y_next - t_y_next)
-    
+    # Calculate alignment for all targets
+    alignments = jax.vmap(lambda t_pos: get_cosine_similarity(t_pos, p_pos))(t_pos)
+    # Range [-1, 1]. We clamp negative values so we don't punish for being behind,
+    # just reward for being in front.
+    alignments = jnp.maximum(0.0, alignments)
     # Apply Mask HERE
-    align_delta = (dy_curr - dy_next) * REWARD_SCALE * 2.0 * valid_shaping_mask
+    align_delta = alignments * AIM_BONUS_SCALE * valid_shaping_mask
 
     # C. Surface Delta (for Monitor)
     # Player movement is global, not per-object, so use global mask only
+    p_y = p_pos[1]
+    p_y_next = p_next_pos[1]
     move_up_delta = (p_y - p_y_next) * REWARD_SCALE * valid_global_mask
 
     # --- 3. Define Kernels ---
@@ -97,6 +112,12 @@ def compute_rewards(obs_st, next_obs_st, state, next_state):
         return (-dist_delta[idx]) + (is_triggered[idx] * PENALTY_FAILURE)
 
     def reward_destroy(label, idx):
+        """
+        Generalized Shooting Reward.
+        Rewards:
+        1. Alignment (Cosine Sim): Keep target in the line of fire.
+        2. Destruction: Event triggered.
+        """
         return align_delta[idx] + (is_triggered[idx] * BONUS_SUCCESS)
 
     def reward_monitor(label, idx):

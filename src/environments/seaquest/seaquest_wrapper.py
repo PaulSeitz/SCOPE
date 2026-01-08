@@ -37,12 +37,18 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         self.n_global_feats = 10 
         self.n_obj_feats = 4 # x, y, w, h
 
+        # Define ranges for easy checking
+        self.idx_player_missile = 34
+
         self._observation_space = self._make_observation_space()
 
     def _make_observation_space(self) -> spaces.Dict:
         return spaces.Dict({
             # Dashboard (Oxygen, Ammo, etc.)
             "global_features": spaces.Box(0.0, 2.0, (self.n_global_feats,), jnp.float32),
+            
+            # Capabilities
+            "capabilities": spaces.Box(0.0, 1.0, (const.N_CAPABILITIES,), jnp.float32),
             
             # Object History [35, Stack*4] -> Flattened for network
             "objects": spaces.Box(0.0, 1.0, (self.max_objs, self.stack_size * self.n_obj_feats), jnp.float32),
@@ -236,11 +242,21 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         latest_mask = mask_stack[-1]
         latest_labels = labels_stack[-1]
 
+        # --- Compute Capabilities ---
+        # Logic: If Player Missile (Idx 34) is present (Mask=1) -> Can't Fire.
+        # Check specific index for efficiency since indices are fixed in Seaquest
+        missile_active = latest_mask[self.idx_player_missile] > 0.5
+        can_fire = jnp.where(missile_active, 0.0, 1.0)
+        
+        caps = jnp.zeros(const.N_CAPABILITIES)
+        caps = caps.at[const.CAP_CAN_FIRE].set(can_fire)
+
         # Events should always be a JAX array (zeros on reset, detected events on step)
         # No need for None check - always a valid JAX array
 
         return ConceptObs(
             global_features=latest_globals,
+            capabilities=caps, # <--- Added
             objects=flat_objects,
             object_mask=latest_mask,
             object_labels=latest_labels,
