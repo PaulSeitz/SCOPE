@@ -1,0 +1,43 @@
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+import jax
+import src.environments.seaquest.seaquest_wrapper as wrapper
+from jaxatari.wrappers import AtariWrapper
+from jaxatari import make as make_atari_env
+import src.environments.seaquest.seaquest_rewards as rewards
+
+if __name__ == "__main__":
+    env = wrapper.SeaquestConceptWrapper(AtariWrapper(make_atari_env('seaquest'), frame_stack_size=1))
+    key = jax.random.key(0)
+    env.reset(key)
+
+    print("=== Observation Space ===")
+    print(env.observation_space())
+
+    print("\n=== Reset ===")
+    obs, state = env.reset(key)
+    print("Observation:", obs)
+    print("State:", state)
+
+    print("\n=== First Step ===")
+    action = 0
+    prev_obs = obs
+    prev_state = state
+    obs, state, reward, done, info = env.step(state, action)
+    print("Observation:", obs)
+    print("State:", state)
+    print("Reward:", reward)
+    print("Done:", done)
+    print("Info:", info)
+    
+    print("\n=== Computed Rewards ===")
+    multi_reward = rewards.compute_rewards(prev_obs, obs, prev_state, state)
+    print("Global Reward:", multi_reward.global_reward)
+    print("Concept Rewards Shape:", multi_reward.concept_rewards.shape)
+    print("Concept Rewards (first few rows):")
+    print(multi_reward.concept_rewards[:5, :5])  # Show first 5x5 for readability
