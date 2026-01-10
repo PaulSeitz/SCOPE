@@ -16,5 +16,6 @@ setup(
         "chex",
         "numpy",
         "pygame",
+        "wandb",
     ],
 )

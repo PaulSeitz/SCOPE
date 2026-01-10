@@ -10,9 +10,11 @@ import src.environments.seaquest.seaquest_wrapper as wrapper
 from jaxatari.wrappers import AtariWrapper
 from jaxatari import make as make_atari_env
 import src.environments.seaquest.seaquest_rewards as rewards
+from src.config import get_default_config
 
 if __name__ == "__main__":
-    env = wrapper.SeaquestConceptWrapper(AtariWrapper(make_atari_env('seaquest'), frame_stack_size=1))
+    config = get_default_config()
+    env = wrapper.SeaquestConceptWrapper(AtariWrapper(make_atari_env('seaquest'), frame_stack_size=1), config=config)
     key = jax.random.key(0)
     env.reset(key)
 
@@ -36,7 +38,7 @@ if __name__ == "__main__":
     print("Info:", info)
     
     print("\n=== Computed Rewards ===")
-    multi_reward = rewards.compute_rewards(prev_obs, obs, prev_state, state)
+    multi_reward = rewards.compute_rewards(prev_obs, obs, prev_state, state, config)
     print("Global Reward:", multi_reward.global_reward)
     print("Concept Rewards Shape:", multi_reward.concept_rewards.shape)
     print("Concept Rewards (first few rows):")

@@ -21,6 +21,7 @@ from jaxatari.wrappers import AtariWrapper
 from jaxatari import make as make_atari_env
 import src.environments.seaquest.seaquest_rewards as rewards
 import src.environments.seaquest.seaquest_constants as consts
+from src.config import get_default_config
 
 # Color constants
 BLACK = (0, 0, 0)
@@ -80,8 +81,9 @@ ACTION_DOWNLEFTFIRE = 17
 
 
 class RewardDashboard:
-    def __init__(self, env, screen_width=800, screen_height=600):
+    def __init__(self, env, screen_width=800, screen_height=600, config=None):
         self.env = env
+        self.config = config if config is not None else get_default_config()
         # Try to get base environment for rendering
         try:
             self.base_env = env._env._env  # Unwrap to get base environment for rendering
@@ -149,7 +151,7 @@ class RewardDashboard:
         # Compute rewards if we have previous state
         if self.prev_obs is not None:
             self.multi_reward = rewards.compute_rewards(
-                self.prev_obs, self.obs, self.prev_state, self.state
+                self.prev_obs, self.obs, self.prev_state, self.state, self.config
             )
             self.total_global_reward += float(self.multi_reward.global_reward)
             
@@ -569,6 +571,9 @@ class RewardDashboard:
 
 def main():
     """Main entry point"""
+    # Get config
+    config = get_default_config()
+    
     # Create environment with settings for manual play
     base_env = make_atari_env('seaquest')
     atari_wrapper = AtariWrapper(
@@ -582,10 +587,10 @@ def main():
         clip_reward=False,
         max_pooling=False,
     )
-    env = wrapper.SeaquestConceptWrapper(atari_wrapper)
+    env = wrapper.SeaquestConceptWrapper(atari_wrapper, config=config)
     
     # Create dashboard
-    dashboard = RewardDashboard(env, screen_width=1200, screen_height=600)
+    dashboard = RewardDashboard(env, screen_width=1200, screen_height=600, config=config)
     
     # Run
     try:

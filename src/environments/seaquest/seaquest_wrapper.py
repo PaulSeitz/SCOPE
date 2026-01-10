@@ -4,9 +4,11 @@ import jax.numpy as jnp
 from jaxatari.wrappers import AtariWrapper, JaxatariWrapper
 import jaxatari.spaces as spaces
 from jaxatari.games import jax_seaquest as jaxatari_seaquest
+from typing import Optional
 
 from src.environments.seaquest.datatypes import ConceptObs
 import src.environments.seaquest.seaquest_constants as const
+from src.config import Config, get_default_config
 
 class SeaquestConceptWrapper(JaxatariWrapper):
     """
@@ -15,14 +17,19 @@ class SeaquestConceptWrapper(JaxatariWrapper):
     2. LABELS objects (Semantic Classes).
     3. DETECTS EVENTS (Symbolic Ground Truth for Rewards).
     """
-    def __init__(self, env):
+    def __init__(self, env, config: Optional[Config] = None):
         super().__init__(env)
         assert isinstance(env, AtariWrapper), "Must wrap AtariWrapper first"
         
+        # Use provided config or default
+        if config is None:
+            config = get_default_config()
+        self.config = config
+        
         self._env = env
         self.stack_size = self._env.frame_stack_size
-        self.SCREEN_WIDTH = 160.0
-        self.SCREEN_HEIGHT = 210.0
+        self.SCREEN_WIDTH = config.environment.screen_width
+        self.SCREEN_HEIGHT = config.environment.screen_height
 
         # Object Capacity (Total: 35)
         # 0: Player
@@ -32,13 +39,13 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         # 29-32: Enemy Missiles (Avoid)
         # 33: Surface Sub (Monitor)
         # 34: Player Missile (Player Tool)
-        self.max_objs = 35 
+        self.max_objs = config.environment.max_objs
         
-        self.n_global_feats = 10 
-        self.n_obj_feats = 4 # x, y, w, h
+        self.n_global_feats = config.environment.n_global_feats
+        self.n_obj_feats = config.environment.n_obj_feats  # x, y, w, h
 
         # Define ranges for easy checking
-        self.idx_player_missile = 34
+        self.idx_player_missile = config.environment.idx_player_missile
 
         self._observation_space = self._make_observation_space()
 
