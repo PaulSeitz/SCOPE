@@ -42,6 +42,7 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         self.max_objs = config.environment.max_objs
         
         self.n_global_feats = config.environment.n_global_feats
+        # TODO: maybe append the label to the object features as well, so they are part of the attention mechanism in meta policy and instance selector
         self.n_obj_feats = config.environment.n_obj_feats  # x, y, w, h
 
         # Define ranges for easy checking

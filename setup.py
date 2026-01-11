@@ -18,4 +18,9 @@ setup(
         "pygame",
         "wandb",
     ],
+    extras_require={
+        "test": [
+            "pytest>=7.0.0",
+        ],
+    },
 )
