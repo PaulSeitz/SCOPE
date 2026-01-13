@@ -1,19 +1,18 @@
 import jax
 import jax.numpy as jnp
+from functools import partial
 from src.environments.seaquest.datatypes import MultiReward
 import src.environments.seaquest.seaquest_constants as consts
 from src.config import Config
 
 
-
-
-def compute_rewards(obs_st, next_obs_st, state, next_state, config: Config):
+@partial(jax.jit, static_argnames=('reward_scale', 'bonus_success', 'penalty_failure', 'aim_bonus_scale', 'global_score_scale'))
+def _compute_rewards_jitted(obs_st, next_obs_st, state, next_state, 
+                             reward_scale, bonus_success, penalty_failure, 
+                             aim_bonus_scale, global_score_scale):
     """
-    The Pure Symbolic Reward Kernel.
-    Inputs: ConceptObs (with Events & Globals)
-    Outputs: Matrix [Num_Concepts, Max_Objs]
+    JIT-compiled version of compute_rewards with static config values extracted.
     """
-    
     # --- 0. Global Safety Checks ---
     # Detect Level Resets or Death Animations to prevent global teleport penalties
     prev_steps = state.env_state.step_counter
@@ -53,7 +52,7 @@ def compute_rewards(obs_st, next_obs_st, state, next_state, config: Config):
     dists_next = jnp.sqrt(jnp.sum((t_next_pos - p_next_pos)**2, axis=1))
     
     # Apply Mask HERE
-    dist_delta = (dists_curr - dists_next) * config.reward.reward_scale * valid_shaping_mask
+    dist_delta = (dists_curr - dists_next) * reward_scale * valid_shaping_mask
     
     # B. Cosine Similarity Alignment (for Destroy)
     def get_cosine_similarity(target_pos, p_pos):
@@ -76,22 +75,22 @@ def compute_rewards(obs_st, next_obs_st, state, next_state, config: Config):
     # just reward for being in front.
     alignments = jnp.maximum(0.0, alignments)
     # Apply Mask HERE
-    align_delta = alignments * config.reward.aim_bonus_scale * valid_shaping_mask
+    align_delta = alignments * aim_bonus_scale * valid_shaping_mask
 
     # C. Surface Delta (for Monitor)
     # Player movement is global, not per-object, so use global mask only
     p_y = p_pos[1]
     p_y_next = p_next_pos[1]
-    move_up_delta = (p_y - p_y_next) * config.reward.reward_scale * valid_global_mask
+    move_up_delta = (p_y - p_y_next) * reward_scale * valid_global_mask
 
     # --- 3. Define Kernels ---
 
     def reward_collect(label, idx):
         # Delta is now 0.0 if triggered, so we only get the Bonus
-        return dist_delta[idx] + (is_triggered[idx] * config.reward.bonus_success)
+        return dist_delta[idx] + (is_triggered[idx] * bonus_success)
 
     def reward_avoid(label, idx):
-        return (-dist_delta[idx]) + (is_triggered[idx] * config.reward.penalty_failure)
+        return (-dist_delta[idx]) + (is_triggered[idx] * penalty_failure)
 
     def reward_destroy(label, idx):
         """
@@ -100,10 +99,10 @@ def compute_rewards(obs_st, next_obs_st, state, next_state, config: Config):
         1. Alignment (Cosine Sim): Keep target in the line of fire.
         2. Destruction: Event triggered.
         """
-        return align_delta[idx] + (is_triggered[idx] * config.reward.bonus_success)
+        return align_delta[idx] + (is_triggered[idx] * bonus_success)
 
     def reward_monitor(label, idx):
-        return move_up_delta + (is_triggered[idx] * config.reward.bonus_success)
+        return move_up_delta + (is_triggered[idx] * bonus_success)
 
     def reward_high_level(label, idx):
         return 0.0
@@ -142,7 +141,7 @@ def compute_rewards(obs_st, next_obs_st, state, next_state, config: Config):
     prev_seaquest = state.env_state
     curr_seaquest = next_state.env_state
     score_diff = (curr_seaquest.score - prev_seaquest.score).astype(jnp.float32)
-    global_reward = score_diff * config.reward.global_score_scale
+    global_reward = score_diff * global_score_scale
 
     return MultiReward(
         global_reward=global_reward,

@@ -9,7 +9,13 @@ This module provides a structured configuration system that:
 """
 from dataclasses import dataclass, field
 from typing import Tuple, Optional
+from pathlib import Path
 import jax.numpy as jnp
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
 @dataclass
@@ -28,6 +34,9 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """Configuration for training hyperparameters."""
+    # Random seed
+    seed: int = 42
+    
     # Learning rates
     sub_policy_lr: float = 1e-3
     meta_policy_lr: float = 1e-3
@@ -35,6 +44,7 @@ class TrainingConfig:
     
     # Q-learning hyperparameters
     gamma: float = 0.99  # Discount factor
+    tau: float = 0.005  # Polyak averaging coefficient for target network updates
     epsilon_start: float = 1.0
     epsilon_end: float = 0.01
     epsilon_decay_steps: int = 100000
@@ -44,11 +54,26 @@ class TrainingConfig:
     buffer_size: int = 100000
     train_frequency: int = 4  # Train every N steps
     target_update_frequency: int = 1000  # Update target network every N steps
+    learning_starts: int = 1000  # Steps before training begins
+    
+    # PQN-specific hyperparameters
+    rollout_len: int = 32  # Steps per update loop (rollout length)
+    epochs: int = 3  # Number of times to reuse collected data (like PPO/PQN)
+    
+    # Hysteresis / Stickiness
+    # How much bonus to add to the previously selected option's Q-value/Logit
+    # A value of 0.5 means the new option must be >0.5 better to switch.
+    meta_stickiness: float = 0.5
+    selector_stickiness: float = 1.0  # Higher stickiness for targets to prevent jitter
     
     # Training duration
     total_steps: int = 1000000
     eval_frequency: int = 10000
     eval_episodes: int = 5
+    exploration_fraction: float = 0.1  # Fraction of total steps for exploration
+    
+    # Parallel environments for vectorization
+    num_envs: int = 256  # Number of parallel environments to run
     
     # Gradient clipping
     max_grad_norm: Optional[float] = 10.0
@@ -57,11 +82,12 @@ class TrainingConfig:
 @dataclass
 class RewardConfig:
     """Configuration for reward shaping."""
-    # Reward scaling
-    reward_scale: float = 10.0  # High scale because inputs are normalized small numbers
-    bonus_success: float = 1.0  # Collection / Kill / Refill
-    penalty_failure: float = -1.0  # Collision
-    aim_bonus_scale: float = 0.1  # Small shaping reward for good aim
+    # Reward scaling - Boosted to prevent target collapse
+    # Scale distance delta (approx 0.05 per frame) by 100 -> +5.0 reward per frame for approaching
+    reward_scale: float = 100.0  # High scale to generate healthy gradients
+    bonus_success: float = 1000.0  # Make success huge (like a jackpot) to dominate sparse signals
+    penalty_failure: float = -10.0  # Collision
+    aim_bonus_scale: float = 0.5  # Penalty for drifting away from target
     
     # Global score reward
     global_score_scale: float = 0.01  # Scale for game score difference
@@ -91,6 +117,12 @@ class EnvironmentConfig:
     max_objs: int = 35
     n_global_feats: int = 10
     n_obj_feats: int = 4  # x, y, w, h
+    
+    # Action space
+    # Number of actions available in the environment
+    # Different games have different action spaces (e.g., Seaquest: 6, full Atari: 18)
+    # Can also be set from environment.action_space if needed
+    n_actions: int = 6
     
     # Object indices (Seaquest-specific, but kept here for now)
     idx_sharks_start: int = 1
@@ -213,14 +245,71 @@ class Config:
         if 'wandb' in d:
             for k, v in d['wandb'].items():
                 if hasattr(config.wandb, k):
-                    if isinstance(v, list) and k == 'tags':
-                        setattr(config.wandb, k, tuple(v))
+                    if k == 'tags':
+                        # Handle tags: convert list to tuple, None to empty tuple
+                        if v is None:
+                            setattr(config.wandb, k, ())
+                        elif isinstance(v, list):
+                            setattr(config.wandb, k, tuple(v))
+                        else:
+                            setattr(config.wandb, k, v)
                     else:
                         setattr(config.wandb, k, v)
         
         return config
+    
+    @classmethod
+    def from_yaml(cls, yaml_path: str):
+        """
+        Create config from YAML file.
+        
+        Args:
+            yaml_path: Path to YAML configuration file
+            
+        Returns:
+            Config object loaded from YAML
+            
+        Raises:
+            ImportError: If PyYAML is not installed
+            FileNotFoundError: If YAML file doesn't exist
+        """
+        if yaml is None:
+            raise ImportError(
+                "PyYAML is required to load config from YAML files. "
+                "Install it with: pip install pyyaml"
+            )
+        
+        yaml_path = Path(yaml_path)
+        if not yaml_path.exists():
+            raise FileNotFoundError(f"Config file not found: {yaml_path}")
+        
+        with open(yaml_path, 'r') as f:
+            yaml_dict = yaml.safe_load(f)
+        
+        # Handle empty or None YAML files
+        if yaml_dict is None:
+            yaml_dict = {}
+        
+        return cls.from_dict(yaml_dict)
 
 
 def get_default_config() -> Config:
     """Get default configuration."""
     return Config()
+
+
+def load_config_from_file(config_path: Optional[str] = None) -> Config:
+    """
+    Load configuration from YAML file or return default config.
+    
+    Args:
+        config_path: Optional path to YAML configuration file.
+                    If None, returns default config.
+    
+    Returns:
+        Config object
+    """
+    if config_path is None:
+        return get_default_config()
+    
+    return Config.from_yaml(config_path)

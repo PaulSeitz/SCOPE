@@ -1,6 +1,7 @@
 # Custom stuff
 results/
 wandb/
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

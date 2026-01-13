@@ -9,6 +9,7 @@ import flax.linen as nn
 from flax.training.train_state import TrainState
 import optax
 import chex
+import src.environments.seaquest.seaquest_constants as consts
 
 class InstanceSelector(nn.Module):
     """
@@ -23,12 +24,13 @@ class InstanceSelector(nn.Module):
     embed_dim: int = 64
 
     @nn.compact
-    def __call__(self, global_features: chex.Array, objects: chex.Array, object_mask: chex.Array):
+    def __call__(self, global_features: chex.Array, objects: chex.Array, object_labels: chex.Array, object_mask: chex.Array):
         """
         Args:
-            global_features: [Batch, N_Globals]
-            objects: [Batch, Max_Objs, Obj_Feats]
-            object_mask: [Batch, Max_Objs] (1=Real, 0=Padding)
+            global_features: [Batch, G]
+            objects: [Batch, N, F]
+            object_labels: [Batch, N] (Integer IDs)
+            object_mask: [Batch, N] (0/1)
             
         Returns:
             attention_weights: [Batch, Num_Concepts, Max_Objs] 
@@ -37,39 +39,78 @@ class InstanceSelector(nn.Module):
         batch_size = global_features.shape[0]
         n_objects = objects.shape[1]
 
-        # --- 1. The Query (What the concept is looking for) ---
-        # generate a unique Query Vector for EVERY concept simultaneously.
-        # This allows us to parallelize decision making.
-        # Input: [Batch, Global_Dim] -> Output: [Batch, Num_Concepts, Embed_Dim]
+        # --- 1. Embeddings ---
+        q_glob = nn.Dense(self.embed_dim)(global_features)
         
-        # separate projection for each concept to allow distinct "search criteria"
-        q_proj = nn.Dense(self.num_concepts * self.embed_dim, name='query_proj')
-        queries = q_proj(global_features).reshape(batch_size, self.num_concepts, self.embed_dim)
-
-        # --- 2. The Keys (What the objects are) ---
-        # Input: [Batch, Max_Objs, Obj_Feats] -> Output: [Batch, Max_Objs, Embed_Dim]
-        k_proj = nn.Dense(self.embed_dim, name='key_proj')
-        keys = k_proj(objects)
-
-        # --- 3. Attention Score (Matching) ---
-        # Equation: Q * K^T
-        # Shapes: [B, Concepts, D] @ [B, D, Objs] -> [B, Concepts, Objs]
-        # This gives us a score matrix: "How much does Concept C want Object O?"
-        scores = jnp.matmul(queries, keys.swapaxes(1, 2))
+        # Normalize objects for consistency
+        norm_objects = objects / 210.0
+        k_objs = nn.Dense(self.embed_dim)(norm_objects)
         
-        # Scale for stability
+        # --- 2. Concept Queries [Batch, Num_Concepts, Dim] ---
+        concept_queries = nn.Dense(self.num_concepts * self.embed_dim)(q_glob)
+        concept_queries = concept_queries.reshape(batch_size, self.num_concepts, self.embed_dim)
+        
+        # --- 3. Raw Scores [Batch, Num_Concepts, Max_Objs] ---
+        # (B, C, D) @ (B, O, D).T -> (B, C, O)
+        scores = jnp.einsum('bcd,bod->bco', concept_queries, k_objs)
         scores = scores / jnp.sqrt(self.embed_dim)
 
-        # --- 4. Masking (Don't look at ghosts) ---
-        # Mask shape: [Batch, Objs] -> Broadcast to [Batch, 1, Objs]
-        mask_expanded = object_mask[:, None, :]
+        # --- 4. THE REVISED MASKING LOGIC ---
         
-        # Apply -Infinity to invalid objects so Softmax creates 0 probability
-        large_neg = -1e9
-        scores = scores + (1.0 - mask_expanded) * large_neg
+        # A. Concept-Specific Targeting Rules
+        concept_ids = jnp.arange(self.num_concepts)[None, :, None] # [1, C, 1]
+        
+        # Rule 1: "Strict Matching" Concepts (Must target specific label)
+        # Collect(2), Avoid(3), Destroy(4)
+        is_strict_concept = (concept_ids == consts.LABEL_COLLECT) | \
+                            (concept_ids == consts.LABEL_AVOID) | \
+                            (concept_ids == consts.LABEL_DESTROY)
+                            
+        # Rule 2: "Self-Targeting" Concepts (Target the Player/Self)
+        # Player(0), Tool(1), Monitor(5)
+        # Note: We group 'Monitor' here. If I want to monitor, I look at myself.
+        is_self_concept = ~is_strict_concept
 
-        # --- 5. Probabilities ---
-        # Dim -1 is the Object dimension
+        # B. Object Identity Checks
+        # We assume Object 0 is always Player
+        obj_ids = jnp.arange(objects.shape[1])[None, None, :]
+        is_player_obj = (obj_ids == 0)
+        
+        # C. Labels
+        labels_expanded = object_labels[:, None, :] # [B, 1, O]
+        label_match = (labels_expanded == concept_ids)
+        
+        # --- D. Construct the Valid Mask ---
+        
+        # Case 1: Strict Concepts -> Must match Label AND Not be Player
+        # (Technically Label check covers 'Not Player' usually, but safe to be explicit)
+        mask_strict = is_strict_concept & label_match & (~is_player_obj)
+        
+        # Case 2: Self Concepts -> Must be Player
+        mask_self = is_self_concept & is_player_obj
+        
+        # Combine
+        final_semantic_mask = mask_strict | mask_self
+        
+        # E. Existence Check
+        existence = object_mask[:, None, :] > 0.5
+        
+        # Final Mask
+        valid_mask = final_semantic_mask & existence
+        
+        # F. Fallback Safety
+        # If a row has NO valid targets (e.g., Collect selected but no Divers), 
+        # fall back to Player (Index 0) to prevent Uniform Crash.
+        # This ensures 'scores' has at least one valid entry (Index 0).
+        any_valid = jnp.any(valid_mask, axis=-1, keepdims=True)
+        fallback_mask = is_player_obj # Fallback to Player
+        valid_mask = jnp.where(any_valid, valid_mask, fallback_mask)
+
+        # Apply Mask (-1e9 is safer than -inf for Softmax stability)
+        large_neg = -1e9
+        scores = scores + (1.0 - valid_mask.astype(jnp.float32)) * large_neg
+
+        # --- 5. Softmax ---
         attn_weights = nn.softmax(scores, axis=-1)
         
         return attn_weights

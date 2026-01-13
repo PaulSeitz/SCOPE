@@ -1,0 +1,88 @@
+model:
+  hidden_dims: [64, 64]
+  meta_hidden_dims: [128, 128]
+  selector_hidden_dims: [64, 64]
+
+training:
+  seed: 42
+  
+  # Learning Rates (Lowered for stability in Hybrid setup)
+  sub_policy_lr: 0.0001
+  meta_policy_lr: 0.0001
+  selector_lr: 0.0001
+  
+  # Hysteresis / Stickiness
+  meta_stickiness: 0.5
+  selector_stickiness: 2.0
+  
+  # Q-Learning Params
+  gamma: 0.99
+  tau: 0.005
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay_steps: 5_000_000
+  
+  # Loop Params
+  batch_size: 32
+  buffer_size: 100000
+  train_frequency: 4
+  target_update_frequency: 2000
+  learning_starts: 50000
+  
+  # PQN-specific hyperparameters
+  rollout_len: 128  # Steps per update loop
+  epochs: 3  # Number of times to reuse collected data
+  
+  # Duration
+  total_steps: 20000000
+  eval_frequency: 200000
+  eval_episodes: 5
+  exploration_fraction: 0.2
+  max_grad_norm: 10.0
+  
+  # Parallel environments for vectorization (performance optimization)
+  num_envs: 256
+
+reward:
+  # Hybrid Reward Scaling - Boosted to prevent target collapse
+  # Scale distance delta (approx 0.05 per frame) by 100 -> +5.0 reward per frame for approaching
+  reward_scale: 100.0       # High scale to generate healthy gradients
+  bonus_success: 1000.0     # Make success huge (like a jackpot) to dominate sparse signals
+  penalty_failure: -10.0
+  aim_bonus_scale: 0.5      # Penalty for drifting away from target
+  global_score_scale: 1.0
+
+environment:
+  game_name: "seaquest"
+  frame_stack_size: 4
+  frame_skip: 4
+  sticky_actions: true
+  episodic_life: true
+  first_fire: false
+  noop_reset: 30
+  clip_reward: false
+  max_pooling: false
+  screen_width: 160.0
+  screen_height: 210.0
+  max_objs: 35
+  n_global_feats: 10
+  n_obj_feats: 4
+  n_actions: 18
+
+concepts:
+  # Included for completeness, though usually constant
+  label_player: 0
+  label_player_tool: 1
+  label_collect: 2
+  label_avoid: 3
+  label_destroy: 4
+  label_monitor_statistic: 5
+  label_high_level_concept: 6
+  n_capabilities: 4
+
+wandb:
+  project: "concept-transfer-rl"
+  name: "pqn-seaquest-512envs"
+  tags: ["seaquest", "concept-transfer", "hybrid-reward"]
+  mode: "offline"  # Set to "offline" for testing, "online" for production
+  save_code: true
