@@ -40,28 +40,26 @@ GRAY = (128, 128, 128)
 DARK_GRAY = (64, 64, 64)
 ORANGE = (255, 165, 0)
 
-# Concept names
+# Concept names (Player concept removed)
 CONCEPT_NAMES = {
-    0: "Player",
-    1: "Player Tool",
-    2: "Collect",
-    3: "Avoid",
-    4: "Destroy",
-    5: "Monitor",
-    6: "High Level",
+    0: "Player Tool",
+    1: "Collect",
+    2: "Avoid",
+    3: "Destroy",
+    4: "Monitor",
+    5: "High Level",
 }
 
-# Object type names
+# Object type names (Player removed, indices shifted down by 1)
 OBJECT_NAMES = [
-    "Player",           # 0
-    "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 1-6
-    "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 7-12
-    "Sub 1", "Sub 2", "Sub 3", "Sub 4", "Sub 5", "Sub 6",  # 13-18
-    "Sub 7", "Sub 8", "Sub 9", "Sub 10", "Sub 11", "Sub 12",  # 19-24
-    "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 25-28
-    "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 29-32
-    "Surface Sub",  # 33
-    "Player Missile",  # 34
+    "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 0-5
+    "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 6-11
+    "Sub 1", "Sub 2", "Sub 3", "Sub 4", "Sub 5", "Sub 6",  # 12-17
+    "Sub 7", "Sub 8", "Sub 9", "Sub 10", "Sub 11", "Sub 12",  # 18-23
+    "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 24-27
+    "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 28-31
+    "Surface Sub",  # 32
+    "Player Missile",  # 33
 ]
 
 
@@ -200,11 +198,14 @@ class AgentVisualization:
                 mask_padding = jnp.zeros((obs.object_mask.shape[0], num_to_pad), dtype=obs.object_mask.dtype)
                 adapted_mask = jnp.concatenate([obs.object_mask, mask_padding], axis=1)
             
-            if obs.object_labels.ndim == 1:
-                labels_padding = jnp.zeros(num_to_pad, dtype=obs.object_labels.dtype)
-                adapted_labels = jnp.concatenate([obs.object_labels, labels_padding])
+            # object_labels is now multi-hot [Max_Objs, Num_Concepts] or [Batch, Max_Objs, Num_Concepts]
+            if obs.object_labels.ndim == 2:
+                # Unbatched: [Max_Objs, Num_Concepts]
+                labels_padding = jnp.zeros((num_to_pad, obs.object_labels.shape[1]), dtype=obs.object_labels.dtype)
+                adapted_labels = jnp.concatenate([obs.object_labels, labels_padding], axis=0)
             else:
-                labels_padding = jnp.zeros((obs.object_labels.shape[0], num_to_pad), dtype=obs.object_labels.dtype)
+                # Batched: [Batch, Max_Objs, Num_Concepts]
+                labels_padding = jnp.zeros((obs.object_labels.shape[0], num_to_pad, obs.object_labels.shape[2]), dtype=obs.object_labels.dtype)
                 adapted_labels = jnp.concatenate([obs.object_labels, labels_padding], axis=1)
             
             if obs.object_events.ndim == 1:
@@ -225,10 +226,13 @@ class AgentVisualization:
             else:
                 adapted_mask = obs.object_mask[:, :expected_max_objs]
             
-            if obs.object_labels.ndim == 1:
-                adapted_labels = obs.object_labels[:expected_max_objs]
+            # object_labels is now multi-hot [Max_Objs, Num_Concepts] or [Batch, Max_Objs, Num_Concepts]
+            if obs.object_labels.ndim == 2:
+                # Unbatched: [Max_Objs, Num_Concepts]
+                adapted_labels = obs.object_labels[:expected_max_objs, :]
             else:
-                adapted_labels = obs.object_labels[:, :expected_max_objs]
+                # Batched: [Batch, Max_Objs, Num_Concepts]
+                adapted_labels = obs.object_labels[:, :expected_max_objs, :]
             
             if obs.object_events.ndim == 1:
                 adapted_events = obs.object_events[:expected_max_objs]
@@ -311,14 +315,18 @@ class AgentVisualization:
         batch_size = self.meta_q_values.shape[0]
         num_concepts = self.meta_q_values.shape[1]
         
-        labels_exp = obs_batched.object_labels[:, None, :]
-        concepts_exp = jnp.arange(num_concepts)[None, :, None]
-        has_label = (labels_exp == concepts_exp) & (obs_batched.object_mask[:, None, :] > 0.5)
-        label_exists = jnp.any(has_label, axis=-1)
+        # object_labels is now multi-hot [Batch, Max_Objs, Num_Concepts]
+        # Transpose to [Batch, Num_Concepts, Max_Objs] to check label matches
+        labels_T = jnp.transpose(obs_batched.object_labels, (0, 2, 1))  # [Batch, Num_Concepts, Max_Objs]
+        existence = (obs_batched.object_mask[:, None, :] > 0.5).astype(jnp.float32)  # [Batch, 1, Max_Objs]
+        
+        # Check if any object has each concept label
+        # Use multiplication instead of & since both arrays are float32
+        has_label = labels_T * existence  # [Batch, Num_Concepts, Max_Objs]
+        label_exists = jnp.any(has_label, axis=-1)  # [Batch, Num_Concepts]
         
         valid_mask = label_exists
-        valid_mask = valid_mask.at[:, consts.LABEL_PLAYER].set(False) 
-        valid_mask = valid_mask.at[:, consts.LABEL_PLAYER_TOOL].set(False)
+        # Note: LABEL_PLAYER no longer exists (player removed from objects)
         valid_mask = valid_mask.at[:, consts.LABEL_MONITOR_STATISTIC].set(True)
         # valid_mask = valid_mask.at[:, consts.LABEL_HIGH_LEVEL_CONCEPT].set(True)
 
@@ -897,12 +905,13 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
         config.environment.n_actions = inferred_actions
     
     # Create a dummy observation to initialize the agent
+    num_concepts = config.concepts.label_high_level_concept + 1
     dummy_obs = ConceptObs(
         global_features=jnp.zeros((1, config.environment.n_global_feats)),
         capabilities=jnp.zeros((1, config.concepts.n_capabilities)),
         objects=jnp.zeros((1, config.environment.max_objs, config.environment.n_obj_feats)),
         object_mask=jnp.zeros((1, config.environment.max_objs)),
-        object_labels=jnp.zeros((1, config.environment.max_objs), dtype=jnp.int32),
+        object_labels=jnp.zeros((1, config.environment.max_objs, num_concepts), dtype=jnp.float32),  # Multi-hot encoding
         object_events=jnp.zeros((1, config.environment.max_objs), dtype=jnp.int32),
     )
     

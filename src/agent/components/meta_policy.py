@@ -27,19 +27,16 @@ class MetaPolicyQNetwork(nn.Module):
         # A rough division by 100.0 puts them in [0, 1] range.
         x_glob = global_features / 100.0
         
-        # Objects: [Batch, 35, 4]. Pos is ~210. Scale down.
-        x_objs = objects / 210.0
-        
         # --- 2. Embeddings ---
         # Embed Global Context
         emb_glob = nn.Dense(self.hidden_dim)(x_glob)
         emb_glob = nn.LayerNorm()(emb_glob)
         
         # Embed Objects (Shared weights for all 35 objects)
-        emb_objs = nn.Dense(self.hidden_dim)(x_objs) # [Batch, 35, Dim]
+        emb_objs = nn.Dense(self.hidden_dim)(objects) # [Batch, 35, Dim]
         
-        # Embed Semantic Labels (What is this object?)
-        label_embeddings = nn.Embed(num_embeddings=10, features=self.hidden_dim)(object_labels)
+        # Linear projection of the object labels (since they are already multi-hot encoded)
+        label_embeddings = nn.Dense(features=self.hidden_dim, use_bias=False)(object_labels)
         
         # Combine Object Features + Label
         x_items = emb_objs + label_embeddings
@@ -91,7 +88,8 @@ class MetaPolicyQNetwork(nn.Module):
         # Dummy init with correct shapes
         d_glob = jnp.zeros((1, global_dim))
         d_objs = jnp.zeros((1, max_objs, obj_dim))
-        d_labels = jnp.zeros((1, max_objs), dtype=jnp.int32)
+        # object_labels shape: [Batch, Max_Objs, Num_Concepts] (multi-hot encoding)
+        d_labels = jnp.zeros((1, max_objs, num_concepts), dtype=jnp.float32)
         d_mask = jnp.zeros((1, max_objs))
         
         params = net.init(key, d_glob, d_objs, d_labels, d_mask)

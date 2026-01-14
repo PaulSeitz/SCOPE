@@ -29,7 +29,7 @@ class InstanceSelector(nn.Module):
         Args:
             global_features: [Batch, G]
             objects: [Batch, N, F]
-            object_labels: [Batch, N] (Integer IDs)
+            object_labels: [Batch, N, Num_Concepts] (Multi-Hot Encoding)
             object_mask: [Batch, N] (0/1)
             
         Returns:
@@ -37,14 +37,12 @@ class InstanceSelector(nn.Module):
                                (Separate attention distribution for EACH concept)
         """
         batch_size = global_features.shape[0]
-        n_objects = objects.shape[1]
 
         # --- 1. Embeddings ---
         q_glob = nn.Dense(self.embed_dim)(global_features)
         
-        # Normalize objects for consistency
-        norm_objects = objects / 210.0
-        k_objs = nn.Dense(self.embed_dim)(norm_objects)
+        # Objects are already normalized to [0, 1] in seaquest_wrapper
+        k_objs = nn.Dense(self.embed_dim)(objects)
         
         # --- 2. Concept Queries [Batch, Num_Concepts, Dim] ---
         concept_queries = nn.Dense(self.num_concepts * self.embed_dim)(q_glob)
@@ -55,55 +53,55 @@ class InstanceSelector(nn.Module):
         scores = jnp.einsum('bcd,bod->bco', concept_queries, k_objs)
         scores = scores / jnp.sqrt(self.embed_dim)
 
-        # --- 4. THE REVISED MASKING LOGIC ---
+        # --- 4. SEMANTIC MASKING---
         
-        # A. Concept-Specific Targeting Rules
-        concept_ids = jnp.arange(self.num_concepts)[None, :, None] # [1, C, 1]
+        # object_labels: [Batch, Max_Objs, Num_Concepts] (The Multi-Hot vectors)
+        # We want to know: For Concept C, is the bit 'C' set in object_labels?
+        # Since object_labels is multi-hot [0, 0, 1, 0...], we can just extract the channel 'C'.
         
-        # Rule 1: "Strict Matching" Concepts (Must target specific label)
-        # Collect(2), Avoid(3), Destroy(4)
-        is_strict_concept = (concept_ids == consts.LABEL_COLLECT) | \
-                            (concept_ids == consts.LABEL_AVOID) | \
-                            (concept_ids == consts.LABEL_DESTROY)
-                            
-        # Rule 2: "Self-Targeting" Concepts (Target the Player/Self)
-        # Player(0), Tool(1), Monitor(5)
-        # Note: We group 'Monitor' here. If I want to monitor, I look at myself.
-        is_self_concept = ~is_strict_concept
-
-        # B. Object Identity Checks
-        # We assume Object 0 is always Player
-        obj_ids = jnp.arange(objects.shape[1])[None, None, :]
-        is_player_obj = (obj_ids == 0)
+        # 1. Transpose labels to [Batch, Num_Concepts, Max_Objs] to match scores shape
+        # This directly gives us the label match mask:
+        # If object 'o' has label 'c', then labels_T[b, c, o] = 1.0
+        labels_T = jnp.transpose(object_labels, (0, 2, 1))
         
-        # C. Labels
-        labels_expanded = object_labels[:, None, :] # [B, 1, O]
-        label_match = (labels_expanded == concept_ids)
+        # The transposed labels matrix IS the label match mask
+        # labels_T[b, c, o] = 1.0 if object 'o' has concept 'c' in its multi-hot encoding
+        label_match_mask = labels_T
         
-        # --- D. Construct the Valid Mask ---
+        # B. Existence Check
+        # Handle both batched [Batch, Max_Objs] and unbatched [Max_Objs] cases
+        if object_mask.ndim == 1:
+            # Unbatched: object_mask is [Max_Objs]
+            # label_match_mask is [Num_Concepts, Max_Objs] (no batch dim)
+            # Expand to [1, Max_Objs] which will broadcast with [Num_Concepts, Max_Objs]
+            existence = (object_mask[None, :] > 0.5).astype(jnp.float32)  # [1, Max_Objs] broadcasts to [Num_Concepts, Max_Objs]
+        else:
+            # Batched: object_mask is [Batch, Max_Objs]
+            # label_match_mask is [Batch, Num_Concepts, Max_Objs]
+            # Expand to [Batch, 1, Max_Objs] which will broadcast with [Batch, Num_Concepts, Max_Objs]
+            existence = (object_mask[:, None, :] > 0.5).astype(jnp.float32)  # [Batch, 1, Max_Objs]
         
-        # Case 1: Strict Concepts -> Must match Label AND Not be Player
-        # (Technically Label check covers 'Not Player' usually, but safe to be explicit)
-        mask_strict = is_strict_concept & label_match & (~is_player_obj)
+        # C. Final Mask construction
+        # We simply demand that the Object has the Concept label set in its multi-hot encoding.
+        # This handles all concepts uniformly:
+        # - Collect/Avoid/Destroy: Must match label
+        # - Monitor: Will try to find objects with Monitor label (if any exist)
+        # - Tool: Will try to find objects with Tool label (Player Missile)
+        # Use multiplication instead of & since both arrays are float32
+        valid_mask = label_match_mask * existence
         
-        # Case 2: Self Concepts -> Must be Player
-        mask_self = is_self_concept & is_player_obj
-        
-        # Combine
-        final_semantic_mask = mask_strict | mask_self
-        
-        # E. Existence Check
-        existence = object_mask[:, None, :] > 0.5
-        
-        # Final Mask
-        valid_mask = final_semantic_mask & existence
-        
-        # F. Fallback Safety
-        # If a row has NO valid targets (e.g., Collect selected but no Divers), 
-        # fall back to Player (Index 0) to prevent Uniform Crash.
-        # This ensures 'scores' has at least one valid entry (Index 0).
+        # D. Fallback Safety
+        # If a row has NO valid targets, we must allow Index 0 to avoid NaNs in Softmax.
+        # This happens if:
+        # 1. The Meta policy picked "Collect" but there are no divers.
+        # 2. The concept is "Monitor" and there are no objects labeled "Monitor".
         any_valid = jnp.any(valid_mask, axis=-1, keepdims=True)
-        fallback_mask = is_player_obj # Fallback to Player
+        
+        # Fallback: Allow Index 0. 
+        # (The downstream logic in Orchestrator handles the case where target is irrelevant)
+        fallback_mask = jax.nn.one_hot(jnp.zeros((batch_size, self.num_concepts), dtype=jnp.int32), 
+                                       num_classes=objects.shape[1]) > 0.5
+                                       
         valid_mask = jnp.where(any_valid, valid_mask, fallback_mask)
 
         # Apply Mask (-1e9 is safer than -inf for Softmax stability)

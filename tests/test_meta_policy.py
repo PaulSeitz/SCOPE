@@ -27,7 +27,7 @@ class TestMetaPolicyQNetwork:
         # Create dummy inputs
         global_features = jnp.zeros((1, global_dim))
         objects = jnp.zeros((1, max_objs, obj_dim))
-        object_labels = jnp.zeros((1, max_objs), dtype=jnp.int32)
+        object_labels = jnp.zeros((1, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
         object_mask = jnp.ones((1, max_objs))
         
         # Initialize parameters
@@ -63,7 +63,7 @@ class TestMetaPolicyQNetwork:
         # Create inputs with some masked objects
         global_features = jnp.ones((batch_size, global_dim))
         objects = jnp.ones((batch_size, max_objs, obj_dim))
-        object_labels = jnp.zeros((batch_size, max_objs), dtype=jnp.int32)
+        object_labels = jnp.zeros((batch_size, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
         
         # Mask: only first 5 objects are real
         object_mask = jnp.zeros((batch_size, max_objs))
@@ -128,7 +128,7 @@ class TestMetaPolicyQNetwork:
         for batch_size in [1, 2, 8, 16]:
             global_features = jnp.ones((batch_size, global_dim))
             objects = jnp.ones((batch_size, max_objs, obj_dim))
-            object_labels = jnp.zeros((batch_size, max_objs), dtype=jnp.int32)
+            object_labels = jnp.zeros((batch_size, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
             object_mask = jnp.ones((batch_size, max_objs))
             
             params = net.init(rng_key, global_features, objects, object_labels, object_mask)

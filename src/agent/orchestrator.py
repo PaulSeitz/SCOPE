@@ -46,8 +46,9 @@ class RelationalAgent:
         )
 
         # 2. Instance Selector
+        num_concepts = config.concepts.label_high_level_concept + 1
         selector_net = InstanceSelector(
-            num_concepts=config.concepts.label_high_level_concept + 1,
+            num_concepts=num_concepts,
             embed_dim=config.model.selector_hidden_dims[0]
         )
         # Dummy inputs for init
@@ -55,7 +56,8 @@ class RelationalAgent:
         # Objects are flattened: [max_objs, stack_size * n_obj_feats]
         d_glob = jnp.zeros((1, sample_obs.global_features.shape[-1]))
         d_obj = jnp.zeros((1, config.environment.max_objs, obj_dim))
-        d_labels = jnp.zeros((1, config.environment.max_objs), dtype=jnp.int32)
+        # object_labels shape: [Batch, Max_Objs, Num_Concepts] (multi-hot encoding)
+        d_labels = jnp.zeros((1, config.environment.max_objs, num_concepts), dtype=jnp.float32)
         d_mask = jnp.zeros((1, config.environment.max_objs))
         
         sel_params = selector_net.init(key_s, d_glob, d_obj, d_labels, d_mask)
@@ -120,30 +122,28 @@ class RelationalAgent:
         
         # Count objects per label
         # We want a mask: [Batch, Num_Concepts]
-        # label_counts[b, c] > 0 if label 'c' exists in batch 'b'
-        # We use vmap or broadcasting
+        # label_exists[b, c] > 0 if label 'c' exists in batch 'b'
+        # object_labels is now [Batch, Max_Objs, Num_Concepts] (multi-hot encoding)
         
-        # Expand labels: [Batch, 1, Max_Objs]
-        labels_exp = obs_in.object_labels[:, None, :]
-        # Expand concepts: [1, Num_Concepts, 1]
-        concepts_exp = jnp.arange(num_concepts)[None, :, None]
-        # Check match: [Batch, Num_Concepts, Max_Objs]
-        has_label = (labels_exp == concepts_exp) & (obs_in.object_mask[:, None, :] > 0.5)
-        # Reduce: [Batch, Num_Concepts]
-        label_exists = jnp.any(has_label, axis=-1)
+        # Transpose to [Batch, Num_Concepts, Max_Objs] to extract concept channels
+        labels_T = jnp.transpose(obs_in.object_labels, (0, 2, 1))  # [Batch, Num_Concepts, Max_Objs]
+        
+        # Check which objects exist: [Batch, Max_Objs] -> [Batch, 1, Max_Objs]
+        object_exists = obs_in.object_mask[:, None, :] > 0.5  # [Batch, 1, Max_Objs]
+        
+        # For each concept, check if any object has that label AND exists
+        # labels_T[b, c, o] = 1.0 if object 'o' has concept 'c'
+        # object_exists[b, 1, o] = 1.0 if object 'o' exists
+        # Multiply to get: [Batch, Num_Concepts, Max_Objs]
+        has_label = labels_T * object_exists
+        
+        # Reduce: [Batch, Num_Concepts] - True if any object has this concept
+        label_exists = jnp.any(has_label > 0.5, axis=-1)
         
         # 2. Construct the Mask
         # By default, concepts require their corresponding objects
         valid_mask = label_exists
-        
-        # Exception A: Concept 0 (Player)
-        # If we want to BLOCK it, set to False.
-        # If we want to ALLOW it (as a fallback), set to True.
-        # You requested to BLOCK it.
-        valid_mask = valid_mask.at[:, consts.LABEL_PLAYER].set(False) 
-        
-        # Exception B: Concept 1 (Tool/Projectile) - usually exists if Player exists
-        valid_mask = valid_mask.at[:, consts.LABEL_PLAYER_TOOL].set(False) # Block tool concept too? usually internal
+
         
         # Exception C: High Level / Monitor
         # These don't target specific objects, so they are always valid
@@ -201,10 +201,30 @@ class RelationalAgent:
         target_idx = jnp.argmax(adjusted_scores, axis=-1)
         target_obj_feats = jnp.take_along_axis(obs_in.objects, target_idx[:, None, None], axis=1).squeeze(1)
 
-        # --- Layer 3: Translation ---
-        player_pos = obs_in.objects[:, 0, 0:2] 
+        # --- Layer 3: Relative Vector Calculation (REFACTORED) ---
+        
+        # 1. Extract Player Position from Global Features
+        # We placed Player X at index 5 and Player Y at index 6 in the Wrapper
+        p_x = obs_in.global_features[:, 5]
+        p_y = obs_in.global_features[:, 6]
+        player_pos = jnp.stack([p_x, p_y], axis=-1)
+        
+        # 2. Extract Target Position
         target_pos = target_obj_feats[:, 0:2]
-        relative_vec = target_pos - player_pos 
+        
+        # 3. Compute Raw Vector
+        raw_relative = target_pos - player_pos 
+        
+        # 4. Zero-out vector for "Monitor" / Self-Concepts
+        # If we are monitoring (Concept 4), we shouldn't care about relative position to a random object.
+        # We mask the relative vector to 0.0.
+        is_monitor = (concept_id == consts.LABEL_MONITOR_STATISTIC)
+        # Also include generic High Level Concept if it exists
+        is_high_level = (concept_id == consts.LABEL_HIGH_LEVEL_CONCEPT)
+        
+        should_zero_vec = is_monitor | is_high_level
+        
+        relative_vec = jnp.where(should_zero_vec[:, None], jnp.zeros_like(raw_relative), raw_relative) 
 
         # --- Layer 4: Motor Control (Sub) ---
         num_concepts = self.config.concepts.label_high_level_concept + 1

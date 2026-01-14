@@ -22,8 +22,8 @@ def batch_size():
 
 @pytest.fixture
 def num_concepts():
-    """Number of concepts for meta policy."""
-    return 5
+    """Number of concepts for meta policy (Player Tool, Collect, Avoid, Destroy, Monitor, High Level = 6)."""
+    return 6
 
 
 @pytest.fixture
@@ -34,8 +34,8 @@ def num_actions():
 
 @pytest.fixture
 def max_objs():
-    """Maximum number of objects."""
-    return 35
+    """Maximum number of objects (Player removed, so 34 instead of 35)."""
+    return 34
 
 
 @pytest.fixture
@@ -69,9 +69,10 @@ def sample_objects(batch_size, max_objs, obj_dim):
 
 
 @pytest.fixture
-def sample_object_labels(batch_size, max_objs):
-    """Sample object labels."""
-    return jnp.zeros((batch_size, max_objs), dtype=jnp.int32)
+def sample_object_labels(batch_size, max_objs, num_concepts):
+    """Sample object labels (multi-hot encoding)."""
+    # Multi-hot encoding: [Batch, Max_Objs, Num_Concepts]
+    return jnp.zeros((batch_size, max_objs, num_concepts), dtype=jnp.float32)
 
 
 @pytest.fixture

@@ -35,9 +35,8 @@ MAGENTA = (255, 0, 255)
 GRAY = (128, 128, 128)
 DARK_GRAY = (64, 64, 64)
 
-# Label names
+# Label names (Player is no longer a label, removed from objects)
 LABEL_NAMES = {
-    consts.LABEL_PLAYER: "Player",
     consts.LABEL_PLAYER_TOOL: "Player Tool",
     consts.LABEL_COLLECT: "Collect",
     consts.LABEL_AVOID: "Avoid",
@@ -46,17 +45,16 @@ LABEL_NAMES = {
     consts.LABEL_HIGH_LEVEL_CONCEPT: "High Level",
 }
 
-# Object type names
+# Object type names (Player removed, indices shifted down by 1)
 OBJECT_NAMES = [
-    "Player",           # 0
-    "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 1-6
-    "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 7-12
-    "Sub 1", "Sub 2", "Sub 3", "Sub 4", "Sub 5", "Sub 6",  # 13-18
-    "Sub 7", "Sub 8", "Sub 9", "Sub 10", "Sub 11", "Sub 12",  # 19-24
-    "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 25-28
-    "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 29-32
-    "Surface Sub",  # 33
-    "Player Missile",  # 34
+    "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 0-5
+    "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 6-11
+    "Sub 1", "Sub 2", "Sub 3", "Sub 4", "Sub 5", "Sub 6",  # 12-17
+    "Sub 7", "Sub 8", "Sub 9", "Sub 10", "Sub 11", "Sub 12",  # 18-23
+    "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 24-27
+    "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 28-31
+    "Surface Sub",  # 32
+    "Player Missile",  # 33
 ]
 
 # Action mapping (Atari actions)
@@ -166,7 +164,20 @@ class RewardDashboard:
                 # Find objects that just triggered events (events are set in current obs)
                 newly_triggered = np.where(curr_events == consts.EVENT_TRIGGERED)[0]
                 for obj_idx in newly_triggered:
-                    label_id = int(object_labels[obj_idx])
+                    # object_labels is now multi-hot [Max_Objs, Num_Concepts]
+                    # Get the primary label (first non-zero label, or use argmax)
+                    if object_labels.ndim == 2:
+                        label_vector = object_labels[obj_idx]
+                        # Get the primary label (first concept with value > 0.5)
+                        label_indices = np.where(label_vector > 0.5)[0]
+                        if len(label_indices) > 0:
+                            label_id = int(label_indices[0])  # Use first matching label
+                        else:
+                            label_id = 0  # Fallback
+                    else:
+                        # Fallback for old format (shouldn't happen)
+                        label_id = int(object_labels[obj_idx])
+                    
                     reward_val = float(concept_rewards[label_id, obj_idx])
                     obj_name = OBJECT_NAMES[obj_idx] if obj_idx < len(OBJECT_NAMES) else f"Obj {obj_idx}"
                     label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
@@ -383,10 +394,26 @@ class RewardDashboard:
             for obj_idx in range(len(object_mask)):
                 if object_mask[obj_idx] > 0.5 and active_count < max_display:
                     obj_name = OBJECT_NAMES[obj_idx] if obj_idx < len(OBJECT_NAMES) else f"Obj {obj_idx}"
-                    label_id = int(object_labels[obj_idx])
-                    label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
                     
-                    # Get reward for this object from the concept row matching its label
+                    # object_labels is now multi-hot [Max_Objs, Num_Concepts]
+                    # Get the primary label (first non-zero label)
+                    if object_labels.ndim == 2:
+                        label_vector = object_labels[obj_idx]
+                        label_indices = np.where(label_vector > 0.5)[0]
+                        if len(label_indices) > 0:
+                            label_id = int(label_indices[0])  # Use first matching label
+                            # For multi-label objects, show all labels
+                            label_names = [LABEL_NAMES.get(int(lid), f"Label {lid}") for lid in label_indices]
+                            label_name = "/".join(label_names)
+                        else:
+                            label_id = 0
+                            label_name = "Unknown"
+                    else:
+                        # Fallback for old format
+                        label_id = int(object_labels[obj_idx])
+                        label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
+                    
+                    # Get reward for this object from the concept row matching its primary label
                     reward_val = float(concept_rewards[label_id, obj_idx])
                     
                     # Compact format: Name | Label | Reward

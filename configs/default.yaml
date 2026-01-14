@@ -13,14 +13,14 @@ training:
   
   # Hysteresis / Stickiness
   meta_stickiness: 0.5
-  selector_stickiness: 2.0
+  selector_stickiness: 1.0
   
   # Q-Learning Params
   gamma: 0.99
   tau: 0.005
   epsilon_start: 1.0
   epsilon_end: 0.05
-  epsilon_decay_steps: 5_000_000
+  epsilon_decay_steps: 2_000_000
   
   # Loop Params
   batch_size: 32
@@ -48,7 +48,7 @@ reward:
   # Scale distance delta (approx 0.05 per frame) by 100 -> +5.0 reward per frame for approaching
   reward_scale: 100.0       # High scale to generate healthy gradients
   bonus_success: 1000.0     # Make success huge (like a jackpot) to dominate sparse signals
-  penalty_failure: -10.0
+  penalty_failure: -1.0
   aim_bonus_scale: 0.5      # Penalty for drifting away from target
   global_score_scale: 1.0
 

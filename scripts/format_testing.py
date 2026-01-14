@@ -41,5 +41,9 @@ if __name__ == "__main__":
     multi_reward = rewards.compute_rewards(prev_obs, obs, prev_state, state, config)
     print("Global Reward:", multi_reward.global_reward)
     print("Concept Rewards Shape:", multi_reward.concept_rewards.shape)
-    print("Concept Rewards (first few rows):")
-    print(multi_reward.concept_rewards[:5, :5])  # Show first 5x5 for readability
+    print("Concept Rewards (first few concepts and objects):")
+    # Handle both unbatched [Num_Concepts, Max_Objs] and batched [Batch, Num_Concepts, Max_Objs]
+    if multi_reward.concept_rewards.ndim == 2:
+        print(multi_reward.concept_rewards[:5, :5])  # [Num_Concepts, Max_Objs]
+    else:
+        print(multi_reward.concept_rewards[0, :5, :5])  # [Batch, Num_Concepts, Max_Objs]

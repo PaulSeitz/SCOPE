@@ -10,13 +10,13 @@ class ConceptObs:
     Modules will cherry-pick what they need from this struct.
     """
     # --- 1. Strategic Dashboard (For Meta-Policy) ---
-    # Hand-crafted features: [Oxygen, Held_Divers, Score, Closest_Enemy_Dist, Enemy_Density, ...]
+    # Hand-crafted features: [Oxygen, Held_Divers, Lives, Closest_Enemy_Dist, Enemy_Density, Diver_Density, Player_X, Player_Y, PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_ORIENTATION]
     # This is the "Expert" view.
     global_features: chex.Array  # Shape: [Batch, N_Globals]
 
     # --- 2. Capabilities (For Sub-Policies) ---
     # Standardized vector defining what the agent CAN do right now. TODO: this might be an issue with transferability, further investigation needed.
-    # [Can_Fire, Has_Speed_Boost, Is_Invulnerable, ...]
+    # [Can_Fire, Facing_X, Facing_Y]
     # This allows the sub-policy to learn "Don't fire if Can_Fire=0"
     capabilities: chex.Array # Shape: [Batch, N_Caps]
 
@@ -29,7 +29,8 @@ class ConceptObs:
     # 1.0 if object exists, 0.0 if padding.
     object_mask: chex.Array 
     
-    # Shape: [Batch, Max_Objs] (Integer)
+    # Multi-Hot Encoding of Labels
+    # Shape: [Batch, Max_Objs, Max_Labels] (Integer) -> can contain multiple labels per object!
     # Semantic Labels: 0=Player, 1=Diver, 2=Shark, 3=Sub, ...
     object_labels: chex.Array 
 

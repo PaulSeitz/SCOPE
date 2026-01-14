@@ -29,10 +29,11 @@ class TestInstanceSelector:
         # Create dummy inputs
         global_features = jnp.zeros((1, global_dim))
         objects = jnp.zeros((1, max_objs, obj_dim))
+        object_labels = jnp.zeros((1, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
         object_mask = jnp.ones((1, max_objs))
         
         # Initialize parameters
-        params = net.init(rng_key, global_features, objects, object_mask)
+        params = net.init(rng_key, global_features, objects, object_labels, object_mask)
         
         # Check that params is a dict (Flax params structure)
         assert isinstance(params, dict)
@@ -40,15 +41,15 @@ class TestInstanceSelector:
     
     def test_forward_pass_shapes(self, rng_key, batch_size, num_concepts, global_dim,
                                   obj_dim, max_objs, sample_global_features,
-                                  sample_objects, sample_object_mask):
+                                  sample_objects, sample_object_labels, sample_object_mask):
         """Test that forward pass produces correct output shapes."""
         net = InstanceSelector(num_concepts=num_concepts)
         
         # Initialize
-        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_mask)
+        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         # Forward pass
-        attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_mask)
+        attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         # Check output shape: [Batch, Num_Concepts, Max_Objs]
         assert attn_weights.shape == (batch_size, num_concepts, max_objs)
@@ -56,12 +57,12 @@ class TestInstanceSelector:
     
     def test_attention_weights_sum_to_one(self, rng_key, batch_size, num_concepts, global_dim,
                                           obj_dim, max_objs, sample_global_features,
-                                          sample_objects, sample_object_mask):
+                                          sample_objects, sample_object_labels, sample_object_mask):
         """Test that attention weights sum to 1 for each concept (probability distribution)."""
         net = InstanceSelector(num_concepts=num_concepts)
         
-        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_mask)
-        attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_mask)
+        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
+        attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         # Sum over object dimension should be 1 for each concept
         sums = jnp.sum(attn_weights, axis=-1)  # [Batch, Num_Concepts]
@@ -71,12 +72,12 @@ class TestInstanceSelector:
     
     def test_attention_weights_non_negative(self, rng_key, batch_size, num_concepts, global_dim,
                                             obj_dim, max_objs, sample_global_features,
-                                            sample_objects, sample_object_mask):
+                                            sample_objects, sample_object_labels, sample_object_mask):
         """Test that attention weights are non-negative (softmax output)."""
         net = InstanceSelector(num_concepts=num_concepts)
         
-        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_mask)
-        attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_mask)
+        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
+        attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         # All weights should be >= 0
         assert jnp.all(attn_weights >= 0)
@@ -89,13 +90,14 @@ class TestInstanceSelector:
         # Create inputs with some masked objects
         global_features = jnp.ones((batch_size, global_dim))
         objects = jnp.ones((batch_size, max_objs, obj_dim))
+        object_labels = jnp.zeros((batch_size, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
         
         # Mask: only first 5 objects are real
         object_mask = jnp.zeros((batch_size, max_objs))
         object_mask = object_mask.at[:, :5].set(1.0)
         
-        params = net.init(rng_key, global_features, objects, object_mask)
-        attn_weights = net.apply(params, global_features, objects, object_mask)
+        params = net.init(rng_key, global_features, objects, object_labels, object_mask)
+        attn_weights = net.apply(params, global_features, objects, object_labels, object_mask)
         
         # Masked objects (indices 5+) should have zero attention
         masked_weights = attn_weights[:, :, 5:]
@@ -103,35 +105,35 @@ class TestInstanceSelector:
     
     def test_jax_jit_compliance(self, rng_key, batch_size, num_concepts, global_dim,
                                 obj_dim, max_objs, sample_global_features,
-                                sample_objects, sample_object_mask):
+                                sample_objects, sample_object_labels, sample_object_mask):
         """Test that the network can be jitted."""
         net = InstanceSelector(num_concepts=num_concepts)
         
         # Initialize
-        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_mask)
+        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         # Create jitted version
         @jax.jit
-        def jitted_forward(params, global_features, objects, object_mask):
-            return net.apply(params, global_features, objects, object_mask)
+        def jitted_forward(params, global_features, objects, object_labels, object_mask):
+            return net.apply(params, global_features, objects, object_labels, object_mask)
         
         # Run jitted version
-        attn_weights = jitted_forward(params, sample_global_features, sample_objects, sample_object_mask)
+        attn_weights = jitted_forward(params, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         assert attn_weights.shape == (batch_size, num_concepts, max_objs)
     
     def test_gradient_computation(self, rng_key, batch_size, num_concepts, global_dim,
                                   obj_dim, max_objs, sample_global_features,
-                                  sample_objects, sample_object_mask):
+                                  sample_objects, sample_object_labels, sample_object_mask):
         """Test that gradients can be computed through the network."""
         net = InstanceSelector(num_concepts=num_concepts)
         
         # Initialize
-        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_mask)
+        params = net.init(rng_key, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
         
         # Define loss function
         def loss_fn(params):
-            attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_mask)
+            attn_weights = net.apply(params, sample_global_features, sample_objects, sample_object_labels, sample_object_mask)
             return jnp.mean(attn_weights ** 2)
         
         # Compute gradients
@@ -149,10 +151,11 @@ class TestInstanceSelector:
         for batch_size in [1, 2, 8, 16]:
             global_features = jnp.ones((batch_size, global_dim))
             objects = jnp.ones((batch_size, max_objs, obj_dim))
+            object_labels = jnp.zeros((batch_size, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
             object_mask = jnp.ones((batch_size, max_objs))
             
-            params = net.init(rng_key, global_features, objects, object_mask)
-            attn_weights = net.apply(params, global_features, objects, object_mask)
+            params = net.init(rng_key, global_features, objects, object_labels, object_mask)
+            attn_weights = net.apply(params, global_features, objects, object_labels, object_mask)
             
             assert attn_weights.shape == (batch_size, num_concepts, max_objs)
     
@@ -242,10 +245,11 @@ class TestInstanceSelector:
         # Create inputs with known structure
         global_features = jnp.ones((batch_size, global_dim)) * 0.5
         objects = jnp.ones((batch_size, max_objs, obj_dim)) * 0.3
+        object_labels = jnp.zeros((batch_size, max_objs, num_concepts), dtype=jnp.float32)  # Multi-hot
         object_mask = jnp.ones((batch_size, max_objs))
         
-        params = net.init(rng_key, global_features, objects, object_mask)
-        attn_weights = net.apply(params, global_features, objects, object_mask)
+        params = net.init(rng_key, global_features, objects, object_labels, object_mask)
+        attn_weights = net.apply(params, global_features, objects, object_labels, object_mask)
         
         # Should produce valid attention weights
         assert attn_weights.shape == (batch_size, num_concepts, max_objs)

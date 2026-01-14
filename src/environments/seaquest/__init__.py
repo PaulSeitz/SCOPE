@@ -5,7 +5,6 @@ Seaquest environment with concept-based observations and rewards
 from .seaquest_wrapper import SeaquestConceptWrapper
 from .datatypes import ConceptObs, MultiReward, AgentState
 from .seaquest_constants import (
-    LABEL_PLAYER,
     LABEL_PLAYER_TOOL,
     LABEL_COLLECT,
     LABEL_AVOID,
@@ -21,7 +20,6 @@ __all__ = [
     "ConceptObs",
     "MultiReward",
     "AgentState",
-    "LABEL_PLAYER",
     "LABEL_PLAYER_TOOL",
     "LABEL_COLLECT",
     "LABEL_AVOID",

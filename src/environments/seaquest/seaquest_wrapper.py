@@ -5,6 +5,8 @@ from jaxatari.wrappers import AtariWrapper, JaxatariWrapper
 import jaxatari.spaces as spaces
 from jaxatari.games import jax_seaquest as jaxatari_seaquest
 from typing import Optional
+from flax import struct
+import chex
 
 from src.environments.seaquest.datatypes import ConceptObs
 import src.environments.seaquest.seaquest_constants as const
@@ -31,26 +33,27 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         self.SCREEN_WIDTH = config.environment.screen_width
         self.SCREEN_HEIGHT = config.environment.screen_height
 
-        # Object Capacity (Total: 35)
-        # 0: Player
-        # 1-12: Sharks (Avoid)
-        # 13-24: Subs (Avoid)
-        # 25-28: Divers (Collect)
-        # 29-32: Enemy Missiles (Avoid)
-        # 33: Surface Sub (Monitor)
-        # 34: Player Missile (Player Tool)
-        self.max_objs = config.environment.max_objs
+        # Object Capacity (Total: 34, Player removed)
+        # 0-11: Sharks (Avoid) - was 1-12
+        # 12-23: Subs (Avoid) - was 13-24
+        # 24-27: Divers (Collect) - was 25-28
+        # 28-31: Enemy Missiles (Avoid) - was 29-32
+        # 32: Surface Sub (Monitor) - was 33
+        # 33: Player Missile (Player Tool) - was 34
+        # Reduced max_objs by 1 (Player is gone)
+        self.max_objs = config.environment.max_objs - 1
         
         self.n_global_feats = config.environment.n_global_feats
         # TODO: maybe append the label to the object features as well, so they are part of the attention mechanism in meta policy and instance selector
         self.n_obj_feats = config.environment.n_obj_feats  # x, y, w, h
 
         # Define ranges for easy checking
-        self.idx_player_missile = config.environment.idx_player_missile
+        self.idx_player_missile = config.environment.idx_player_missile - 1
 
         self._observation_space = self._make_observation_space()
 
     def _make_observation_space(self) -> spaces.Dict:
+        num_concepts = self.config.concepts.label_high_level_concept + 1
         return spaces.Dict({
             # Dashboard (Oxygen, Ammo, etc.)
             "global_features": spaces.Box(0.0, 2.0, (self.n_global_feats,), jnp.float32),
@@ -65,9 +68,9 @@ class SeaquestConceptWrapper(JaxatariWrapper):
             "object_mask": spaces.Box(0.0, 1.0, (self.max_objs,), jnp.float32),
             
             # Semantic Labels
-            "object_labels": spaces.Box(0, 10, (self.max_objs,), jnp.int32),
+            "object_labels": spaces.Box(0, 1, (self.max_objs, num_concepts), jnp.float32),
             
-            # NEW: Symbolic Event Channel (0=None, 1=Interaction)
+            # Symbolic Event Channel (0=None, 1=Interaction)
             "object_events": spaces.Box(0, 2, (self.max_objs,), jnp.int32),
             
             # Internal placeholders
@@ -90,7 +93,7 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         prev_seaquest = prev_state.env_state
         curr_seaquest = curr_state.env_state
 
-        # A. COLLECTION EVENTS (Divers: Indices 25-28)
+        # A. COLLECTION EVENTS (Divers: Indices 24-27)
         # Logic: Score up + Diver disappeared
         score_up = (curr_seaquest.score > prev_seaquest.score) # Generic score check
         # Note: Seaquest specific: divers_collected count increases
@@ -105,9 +108,9 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         
         # Tag specific diver
         d_event = jnp.logical_and(d_disappeared, divers_increased)
-        events = events.at[25:29].set(d_event.astype(jnp.int32))
+        events = events.at[24:28].set(d_event.astype(jnp.int32))
 
-        # B. DESTRUCTION EVENTS (Enemies: Sharks 1-12, Subs 13-24)
+        # B. DESTRUCTION EVENTS (Enemies: Sharks 0-11, Subs 12-23)
         # Logic: Score up + Enemy disappeared (and NOT a diver collection)
         # This prevents awarding "Destroy" when we actually "Collected"
         combat_score = jnp.logical_and(score_up, ~divers_increased)
@@ -116,13 +119,13 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         s_prev_act = prev_seaquest.shark_positions[:, 2] != 0
         s_curr_act = curr_seaquest.shark_positions[:, 2] != 0
         s_gone = jnp.logical_and(s_prev_act, ~s_curr_act)
-        events = events.at[1:13].set(jnp.logical_and(s_gone, combat_score).astype(jnp.int32))
+        events = events.at[0:12].set(jnp.logical_and(s_gone, combat_score).astype(jnp.int32))
         
         # Subs - position arrays are (12, 3): [x, y, active_or_direction]
         sub_prev_act = prev_seaquest.sub_positions[:, 2] != 0
         sub_curr_act = curr_seaquest.sub_positions[:, 2] != 0
         sub_gone = jnp.logical_and(sub_prev_act, ~sub_curr_act)
-        events = events.at[13:25].set(jnp.logical_and(sub_gone, combat_score).astype(jnp.int32))
+        events = events.at[12:24].set(jnp.logical_and(sub_gone, combat_score).astype(jnp.int32))
 
         # C. COLLISION / AVOID [FIXED]
         # Old: lives < prev_lives (Too slow, waits for animation)
@@ -134,14 +137,14 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         if_hit_tag_sharks = jnp.logical_and(just_died, s_prev_act)
         if_hit_tag_subs = jnp.logical_and(just_died, sub_prev_act)
         
-        # Check enemy missiles (indices 29-32)
+        # Check enemy missiles (indices 28-31)
         m_prev_act = prev_seaquest.enemy_missile_positions[:, 2] != 0
         if_hit_tag_missiles = jnp.logical_and(just_died, m_prev_act)
 
         # Apply tags
-        events = events.at[1:13].max(if_hit_tag_sharks.astype(jnp.int32))
-        events = events.at[13:25].max(if_hit_tag_subs.astype(jnp.int32))
-        events = events.at[29:33].max(if_hit_tag_missiles.astype(jnp.int32))
+        events = events.at[0:12].max(if_hit_tag_sharks.astype(jnp.int32))
+        events = events.at[12:24].max(if_hit_tag_subs.astype(jnp.int32))
+        events = events.at[28:32].max(if_hit_tag_missiles.astype(jnp.int32))
 
         # D. MONITOR/SURFACE EVENT (Oxygen Refill)
         # Logic: Oxygen increased
@@ -151,12 +154,12 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         is_playing = jnp.logical_and(curr_seaquest.just_surfaced != -1, curr_seaquest.death_counter == 0)
         valid_refill = jnp.logical_and(refilled, is_playing)
         
-        events = events.at[33].set(valid_refill.astype(jnp.int32))
+        events = events.at[32].set(valid_refill.astype(jnp.int32))
 
         return events
 
     # --- 2. Normalization & Stacking ---
-    def _normalize_feats(self, entity_array, label_id):
+    def _normalize_feats(self, entity_array, label_array):
         # Input: [N, 5] (x, y, w, h, active)
         # Output: feats[N, 4], mask[N], labels[N]
         x, y, w, h, active = entity_array[:, 0], entity_array[:, 1], entity_array[:, 2], entity_array[:, 3], entity_array[:, 4]
@@ -169,7 +172,19 @@ class SeaquestConceptWrapper(JaxatariWrapper):
             h / self.SCREEN_HEIGHT
         ], axis=-1)
         
-        labels = jnp.full((entity_array.shape[0],), label_id, dtype=jnp.int32)
+        
+        # create multi-hot encoding of labels
+        num_concepts = self.config.concepts.label_high_level_concept + 1
+        
+        def make_one_hot(idx):
+            return jax.nn.one_hot(idx, num_classes = num_concepts)
+
+        # sum over the labels to get the multi-hot encoding
+        multi_hot = jnp.sum(jax.vmap(make_one_hot)(label_array), axis=0)
+
+        # broadcast multi-hot encoding to the shape of the entitiy array
+        labels = jnp.tile(multi_hot, (entity_array.shape[0], 1))
+
         mask = active.astype(jnp.float32)
         return feats, mask, labels
 
@@ -179,54 +194,67 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         def sc(e): return jnp.array([[e.x, e.y, e.width, e.height, e.active]])
 
         # 1. Process Groups
-        # Player (0)
-        p_f, p_m, p_l = self._normalize_feats(sc(obs.player), const.LABEL_PLAYER)
         
         # Enemies -> DESTROY (or AVOID, depending on strategy. Let's use DESTROY as primary for enemies we can kill)
-        # Actually, Sharks/Subs are usually DESTROY targets. 
-        # But if we have no ammo, they become AVOID. 
-        # For now, let's label them DESTROY. The policy can learn to avoid if it can't shoot.
-        sh_f, sh_m, sh_l = self._normalize_feats(obs.sharks, const.LABEL_DESTROY)
-        su_f, su_m, su_l = self._normalize_feats(obs.submarines, const.LABEL_DESTROY)
+        sh_ids = jnp.array([const.LABEL_DESTROY, const.LABEL_AVOID])
+        sh_f, sh_m, sh_l = self._normalize_feats(obs.sharks, sh_ids)
+        su_f, su_m, su_l = self._normalize_feats(obs.submarines, sh_ids)
         
         # Divers -> COLLECT
-        di_f, di_m, di_l = self._normalize_feats(obs.divers, const.LABEL_COLLECT)
+        di_ids = jnp.array([const.LABEL_COLLECT])
+        di_f, di_m, di_l = self._normalize_feats(obs.divers, di_ids)
         
         # Enemy Missiles -> AVOID (Cannot destroy them usually)
-        em_f, em_m, em_l = self._normalize_feats(obs.enemy_missiles, const.LABEL_AVOID)
+        em_ids = jnp.array([const.LABEL_AVOID])
+        em_f, em_m, em_l = self._normalize_feats(obs.enemy_missiles, em_ids)
         
-        # Surface Sub -> MONITOR STATISTIC
-        ss_f, ss_m, ss_l = self._normalize_feats(sc(obs.surface_submarine), const.LABEL_MONITOR_STATISTIC)
+        # Surface Sub -> AVOID
+        ss_ids = jnp.array([const.LABEL_AVOID])
+        ss_f, ss_m, ss_l = self._normalize_feats(sc(obs.surface_submarine), ss_ids)
         
         # Player Missile -> TOOL (or part of Destroy concept)
-        # We can label it HIGH_LEVEL or just Generic.
-        pm_f, pm_m, pm_l = self._normalize_feats(sc(obs.player_missile), const.LABEL_PLAYER_TOOL)
+        pm_ids = jnp.array([const.LABEL_PLAYER_TOOL])
+        pm_f, pm_m, pm_l = self._normalize_feats(sc(obs.player_missile), pm_ids)
 
         # 2. Concat
-        objects = jnp.concatenate([p_f, sh_f, su_f, di_f, em_f, ss_f, pm_f], axis=0)
-        mask = jnp.concatenate([p_m, sh_m, su_m, di_m, em_m, ss_m, pm_m], axis=0)
-        labels = jnp.concatenate([p_l, sh_l, su_l, di_l, em_l, ss_l, pm_l], axis=0)
+        objects = jnp.concatenate([sh_f, su_f, di_f, em_f, ss_f, pm_f], axis=0)
+        mask = jnp.concatenate([sh_m, su_m, di_m, em_m, ss_m, pm_m], axis=0)
+        labels = jnp.concatenate([sh_l, su_l, di_l, em_l, ss_l, pm_l], axis=0)
 
-        # 3. Global Features (Expert Dashboard)
-        # We pass these to ALL sub-policies!
+        # 3. Global Features (Includes Player Position)
         oxy_norm = obs.oxygen_level / 64.0
         divers_held = obs.collected_divers / 6.0
         lives_norm = obs.lives / 3.0
-        can_fire = (obs.player_missile.active == 0).astype(jnp.float32)
         
         # Calculate simple densities
         enemy_count = jnp.sum(sh_m) + jnp.sum(su_m)
         diver_count = jnp.sum(di_m)
         
+        player_width = obs.player.width / self.SCREEN_WIDTH
+        player_height = obs.player.height / self.SCREEN_HEIGHT
+        # Normalize orientation from [-1, 1] to [0, 1]: -1 -> 0.0, 1 -> 1.0
+        player_orientation = (obs.player.o + 1.0) / 2.0
+
         global_features = jnp.stack([
-            oxy_norm, divers_held, lives_norm, can_fire,
-            enemy_count / 24.0, diver_count / 4.0,
-            obs.player.x / self.SCREEN_WIDTH, # Player Global X
-            obs.player.y / self.SCREEN_HEIGHT, # Player Global Y
-            0.0, 0.0 # Pad to 10 if needed
+            oxy_norm, divers_held, lives_norm, 
+            enemy_count, diver_count,
+            obs.player.x / self.SCREEN_WIDTH,
+            obs.player.y / self.SCREEN_HEIGHT,
+            player_width, player_height, player_orientation
         ])
 
         return objects, mask, labels, global_features
+
+    def _orientation_to_facing_vec(self, orientation):
+        """
+        Convert player orientation to facing vector.
+        In Seaquest: orientation 1 = Right (facing [1, 0]), orientation -1 = Left (facing [-1, 0])
+        """
+        # orientation: 1 = right, -1 = left
+        # Use orientation directly as facing_x (1 for right, -1 for left)
+        facing_x = orientation.astype(jnp.float32)  # 1.0 for right, -1.0 for left
+        facing_y = 0.0  # Seaquest is horizontal only
+        return jnp.array([facing_x, facing_y])
 
     def _process_stack(self, obs_stack, events):
         """
@@ -251,24 +279,33 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         latest_labels = labels_stack[-1]
 
         # --- Compute Capabilities ---
-        # Logic: If Player Missile (Idx 34) is present (Mask=1) -> Can't Fire.
+        # Logic: If Player Missile (Idx 33, was 34) is present (Mask=1) -> Can't Fire.
         # Check specific index for efficiency since indices are fixed in Seaquest
         missile_active = latest_mask[self.idx_player_missile] > 0.5
         can_fire = jnp.where(missile_active, 0.0, 1.0)
         
         caps = jnp.zeros(const.N_CAPABILITIES)
         caps = caps.at[const.CAP_CAN_FIRE].set(can_fire)
+        
+        # 2. Inject Dynamic Shooting Vector (from player orientation)
+        # Extract orientation from global_features (index 9) and denormalize from [0, 1] back to [-1, 1]
+        # Normalized: 0.0 = -1 (left), 1.0 = 1 (right)
+        player_orientation_norm = latest_globals[9]
+        player_orientation = player_orientation_norm * 2.0 - 1.0  # Denormalize: 0.0 -> -1.0, 1.0 -> 1.0
+        facing_vec = self._orientation_to_facing_vec(player_orientation)
+        caps = caps.at[const.CAP_FACING_X].set(facing_vec[0])
+        caps = caps.at[const.CAP_FACING_Y].set(facing_vec[1])
 
         # Events should always be a JAX array (zeros on reset, detected events on step)
         # No need for None check - always a valid JAX array
 
         return ConceptObs(
             global_features=latest_globals,
-            capabilities=caps, # <--- Added
+            capabilities=caps,
             objects=flat_objects,
             object_mask=latest_mask,
             object_labels=latest_labels,
-            object_events=events, # <--- The Magic Link
+            object_events=events,
             active_concept=jnp.array(0, dtype=jnp.int32),
             active_target_idx=jnp.array(0, dtype=jnp.int32)
         )
@@ -276,10 +313,9 @@ class SeaquestConceptWrapper(JaxatariWrapper):
     # --- 3. Main Loop Overrides ---
     @functools.partial(jax.jit, static_argnums=(0,))
     def reset(self, key):
-        obs_stack, state = self._env.reset(key)
-        # No events on reset - pass zero array
+        obs_stack, env_state = self._env.reset(key)
         zero_events = jnp.zeros(self.max_objs, dtype=jnp.int32)
-        return self._process_stack(obs_stack, zero_events), state
+        return self._process_stack(obs_stack, zero_events), env_state
 
     @functools.partial(jax.jit, static_argnums=(0,))
     def step(self, state, action):
