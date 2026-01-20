@@ -40,17 +40,17 @@ GRAY = (128, 128, 128)
 DARK_GRAY = (64, 64, 64)
 ORANGE = (255, 165, 0)
 
-# Concept names (Player concept removed)
+# Concept names (Renumbered: Player Tool removed, concepts renumbered)
 CONCEPT_NAMES = {
-    0: "Player Tool",
-    1: "Collect",
-    2: "Avoid",
-    3: "Destroy",
-    4: "Monitor",
-    5: "High Level",
+    consts.LABEL_COLLECT: "Collect",      # 0
+    consts.LABEL_AVOID: "Avoid",         # 1
+    consts.LABEL_DESTROY: "Destroy",     # 2
+    consts.LABEL_DEFAULT: "Monitor",    # 3 (was 4, now 3)
 }
 
-# Object type names (Player removed, indices shifted down by 1)
+# Object type names (Player Missile removed from object list)
+# Total: 33 objects (12 sharks + 12 subs + 4 divers + 4 enemy missiles + 1 surface sub)
+# But max_objs is 34, so index 33 is padding
 OBJECT_NAMES = [
     "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 0-5
     "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 6-11
@@ -59,15 +59,22 @@ OBJECT_NAMES = [
     "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 24-27
     "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 28-31
     "Surface Sub",  # 32
-    "Player Missile",  # 33
+    # Index 33 is padding (Player Missile removed, handled via capabilities)
 ]
 
 
 class AgentVisualization:
-    def __init__(self, env, agent: RelationalAgent, screen_width=1400, screen_height=700, config=None):
+    def __init__(self, env, agent: RelationalAgent, screen_width=1400, screen_height=700, config=None, phase=3, force_concept_id=None):
         self.env = env
         self.agent = agent
         self.config = config if config is not None else get_default_config()
+        self.phase = phase  # Training phase: 1, 2, or 3
+        self.force_concept_id = force_concept_id  # Optional: force a specific concept (overrides phase)
+        
+        # Temporarily modify agent's config for forced concept mode
+        if force_concept_id is not None:
+            self.agent.config.training.force_concept_mode = True
+            self.agent.config.training.force_concept_id = force_concept_id
         
         # Store expected dimensions from agent's config
         self.expected_global_feats = self.agent.config.environment.n_global_feats
@@ -128,6 +135,25 @@ class AgentVisualization:
         self.instance_history = []
         self.history_length = 50
         
+        # Set global_step based on phase for phase simulation
+        # Phase 1: Use a step value < phase_1_steps (e.g., 0)
+        # Phase 2: Use a step value between phase_1_steps and phase_2_steps
+        # Phase 3: Use a step value > phase_2_steps (full model)
+        phase_1_steps = self.config.training.phase_1_steps
+        phase_2_steps = self.config.training.phase_2_steps
+        
+        if self.phase == 1:
+            self.simulated_global_step = 0
+        elif self.phase == 2:
+            # Set to a value in phase 2 range
+            self.simulated_global_step = phase_1_steps + (phase_2_steps - phase_1_steps) // 2
+        elif self.phase == 3:
+            # Set to a value after phase 2 (full model)
+            self.simulated_global_step = phase_2_steps + 1_000_000  # Well into phase 3
+        else:
+            # Default to phase 3 (full model)
+            self.simulated_global_step = phase_2_steps + 1_000_000
+        
     def reset(self):
         """Reset the environment"""
         self.rng_key, subkey = jax.random.split(self.rng_key)
@@ -138,6 +164,8 @@ class AgentVisualization:
         self.step_count = 0
         self.total_global_reward = 0.0
         self.agent_state = None
+        # Track global step for curriculum phases in the agent
+        # Use simulated_global_step instead of incrementing, to maintain phase behavior
         self.concept_history = []
         self.instance_history = []
         
@@ -276,13 +304,15 @@ class AgentVisualization:
         adapted_obs = self._adapt_observation(self.obs)
         
         # Select action
+        # Use simulated_global_step to maintain phase behavior (doesn't increment)
         self.agent_state = self.agent.select_action(
             adapted_obs,
             prev_concept=prev_concept,
             prev_target_idx=prev_target_idx,
             key=key_act,
             epsilon_meta=0.0,  # No exploration during visualization
-            epsilon_sub=0.0
+            epsilon_sub=0.0,
+            global_step=self.simulated_global_step,
         )
         
         # Get Q-values for display
@@ -327,21 +357,26 @@ class AgentVisualization:
         
         valid_mask = label_exists
         # Note: LABEL_PLAYER no longer exists (player removed from objects)
-        valid_mask = valid_mask.at[:, consts.LABEL_MONITOR_STATISTIC].set(True)
+        valid_mask = valid_mask.at[:, consts.LABEL_DEFAULT].set(True)
         # valid_mask = valid_mask.at[:, consts.LABEL_HIGH_LEVEL_CONCEPT].set(True)
 
         any_valid = jnp.any(valid_mask, axis=-1, keepdims=True)
-        fallback_mask = jax.nn.one_hot(jnp.full((batch_size,), consts.LABEL_MONITOR_STATISTIC), num_concepts)
+        fallback_mask = jax.nn.one_hot(jnp.full((batch_size,), consts.LABEL_DEFAULT), num_concepts)
         self.valid_concepts_mask = jnp.where(any_valid, valid_mask, fallback_mask)
         # ------------------------------------------------
         
-        # Selector weights
+        # Selector weights (conditioned on currently selected concept, matching training call signature)
+        selector_num_concepts = num_concepts  # Same as meta policy concepts
+        selector_cmd_one_hot = jax.nn.one_hot(
+            agent_state_batched.selected_concept,
+            num_classes=selector_num_concepts,
+        )
         self.selector_weights = self.agent.selector_state.apply_fn(
             self.agent.selector_state.params,
             obs_batched.global_features,
             obs_batched.objects,
-            obs_batched.object_labels,
-            obs_batched.object_mask
+            obs_batched.object_mask,
+            selector_cmd_one_hot,
         )
         
         # Sub Q-values (need to compute relative vector)
@@ -360,6 +395,7 @@ class AgentVisualization:
         
         self.sub_q_values = self.agent.sub_state.apply_fn(
             self.agent.sub_state.params,
+            obs_batched.global_features,
             rel_vec,
             context
         )
@@ -580,7 +616,8 @@ class AgentVisualization:
                 self.screen.blit(header, (x, current_y))
                 current_y += 20
                 
-                sel_weights = np.array(self.selector_weights[0, concept_id, :])
+                # selector_weights has shape [Batch, Num_Objects] for the currently selected concept
+                sel_weights = np.array(self.selector_weights[0])
                 object_mask = np.array(self.obs.object_mask[0])
                 
                 # Show top 5 objects
@@ -599,17 +636,12 @@ class AgentVisualization:
                         current_y += 16
     
     def _draw_column2(self, x, y):
-        """Draw column 2: Q-Values & Statistics"""
+        """Draw column 2: Q-Values & Detailed Reward Breakdown"""
         current_y = y
         
-        # Title
-        title = self.bold_font.render("Q-Values & Stats", True, WHITE)
-        self.screen.blit(title, (x, current_y))
-        current_y += 30
-        
-        # Sub Q-Values
+        # --- 1. Sub-Policy Q-Values (Action Confidence) ---
         if self.sub_q_values is not None and self.agent_state is not None:
-            header = self.small_font.render("Sub Policy Q-Values:", True, WHITE)
+            header = self.small_font.render("Sub-Policy Q-Values (Action):", True, WHITE)
             self.screen.blit(header, (x, current_y))
             current_y += 20
             
@@ -621,26 +653,132 @@ class AgentVisualization:
             for act_id in top_actions:
                 q_val = sub_q[act_id]
                 color = GREEN if act_id == action_id else GRAY
-                action_name = f"Action {act_id}"
-                q_text = self.small_font.render(f"{action_name}: {q_val:.3f}", True, color)
+                # Simple mapping for Seaquest actions (approximate)
+                if act_id == 0: act_name = "NOOP"
+                elif act_id == 1: act_name = "FIRE"
+                elif 2 <= act_id <= 5: act_name = f"MOVE {act_id}"
+                else: act_name = f"ACT {act_id}"
+                
+                q_text = self.small_font.render(f"{act_name}: {q_val:.3f}", True, color)
                 self.screen.blit(q_text, (x + 5, current_y))
                 current_y += 16
             
-            current_y += 10
+            current_y += 15
         
-        # Statistics
-        stats_title = self.small_font.render("Statistics:", True, WHITE)
+        # --- 2. THE REWARD DASHBOARD (NEW) ---
+        # This section visualizes exactly what each "Brain" is optimizing for.
+        
+        if self.multi_reward is not None and self.agent_state is not None:
+            title = self.bold_font.render("Reward Signals (Last Step)", True, WHITE)
+            self.screen.blit(title, (x, current_y))
+            current_y += 25
+            
+            # Extract indices
+            c_idx = int(self.agent_state.selected_concept)
+            t_idx = int(self.agent_state.selected_target_idx)
+            
+            # Helper to extract value from batched/unbatched array
+            def get_val(arr, *indices):
+                if arr.ndim == len(indices) + 1: # Batched [B, ...]
+                    return float(arr[0, *indices])
+                return float(arr[*indices])
+
+            # A. META-POLICY REWARD (Strategic)
+            # Optimizes: Global Score + Survival
+            meta_rew = get_val(self.multi_reward.global_reward)
+            
+            m_color = GREEN if meta_rew > 0 else (RED if meta_rew < 0 else WHITE)
+            self.screen.blit(self.small_font.render("Meta-Policy (Global):", True, YELLOW), (x, current_y))
+            self.screen.blit(self.small_font.render(f"{meta_rew:.4f}", True, m_color), (x + 120, current_y))
+            current_y += 16
+            
+            # B. SUB-POLICY REWARD (Execution)
+            # Optimizes: Shaping + Global Shared Fate
+            # This is the specific scalar reward the active sub-policy received this step.
+            sub_rew = get_val(self.multi_reward.concept_rewards, c_idx, t_idx)
+            
+            s_color = CYAN if sub_rew > 0 else (ORANGE if sub_rew < 0 else WHITE)
+            self.screen.blit(self.small_font.render("Sub-Policy (Hybrid):", True, YELLOW), (x, current_y))
+            self.screen.blit(self.small_font.render(f"{sub_rew:.4f}", True, s_color), (x + 120, current_y))
+            current_y += 16
+            
+            # C. COMPONENT ANALYSIS (Why is Sub-Policy happy/sad?)
+            # Calculate the "Pure Shaping" by removing the Global component
+            # (Assuming sub_rew = shaping + meta_rew)
+            pure_shaping = sub_rew - meta_rew
+            
+            p_color = GRAY
+            if abs(pure_shaping) > 0.001:
+                p_color = GREEN if pure_shaping > 0 else RED
+                
+            self.screen.blit(self.small_font.render("  L Shaping (Local):", True, GRAY), (x, current_y))
+            self.screen.blit(self.small_font.render(f"{pure_shaping:.4f}", True, p_color), (x + 120, current_y))
+            current_y += 25
+
+            # --- D. INSTANCE SELECTOR INSIGHT ---
+            # Show rewards for ALTERNATIVE targets to see if the selector made the right choice.
+            # We scan the rewards for the *active concept* across all objects.
+            
+            self.screen.blit(self.small_font.render("Instance Potentials:", True, WHITE), (x, current_y))
+            current_y += 16
+            
+            # Get rewards for all objects under current concept
+            # Shape: [Max_Objs]
+            if self.multi_reward.concept_rewards.ndim == 3:
+                all_obj_rewards = self.multi_reward.concept_rewards[0, c_idx, :]
+            else:
+                all_obj_rewards = self.multi_reward.concept_rewards[c_idx, :]
+                
+            # Filter for objects that actually exist
+            obj_mask = self.obs.object_mask[0] if self.obs.object_mask.ndim == 2 else self.obs.object_mask
+            
+            # Find best alternative
+            valid_indices = np.where(obj_mask > 0.5)[0]
+            if len(valid_indices) > 0:
+                # Sort by reward
+                best_idx = valid_indices[np.argmax(all_obj_rewards[valid_indices])]
+                best_val = float(all_obj_rewards[best_idx])
+                
+                # Did we pick the best?
+                is_optimal = (best_idx == t_idx) or (abs(best_val - sub_rew) < 0.001)
+                
+                # Current Selection
+                sel_name = OBJECT_NAMES[t_idx] if t_idx < len(OBJECT_NAMES) else f"Obj {t_idx}"
+                self.screen.blit(self.small_font.render(f"Selected [{sel_name}]:", True, GRAY), (x + 10, current_y))
+                self.screen.blit(self.small_font.render(f"{sub_rew:.2f}", True, s_color), (x + 130, current_y))
+                current_y += 16
+                
+                # Best Alternative (if different)
+                if not is_optimal:
+                    alt_name = OBJECT_NAMES[best_idx] if best_idx < len(OBJECT_NAMES) else f"Obj {best_idx}"
+                    self.screen.blit(self.small_font.render(f"Better   [{alt_name}]:", True, GRAY), (x + 10, current_y))
+                    self.screen.blit(self.small_font.render(f"{best_val:.2f}", True, MAGENTA), (x + 130, current_y))
+                    current_y += 16
+            
+            current_y += 10
+
+        # --- 3. Global Statistics ---
+        stats_title = self.small_font.render("Global Stats:", True, WHITE)
         self.screen.blit(stats_title, (x, current_y))
         current_y += 20
         
+        # Build mode description
+        if self.force_concept_id is not None:
+            concept_names = {0: "COLLECT", 1: "AVOID", 2: "DESTROY", 3: "DEFAULT"}
+            concept_name = concept_names.get(self.force_concept_id, f"Concept {self.force_concept_id}")
+            phase_name = f"Forced: {concept_name}"
+        elif self.phase == 1:
+            phase_name = "Phase 1 (Heuristic Meta + Heuristic Selector)"
+        elif self.phase == 2:
+            phase_name = "Phase 2 (Heuristic Meta + Network Selector)"
+        else:  # phase == 3
+            phase_name = "Phase 3 (Full Model: Network Meta + Network Selector)"
+        
         stats = [
             f"Step: {self.step_count}",
-            f"Global Reward: {self.total_global_reward:.3f}",
             f"FPS: {self.actual_fps:.1f}/{self.target_fps}",
+            f"Mode: {phase_name}",
         ]
-        
-        if self.multi_reward is not None:
-            stats.append(f"Last Reward: {float(self.multi_reward.global_reward):.3f}")
         
         if self.obs is not None:
             stats.extend([
@@ -946,9 +1084,10 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
     
     # 2. Instance Selector - create normally (should match)
     from src.agent.components.instance_selector import InstanceSelector
+    selector_hidden_dim = config.model.selector_hidden_dims[0]
     selector_net = InstanceSelector(
         num_concepts=num_concepts,
-        embed_dim=config.model.selector_hidden_dims[0]
+        hidden_dim=selector_hidden_dim,
     )
     # Note: We don't need to call init() since we're using loaded params directly
     
@@ -992,6 +1131,10 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize trained agent playing Seaquest")
     parser.add_argument("--model", type=str, required=True, help="Path to saved model file (.pkl)")
     parser.add_argument("--config", type=str, default=None, help="Path to config file (optional)")
+    parser.add_argument("--phase", type=int, choices=[1, 2, 3], default=3, 
+                        help="Training phase to simulate: 1 (heuristic meta + heuristic selector), 2 (heuristic meta + network selector), or 3 (full model: network meta + network selector)")
+    parser.add_argument("--force-concept", type=int, choices=[0, 1, 2, 3], default=None,
+                        help="Force a specific concept (overrides phase): 0=COLLECT, 1=AVOID, 2=DESTROY, 3=DEFAULT")
     args = parser.parse_args()
     
     # Get config
@@ -1013,7 +1156,7 @@ def main():
     print("Agent loaded successfully!")
     
     # Create environment
-    base_env = make_atari_env('seaquest')
+    base_env = make_atari_env('seaquest', mods_config=["disable_surfacing_death"])
     atari_wrapper = AtariWrapper(
         base_env,
         frame_stack_size=config.environment.frame_stack_size,
@@ -1028,7 +1171,21 @@ def main():
     env = wrapper.SeaquestConceptWrapper(atari_wrapper, config=config)
     
     # Create visualization
-    visualization = AgentVisualization(env, agent, screen_width=1400, screen_height=700, config=config)
+    visualization = AgentVisualization(env, agent, screen_width=1400, screen_height=700, config=config, phase=args.phase, force_concept_id=args.force_concept)
+    
+    # Print mode information
+    if args.force_concept is not None:
+        concept_names = {0: "COLLECT", 1: "AVOID", 2: "DESTROY", 3: "DEFAULT"}
+        concept_name = concept_names.get(args.force_concept, f"Concept {args.force_concept}")
+        print(f"Running visualization with FORCED CONCEPT: {concept_name}")
+    else:
+        phase_names = {
+            1: "Phase 1 (Heuristic Meta + Heuristic Selector)",
+            2: "Phase 2 (Heuristic Meta + Network Selector)",
+            3: "Phase 3 (Full Model: Network Meta + Network Selector)"
+        }
+        phase_name = phase_names.get(args.phase, "Phase 3 (Full Model)")
+        print(f"Running visualization in {phase_name}")
     
     # Run
     try:

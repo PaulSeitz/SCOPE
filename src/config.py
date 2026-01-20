@@ -8,7 +8,7 @@ This module provides a structured configuration system that:
 - Can be loaded from YAML/JSON files
 """
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from pathlib import Path
 import jax.numpy as jnp
 
@@ -24,10 +24,7 @@ class ModelConfig:
     # Sub-policy network architecture
     hidden_dims: Tuple[int, ...] = (64, 64)
     
-    # Meta-policy configuration (placeholder for future)
-    meta_hidden_dims: Tuple[int, ...] = (128, 128)
-    
-    # Instance selector configuration (placeholder for future)
+    # Instance selector configuration
     selector_hidden_dims: Tuple[int, ...] = (64, 64)
 
 
@@ -47,14 +44,9 @@ class TrainingConfig:
     tau: float = 0.005  # Polyak averaging coefficient for target network updates
     epsilon_start: float = 1.0
     epsilon_end: float = 0.01
-    epsilon_decay_steps: int = 100000
     
     # Training loop
     batch_size: int = 32
-    buffer_size: int = 100000
-    train_frequency: int = 4  # Train every N steps
-    target_update_frequency: int = 1000  # Update target network every N steps
-    learning_starts: int = 1000  # Steps before training begins
     
     # PQN-specific hyperparameters
     rollout_len: int = 32  # Steps per update loop (rollout length)
@@ -67,16 +59,23 @@ class TrainingConfig:
     selector_stickiness: float = 1.0  # Higher stickiness for targets to prevent jitter
     
     # Training duration
-    total_steps: int = 1000000
-    eval_frequency: int = 10000
-    eval_episodes: int = 5
-    exploration_fraction: float = 0.1  # Fraction of total steps for exploration
+    total_steps: int = 100_000_000
     
     # Parallel environments for vectorization
     num_envs: int = 256  # Number of parallel environments to run
     
-    # Gradient clipping
-    max_grad_norm: Optional[float] = 10.0
+    # Phased training: freeze parts of the network for certain steps
+    # Phase 1 (0 to phase_1_steps): Only Sub-Policy trains
+    # Phase 2 (phase_1_steps to phase_2_steps): Sub-Policy + Selector train
+    # Phase 3 (after phase_2_steps): All components train (Sub-Policy + Selector + Meta-Policy)
+    phase_1_steps: int = 5_000_000  # Steps until selector starts training
+    phase_2_steps: int = 10_000_000  # Steps until meta-policy starts training
+    
+    # Forced concept training mode: permanently force one concept and only train that
+    # When enabled, the agent will always select the specified concept regardless of phase
+    # Only the sub-policy for that concept will be trained (meta and selector are frozen)
+    force_concept_mode: bool = False  # Enable forced concept training
+    force_concept_id: Optional[int] = None  # Concept ID to force (0=COLLECT, 1=AVOID, 2=DESTROY, 3=DEFAULT)
 
 
 @dataclass
@@ -98,6 +97,9 @@ class EnvironmentConfig:
     """Configuration for environment settings."""
     # Game settings
     game_name: str = "seaquest"
+    # Game mods: list of strings that can be applied to the environment
+    # See jaxatari documentation for available mods
+    game_mods: List[str] = field(default_factory=list)
     
     # Atari wrapper settings
     frame_stack_size: int = 4
@@ -136,25 +138,13 @@ class EnvironmentConfig:
 @dataclass
 class ConceptConstants:
     """Semantic labels and constants (environment-agnostic concepts)."""
-    # Labels
-    label_player: int = 0
-    label_player_tool: int = 1
-    label_collect: int = 2
-    label_avoid: int = 3
-    label_destroy: int = 4
-    label_monitor_statistic: int = 5
-    label_high_level_concept: int = 6
-    
-    # Events
-    event_triggered: int = 1
-    event_not_triggered: int = 0
+    # High-level concept label (used to determine number of concepts)
+    # Should be set to the highest concept label index (e.g., LABEL_DEFAULT = 3 for Seaquest)
+    # num_concepts = label_high_level_concept + 1
+    label_high_level_concept: int = 3
     
     # Capabilities
-    cap_can_fire: int = 0
     n_capabilities: int = 4
-    
-    # Physics/Rules
-    shooting_vector: jnp.ndarray = field(default_factory=lambda: jnp.array([1.0, 0.0]))
 
 
 @dataclass
@@ -163,12 +153,11 @@ class WandBConfig:
     project: str = "concept-based-learning"
     entity: Optional[str] = None
     name: Optional[str] = None
-    tags: Tuple[str, ...] = ()
     notes: Optional[str] = None
     mode: str = "online"  # "online", "offline", "disabled"
-    save_code: bool = True
     group: Optional[str] = None
     job_type: Optional[str] = None
+    log_interval: int = 10
 
 
 @dataclass
@@ -237,24 +226,12 @@ class Config:
         if 'concepts' in d:
             for k, v in d['concepts'].items():
                 if hasattr(config.concepts, k):
-                    if k == 'shooting_vector' and isinstance(v, list):
-                        setattr(config.concepts, k, jnp.array(v))
-                    else:
-                        setattr(config.concepts, k, v)
+                    setattr(config.concepts, k, v)
         
         if 'wandb' in d:
             for k, v in d['wandb'].items():
                 if hasattr(config.wandb, k):
-                    if k == 'tags':
-                        # Handle tags: convert list to tuple, None to empty tuple
-                        if v is None:
-                            setattr(config.wandb, k, ())
-                        elif isinstance(v, list):
-                            setattr(config.wandb, k, tuple(v))
-                        else:
-                            setattr(config.wandb, k, v)
-                    else:
-                        setattr(config.wandb, k, v)
+                    setattr(config.wandb, k, v)
         
         return config
     

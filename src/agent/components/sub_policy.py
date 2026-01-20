@@ -29,29 +29,31 @@ class SubPolicyQNetwork(nn.Module):
     hidden_dims: Tuple[int, ...]
 
     @nn.compact
-    def __call__(self, relative_vec: chex.Array, capabilities: chex.Array):
-        # --- FIX: Normalize Inputs ---
+    def __call__(self, global_features: chex.Array, relative_vec: chex.Array, capabilities: chex.Array):
+        # --- 1. Normalize Inputs ---
         # Seaquest screen is roughly 160x210. 
         # relative_vec is (target - player), so range is approx [-160, 160].
         # We divide by 160.0 to squash it to ~[-1.0, 1.0]
         norm_rel_vec = relative_vec / 160.0
         
-        # 1. Input Fusion
-        # capabilities are [0, 1].
-        x = jnp.concatenate([norm_rel_vec, capabilities], axis=-1)
+        # Globals are already roughly normalized in the wrapper, 
+        # but the Orchestrator might need to ensure they are consistent.
+        # global_features: [Batch, N_Globals]
+        
+        # --- 2. Input Fusion ---
+        # Concatenate: [Globals, Relative_Vector, Capabilities]
+        # This gives the "Default" concept access to Oxygen (in Globals) 
+        # even if Relative_Vector is zeroed out.
+        x = jnp.concatenate([global_features, norm_rel_vec, capabilities], axis=-1)
 
-        # 2. The Logic Body (MLP with LayerNorm)
-        # Low number of hidden dims since the concepts are already low level.
-        # LayerNorm is CRITICAL for PQN stability - prevents target collapse
+        # 3. Logic Body
         for dim in self.hidden_dims:
             x = nn.Dense(features=dim)(x)
-            x = nn.LayerNorm()(x)  # CRITICAL FOR PQN STABILITY
-            x = nn.relu(x) # Simple ReLU is robust for Q-learning
+            x = nn.LayerNorm()(x)
+            x = nn.relu(x)
 
-        # 3. Action Head
-        # No activation at the end (Q-values are unbounded regression targets)
+        # 4. Action Head
         q_values = nn.Dense(features=self.num_actions)(x)
-        
         return q_values
 
 class SubPolicy:
@@ -63,7 +65,7 @@ class SubPolicy:
     @staticmethod
     def create_train_state(key, num_actions: int, learning_rate: float, 
                            hidden_dims: Tuple[int, ...], cap_dim: int = 4, 
-                           num_concepts: int = 7) -> RLTrainState:
+                           num_concepts: int = 7, global_dim: int = 10) -> RLTrainState:
         """
         Initializes the model parameters and optimizer with target network support.
         Note: capabilities input includes concept context, so total input size is cap_dim + num_concepts.
@@ -71,12 +73,12 @@ class SubPolicy:
         net = SubPolicyQNetwork(num_actions=num_actions, hidden_dims=hidden_dims)
         
         # Dummy inputs for shape inference
-        # Shape: [1, 2] and [1, cap_dim + num_concepts] (includes concept one-hot)
-        dummy_rel = jnp.zeros((1, 2))
+        d_glob = jnp.zeros((1, global_dim))
+        d_rel = jnp.zeros((1, 2))
         expanded_cap_dim = cap_dim + num_concepts
-        dummy_cap = jnp.zeros((1, expanded_cap_dim))
+        d_cap = jnp.zeros((1, expanded_cap_dim))
         
-        params = net.init(key, dummy_rel, dummy_cap)
+        params = net.init(key, d_glob, d_rel, d_cap)
         
         tx = optax.adam(learning_rate=learning_rate)
         
@@ -89,6 +91,7 @@ class SubPolicy:
     @staticmethod
     @jax.jit
     def select_action_eps_greedy(train_state: RLTrainState, 
+                                 global_features: chex.Array,
                                  relative_vec: chex.Array, 
                                  capabilities: chex.Array, 
                                  epsilon: float, 
@@ -96,29 +99,22 @@ class SubPolicy:
         """
         Standard Epsilon-Greedy selection for Q-Learning.
         """
-        # 1. Get Q-Values
-        q_values = train_state.apply_fn(train_state.params, relative_vec, capabilities)
-        
-        # 2. Greedy Choice (Argmax)
+        q_values = train_state.apply_fn(train_state.params, global_features, relative_vec, capabilities)
         greedy_action = jnp.argmax(q_values, axis=-1)
-        
-        # 3. Random Choice
         random_action = jax.random.randint(key, shape=greedy_action.shape, 
                                            minval=0, maxval=q_values.shape[-1])
         
-        # 4. Mix based on Epsilon
-        # If rand < eps -> Random, else Greedy
         rng_mix = jax.random.uniform(key, shape=greedy_action.shape)
         action = jnp.where(rng_mix < epsilon, random_action, greedy_action)
-        
         return action, q_values
 
     @staticmethod
     @jax.jit
-    def get_q_values(train_state: RLTrainState, 
+    def get_q_values(train_state: RLTrainState,
+                     global_features: chex.Array,
                      relative_vec: chex.Array, 
                      capabilities: chex.Array):
         """
         Helper for the update step (calculating loss).
         """
-        return train_state.apply_fn(train_state.params, relative_vec, capabilities)
+        return train_state.apply_fn(train_state.params, global_features, relative_vec, capabilities)

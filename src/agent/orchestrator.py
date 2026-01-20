@@ -15,6 +15,45 @@ from src.config import Config
 from src.environments.seaquest.datatypes import ConceptObs, AgentState
 import src.environments.seaquest.seaquest_constants as consts
 
+def heuristic_meta(obs):
+    """
+    Rulebook for Phase 1 & 2.
+    # TODO: if it does not work maybe change order of concepts and pull DESTROY forward
+    Priority: Surface (if low oxy) > Collect (if divers) > Destroy (if enemies) > Default
+    """
+    oxy_level = obs.global_features[0]
+    diver_count = obs.global_features[4]
+    enemy_count = obs.global_features[3]
+    
+    is_low_oxy = oxy_level < 0.3
+    has_divers = diver_count > 0
+    has_enemies = enemy_count > 0
+    
+    c_collect = consts.LABEL_COLLECT
+    c_destroy = consts.LABEL_DESTROY
+    c_default = consts.LABEL_DEFAULT
+    
+    concept = jnp.where(is_low_oxy, c_default,
+               jnp.where(has_divers, c_collect,
+                jnp.where(has_enemies, c_destroy, c_default)))
+    return concept
+
+def heuristic_selector(obs, concept_id, player_pos):
+    """
+    Rulebook for Phase 1.
+    Logic: Pick NEAREST valid object for the chosen concept.
+    """
+    relevant_col = obs.object_labels[:, concept_id]
+    is_valid = (relevant_col > 0.5) & (obs.object_mask > 0.5)
+    
+    obj_pos = obs.objects[:, 0:2]
+    dists = jnp.sum((obj_pos - player_pos)**2, axis=-1)
+    
+    safe_dists = jnp.where(is_valid, dists, 1e9)
+    
+    target_idx = jnp.argmin(safe_dists)
+    return target_idx
+
 @struct.dataclass
 class RelationalAgent:
     """
@@ -26,7 +65,7 @@ class RelationalAgent:
     
     # These contain the arrays (params) JAX needs to update
     meta_state: RLTrainState = None
-    selector_state: TrainState = None
+    selector_state: RLTrainState = None
     sub_state: RLTrainState = None
 
     @classmethod
@@ -47,22 +86,15 @@ class RelationalAgent:
 
         # 2. Instance Selector
         num_concepts = config.concepts.label_high_level_concept + 1
-        selector_net = InstanceSelector(
+        selector_state = InstanceSelector.create_train_state(
+            key_s,
+            learning_rate=config.training.selector_lr,
+            global_dim=sample_obs.global_features.shape[-1],
+            obj_dim=obj_dim,
+            max_objs=config.environment.max_objs,
             num_concepts=num_concepts,
-            embed_dim=config.model.selector_hidden_dims[0]
+            hidden_dim=config.model.selector_hidden_dims[0] if len(config.model.selector_hidden_dims) > 0 else 64
         )
-        # Dummy inputs for init
-        # We ensure these have the Batch dimension [1, ...]
-        # Objects are flattened: [max_objs, stack_size * n_obj_feats]
-        d_glob = jnp.zeros((1, sample_obs.global_features.shape[-1]))
-        d_obj = jnp.zeros((1, config.environment.max_objs, obj_dim))
-        # object_labels shape: [Batch, Max_Objs, Num_Concepts] (multi-hot encoding)
-        d_labels = jnp.zeros((1, config.environment.max_objs, num_concepts), dtype=jnp.float32)
-        d_mask = jnp.zeros((1, config.environment.max_objs))
-        
-        sel_params = selector_net.init(key_s, d_glob, d_obj, d_labels, d_mask)
-        sel_tx = optax.adam(config.training.selector_lr)
-        selector_state = TrainState.create(apply_fn=selector_net.apply, params=sel_params, tx=sel_tx)
 
         # 3. Sub Policy
         sub_state = SubPolicy.create_train_state(
@@ -71,7 +103,8 @@ class RelationalAgent:
             learning_rate=config.training.sub_policy_lr,
             hidden_dims=config.model.hidden_dims,
             cap_dim=config.concepts.n_capabilities,
-            num_concepts=config.concepts.label_high_level_concept + 1
+            num_concepts=config.concepts.label_high_level_concept + 1,
+            global_dim=sample_obs.global_features.shape[-1]
         )
         
         return cls(config=config, meta_state=meta_state, selector_state=selector_state, sub_state=sub_state)
@@ -83,16 +116,15 @@ class RelationalAgent:
                       prev_target_idx: chex.Array,
                       key: chex.PRNGKey, 
                       epsilon_meta: float,
-                      epsilon_sub: float):
+                      epsilon_sub: float,
+                      global_step: int):
         
-        # --- 0. Auto-Batching Logic ---
-        # If input is unbatched (rank 1 global features), expand dims to [1, ...]
+        # --- 0. Batch Dimension Check ---
+        # We ensure obs features have a batch dimension for consistent processing.
         is_unbatched = obs.global_features.ndim == 1
         
         if is_unbatched:
-            # Expand all leaves in the ConceptObs struct
             obs_in = jax.tree.map(lambda x: x[None, ...], obs)
-            # Expand scalars
             prev_concept_in = jnp.expand_dims(prev_concept, 0)
             prev_target_idx_in = jnp.expand_dims(prev_target_idx, 0)
         else:
@@ -100,9 +132,22 @@ class RelationalAgent:
             prev_concept_in = prev_concept
             prev_target_idx_in = prev_target_idx
 
-        k1, k2 = jax.random.split(key)
-        k1a, k1b = jax.random.split(k1)
+        k1, k_sub = jax.random.split(key)
+        k1a, k1b, k_drill = jax.random.split(k1, 3)
+        k2a, k2b = jax.random.split(k_sub)
 
+        # --- CURRICULUM PHASES ---
+        phase_1_steps = self.config.training.phase_1_steps
+        phase_2_steps = self.config.training.phase_2_steps
+        
+        is_phase_1 = global_step < phase_1_steps
+        is_phase_2 = (global_step >= phase_1_steps) & (global_step < phase_2_steps)
+        
+        # --- FORCED CONCEPT MODE ---
+        # If forced concept mode is enabled, always select the forced concept
+        force_concept_mode = self.config.training.force_concept_mode
+        force_concept_id = self.config.training.force_concept_id
+        
         # --- Layer 1: Strategic Decision (Meta) ---
         q_values_meta = self.meta_state.apply_fn(
             self.meta_state.params, 
@@ -112,32 +157,13 @@ class RelationalAgent:
             obs_in.object_mask
         )
         
-        # --- Action Validity Masking ---
-        # 1. Identify which concepts are possible right now
-        # Check existence of objects for each label
-        # labels: [Batch, Max_Objs]
-        
         batch_size = q_values_meta.shape[0]
         num_concepts = q_values_meta.shape[1]
         
-        # Count objects per label
-        # We want a mask: [Batch, Num_Concepts]
-        # label_exists[b, c] > 0 if label 'c' exists in batch 'b'
-        # object_labels is now [Batch, Max_Objs, Num_Concepts] (multi-hot encoding)
-        
-        # Transpose to [Batch, Num_Concepts, Max_Objs] to extract concept channels
-        labels_T = jnp.transpose(obs_in.object_labels, (0, 2, 1))  # [Batch, Num_Concepts, Max_Objs]
-        
-        # Check which objects exist: [Batch, Max_Objs] -> [Batch, 1, Max_Objs]
-        object_exists = obs_in.object_mask[:, None, :] > 0.5  # [Batch, 1, Max_Objs]
-        
-        # For each concept, check if any object has that label AND exists
-        # labels_T[b, c, o] = 1.0 if object 'o' has concept 'c'
-        # object_exists[b, 1, o] = 1.0 if object 'o' exists
-        # Multiply to get: [Batch, Num_Concepts, Max_Objs]
+        # --- Action Validity Masking ---
+        labels_T = jnp.transpose(obs_in.object_labels, (0, 2, 1))
+        object_exists = obs_in.object_mask[:, None, :] > 0.5
         has_label = labels_T * object_exists
-        
-        # Reduce: [Batch, Num_Concepts] - True if any object has this concept
         label_exists = jnp.any(has_label > 0.5, axis=-1)
         
         # 2. Construct the Mask
@@ -147,22 +173,18 @@ class RelationalAgent:
         
         # Exception C: High Level / Monitor
         # These don't target specific objects, so they are always valid
-        valid_mask = valid_mask.at[:, consts.LABEL_MONITOR_STATISTIC].set(True)
+        # Ensure Valid Mask allows LABEL_DEFAULT
+        valid_mask = valid_mask.at[:, consts.LABEL_DEFAULT].set(True)
+        
         # valid_mask = valid_mask.at[:, consts.LABEL_HIGH_LEVEL_CONCEPT].set(True)
-
-        # Safety: If EVERYTHING is masked (e.g. empty screen), allow 'Monitor' or 'Destroy' (blind fire)
         any_valid = jnp.any(valid_mask, axis=-1, keepdims=True)
-        # If nothing valid, force Monitor (Index 5) or similar safe state
-        fallback_mask = jax.nn.one_hot(jnp.full((batch_size,), consts.LABEL_MONITOR_STATISTIC), num_concepts)
+        fallback_mask = jax.nn.one_hot(jnp.full((batch_size,), consts.LABEL_DEFAULT), num_concepts)
         valid_mask = jnp.where(any_valid, valid_mask, fallback_mask)
         
         # 3. Apply Mask to Q-Values
         large_neg = -1e9
         masked_q_values = q_values_meta + (1.0 - valid_mask.astype(jnp.float32)) * large_neg
         
-        # --- Standard Selection Logic ---
-        
-        # Stickiness (Apply to masked Q)
         prev_concept_mask = jax.nn.one_hot(prev_concept_in, num_classes=num_concepts)
         adjusted_meta_q = masked_q_values + (prev_concept_mask * self.config.training.meta_stickiness)
         
@@ -172,85 +194,191 @@ class RelationalAgent:
         # Instead of pure random, we sample from Softmax of mask
         # Add large noise to masked_q and argmax
         random_noise = jax.random.uniform(k1a, shape=masked_q_values.shape)
-        noisy_q = masked_q_values + random_noise * 1e6 # Noise dominates Q, but Mask dominates Noise
+        noisy_q = masked_q_values + random_noise * 1e6
         random_concept = jnp.argmax(noisy_q, axis=-1)
         
         rng_mix = jax.random.uniform(k1b, shape=greedy_concept.shape)
-        concept_id = jnp.where(rng_mix < epsilon_meta, random_concept, greedy_concept)
+        net_concept = jnp.where(rng_mix < epsilon_meta, random_concept, greedy_concept)
+
+        # B. THE DRILL SERGEANT (Sticky Random Valid Choice for Phase 1)
+        # During Phase 1, we randomly sample from valid concepts (except DEFAULT TODO: I think this is necessary, but can test..) and stick to them
+        # until they become invalid. This ensures all Sub-Policies get training data.
+        
+        # 1. Check if previous concept is still valid
+        # prev_concept_in is [Batch], valid_mask is [Batch, Num_Concepts]
+        prev_concept_idx = prev_concept_in[:, None]  # [Batch, 1]
+        prev_is_valid = jnp.take_along_axis(valid_mask, prev_concept_idx, axis=1).squeeze(1) > 0.5
+        
+        # 2. Pick new random concept from valid ones
+        # Add uniform noise to valid_mask and argmax to get random valid concept
+        drill_noise = jax.random.uniform(k_drill, shape=valid_mask.shape)
+        # Only consider valid concepts (multiply by valid_mask)
+        weighted_valid = valid_mask.astype(jnp.float32) * drill_noise
+        # Remove DEFAULT from valid concepts
+        weighted_valid = weighted_valid.at[:, consts.LABEL_DEFAULT].set(0.0)
+        new_random_concept = jnp.argmax(weighted_valid, axis=-1)
+        
+        # 3. Resolve Drill Concept: stick to previous if still valid, otherwise pick new
+        drill_concept = jnp.where(prev_is_valid, prev_concept_in, new_random_concept)
+        
+        # C. Heuristic Output (for Phase 2)
+        if obs_in.global_features.ndim == 1:
+            rule_concept = jnp.expand_dims(heuristic_meta(obs_in), 0)
+        else:
+            rule_concept = jax.vmap(heuristic_meta)(obs_in)
+        
+        # D. Switch based on Phase
+        # Phase 1: Use Sticky Drill (random valid, persists until invalid)
+        # Phase 2: Use Heuristic (priority-based)
+        # Phase 3: Use Network (full AI)
+        normal_selected_concept = jnp.where(
+            is_phase_1, 
+            drill_concept,
+            jnp.where(is_phase_2, rule_concept, net_concept)
+        )
+        
+        # E. Apply Forced Concept Mode (if enabled)
+        # If force_concept_mode is True and force_concept_id is set, override the selection
+        # Ensure selected_concept has the same shape as normal_selected_concept
+        if force_concept_mode and force_concept_id is not None:
+            # Always create with batch dimension to match normal_selected_concept shape
+            selected_concept = jnp.full(normal_selected_concept.shape, force_concept_id, dtype=jnp.int32)
+        else:
+            selected_concept = normal_selected_concept
 
         # --- Layer 2: Tactical Decision (Selector) ---
-        attn_weights = self.selector_state.apply_fn(
+        # PREPARE COMMAND: Convert integer concept to One-Hot Vector
+        # This acts as the "Command Signal" for the Selector
+        cmd_one_hot = jax.nn.one_hot(selected_concept, num_classes=num_concepts)
+        
+        # A. Network Output (Q-Values) - Conditioned on Command
+        # Inspector rates EVERY object, knowing what command it's executing
+        raw_scores = self.selector_state.apply_fn(
             self.selector_state.params,
             obs_in.global_features,
             obs_in.objects,
-            obs_in.object_labels,
-            obs_in.object_mask
+            obs_in.object_mask,
+            cmd_one_hot
         )
         
-        # Get scores for the active concept
-        active_scores = jnp.take_along_axis(attn_weights, concept_id[:, None, None], axis=1).squeeze(1)
+        # B. The Semantic Gate (Pre-Masking Logic)
+        # Even though the network *knows* the command, we still strictly enforce 
+        # that it cannot pick invalid objects (e.g. collecting a Shark).
+        # Extract the column for the active concept
+        # obs.object_labels: [Batch, N, Num_Concepts]
+        concept_mask = jnp.take_along_axis(
+            obs_in.object_labels,
+            selected_concept[:, None, None],
+            axis=2
+        ).squeeze(2)  # Result: [Batch, N] (1.0 = Valid, 0.0 = Invalid)
         
-        # [Stickiness]
-        concept_unchanged = (concept_id == prev_concept_in).astype(jnp.float32)
-        prev_target_mask = jax.nn.one_hot(prev_target_idx_in, num_classes=active_scores.shape[-1])
+        # C. Apply Gate
+        # If label says "No", score becomes -1e9 (Ignored)
+        masked_scores = raw_scores + (1.0 - concept_mask) * large_neg
         
-        stickiness_bonus = prev_target_mask * self.config.training.selector_stickiness * concept_unchanged[:, None]
-        adjusted_scores = active_scores + stickiness_bonus
+        # D. Greedy Selection
+        greedy_target = jnp.argmax(masked_scores, axis=-1)
         
-        # Select target (Argmax on adjusted scores)
-        target_idx = jnp.argmax(adjusted_scores, axis=-1)
-        target_obj_feats = jnp.take_along_axis(obs_in.objects, target_idx[:, None, None], axis=1).squeeze(1)
-
-        # --- Layer 3: Relative Vector Calculation (REFACTORED) ---
+        # E. Epsilon Greedy (Exploration) for Selector
+        # Add random noise to masked scores to pick random valid object
+        noise = jax.random.uniform(k2a, shape=masked_scores.shape, minval=0.0, maxval=1.0)
+        # Only add noise to valid targets (prevent picking invalid via noise)
+        noisy_scores = masked_scores + (noise * concept_mask * 100.0)
         
-        # 1. Extract Player Position from Global Features
-        # We placed Player X at index 5 and Player Y at index 6 in the Wrapper
+        random_valid_target = jnp.argmax(noisy_scores, axis=-1)
+        
+        rng_mix_sel = jax.random.uniform(k2b, shape=greedy_target.shape)
+        net_target_idx = jnp.where(rng_mix_sel < epsilon_sub, random_valid_target, greedy_target)
+        
+        # B. Heuristic Output
         p_x = obs_in.global_features[:, 5]
         p_y = obs_in.global_features[:, 6]
         player_pos = jnp.stack([p_x, p_y], axis=-1)
         
-        # 2. Extract Target Position
-        target_pos = target_obj_feats[:, 0:2]
+        def sel_heuristic_single(b_idx):
+            return heuristic_selector(
+                jax.tree.map(lambda x: x[b_idx], obs_in),
+                selected_concept[b_idx],
+                player_pos[b_idx]
+            )
         
-        # 3. Compute Raw Vector
+        rule_target_idx = jax.vmap(sel_heuristic_single)(jnp.arange(batch_size))
+        
+        # C. Switch (Phase 1 forces Heuristic)
+        use_rule_sel = is_phase_1
+        target_idx = jnp.where(use_rule_sel, rule_target_idx, net_target_idx)
+        target_obj_feats = jnp.take_along_axis(obs_in.objects, target_idx[:, None, None], axis=1).squeeze(1)
+
+        # --- Layer 3: Relative Vector Calculation ---
+        target_pos = target_obj_feats[:, 0:2]
         raw_relative = target_pos - player_pos 
         
-        # 4. Zero-out vector for "Monitor" / Self-Concepts
-        # If we are monitoring (Concept 4), we shouldn't care about relative position to a random object.
-        # We mask the relative vector to 0.0.
-        is_monitor = (concept_id == consts.LABEL_MONITOR_STATISTIC)
-        # Also include generic High Level Concept if it exists
-        is_high_level = (concept_id == consts.LABEL_HIGH_LEVEL_CONCEPT)
-        
-        should_zero_vec = is_monitor | is_high_level
-        
-        relative_vec = jnp.where(should_zero_vec[:, None], jnp.zeros_like(raw_relative), raw_relative) 
+        # 4. Zero-out vector for DEFAULT Concept
+        # If we are in "Default" mode, we don't care about the target object.
+        # We mask the relative vector to 0.0 so the Sub-Policy learns purely from Globals.
+        is_default = (selected_concept == consts.LABEL_DEFAULT)
+        relative_vec = jnp.where(is_default[:, None], jnp.zeros_like(raw_relative), raw_relative) 
 
         # --- Layer 4: Motor Control (Sub) ---
         num_concepts = self.config.concepts.label_high_level_concept + 1
-        concept_one_hot = jax.nn.one_hot(concept_id, num_classes=num_concepts)
+        concept_one_hot = jax.nn.one_hot(selected_concept, num_classes=num_concepts)
         expanded_capabilities = jnp.concatenate([obs_in.capabilities, concept_one_hot], axis=-1)
         
-        action, sub_q = SubPolicy.select_action_eps_greedy(
-            self.sub_state,
-            relative_vec,
-            expanded_capabilities,
-            epsilon_sub,
-            k2
+        # Standard Sub-Policy execution (used for all concepts initially)
+        action_std, sub_q_std = SubPolicy.select_action_eps_greedy(
+            self.sub_state, obs_in.global_features, relative_vec, expanded_capabilities, epsilon_sub, k_sub
         )
+
+        # Implementation of the Aggregation Logic for AVOID
+        def get_avoidance_q(b_idx):
+            # 1. Identify threats
+            labels = obs_in.object_labels[b_idx]
+            is_threat = (labels[:, consts.LABEL_AVOID] > 0.5) & (obs_in.object_mask[b_idx] > 0.5)
+            
+            # 2. Get relative vectors for ALL threats
+            all_target_pos = obs_in.objects[b_idx, :, 0:2]
+            all_rel_vecs = all_target_pos - player_pos[b_idx]
+            
+            # 3. Context for AVOID
+            avoid_one_hot = jax.nn.one_hot(consts.LABEL_AVOID, num_classes=num_concepts)
+            avoid_caps = jnp.concatenate([obs_in.capabilities[b_idx], avoid_one_hot], axis=-1)
+            n_objs = obs_in.objects.shape[1]
+            avoid_caps_batch = jnp.tile(avoid_caps[None, :], (n_objs, 1))
+            glob_batch = jnp.tile(obs_in.global_features[b_idx][None, :], (n_objs, 1))
+            
+            # 4. Batch execute Sub-Policy
+            all_q = self.sub_state.apply_fn(self.sub_state.params, glob_batch, all_rel_vecs, avoid_caps_batch)
+            
+            # 5. Mask out non-threats and sum Q-values
+            masked_q = all_q * is_threat[:, None]
+            return jnp.sum(masked_q, axis=0)
+
+        all_avoid_q = jax.vmap(get_avoidance_q)(jnp.arange(batch_size))
+        
+        # Action selection for aggregated avoidance
+        greedy_avoid_action = jnp.argmax(all_avoid_q, axis=-1)
+        k_avoid, _ = jax.random.split(k_sub)
+        rng_mix_sub = jax.random.uniform(k_avoid, shape=greedy_avoid_action.shape)
+        action_avoid = jnp.where(rng_mix_sub < epsilon_sub, 
+                                 jax.random.randint(k_avoid, shape=greedy_avoid_action.shape, minval=0, maxval=sub_q_std.shape[-1]), 
+                                 greedy_avoid_action)
+
+        is_avoid = (selected_concept == consts.LABEL_AVOID)
+        final_action = jnp.where(is_avoid, action_avoid, action_std)
+        final_q = jnp.where(is_avoid[:, None], all_avoid_q, sub_q_std)
 
         # --- 5. Auto-Squeeze Logic ---
         if is_unbatched:
             return AgentState(
-                action=action.squeeze(0),
-                selected_concept=concept_id.squeeze(0),
+                action=final_action.squeeze(0),
+                selected_concept=selected_concept.squeeze(0),
                 selected_target_idx=target_idx.squeeze(0),
-                log_probs=jnp.max(sub_q, axis=-1).squeeze(0)
+                log_probs=jnp.max(final_q, axis=-1).squeeze(0)
             )
         else:
             return AgentState(
-                action=action,
-                selected_concept=concept_id,
+                action=final_action,
+                selected_concept=selected_concept,
                 selected_target_idx=target_idx,
-                log_probs=jnp.max(sub_q, axis=-1)
+                log_probs=jnp.max(final_q, axis=-1)
             )

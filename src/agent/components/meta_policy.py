@@ -14,22 +14,17 @@ class MetaPolicyQNetwork(nn.Module):
     """
     Relational Meta-Policy.
     Uses Self-Attention to understand the 'Board State' before making a strategic decision.
+    TODO: pull hidden_dim sizes etc into config
     """
     num_concepts: int
-    hidden_dim: int = 128
+    hidden_dim: int = 64
     num_heads: int = 2
     
     @nn.compact
     def __call__(self, global_features, objects, object_labels, object_mask):
-        # --- 1. Normalize Inputs (Crucial) ---
-        # Globals: [Batch, 10]. Oxygen is ~100. Scale down.
-        # We assume globals are [Oxygen, Score, Held_Divers, ...]
-        # A rough division by 100.0 puts them in [0, 1] range.
-        x_glob = global_features / 100.0
-        
-        # --- 2. Embeddings ---
-        # Embed Global Context
-        emb_glob = nn.Dense(self.hidden_dim)(x_glob)
+        # --- 1. Embeddings ---
+        # Embed Global Context (global_features are already normalized in the wrapper)
+        emb_glob = nn.Dense(self.hidden_dim)(global_features)
         emb_glob = nn.LayerNorm()(emb_glob)
         
         # Embed Objects (Shared weights for all 35 objects)
@@ -67,9 +62,22 @@ class MetaPolicyQNetwork(nn.Module):
         # --- 4. Aggregation ---
         # We need to summarize the 35 objects into one "Situation Vector".
         # We use Max-Pooling masked by existence.
-        # Set padding to -infinity before max
-        x_items = x_items + (1.0 - object_mask[:, :, None]) * -1e9
-        situation_vector = jnp.max(x_items, axis=1) # [Batch, Dim]
+        # SAFER Aggregation: Instead of adding -1e9, use a safe selection approach
+        large_neg = -1e9
+        masked_x_items = x_items + (1.0 - object_mask[:, :, None]) * large_neg
+        
+        # Perform Max
+        raw_max = jnp.max(masked_x_items, axis=1)
+        
+        # Check if ANY object exists in the batch item
+        any_object_exists = jnp.max(object_mask, axis=1, keepdims=True) > 0.5  # [Batch, 1]
+        
+        # If objects exist, use the max. If not, use zeros (or the global embedding).
+        situation_vector = jnp.where(
+            any_object_exists,
+            raw_max,
+            jnp.zeros_like(raw_max)  # Fallback to 0.0 to prevent -1e9 propagation
+        )
 
         # --- 5. Decision ---
         # Combine "My Status" (Globals) with "Situation" (Objects)

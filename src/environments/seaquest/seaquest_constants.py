@@ -1,12 +1,10 @@
 import jax.numpy as jnp
 
-LABEL_PLAYER_TOOL = 0
-LABEL_COLLECT = 1
-LABEL_AVOID = 2
-LABEL_DESTROY = 3
-LABEL_MONITOR_STATISTIC = 4 # this is very specific to Seaquest, it will label the oxygen statistic. We should look at a better way to do such high level monitoring, for example using BlendRL. 
-# Our approach concerns itself mainly with enabling low level decision making, so high level concepts are in part left to the roadside. Maybe use a general high level concept space for all environments, tests tbd
-LABEL_HIGH_LEVEL_CONCEPT = 5 # could be anything game specific really
+# Renumbered Core Concepts (removed LABEL_PLAYER_TOOL)
+LABEL_COLLECT = 0
+LABEL_AVOID = 1
+LABEL_DESTROY = 2
+LABEL_DEFAULT = 3  # Monitor / Surface (was 4, now 3)
 
 EVENT_TRIGGERED = 1
 EVENT_NOT_TRIGGERED = 0

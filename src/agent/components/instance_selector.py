@@ -1,137 +1,69 @@
-# src/agents/instance_selector.py
-# References:
-# Adapted from 'Attention Is All You Need' for Object-Centric RL.
-# This module acts as the bridge between Abstract Command (Meta) and Concrete Target (Sub).
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.training.train_state import TrainState
-import optax
 import chex
-import src.environments.seaquest.seaquest_constants as consts
+import optax
+from src.rl_utils import RLTrainState
 
 class InstanceSelector(nn.Module):
     """
-    The Attention Mechanism. Using the previously selected concept to execute, selects the target object to act on (i.e. for collect it tries to find a suitable diver).
-    TODO: maybe we can cut out the concept selection step and only expand this to select an object to act on and then act according to the label?
-    
-    Query:  Global Context (What do we need?)
-    Keys:   All Objects (What is available?)
-    Values: Object Features (Where are they?)
+    Command-Conditioned Scorer.
+    Input: Global Context + Command (Concept) + Object
+    Output: Relevance Score
     """
-    num_concepts: int
-    embed_dim: int = 64
+    hidden_dim: int = 64
+    num_concepts: int = 4
 
     @nn.compact
-    def __call__(self, global_features: chex.Array, objects: chex.Array, object_labels: chex.Array, object_mask: chex.Array):
+    def __call__(self, global_features: chex.Array, objects: chex.Array, object_mask: chex.Array, concept_one_hot: chex.Array):
         """
         Args:
             global_features: [Batch, G]
             objects: [Batch, N, F]
-            object_labels: [Batch, N, Num_Concepts] (Multi-Hot Encoding)
-            object_mask: [Batch, N] (0/1)
-            
+            object_mask: [Batch, N]
+            concept_one_hot: [Batch, Num_Concepts]
         Returns:
-            attention_weights: [Batch, Num_Concepts, Max_Objs] 
-                               (Separate attention distribution for EACH concept)
+            q_values: [Batch, N] (Raw scores)
         """
-        batch_size = global_features.shape[0]
+        n_objects = objects.shape[1]
 
-        # --- 1. Embeddings ---
-        q_glob = nn.Dense(self.embed_dim)(global_features)
+        # 1. Expand Globals AND Command to match object count
+        # We broadcast the "Orders" to every "Inspector"
+        # [Batch, G] -> [Batch, N, G]
+        global_expanded = jnp.tile(global_features[:, None, :], (1, n_objects, 1))
         
-        # Objects are already normalized to [0, 1] in seaquest_wrapper
-        k_objs = nn.Dense(self.embed_dim)(objects)
+        # [Batch, C] -> [Batch, N, C]
+        command_expanded = jnp.tile(concept_one_hot[:, None, :], (1, n_objects, 1))
         
-        # --- 2. Concept Queries [Batch, Num_Concepts, Dim] ---
-        concept_queries = nn.Dense(self.num_concepts * self.embed_dim)(q_glob)
-        concept_queries = concept_queries.reshape(batch_size, self.num_concepts, self.embed_dim)
+        # 2. Fuse Everything: Context + Command + Object
+        # The network now knows: "We are in danger (Context), Command is Fight (Command), This is a Shark (Object)"
+        x = jnp.concatenate([global_expanded, command_expanded, objects], axis=-1)
         
-        # --- 3. Raw Scores [Batch, Num_Concepts, Max_Objs] ---
-        # (B, C, D) @ (B, O, D).T -> (B, C, O)
-        scores = jnp.einsum('bcd,bod->bco', concept_queries, k_objs)
-        scores = scores / jnp.sqrt(self.embed_dim)
-
-        # --- 4. SEMANTIC MASKING---
+        # 3. Shared Network
+        h = nn.Dense(self.hidden_dim)(x)
+        h = nn.relu(h)
+        h = nn.Dense(self.hidden_dim)(h)
+        h = nn.relu(h)
         
-        # object_labels: [Batch, Max_Objs, Num_Concepts] (The Multi-Hot vectors)
-        # We want to know: For Concept C, is the bit 'C' set in object_labels?
-        # Since object_labels is multi-hot [0, 0, 1, 0...], we can just extract the channel 'C'.
+        # 4. Score
+        q_values = nn.Dense(1)(h).squeeze(-1)
         
-        # 1. Transpose labels to [Batch, Num_Concepts, Max_Objs] to match scores shape
-        # This directly gives us the label match mask:
-        # If object 'o' has label 'c', then labels_T[b, c, o] = 1.0
-        labels_T = jnp.transpose(object_labels, (0, 2, 1))
-        
-        # The transposed labels matrix IS the label match mask
-        # labels_T[b, c, o] = 1.0 if object 'o' has concept 'c' in its multi-hot encoding
-        label_match_mask = labels_T
-        
-        # B. Existence Check
-        # Handle both batched [Batch, Max_Objs] and unbatched [Max_Objs] cases
-        if object_mask.ndim == 1:
-            # Unbatched: object_mask is [Max_Objs]
-            # label_match_mask is [Num_Concepts, Max_Objs] (no batch dim)
-            # Expand to [1, Max_Objs] which will broadcast with [Num_Concepts, Max_Objs]
-            existence = (object_mask[None, :] > 0.5).astype(jnp.float32)  # [1, Max_Objs] broadcasts to [Num_Concepts, Max_Objs]
-        else:
-            # Batched: object_mask is [Batch, Max_Objs]
-            # label_match_mask is [Batch, Num_Concepts, Max_Objs]
-            # Expand to [Batch, 1, Max_Objs] which will broadcast with [Batch, Num_Concepts, Max_Objs]
-            existence = (object_mask[:, None, :] > 0.5).astype(jnp.float32)  # [Batch, 1, Max_Objs]
-        
-        # C. Final Mask construction
-        # We simply demand that the Object has the Concept label set in its multi-hot encoding.
-        # This handles all concepts uniformly:
-        # - Collect/Avoid/Destroy: Must match label
-        # - Monitor: Will try to find objects with Monitor label (if any exist)
-        # - Tool: Will try to find objects with Tool label (Player Missile)
-        # Use multiplication instead of & since both arrays are float32
-        valid_mask = label_match_mask * existence
-        
-        # D. Fallback Safety
-        # If a row has NO valid targets, we must allow Index 0 to avoid NaNs in Softmax.
-        # This happens if:
-        # 1. The Meta policy picked "Collect" but there are no divers.
-        # 2. The concept is "Monitor" and there are no objects labeled "Monitor".
-        any_valid = jnp.any(valid_mask, axis=-1, keepdims=True)
-        
-        # Fallback: Allow Index 0. 
-        # (The downstream logic in Orchestrator handles the case where target is irrelevant)
-        fallback_mask = jax.nn.one_hot(jnp.zeros((batch_size, self.num_concepts), dtype=jnp.int32), 
-                                       num_classes=objects.shape[1]) > 0.5
-                                       
-        valid_mask = jnp.where(any_valid, valid_mask, fallback_mask)
-
-        # Apply Mask (-1e9 is safer than -inf for Softmax stability)
+        # 5. Existence Masking (Standard)
         large_neg = -1e9
-        scores = scores + (1.0 - valid_mask.astype(jnp.float32)) * large_neg
-
-        # --- 5. Softmax ---
-        attn_weights = nn.softmax(scores, axis=-1)
+        q_values = jnp.where(object_mask > 0.5, q_values, large_neg)
         
-        return attn_weights
+        return q_values
 
     @staticmethod
-    def get_target_object(objects: chex.Array, attn_weights: chex.Array, concept_id: chex.Array):
-        """
-        Helper to extract the actual target features based on the attention.
-        This handles the "Soft" vs "Hard" selection logic.
-        """
-        # attn_weights: [Batch, Num_Concepts, Max_Objs]
-        # concept_id: [Batch] (The active concept chosen by Meta)
+    def create_train_state(key, learning_rate, global_dim, obj_dim, max_objs, num_concepts, hidden_dim=64):
+        net = InstanceSelector(hidden_dim=hidden_dim, num_concepts=num_concepts)
         
-        # 1. Select the Attention Map for the ACTIVE concept
-        # Shape: [Batch, Max_Objs]
-        active_attn = jnp.take_along_axis(attn_weights, concept_id[:, None, None], axis=1).squeeze(1)
+        # Dummy inputs
+        d_glob = jnp.zeros((1, global_dim))
+        d_obj = jnp.zeros((1, max_objs, obj_dim))
+        d_mask = jnp.zeros((1, max_objs))
+        d_conc = jnp.zeros((1, num_concepts))
         
-        # 2. Hard Selection (Argmax) - for selecting the discrete target
-        # We use this to compute the Relative Vector
-        target_idx = jnp.argmax(active_attn, axis=-1)
-        
-        # 3. Extract Target Features
-        # Shape: [Batch, Obj_Feats]
-        target_obj = jnp.take_along_axis(objects, target_idx[:, None, None], axis=1).squeeze(1)
-        
-        return target_obj, target_idx
+        params = net.init(key, d_glob, d_obj, d_mask, d_conc)
+        tx = optax.adam(learning_rate)
+        return RLTrainState.create(apply_fn=net.apply, params=params, tx=tx)

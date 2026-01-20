@@ -35,17 +35,15 @@ MAGENTA = (255, 0, 255)
 GRAY = (128, 128, 128)
 DARK_GRAY = (64, 64, 64)
 
-# Label names (Player is no longer a label, removed from objects)
+# Label names (Player Tool removed, concepts renumbered)
 LABEL_NAMES = {
-    consts.LABEL_PLAYER_TOOL: "Player Tool",
     consts.LABEL_COLLECT: "Collect",
     consts.LABEL_AVOID: "Avoid",
     consts.LABEL_DESTROY: "Destroy",
-    consts.LABEL_MONITOR_STATISTIC: "Monitor",
-    consts.LABEL_HIGH_LEVEL_CONCEPT: "High Level",
+    consts.LABEL_DEFAULT: "Default",
 }
 
-# Object type names (Player removed, indices shifted down by 1)
+# Object type names (Player Missile removed from object list)
 OBJECT_NAMES = [
     "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 0-5
     "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 6-11
@@ -54,7 +52,7 @@ OBJECT_NAMES = [
     "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 24-27
     "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 28-31
     "Surface Sub",  # 32
-    "Player Missile",  # 33
+    # Player Missile removed - handled via capabilities (can_fire)
 ]
 
 # Action mapping (Atari actions)
@@ -105,6 +103,13 @@ class RewardDashboard:
         self.step_count = 0
         self.total_global_reward = 0.0
         self.rng_key = jax.random.key(42)
+
+        # Cache reward configuration (matches training + visualization helpers)
+        self.reward_scale = float(self.config.reward.reward_scale)
+        self.bonus_success = float(self.config.reward.bonus_success)
+        self.penalty_failure = float(self.config.reward.penalty_failure)
+        self.aim_bonus_scale = float(self.config.reward.aim_bonus_scale)
+        self.global_score_scale = float(self.config.reward.global_score_scale)
         
         # Freeze/step controls
         self.frozen = False
@@ -148,8 +153,17 @@ class RewardDashboard:
         
         # Compute rewards if we have previous state
         if self.prev_obs is not None:
-            self.multi_reward = rewards.compute_rewards(
-                self.prev_obs, self.obs, self.prev_state, self.state, self.config
+            # Use the shared JIT-ed reward function to stay in sync
+            self.multi_reward = rewards._compute_rewards_jitted(
+                self.prev_obs,
+                self.obs,
+                self.prev_state,
+                self.state,
+                self.reward_scale,
+                self.bonus_success,
+                self.penalty_failure,
+                self.aim_bonus_scale,
+                self.global_score_scale,
             )
             self.total_global_reward += float(self.multi_reward.global_reward)
             
