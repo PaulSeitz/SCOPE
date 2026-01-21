@@ -27,7 +27,7 @@ from src.environments.seaquest.seaquest_rewards import _compute_rewards_jitted
 from src.agent.orchestrator import RelationalAgent
 from src.environments.seaquest.datatypes import ConceptObs, AgentState, MultiReward
 import src.environments.seaquest.seaquest_constants as consts
-from src.rl_utils import double_q_learning_loss, soft_update_params
+from src.rl_utils import double_q_learning_loss, compute_q_lambda_returns
 from jaxatari.wrappers import AtariWrapper
 from jaxatari import make as make_atari_env
 
@@ -48,123 +48,27 @@ class Transition:
     next_obs: ConceptObs
     done: chex.Array
     agent_state: AgentState
+    q_lambda_target: chex.Array = None  # Q(λ) return target (optional, computed after rollout)
+
+def get_final_layer_l2(params):
+    """
+    Extract final layer kernel weights for L2 regularization.
+    PQN requires L2 regularization specifically on the final layer kernel (not bias).
+    """
+    # Flatten the parameter tree to get all leaves
+    leaves = jax.tree_util.tree_leaves(params)
+    # Iterate backwards to find the first 2D array (kernel matrices are 2D, biases are 1D)
+    for leaf in reversed(leaves):
+        if leaf.ndim == 2:  # Kernels are matrices, biases are vectors
+            return jnp.sum(leaf ** 2)
+    # Fallback: if no 2D array found, return 0.0 (should not happen if model is correct)
+    return 0.0
 
 class AgentUpdater:
     """Stateless update logic adapted for PQN batches."""
     
     @staticmethod
-    def update_sub(agent, batch_flat: Transition, gamma, tau):
-        # Input is now pre-flattened batch: [Batch, ...]
-        batch_size = batch_flat.action.shape[0]
-        num_concepts = agent.config.concepts.label_high_level_concept + 1
-        concept_ids = batch_flat.agent_state.selected_concept
-        is_avoid = (concept_ids == consts.LABEL_AVOID)
-        
-        # --- 1. Reward Extraction ---
-        # r_concept: [Batch, Max_Objs]
-        r_concept = jnp.take_along_axis(batch_flat.reward.concept_rewards, concept_ids[:, None, None], axis=1).squeeze(1)
-        
-        # Standard reward (one target)
-        target_idx = batch_flat.agent_state.selected_target_idx
-        reward_std = jnp.take_along_axis(r_concept, target_idx[:, None], axis=1).squeeze(1)
-        
-        # Aggregated reward (for AVOID, we average over all threats)
-        # Fixed: Average the danger. If surrounded by 5 sharks, it's just "Bad", not "5x Bad".
-        # Only count objects that are actually threats (have LABEL_AVOID)
-        is_threat = (batch_flat.obs.object_labels[:, :, consts.LABEL_AVOID] > 0.5) & (batch_flat.obs.object_mask > 0.5)
-        threat_count = jnp.sum(is_threat, axis=1) + 1e-8
-        reward_agg = jnp.sum(r_concept * is_threat, axis=1) / threat_count
-        specific_reward = jnp.where(is_avoid, reward_agg, reward_std)
-
-        # --- 2. Q-Value Helper ---
-        def get_all_q(params, obs, c_ids, t_indices):
-            # A. Standard Q (Single Target)
-            p_pos = obs.global_features[:, 5:7]
-            target_obj = jnp.take_along_axis(obs.objects, t_indices[:, None, None], axis=1).squeeze(1)
-            rel_vec_std = target_obj[:, 0:2] - p_pos
-            
-            concept_one_hot = jax.nn.one_hot(c_ids, num_classes=num_concepts)
-            ctx_std = jnp.concatenate([obs.capabilities, concept_one_hot], axis=-1)
-            q_std = agent.sub_state.apply_fn(params, obs.global_features, rel_vec_std, ctx_std)
-            
-            # B. Aggregated Q (for AVOID)
-            def get_agg_q_single(b_idx):
-                # Identify threats for this specific batch element
-                labels = obs.object_labels[b_idx]
-                is_threat = (labels[:, consts.LABEL_AVOID] > 0.5) & (obs.object_mask[b_idx] > 0.5)
-                
-                # Relative vectors for ALL potential threats
-                all_rel_vecs = obs.objects[b_idx, :, 0:2] - p_pos[b_idx]
-                
-                # Context for AVOID
-                avoid_one_hot = jax.nn.one_hot(consts.LABEL_AVOID, num_classes=num_concepts)
-                avoid_ctx = jnp.concatenate([obs.capabilities[b_idx], avoid_one_hot], axis=-1)
-                
-                # Run Sub-Policy for all objects
-                n_objs = obs.objects.shape[1]
-                glob_tile = jnp.tile(obs.global_features[b_idx][None, :], (n_objs, 1))
-                ctx_tile = jnp.tile(avoid_ctx[None, :], (n_objs, 1))
-                
-                all_q = agent.sub_state.apply_fn(params, glob_tile, all_rel_vecs, ctx_tile)
-                # Aggregate threats (Fixed: Mean aggregation instead of sum)
-                valid_threats = jnp.sum(is_threat) + 1e-8
-                return jnp.sum(all_q * is_threat[:, None], axis=0) / valid_threats
-
-            q_agg = jax.vmap(get_agg_q_single)(jnp.arange(batch_size))
-            return jnp.where(is_avoid[:, None], q_agg, q_std)
-
-        # --- 3. Loss Function ---
-        def loss_fn(params, target_params):
-            # Q-values for current state
-            q_online = get_all_q(params, batch_flat.obs, concept_ids, target_idx)
-            q_pred = jnp.take_along_axis(q_online, batch_flat.action[:, None], axis=-1).squeeze(-1)
-            
-            # Double Q Logic for Target
-            q_next_online = get_all_q(params, batch_flat.next_obs, concept_ids, target_idx)
-            next_actions = jnp.argmax(q_next_online, axis=-1)
-            
-            q_next_target = get_all_q(target_params, batch_flat.next_obs, concept_ids, target_idx)
-            next_q_val = jnp.take_along_axis(q_next_target, next_actions[:, None], axis=-1).squeeze(-1)
-            
-            target = specific_reward + (1.0 - batch_flat.done) * gamma * next_q_val
-            # Return per-sample losses for grouping by concept
-            return optax.huber_loss(q_pred, target, delta=1.0)
-
-        grad_fn = jax.value_and_grad(lambda p, tp: jnp.mean(loss_fn(p, tp)))
-        loss_per_sample = loss_fn(agent.sub_state.params, agent.sub_state.target_params)
-        loss, grads = grad_fn(agent.sub_state.params, agent.sub_state.target_params)
-        
-        # Compute losses per concept label
-        concept_one_hot = jax.nn.one_hot(concept_ids, num_classes=num_concepts)  # [Batch, Num_Concepts]
-        # For each concept, compute mean loss where that concept was selected
-        loss_per_concept = jnp.sum(loss_per_sample[:, None] * concept_one_hot, axis=0) / (jnp.sum(concept_one_hot, axis=0) + 1e-8)  # [Num_Concepts]
-        
-        new_state = agent.sub_state.apply_gradients(grads=grads)
-        new_state = soft_update_params(new_state, tau)
-        return new_state, loss, loss_per_concept
-
-    @staticmethod
-    def update_meta(agent, batch_flat: Transition, gamma, tau):
-        # Input is now pre-flattened batch: [Batch, ...]
-        def loss_fn(params, target_params):
-            q_online = agent.meta_state.apply_fn(params, batch_flat.obs.global_features, batch_flat.obs.objects, batch_flat.obs.object_labels, batch_flat.obs.object_mask)
-            q_target = agent.meta_state.apply_fn(target_params, batch_flat.next_obs.global_features, batch_flat.next_obs.objects, batch_flat.next_obs.object_labels, batch_flat.next_obs.object_mask)
-            
-            q_pred = jnp.take_along_axis(q_online, batch_flat.agent_state.selected_concept[:, None], axis=-1).squeeze(-1)
-            next_action = jnp.argmax(agent.meta_state.apply_fn(params, batch_flat.next_obs.global_features, batch_flat.next_obs.objects, batch_flat.next_obs.object_labels, batch_flat.next_obs.object_mask), axis=-1)
-            next_q_val = jnp.take_along_axis(q_target, next_action[:, None], axis=-1).squeeze(-1)
-            
-            target = batch_flat.reward.global_reward + (1.0 - batch_flat.done) * gamma * next_q_val
-            return jnp.mean(optax.huber_loss(q_pred, target, delta=1.0))
-
-        grad_fn = jax.value_and_grad(loss_fn)
-        loss, grads = grad_fn(agent.meta_state.params, agent.meta_state.target_params)
-        new_state = agent.meta_state.apply_gradients(grads=grads)
-        new_state = soft_update_params(new_state, tau)
-        return new_state, loss
-
-    @staticmethod
-    def update_grad_masking(agent, batch_flat: Transition, global_step, phase_1_steps, phase_2_steps, gamma, tau):
+    def update_grad_masking(agent, batch_flat: Transition, global_step, phase_1_steps, phase_2_steps, gamma, lambda_):
         """
         Update all components with gradient masking based on training phase.
         
@@ -215,19 +119,40 @@ class AgentUpdater:
             q_agg = jax.vmap(get_agg_q_single)(jnp.arange(batch_size))
             return jnp.where(is_avoid[:, None], q_agg, q_std)
         
-        def sub_loss_fn(params, target_params):
+        def sub_loss_fn(params):
+            # A. Online Q (Current State)
             q_online = get_all_q(params, batch_flat.obs, concept_ids, target_idx)
             q_pred = jnp.take_along_axis(q_online, batch_flat.action[:, None], axis=-1).squeeze(-1)
-            q_next_online = get_all_q(params, batch_flat.next_obs, concept_ids, target_idx)
-            next_actions = jnp.argmax(q_next_online, axis=-1)
-            q_next_target = get_all_q(target_params, batch_flat.next_obs, concept_ids, target_idx)
-            next_q_val = jnp.take_along_axis(q_next_target, next_actions[:, None], axis=-1).squeeze(-1)
-            target = specific_reward + (1.0 - batch_flat.done) * gamma * next_q_val
-            return optax.huber_loss(q_pred, target, delta=1.0)
+            
+            # B. Target Calculation (NO TARGET NETWORK - PQN Style)
+            # Use current params, but Stop Gradient
+            q_next = get_all_q(params, batch_flat.next_obs, concept_ids, target_idx)
+            q_next = jax.lax.stop_gradient(q_next)  # <--- CRITICAL PQN CHANGE
+            
+            # For 1-step TD fallback (if Q(λ) not computed)
+            next_actions = jnp.argmax(q_next, axis=-1)
+            next_q_val = jnp.take_along_axis(q_next, next_actions[:, None], axis=-1).squeeze(-1)
+            
+            # Use Q(λ) target if provided, otherwise fall back to 1-step TD
+            if batch_flat.q_lambda_target is not None:
+                target = batch_flat.q_lambda_target
+            else:
+                # Standard 1-step TD target (equivalent to λ=0)
+                target = specific_reward + (1.0 - batch_flat.done) * gamma * next_q_val
+            
+            # C. TD Loss
+            td_loss = optax.huber_loss(q_pred, target, delta=1.0)
+            
+            # D. PQN Regularization: L2 on final layer
+            # Paper Theorem 2: The coefficient must be 0.5 * (gamma/2)^2 to cancel bootstrap expansion
+            pqn_l2_coeff = 0.5 * ((gamma / 2.0) ** 2)
+            l2_loss = pqn_l2_coeff * get_final_layer_l2(params)
+            
+            return td_loss + l2_loss
         
-        sub_grad_fn = jax.value_and_grad(lambda p, tp: jnp.mean(sub_loss_fn(p, tp)))
-        loss_per_sample = sub_loss_fn(agent.sub_state.params, agent.sub_state.target_params)
-        loss_sub, grads_sub = sub_grad_fn(agent.sub_state.params, agent.sub_state.target_params)
+        sub_grad_fn = jax.value_and_grad(lambda p: jnp.mean(sub_loss_fn(p)))
+        loss_per_sample = sub_loss_fn(agent.sub_state.params)
+        loss_sub, grads_sub = sub_grad_fn(agent.sub_state.params)
         
         # Compute losses per concept label
         concept_one_hot = jax.nn.one_hot(concept_ids, num_classes=num_concepts)
@@ -242,27 +167,38 @@ class AgentUpdater:
         reward_per_concept = jnp.where(concept_counts > 0, reward_per_concept, jnp.nan)
         
         # --- 2. Compute Meta-Policy Loss & Gradients ---
-        def meta_loss_fn(params, target_params):
-            q_online = agent.meta_state.apply_fn(params, batch_flat.obs.global_features, batch_flat.obs.objects, batch_flat.obs.object_labels, batch_flat.obs.object_mask)
-            q_target = agent.meta_state.apply_fn(target_params, batch_flat.next_obs.global_features, batch_flat.next_obs.objects, batch_flat.next_obs.object_labels, batch_flat.next_obs.object_mask)
+        def meta_loss_fn(params):
+            # Labels are now part of objects, so no separate object_labels parameter needed
+            q_online = agent.meta_state.apply_fn(params, batch_flat.obs.global_features, batch_flat.obs.objects, batch_flat.obs.object_mask)
             q_pred = jnp.take_along_axis(q_online, batch_flat.agent_state.selected_concept[:, None], axis=-1).squeeze(-1)
-            next_action = jnp.argmax(agent.meta_state.apply_fn(params, batch_flat.next_obs.global_features, batch_flat.next_obs.objects, batch_flat.next_obs.object_labels, batch_flat.next_obs.object_mask), axis=-1)
-            next_q_val = jnp.take_along_axis(q_target, next_action[:, None], axis=-1).squeeze(-1)
+            
+            # PQN: Use current params with stop_gradient
+            q_next = agent.meta_state.apply_fn(params, batch_flat.next_obs.global_features, batch_flat.next_obs.objects, batch_flat.next_obs.object_mask)
+            q_next = jax.lax.stop_gradient(q_next)
+            
+            next_action = jnp.argmax(q_next, axis=-1)
+            next_q_val = jnp.take_along_axis(q_next, next_action[:, None], axis=-1).squeeze(-1)
             target = batch_flat.reward.global_reward + (1.0 - batch_flat.done) * gamma * next_q_val
-            return jnp.mean(optax.huber_loss(q_pred, target, delta=1.0))
+            
+            td_loss = optax.huber_loss(q_pred, target, delta=1.0)
+            # PQN Regularization: L2 on final layer with paper-specified coefficient
+            pqn_l2_coeff = 0.5 * ((gamma / 2.0) ** 2)
+            l2_loss = pqn_l2_coeff * get_final_layer_l2(params)
+            return td_loss + l2_loss
         
-        meta_grad_fn = jax.value_and_grad(meta_loss_fn)
-        loss_meta, grads_meta = meta_grad_fn(agent.meta_state.params, agent.meta_state.target_params)
+        meta_grad_fn = jax.value_and_grad(lambda p: jnp.mean(meta_loss_fn(p)))
+        loss_meta, grads_meta = meta_grad_fn(agent.meta_state.params)
         
-        # --- 3. Compute Selector Loss & Gradients (DQN-based) ---
-        def sel_loss_fn(params, target_params):
+        # --- 3. Compute Selector Loss & Gradients (PQN-based) ---
+        def sel_loss_fn(params):
             # Convert the Recorded Concept to One-Hot
             cmd_one_hot = jax.nn.one_hot(
                 batch_flat.agent_state.selected_concept,
                 num_classes=num_concepts
             )
             
-            # 1. Compute Q_online(s, a) - Conditioned on what the agent was trying to do
+            # 1. Compute Q_online(s, a)
+            # Returns: [Batch, Max_Objs] with -1e9 in invalid slots
             q_values = agent.selector_state.apply_fn(
                 params,
                 batch_flat.obs.global_features,
@@ -271,50 +207,71 @@ class AgentUpdater:
                 cmd_one_hot
             )
             
-            # Gather Q-value of the Action Taken (selected_target_idx)
+            # Gather Q-value of the Action Taken
+            # If selected_target_idx points to an invalid object, this is -1e9
             q_pred = jnp.take_along_axis(q_values, batch_flat.agent_state.selected_target_idx[:, None], axis=1).squeeze(1)
             
-            # 2. Compute Target (Double DQN)
-            # Selector gets GLOBAL reward only.
-            # If it picks a target that is easy to reach but yields no score,
-            # it should learn that was a bad choice.
+            # --- SANITY CHECK 1: Was the selected target actually valid? ---
+            # If we picked a 'Ghost' (Index 0 fallback when nothing existed), we can't train on it.
+            # Check validity of the selected index
+            valid_mask_batch = (batch_flat.obs.object_mask > 0.5).astype(jnp.float32)
+            is_target_valid = jnp.take_along_axis(valid_mask_batch, batch_flat.agent_state.selected_target_idx[:, None], axis=1).squeeze(1)
+            
+            # 2. Compute Target (PQN: Use current params with stop_gradient)
             reward = batch_flat.reward.global_reward
             
-            # Next State Q: Double DQN with Semantic Masking
-            # A. Get next Q values (conditioned on the same command)
+            # Next State Q (PQN: current params with stop_gradient)
             q_next_all = agent.selector_state.apply_fn(
-                target_params,
+                params,
                 batch_flat.next_obs.global_features,
                 batch_flat.next_obs.objects,
                 batch_flat.next_obs.object_mask,
                 cmd_one_hot
             )
+            q_next_all = jax.lax.stop_gradient(q_next_all)  # <--- CRITICAL PQN CHANGE
             
-            # B. Get the mask for the concept chosen in the NEXT state
-            # We use the same concept that was selected (for consistency)
-            # In practice, we'd use the next concept, but we don't have that in the batch
-            # So we use the current concept as a proxy
+            # Next Concept Mask
             next_concept_mask = jnp.take_along_axis(
                 batch_flat.next_obs.object_labels,
                 batch_flat.agent_state.selected_concept[:, None, None],
                 axis=2
-            ).squeeze(2)  # Result: [Batch, N]
+            ).squeeze(2)
             
-            # C. Mask invalid objects in next state (both existence and concept match)
+            # Next Valid Mask (Existence AND Concept Match)
             large_neg = -1e9
             next_existence_mask = (batch_flat.next_obs.object_mask > 0.5).astype(jnp.float32)
             next_valid_mask = (next_concept_mask * next_existence_mask).astype(jnp.float32)
+            
+            # Apply mask to Q-values
             q_next_masked = q_next_all + (1.0 - next_valid_mask) * large_neg
             
-            # D. Max over objects
-            next_val = jnp.max(q_next_masked, axis=1)
+            # --- SANITY CHECK 2: Does ANY valid object exist next step? ---
+            any_valid_next = jnp.max(next_valid_mask, axis=1) > 0.5
+            
+            # If valid objects exist, take Max. 
+            # If NOT, return 0.0 (Terminal-like state for this decision). 
+            # Do NOT propagate -1e9.
+            next_val_raw = jnp.max(q_next_masked, axis=1)
+            next_val = jnp.where(any_valid_next, next_val_raw, 0.0)
             
             target = reward + (1.0 - batch_flat.done) * gamma * next_val
             
-            return jnp.mean(optax.huber_loss(q_pred, target, delta=1.0))
+            # 3. Calculate Loss
+            td_loss = optax.huber_loss(q_pred, target, delta=1.0)
+            
+            # 4. Mask the Loss
+            # If we selected an invalid target, the Q-value is garbage (-1e9).
+            # Zero out the loss for this specific sample so it doesn't explode the gradients.
+            masked_loss = td_loss * is_target_valid
+            
+            # 5. PQN Regularization: L2 on final layer with paper-specified coefficient
+            pqn_l2_coeff = 0.5 * ((gamma / 2.0) ** 2)
+            l2_loss = pqn_l2_coeff * get_final_layer_l2(params)
+            
+            return jnp.mean(masked_loss) + l2_loss
         
         sel_grad_fn = jax.value_and_grad(sel_loss_fn)
-        loss_sel, grads_sel = sel_grad_fn(agent.selector_state.params, agent.selector_state.target_params)
+        loss_sel, grads_sel = sel_grad_fn(agent.selector_state.params)
         
         # --- 4. Create Freeze Masks (0.0 = Frozen, 1.0 = Active) ---
         is_phase_2 = global_step > phase_1_steps
@@ -341,12 +298,10 @@ class AgentUpdater:
         # --- 7. Apply Updates ---
         # The optimizers will receive 0.0 gradients for frozen weights,
         # effectively acting as "no update" (momentum might drift slightly, but negligible).
+        # PQN: No target network updates needed!
         new_sub = agent.sub_state.apply_gradients(grads=grads_sub)
-        new_sub = soft_update_params(new_sub, tau)
         new_sel = agent.selector_state.apply_gradients(grads=grads_sel)
-        new_sel = soft_update_params(new_sel, tau)
         new_meta = agent.meta_state.apply_gradients(grads=grads_meta)
-        new_meta = soft_update_params(new_meta, tau)
         
         new_agent = agent.replace(sub_state=new_sub, selector_state=new_sel, meta_state=new_meta)
         return new_agent, loss_sub, loss_meta_masked, loss_sel_masked, loss_per_concept, reward_per_concept
@@ -378,18 +333,19 @@ def rollout_step(carry, unused, NUM_ENVS, env_step_vmap, compute_rewards_vmap,
     
     transition = Transition(
         obs=obs_c, action=action_idx, reward=multi_reward, 
-        next_obs=next_obs, done=done, agent_state=agent_state
+        next_obs=next_obs, done=done, agent_state=agent_state,
+        q_lambda_target=None  # Will be computed after rollout
     )
     
     new_carry = (agent_c, next_env_state, next_obs, next_concept, next_target, rng, eps_sub_c, eps_meta_c)
     return new_carry, (transition, r_raw, done)
 
 
-@partial(jax.jit, static_argnames=['NUM_ENVS', 'ROLLOUT_LEN', 'EPOCHS', 'batch_size', 'gamma', 'tau', 
+@partial(jax.jit, static_argnames=['NUM_ENVS', 'ROLLOUT_LEN', 'EPOCHS', 'NUM_MINIBATCHES', 'gamma', 'lambda_', 
                                    'reward_scale', 'bonus_success', 'penalty_failure', 'aim_bonus_scale', 'global_score_scale',
                                    'phase_1_steps', 'phase_2_steps',
                                    'env_step_vmap', 'compute_rewards_vmap'])
-def train_step(agent_carry, env_carry, global_step, NUM_ENVS, ROLLOUT_LEN, EPOCHS, batch_size, gamma, tau,
+def train_step(agent_carry, env_carry, global_step, NUM_ENVS, ROLLOUT_LEN, EPOCHS, NUM_MINIBATCHES, gamma, lambda_,
                reward_scale, bonus_success, penalty_failure, aim_bonus_scale, global_score_scale,
                phase_1_steps, phase_2_steps,
                env_step_vmap, compute_rewards_vmap):
@@ -412,9 +368,93 @@ def train_step(agent_carry, env_carry, global_step, NUM_ENVS, ROLLOUT_LEN, EPOCH
     # Unpack final state
     _, next_env_state, next_obs, next_concept, next_target, next_rng, _, _ = final_carry
     
+    # 1.5. Compute Q(λ) returns for the rollout
+    # PQN relies on Q(λ) returns to compensate for the lack of a replay buffer.
+    # We must compute bootstrap Q-values for the entire rollout using the CURRENT network.
+    
+    # Extract rewards and dones from rollout: [ROLLOUT_LEN, NUM_ENVS]
+    rollout_dones = dones  # Already in correct shape
+    
+    # Flatten batch for Q-value computation
+    flat_next_obs = jax.tree.map(lambda x: jnp.reshape(x, (ROLLOUT_LEN * NUM_ENVS, *x.shape[2:])), batch.next_obs)
+    flat_concept = jnp.reshape(batch.agent_state.selected_concept, (ROLLOUT_LEN * NUM_ENVS,))
+    flat_target_idx = jnp.reshape(batch.agent_state.selected_target_idx, (ROLLOUT_LEN * NUM_ENVS,))
+    
+    # Helper to get max Q-values for bootstrapping (reuse logic from AgentUpdater)
+    def get_batch_max_q(obs_batch, concept_batch, target_batch):
+        batch_size = obs_batch.global_features.shape[0]
+        num_concepts = agent_carry.config.concepts.label_high_level_concept + 1
+        is_avoid = (concept_batch == consts.LABEL_AVOID)
+        
+        # Standard Q computation
+        p_pos = obs_batch.global_features[:, 5:7]
+        target_obj = jnp.take_along_axis(obs_batch.objects, target_batch[:, None, None], axis=1).squeeze(1)
+        rel_vec_std = target_obj[:, 0:2] - p_pos
+        concept_one_hot = jax.nn.one_hot(concept_batch, num_classes=num_concepts)
+        ctx_std = jnp.concatenate([obs_batch.capabilities, concept_one_hot], axis=-1)
+        q_std = agent_carry.sub_state.apply_fn(agent_carry.sub_state.params, obs_batch.global_features, rel_vec_std, ctx_std)
+        
+        # Aggregated Q for AVOID
+        def get_agg_q_single(b_idx):
+            labels = obs_batch.object_labels[b_idx]
+            is_threat = (labels[:, consts.LABEL_AVOID] > 0.5) & (obs_batch.object_mask[b_idx] > 0.5)
+            all_rel_vecs = obs_batch.objects[b_idx, :, 0:2] - p_pos[b_idx]
+            avoid_one_hot = jax.nn.one_hot(consts.LABEL_AVOID, num_classes=num_concepts)
+            avoid_ctx = jnp.concatenate([obs_batch.capabilities[b_idx], avoid_one_hot], axis=-1)
+            n_objs = obs_batch.objects.shape[1]
+            glob_tile = jnp.tile(obs_batch.global_features[b_idx][None, :], (n_objs, 1))
+            ctx_tile = jnp.tile(avoid_ctx[None, :], (n_objs, 1))
+            all_q = agent_carry.sub_state.apply_fn(agent_carry.sub_state.params, glob_tile, all_rel_vecs, ctx_tile)
+            valid_threats = jnp.sum(is_threat) + 1e-8
+            return jnp.sum(all_q * is_threat[:, None], axis=0) / valid_threats
+        
+        q_agg = jax.vmap(get_agg_q_single)(jnp.arange(batch_size))
+        q_all = jnp.where(is_avoid[:, None], q_agg, q_std)
+        
+        # Return max Q-value for each sample (for bootstrapping)
+        return jnp.max(q_all, axis=-1)
+    
+    # Compute Q-values for all next states and apply stop_gradient (PQN requirement)
+    next_q_values_flat = jax.lax.stop_gradient(get_batch_max_q(flat_next_obs, flat_concept, flat_target_idx))
+    next_q_values = jnp.reshape(next_q_values_flat, (ROLLOUT_LEN, NUM_ENVS))
+    
+    # Extract concept-specific rewards (same logic as in update_grad_masking)
+    # Use CURRENT obs and rewards (not next_obs) - rewards correspond to transitions from obs to next_obs
+    flat_obs = jax.tree.map(lambda x: jnp.reshape(x, (ROLLOUT_LEN * NUM_ENVS, *x.shape[2:])), batch.obs)
+    flat_reward = jax.tree.map(lambda x: jnp.reshape(x, (ROLLOUT_LEN * NUM_ENVS, *x.shape[2:])), batch.reward)
+    
+    def extract_specific_rewards(obs_batch, reward_batch, concept_batch, target_batch):
+        batch_size = obs_batch.global_features.shape[0]
+        num_concepts = agent_carry.config.concepts.label_high_level_concept + 1
+        is_avoid = (concept_batch == consts.LABEL_AVOID)
+        
+        r_concept = jnp.take_along_axis(reward_batch.concept_rewards, concept_batch[:, None, None], axis=1).squeeze(1)
+        reward_std = jnp.take_along_axis(r_concept, target_batch[:, None], axis=1).squeeze(1)
+        is_threat = (obs_batch.object_labels[:, :, consts.LABEL_AVOID] > 0.5) & (obs_batch.object_mask > 0.5)
+        threat_count = jnp.sum(is_threat, axis=1) + 1e-8
+        reward_agg = jnp.sum(r_concept * is_threat, axis=1) / threat_count
+        return jnp.where(is_avoid, reward_agg, reward_std)
+    
+    specific_rewards_flat = extract_specific_rewards(flat_obs, flat_reward, flat_concept, flat_target_idx)
+    specific_rewards = jnp.reshape(specific_rewards_flat, (ROLLOUT_LEN, NUM_ENVS))
+    
+    # Compute Q(λ) returns using the helper function
+    q_lambda_targets = compute_q_lambda_returns(
+        rewards=specific_rewards,
+        next_q_values=next_q_values,
+        dones=rollout_dones,
+        gamma=gamma,
+        lambda_=lambda_
+    )
+    
+    # Assign computed Q(λ) targets back to the batch
+    q_lambda_flat = jnp.reshape(q_lambda_targets, (ROLLOUT_LEN * NUM_ENVS,))
+    batch = batch.replace(q_lambda_target=q_lambda_flat)
+    
     # 2. Updates
+    # PQN convention: compute batch_size from num_minibatches
     total_steps = NUM_ENVS * ROLLOUT_LEN
-    num_minibatches = total_steps // batch_size
+    batch_size = total_steps // NUM_MINIBATCHES
     
     def update_epoch(carry, _):
         ag, rng_epoch = carry
@@ -424,13 +464,13 @@ def train_step(agent_carry, env_carry, global_step, NUM_ENVS, ROLLOUT_LEN, EPOCH
         def get_minibatch(x):
             flat = jnp.reshape(x, (total_steps, *x.shape[2:]))
             shuffled = flat[perm]
-            return jnp.reshape(shuffled, (num_minibatches, batch_size, *x.shape[2:]))
+            return jnp.reshape(shuffled, (NUM_MINIBATCHES, batch_size, *x.shape[2:]))
 
         shuffled_batch = jax.tree.map(get_minibatch, batch)
         
         def update_minibatch(ag_curr, minibatch):
             new_ag, l_sub, l_meta, l_sel, l_sub_per_concept, r_sub_per_concept = AgentUpdater.update_grad_masking(
-                ag_curr, minibatch, global_step, phase_1_steps, phase_2_steps, gamma, tau
+                ag_curr, minibatch, global_step, phase_1_steps, phase_2_steps, gamma, lambda_
             )
             return new_ag, (l_sub, l_meta, l_sel, l_sub_per_concept, r_sub_per_concept)
 
@@ -469,9 +509,9 @@ def create_train_scan(total_updates, config, NUM_ENVS, ROLLOUT_LEN, env_step_vma
     
     # Update parameters
     EPOCHS = config.training.epochs
-    batch_size = config.training.batch_size
+    NUM_MINIBATCHES = config.training.num_minibatches
     gamma = config.training.gamma
-    tau = config.training.tau
+    lambda_ = config.training.lambda_
     reward_scale = config.reward.reward_scale
     bonus_success = config.reward.bonus_success
     penalty_failure = config.reward.penalty_failure
@@ -529,7 +569,7 @@ def create_train_scan(total_updates, config, NUM_ENVS, ROLLOUT_LEN, env_step_vma
         new_agent, new_env_carry, metrics_raw = train_step(
             agent_c, env_carry_update, global_step,
             NUM_ENVS=NUM_ENVS, ROLLOUT_LEN=ROLLOUT_LEN, EPOCHS=EPOCHS, 
-            batch_size=batch_size, gamma=gamma, tau=tau,
+            NUM_MINIBATCHES=NUM_MINIBATCHES, gamma=gamma, lambda_=lambda_,
             reward_scale=reward_scale, bonus_success=bonus_success, 
             penalty_failure=penalty_failure, aim_bonus_scale=aim_bonus_scale, 
             global_score_scale=global_score_scale,
@@ -616,14 +656,17 @@ def main():
     ROLLOUT_LEN = config.training.rollout_len
     EPOCHS = config.training.epochs
     
-    print(f"Training configuration: {NUM_ENVS} environments, {TOTAL_TIMESTEPS:,} total steps, rollout_len={ROLLOUT_LEN}, epochs={EPOCHS}")
+    NUM_MINIBATCHES = config.training.num_minibatches
     
-    # Validate batch size divides evenly
+    print(f"Training configuration: {NUM_ENVS} environments, {TOTAL_TIMESTEPS:,} total steps, rollout_len={ROLLOUT_LEN}, epochs={EPOCHS}, num_minibatches={NUM_MINIBATCHES}")
+    
+    # Validate num_minibatches divides evenly (PQN convention)
     total_steps_per_update = NUM_ENVS * ROLLOUT_LEN
-    if total_steps_per_update % config.training.batch_size != 0:
+    if total_steps_per_update % NUM_MINIBATCHES != 0:
         raise ValueError(
-            f"Batch size {config.training.batch_size} must divide total steps per update "
-            f"({total_steps_per_update} = {NUM_ENVS} envs * {ROLLOUT_LEN} rollout_len)"
+            f"num_minibatches {NUM_MINIBATCHES} must divide total steps per update "
+            f"({total_steps_per_update} = {NUM_ENVS} envs * {ROLLOUT_LEN} rollout_len). "
+            f"Computed batch_size would be {total_steps_per_update // NUM_MINIBATCHES}"
         )
     
     # 1. Init WandB

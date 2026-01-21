@@ -21,92 +21,96 @@ class MetaPolicyQNetwork(nn.Module):
     num_heads: int = 2
     
     @nn.compact
-    def __call__(self, global_features, objects, object_labels, object_mask):
+    def __call__(self, global_features, objects, object_mask):
         # --- 1. Embeddings ---
-        # Embed Global Context (global_features are already normalized in the wrapper)
+        # Embed Global Context
         emb_glob = nn.Dense(self.hidden_dim)(global_features)
-        emb_glob = nn.LayerNorm()(emb_glob)
+        emb_glob = nn.LayerNorm()(emb_glob)  # Internal normalization after embedding
         
-        # Embed Objects (Shared weights for all 35 objects)
-        emb_objs = nn.Dense(self.hidden_dim)(objects) # [Batch, 35, Dim]
+        # Embed Objects (Shared weights for all objects)
+        # Objects now include spatial features (x, y, w, h) + labels, so embedding learns joint representation
+        x_items = nn.Dense(self.hidden_dim)(objects) # [Batch, Max_Objs, Dim]
+        x_items = nn.LayerNorm()(x_items)  # Internal normalization after embedding
+
+        # --- 2. Add Learnable Summary Token (BERT-style [CLS] token) ---
+        # Create a learnable "summary token" that will aggregate information from all objects
+        # This is similar to BERT's [CLS] token - it learns to summarize the entire scene
+        batch_size = objects.shape[0]
+        summary_token = self.param('summary_token', 
+                                   nn.initializers.zeros_init(),
+                                   (1, self.hidden_dim))  # [1, hidden_dim]
+        summary_token_batch = jnp.tile(summary_token[None, :, :], (batch_size, 1, 1))  # [Batch, 1, hidden_dim]
         
-        # Linear projection of the object labels (since they are already multi-hot encoded)
-        label_embeddings = nn.Dense(features=self.hidden_dim, use_bias=False)(object_labels)
+        # Prepend summary token to object sequence: [Batch, 1+Max_Objs, hidden_dim]
+        x_sequence = jnp.concatenate([summary_token_batch, x_items], axis=1)
         
-        # Combine Object Features + Label
-        x_items = emb_objs + label_embeddings
-        x_items = nn.LayerNorm()(x_items)
+        # Update mask: summary token is always valid (mask=1), then object mask
+        summary_mask = jnp.ones((batch_size, 1))  # [Batch, 1]
+        sequence_mask = jnp.concatenate([summary_mask, object_mask], axis=1)  # [Batch, 1+Max_Objs]
 
         # --- 3. Relational Reasoning (Transformer Block) ---
         # Create attention mask: Don't look at padding objects (where mask is 0)
-        # Mask shape for MultiHeadDotProductAttention: [Batch, 1, 1, Objects]
-        attn_mask = object_mask[:, None, None, :]
+        # Mask shape for MultiHeadDotProductAttention: [Batch, 1, 1, 1+Max_Objs]
+        attn_mask = sequence_mask[:, None, None, :]
         
-        # Self-Attention: Objects look at other objects
-        # "Is there a shark near the diver?"
+        # Self-Attention: Summary token and objects attend to each other
+        # The summary token learns to aggregate relevant information from all objects
         x_attn = nn.MultiHeadDotProductAttention(num_heads=self.num_heads, qkv_features=self.hidden_dim)(
-            inputs_q=x_items,
-            inputs_kv=x_items,
+            inputs_q=x_sequence,
+            inputs_kv=x_sequence,
             mask=attn_mask
         )
-        x_items = x_items + x_attn # Residual
-        x_items = nn.LayerNorm()(x_items)
+        x_sequence = x_sequence + x_attn # Residual
+        x_sequence = nn.LayerNorm()(x_sequence)
         
         # Feed Forward block
-        x_ff = nn.Dense(self.hidden_dim)(x_items)
+        x_ff = nn.Dense(self.hidden_dim)(x_sequence)
         x_ff = nn.relu(x_ff)
         x_ff = nn.Dense(self.hidden_dim)(x_ff)
-        x_items = x_items + x_ff # Residual
-        x_items = nn.LayerNorm()(x_items)
+        x_sequence = x_sequence + x_ff # Residual
+        x_sequence = nn.LayerNorm()(x_sequence)
 
-        # --- 4. Aggregation ---
-        # We need to summarize the 35 objects into one "Situation Vector".
-        # We use Max-Pooling masked by existence.
-        # SAFER Aggregation: Instead of adding -1e9, use a safe selection approach
-        large_neg = -1e9
-        masked_x_items = x_items + (1.0 - object_mask[:, :, None]) * large_neg
-        
-        # Perform Max
-        raw_max = jnp.max(masked_x_items, axis=1)
-        
-        # Check if ANY object exists in the batch item
-        any_object_exists = jnp.max(object_mask, axis=1, keepdims=True) > 0.5  # [Batch, 1]
-        
-        # If objects exist, use the max. If not, use zeros (or the global embedding).
-        situation_vector = jnp.where(
-            any_object_exists,
-            raw_max,
-            jnp.zeros_like(raw_max)  # Fallback to 0.0 to prevent -1e9 propagation
-        )
+        # --- 4. Extract Situation Vector from Summary Token ---
+        # The summary token (first token) now contains the aggregated situation information
+        situation_vector = x_sequence[:, 0, :]  # [Batch, hidden_dim]
 
         # --- 5. Decision ---
-        # Combine "My Status" (Globals) with "Situation" (Objects)
+        # Combine "My Status" (Globals) with "Situation" (Summary Token)
         z = jnp.concatenate([emb_glob, situation_vector], axis=-1)
         
         z = nn.Dense(self.hidden_dim)(z)
         z = nn.relu(z)
-        z = nn.Dense(self.num_concepts)(z)
+        z = nn.LayerNorm()(z)  # <--- PQN: Ensure features entering head are normalized
         
+        z = nn.Dense(self.num_concepts)(z)  # Head
         return z
 
     @staticmethod
-    def create_train_state(key, num_concepts, learning_rate, global_dim, obj_dim, max_objs):
+    def create_train_state(key, num_concepts, learning_rate, global_dim, obj_dim, max_objs,
+                          max_grad_norm=None, lr_linear_decay=False, total_steps=None):
+        from src.rl_utils import create_optimizer
+        
         net = MetaPolicyQNetwork(num_concepts=num_concepts)
         
         # Dummy init with correct shapes
+        # obj_dim now includes labels (spatial features + num_concepts)
         d_glob = jnp.zeros((1, global_dim))
         d_objs = jnp.zeros((1, max_objs, obj_dim))
-        # object_labels shape: [Batch, Max_Objs, Num_Concepts] (multi-hot encoding)
-        d_labels = jnp.zeros((1, max_objs, num_concepts), dtype=jnp.float32)
         d_mask = jnp.zeros((1, max_objs))
         
-        params = net.init(key, d_glob, d_objs, d_labels, d_mask)
-        tx = optax.adam(learning_rate)
+        params = net.init(key, d_glob, d_objs, d_mask)
+        tx = create_optimizer(
+            learning_rate=learning_rate,
+            max_grad_norm=max_grad_norm,
+            lr_linear_decay=lr_linear_decay,
+            total_steps=total_steps
+        )
         return RLTrainState.create(apply_fn=net.apply, params=params, tx=tx)
 
 class MetaPolicy:
     @staticmethod
-    def create_train_state(key, num_concepts, learning_rate, global_dim, obj_dim=None, max_objs=None):
+    def create_train_state(key, num_concepts, learning_rate, global_dim, obj_dim=None, max_objs=None,
+                          max_grad_norm=None, lr_linear_decay=False, total_steps=None):
         """
         Creates RLTrainState for Meta Policy with target network support.
         Delegates to MetaPolicyQNetwork.create_train_state for consistency.
@@ -122,13 +126,16 @@ class MetaPolicy:
             learning_rate=learning_rate,
             global_dim=global_dim,
             obj_dim=obj_dim,
-            max_objs=max_objs
+            max_objs=max_objs,
+            max_grad_norm=max_grad_norm,
+            lr_linear_decay=lr_linear_decay,
+            total_steps=total_steps
         )
 
     @staticmethod
     @jax.jit
-    def select_concept_eps_greedy(train_state, global_features, objects, object_labels, object_mask, epsilon, key):
-        q_values = train_state.apply_fn(train_state.params, global_features, objects, object_labels, object_mask)
+    def select_concept_eps_greedy(train_state, global_features, objects, object_mask, epsilon, key):
+        q_values = train_state.apply_fn(train_state.params, global_features, objects, object_mask)
         
         greedy = jnp.argmax(q_values, axis=-1)
         random = jax.random.randint(key, shape=greedy.shape, minval=0, maxval=q_values.shape[-1])

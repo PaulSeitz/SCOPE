@@ -1,14 +1,17 @@
 model:
   hidden_dims: [64, 64]
   selector_hidden_dims: [64, 64]
+  # Normalization (PQN parameters)
+  norm_input: false  # Whether to normalize inputs (PQN parameter)
+  norm_type: "layer_norm"  # Normalization type: "layer_norm" or "batch_norm" (PQN parameter)
 
 training:
   seed: 42
   
-  # Learning Rates (Reduced for stability in Debug Run)
-  sub_policy_lr: 0.0001
-  meta_policy_lr: 0.0001
-  selector_lr: 0.0001
+  # Learning Rates (High-throughput: aggressive for stable 1024-env signal)
+  sub_policy_lr: 0.0005
+  meta_policy_lr: 0.0005
+  selector_lr: 0.0005
   
   # Hysteresis / Stickiness
   meta_stickiness: 0.0     # Reduced to 0.0 - don't encourage staying on Default
@@ -16,38 +19,35 @@ training:
   
   # Q-Learning Params
   gamma: 0.99
+  lambda_: 0.65  # Q(lambda) return parameter (PQN parameter, blends multi-step returns)
   
-  # Tau must be tiny to maintain stability over a lot of updates.
-  tau: 0.00001
-  
-  # CRITICAL FIX: EPSILON
-  # We want Epsilon to hit 0.1 by the end of Phase 1 (20M steps)
-  # so the Selector/Meta have a competent Sub-Policy to work with.
-  # The decay is calculated as: current_eps = max(end, start - progress * decay_rate)
-  # Modified in train.py to decay over first 20% of training (finish decay by 20M steps)
   epsilon_start: 1.0
-  epsilon_end: 0.02
+  epsilon_end: 0.01  # Lower epsilon_end for high-throughput (enough samples to risk exploration)
+  epsilon_decay: 0.1  # Epsilon decay rate (PQN parameter, used if custom schedules disabled)
   
-  # Loop Params
-  # Increase batch size to stabilize gradients across 1024 environments
-  batch_size: 256  # number of samples to update the policy
+  # Gradient clipping (PQN parameter)
+  max_grad_norm: 5.0  # Tighter clip because 1024 envs can sum to huge gradients
   
-  # PQN-specific hyperparameters
-  rollout_len: 64  # Steps per update loop
-  epochs: 4  # Reduced from 3 to prevent overfitting to the rollout buffer
+  # Learning rate decay (PQN parameter)
+  lr_linear_decay: false  # Whether to linearly decay learning rate over training
   
-  # Duration
-  total_steps: 40_000_000
+  # PQN-specific hyperparameters (High-throughput defaults for 1024 envs)
+  rollout_len: 32  # Steps per update loop - shorter for more frequent updates
+  num_minibatches: 64  # Number of minibatches per epoch - keeps batch size ~1024 (32*1024/64)
+  epochs: 4  # Number of epochs (NUM_EPOCHS in PQN)
   
-  # Parallel environments for vectorization (performance optimization)
-  num_envs: 512
+  # Duration (High-throughput: ensures enough optimization steps)
+  total_steps: 100_000_000  # 100M steps ensures ~1,500-2,000 updates with 1024 envs
+  
+  # Parallel environments for vectorization (High-throughput: massive parallelism)
+  num_envs: 1024  # High-throughput regime for stable PQN online targets
   
   # Phased training: freeze parts of the network for certain steps
   # Phase 1 (0 to phase_1_steps): Only Sub-Policy trains
   # Phase 2 (phase_1_steps to phase_2_steps): Sub-Policy + Selector train
   # Phase 3 (after phase_2_steps): All components train
-  phase_1_steps: 40_000_000  # Steps until selector starts training
-  phase_2_steps: 80_000_000  # Steps until meta-policy starts training
+  phase_1_steps: 0  # Steps until selector starts training (scaled for high-throughput)
+  phase_2_steps: 0  # Steps until meta-policy starts training (scaled for high-throughput)
   
   # Forced concept training mode: permanently force one concept and only train that
   # When enabled, the agent will always select the specified concept regardless of phase

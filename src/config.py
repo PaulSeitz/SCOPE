@@ -26,6 +26,10 @@ class ModelConfig:
     
     # Instance selector configuration
     selector_hidden_dims: Tuple[int, ...] = (64, 64)
+    
+    # Normalization (PQN parameters)
+    norm_input: bool = False  # Whether to normalize inputs (PQN parameter)
+    norm_type: str = "layer_norm"  # Normalization type: "layer_norm" or "batch_norm" (PQN parameter)
 
 
 @dataclass
@@ -34,23 +38,29 @@ class TrainingConfig:
     # Random seed
     seed: int = 42
     
-    # Learning rates
-    sub_policy_lr: float = 1e-3
-    meta_policy_lr: float = 1e-3
-    selector_lr: float = 1e-3
+    # Learning rates (High-throughput defaults for 1024 envs)
+    sub_policy_lr: float = 0.0005
+    meta_policy_lr: float = 0.0005
+    selector_lr: float = 0.0005
     
     # Q-learning hyperparameters
     gamma: float = 0.99  # Discount factor
+    lambda_: float = 0.65  # Q(lambda) return parameter (PQN parameter, blends multi-step returns)
     tau: float = 0.005  # Polyak averaging coefficient for target network updates
     epsilon_start: float = 1.0
-    epsilon_end: float = 0.01
+    epsilon_end: float = 0.01  # Lower epsilon_end for high-throughput (enough samples to risk exploration)
+    epsilon_decay: float = 0.1  # Epsilon decay rate (PQN parameter, used if custom schedules disabled)
     
-    # Training loop
-    batch_size: int = 32
+    # Gradient clipping (PQN parameter)
+    max_grad_norm: float = 5.0  # Tighter clip because 1024 envs can sum to huge gradients
     
-    # PQN-specific hyperparameters
-    rollout_len: int = 32  # Steps per update loop (rollout length)
-    epochs: int = 3  # Number of times to reuse collected data (like PPO/PQN)
+    # Learning rate decay (PQN parameter)
+    lr_linear_decay: bool = False  # Whether to linearly decay learning rate over training
+    
+    # PQN-specific hyperparameters (High-throughput defaults for 1024 envs)
+    rollout_len: int = 32  # Steps per update loop (rollout length) - shorter for more frequent updates
+    num_minibatches: int = 64  # Number of minibatches per epoch - keeps batch size ~1024 (32*1024/64)
+    epochs: int = 4  # Number of times to reuse collected data (like PPO/PQN)
     
     # Hysteresis / Stickiness
     # How much bonus to add to the previously selected option's Q-value/Logit
@@ -58,18 +68,18 @@ class TrainingConfig:
     meta_stickiness: float = 0.5
     selector_stickiness: float = 1.0  # Higher stickiness for targets to prevent jitter
     
-    # Training duration
-    total_steps: int = 100_000_000
+    # Training duration (High-throughput defaults for 1024 envs)
+    total_steps: int = 100_000_000  # 100M steps ensures enough optimization steps (~1,500-2,000 updates)
     
     # Parallel environments for vectorization
-    num_envs: int = 256  # Number of parallel environments to run
+    num_envs: int = 1024  # High-throughput: massive parallelism for stable PQN online targets
     
     # Phased training: freeze parts of the network for certain steps
     # Phase 1 (0 to phase_1_steps): Only Sub-Policy trains
     # Phase 2 (phase_1_steps to phase_2_steps): Sub-Policy + Selector train
     # Phase 3 (after phase_2_steps): All components train (Sub-Policy + Selector + Meta-Policy)
-    phase_1_steps: int = 5_000_000  # Steps until selector starts training
-    phase_2_steps: int = 10_000_000  # Steps until meta-policy starts training
+    phase_1_steps: int = 20_000_000  # Scaled up for high-throughput curriculum
+    phase_2_steps: int = 50_000_000  # Scaled up for high-throughput curriculum
     
     # Forced concept training mode: permanently force one concept and only train that
     # When enabled, the agent will always select the specified concept regardless of phase

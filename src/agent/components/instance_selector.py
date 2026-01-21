@@ -39,13 +39,17 @@ class InstanceSelector(nn.Module):
         # The network now knows: "We are in danger (Context), Command is Fight (Command), This is a Shark (Object)"
         x = jnp.concatenate([global_expanded, command_expanded, objects], axis=-1)
         
-        # 3. Shared Network
+        # 3. Shared Network (PQN-compliant: LayerNorm after activation for internal normalization)
         h = nn.Dense(self.hidden_dim)(x)
         h = nn.relu(h)
+        h = nn.LayerNorm()(h)
+        
         h = nn.Dense(self.hidden_dim)(h)
         h = nn.relu(h)
+        h = nn.LayerNorm()(h)
         
-        # 4. Score
+        # 4. Score (Head)
+        # Features entering head are now normalized (zero-mean, unit-variance)
         q_values = nn.Dense(1)(h).squeeze(-1)
         
         # 5. Existence Masking (Standard)
@@ -55,7 +59,10 @@ class InstanceSelector(nn.Module):
         return q_values
 
     @staticmethod
-    def create_train_state(key, learning_rate, global_dim, obj_dim, max_objs, num_concepts, hidden_dim=64):
+    def create_train_state(key, learning_rate, global_dim, obj_dim, max_objs, num_concepts, hidden_dim=64,
+                          max_grad_norm=None, lr_linear_decay=False, total_steps=None):
+        from src.rl_utils import create_optimizer
+        
         net = InstanceSelector(hidden_dim=hidden_dim, num_concepts=num_concepts)
         
         # Dummy inputs
@@ -65,5 +72,10 @@ class InstanceSelector(nn.Module):
         d_conc = jnp.zeros((1, num_concepts))
         
         params = net.init(key, d_glob, d_obj, d_mask, d_conc)
-        tx = optax.adam(learning_rate)
+        tx = create_optimizer(
+            learning_rate=learning_rate,
+            max_grad_norm=max_grad_norm,
+            lr_linear_decay=lr_linear_decay,
+            total_steps=total_steps
+        )
         return RLTrainState.create(apply_fn=net.apply, params=params, tx=tx)

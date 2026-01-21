@@ -43,8 +43,9 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         self.max_objs = config.environment.max_objs
         
         self.n_global_feats = config.environment.n_global_feats
-        # TODO: maybe append the label to the object features as well, so they are part of the attention mechanism in meta policy and instance selector
-        self.n_obj_feats = config.environment.n_obj_feats  # x, y, w, h
+        # Object features now include labels: x, y, w, h + multi-hot labels
+        num_concepts = config.concepts.label_high_level_concept + 1
+        self.n_obj_feats = config.environment.n_obj_feats + num_concepts  # x, y, w, h + labels
 
         self._observation_space = self._make_observation_space()
 
@@ -174,17 +175,16 @@ class SeaquestConceptWrapper(JaxatariWrapper):
     # --- 2. Normalization & Stacking ---
     def _normalize_feats(self, entity_array, label_array):
         # Input: [N, 5] (x, y, w, h, active)
-        # Output: feats[N, 4], mask[N], labels[N]
+        # Output: feats[N, 4 + num_concepts] (spatial features + labels), mask[N]
         x, y, w, h, active = entity_array[:, 0], entity_array[:, 1], entity_array[:, 2], entity_array[:, 3], entity_array[:, 4]
         
-        # Norm [0, 1]
-        feats = jnp.stack([
+        # Norm [0, 1] spatial features
+        spatial_feats = jnp.stack([
             x / self.SCREEN_WIDTH, 
             y / self.SCREEN_HEIGHT, 
             w / self.SCREEN_WIDTH, 
             h / self.SCREEN_HEIGHT
         ], axis=-1)
-        
         
         # create multi-hot encoding of labels
         num_concepts = self.config.concepts.label_high_level_concept + 1
@@ -195,11 +195,14 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         # sum over the labels to get the multi-hot encoding
         multi_hot = jnp.sum(jax.vmap(make_one_hot)(label_array), axis=0)
 
-        # broadcast multi-hot encoding to the shape of the entitiy array
+        # broadcast multi-hot encoding to the shape of the entity array
         labels = jnp.tile(multi_hot, (entity_array.shape[0], 1))
 
+        # Append labels to spatial features so embedding includes semantic information
+        feats = jnp.concatenate([spatial_feats, labels], axis=-1)
+
         mask = active.astype(jnp.float32)
-        return feats, mask, labels
+        return feats, mask
 
     def _process_single_frame(self, obs, state):
         """Extracts features from ONE frame."""
@@ -213,20 +216,20 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         
         # Enemies -> DESTROY (or AVOID, depending on strategy. Let's use DESTROY as primary for enemies we can kill)
         sh_ids = jnp.array([const.LABEL_DESTROY, const.LABEL_AVOID])
-        sh_f, sh_m, sh_l = self._normalize_feats(obs.sharks, sh_ids)
-        su_f, su_m, su_l = self._normalize_feats(obs.submarines, sh_ids)
+        sh_f, sh_m = self._normalize_feats(obs.sharks, sh_ids)
+        su_f, su_m = self._normalize_feats(obs.submarines, sh_ids)
         
         # Divers -> COLLECT
         di_ids = jnp.array([const.LABEL_COLLECT])
-        di_f, di_m, di_l = self._normalize_feats(obs.divers, di_ids)
+        di_f, di_m = self._normalize_feats(obs.divers, di_ids)
         
         # Enemy Missiles -> AVOID (Cannot destroy them usually)
         em_ids = jnp.array([const.LABEL_AVOID])
-        em_f, em_m, em_l = self._normalize_feats(obs.enemy_missiles, em_ids)
+        em_f, em_m = self._normalize_feats(obs.enemy_missiles, em_ids)
         
         # Surface Sub -> AVOID
         ss_ids = jnp.array([const.LABEL_AVOID])
-        ss_f, ss_m, ss_l = self._normalize_feats(sc(obs.surface_submarine), ss_ids)
+        ss_f, ss_m = self._normalize_feats(sc(obs.surface_submarine), ss_ids)
         
         # Player Missile is no longer in the object list - it's handled via capabilities (can_fire)
 
@@ -235,14 +238,16 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         # But max_objs is 34, so we need to pad with 1 zero object
         objects_raw = jnp.concatenate([sh_f, su_f, di_f, em_f, ss_f], axis=0)
         mask_raw = jnp.concatenate([sh_m, su_m, di_m, em_m, ss_m], axis=0)
-        labels_raw = jnp.concatenate([sh_l, su_l, di_l, em_l, ss_l], axis=0)
         
         # Pad to max_objs (always pad, JAX needs static shapes)
         n_actual = objects_raw.shape[0]
         pad_size = self.max_objs - n_actual
         objects = jnp.concatenate([objects_raw, jnp.zeros((pad_size, objects_raw.shape[1]))], axis=0)
         mask = jnp.concatenate([mask_raw, jnp.zeros(pad_size)], axis=0)
-        labels = jnp.concatenate([labels_raw, jnp.zeros((pad_size, labels_raw.shape[1]))], axis=0)
+        
+        # Extract labels from objects for backward compatibility (still needed for some logic)
+        num_concepts = self.config.concepts.label_high_level_concept + 1
+        labels = objects[:, 4:4+num_concepts]  # Extract label portion from objects
 
         # 3. Global Features (Includes Player Position)
         oxy_norm = obs.oxygen_level / 64.0
@@ -287,15 +292,15 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         """
         Flattens history, attaches events.
         """
-        # VMAP over stack to get features [Stack, N, 4]
+        # VMAP over stack to get features [Stack, N, n_obj_feats]
         # We need to pass a dummy state or just use the obs, but _process_single_frame only needs obs.
         # Wait, _process_single_frame calls obs.sharks...
         objects_stack, mask_stack, labels_stack, globals_stack, missile_active_stack = jax.vmap(
             lambda o: self._process_single_frame(o, None) # State unused in feature extraction
         )(obs_stack)
 
-        # Flatten Objects: [Stack, N, 4] -> [N, Stack*4]
-        # Transpose to [N, Stack, 4]
+        # Flatten Objects: [Stack, N, n_obj_feats] -> [N, Stack*n_obj_feats]
+        # Transpose to [N, Stack, n_obj_feats]
         n_objs = objects_stack.shape[1]
         objs_T = jnp.transpose(objects_stack, (1, 0, 2))
         flat_objects = objs_T.reshape(n_objs, -1)
@@ -303,7 +308,12 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         # Take Latest Globals/Masks
         latest_globals = globals_stack[-1]
         latest_mask = mask_stack[-1]
-        latest_labels = labels_stack[-1]
+        
+        # Extract labels from latest frame's objects for backward compatibility
+        # Labels are at indices [4:4+num_concepts] in each object's feature vector
+        num_concepts = self.config.concepts.label_high_level_concept + 1
+        latest_objects_unflattened = objects_stack[-1]  # [N, n_obj_feats]
+        latest_labels = latest_objects_unflattened[:, 4:4+num_concepts]  # [N, num_concepts]
 
         # --- Compute Capabilities (UPDATED) ---
         # Extract missile status from latest frame (last element of processed stack)

@@ -11,27 +11,25 @@ class ConceptObs:
     """
     # --- 1. Strategic Dashboard (For Meta-Policy) ---
     # Hand-crafted features: [Oxygen, Held_Divers, Lives, Closest_Enemy_Dist, Enemy_Density, Diver_Density, Player_X, Player_Y, PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_ORIENTATION]
-    # This is the "Expert" view.
     global_features: chex.Array  # Shape: [Batch, N_Globals]
 
     # --- 2. Capabilities (For Sub-Policies) ---
-    # Standardized vector defining what the agent CAN do right now. TODO: this might be an issue with transferability, further investigation needed.
+    # Standardized vector defining what the agent CAN do right now. TODO: this might be an issue with transferability, tbd.
     # [Can_Fire, Facing_X, Facing_Y]
-    # This allows the sub-policy to learn "Don't fire if Can_Fire=0"
     capabilities: chex.Array # Shape: [Batch, N_Caps]
 
-    # --- 3. Tactical Detail (For Instance Selector & Full-Access Meta) ---
+    # --- 3. Tactical Detail ---
     # The raw object list. 
-    # Shape: [Batch, Max_Objs, Obj_Feats] (x, y, vx, vy, type_id, ...)
+    # Shape: [Batch, Max_Objs, Obj_Feats] (x, y, h, w, multi-hot encoding of labels)
     objects: chex.Array 
     
     # Shape: [Batch, Max_Objs] (Boolean)
-    # 1.0 if object exists, 0.0 if padding.
-    object_mask: chex.Array 
+    # 1.0 if object exists, 0.0 if padding. -> used for existence masking in various components
+    object_mask: chex.Array
     
     # Multi-Hot Encoding of Labels
-    # Shape: [Batch, Max_Objs, Max_Labels] (Integer) -> can contain multiple labels per object!
-    # Semantic Labels: 0=Player, 1=Diver, 2=Shark, 3=Sub, ...
+    # Shape: [Batch, Max_Objs, Max_Labels] (Integer) -> can contain multiple labels per object!!
+    # Semantic Labels: 0=COLLECT, 1=AVOID, 2=DESTROY, 3=DEFAULT (catch all for high level concepts, no object should have this label as this is in the global features!)
     object_labels: chex.Array 
 
     # Shape: [Batch, Max_Objs] (Integer)
@@ -69,4 +67,4 @@ class AgentState:
     action: chex.Array
     selected_concept: chex.Array    # The output of Meta-Policy
     selected_target_idx: chex.Array # The output of Instance Selector
-    log_probs: chex.Array           # Useful for PPO updates later
+    log_probs: chex.Array # Q-values for the selected action

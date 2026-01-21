@@ -74,14 +74,20 @@ class RelationalAgent:
         
         # 1. Meta Policy
         # Objects are flattened: [max_objs, stack_size * n_obj_feats]
-        obj_dim = config.environment.frame_stack_size * config.environment.n_obj_feats
+        # n_obj_feats now includes labels: 4 (spatial) + num_concepts (labels)
+        num_concepts = config.concepts.label_high_level_concept + 1
+        n_obj_feats_with_labels = config.environment.n_obj_feats + num_concepts
+        obj_dim = config.environment.frame_stack_size * n_obj_feats_with_labels
         meta_state = MetaPolicy.create_train_state(
             key_m,
             num_concepts=config.concepts.label_high_level_concept + 1,
             learning_rate=config.training.meta_policy_lr,
             global_dim=sample_obs.global_features.shape[-1],
             obj_dim=obj_dim,
-            max_objs=config.environment.max_objs
+            max_objs=config.environment.max_objs,
+            max_grad_norm=config.training.max_grad_norm,
+            lr_linear_decay=config.training.lr_linear_decay,
+            total_steps=config.training.total_steps
         )
 
         # 2. Instance Selector
@@ -93,7 +99,10 @@ class RelationalAgent:
             obj_dim=obj_dim,
             max_objs=config.environment.max_objs,
             num_concepts=num_concepts,
-            hidden_dim=config.model.selector_hidden_dims[0] if len(config.model.selector_hidden_dims) > 0 else 64
+            hidden_dim=config.model.selector_hidden_dims[0] if len(config.model.selector_hidden_dims) > 0 else 64,
+            max_grad_norm=config.training.max_grad_norm,
+            lr_linear_decay=config.training.lr_linear_decay,
+            total_steps=config.training.total_steps
         )
 
         # 3. Sub Policy
@@ -103,6 +112,9 @@ class RelationalAgent:
             learning_rate=config.training.sub_policy_lr,
             hidden_dims=config.model.hidden_dims,
             cap_dim=config.concepts.n_capabilities,
+            max_grad_norm=config.training.max_grad_norm,
+            lr_linear_decay=config.training.lr_linear_decay,
+            total_steps=config.training.total_steps,
             num_concepts=config.concepts.label_high_level_concept + 1,
             global_dim=sample_obs.global_features.shape[-1]
         )
@@ -149,11 +161,11 @@ class RelationalAgent:
         force_concept_id = self.config.training.force_concept_id
         
         # --- Layer 1: Strategic Decision (Meta) ---
+        # Labels are now part of objects, so no separate object_labels parameter needed
         q_values_meta = self.meta_state.apply_fn(
             self.meta_state.params, 
             obs_in.global_features,
             obs_in.objects,
-            obs_in.object_labels,
             obs_in.object_mask
         )
         

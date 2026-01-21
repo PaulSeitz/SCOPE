@@ -133,9 +133,16 @@ def _compute_rewards_jitted(obs_st, next_obs_st, state, next_state,
     align_curr = jax.vmap(lambda t: get_alignment_potential(t, p_pos, facing_vec))(t_pos)
     align_next = jax.vmap(lambda t: get_alignment_potential(t, p_next_pos, facing_vec))(t_next_pos)
 
-    # Reward is the DIFFERENCE (Did I improve my aim?)
+    # Reward: Improvement (Shaping)
     align_delta = (align_next - align_curr)
     align_shaping = align_delta * aim_bonus_scale * valid_shaping_mask
+    
+    # --- Holding Bonus ---
+    # Reward for simply BEING aimed correctly. 
+    # This prevents the "Aim Away -> Snap Back" jitter loop.
+    # We give a bonus if alignment is > 0.9 (roughly 25 degrees cone)
+    is_aligned = (align_curr > 0.9).astype(jnp.float32)
+    align_holding = is_aligned * (aim_bonus_scale * 0.1) * valid_shaping_mask
 
     # C. Events (Did we succeed?)
     # is_triggered is [Max_Objs] or [Batch, Max_Objs] (1.0 if event happened)
@@ -177,8 +184,13 @@ def _compute_rewards_jitted(obs_st, next_obs_st, state, next_state,
     # Each row assumes the agent selected THAT concept.
     
     # Row: COLLECT
-    # Rule: Reward for getting closer + Big Bonus for success
-    r_collect = dist_delta + (is_triggered * bonus_success)
+    # "Fickleness" is often due to inertia (drifting back creates neg reward).
+    # We add a small binary bonus just for "Closing the Gap" regardless of speed.
+    is_closing = (dist_delta > 0).astype(jnp.float32)
+    closing_bonus = is_closing * (reward_scale * 0.1) 
+    
+    # We keep COLLECT reckless. It is the Meta-Policy's job to switch if a Shark is in the way.
+    r_collect = dist_delta + closing_bonus + (is_triggered * bonus_success)
     
     # Row: AVOID
     # Rule: PENALTY for getting closer + Big Penalty for triggering (collision)
@@ -192,10 +204,8 @@ def _compute_rewards_jitted(obs_st, next_obs_st, state, next_state,
         r_avoid = (-dist_delta_avoid) - global_avoid_delta[:, None] + (is_triggered * penalty_failure)
     
     # Row: DESTROY
-    # Rule: Reward for IMPROVING aim (potential-based) + Big Bonus for triggering (kill)
-    # OLD: r_destroy = align_reward + ... (BAD: State-based)
-    # NEW: Use align_shaping (clipped potential-based) - only rewards improvement, not maintenance
-    r_destroy = align_shaping + (dist_delta * 0.1) + (is_triggered * bonus_success)
+    # Note: We keep `align_shaping` for the gradient signal to GET there.
+    r_destroy = align_shaping + align_holding + (is_triggered * bonus_success)
     
     # Row: MONITOR / HIGH_LEVEL (Self-centric)
     # These usually don't depend on the target object index and only rely on global features like the player position.

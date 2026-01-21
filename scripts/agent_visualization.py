@@ -79,6 +79,34 @@ class AgentVisualization:
         # Store expected dimensions from agent's config
         self.expected_global_feats = self.agent.config.environment.n_global_feats
         
+        # Infer expected obj_dim from agent's meta policy params
+        # This handles cases where the model was trained with different obj_dim than config
+        def infer_obj_dim_from_params(params):
+            """Infer obj_dim from Dense_1 layer which processes objects"""
+            def find_dense1_kernel(d, path=""):
+                if isinstance(d, dict):
+                    for k, v in d.items():
+                        result = find_dense1_kernel(v, f"{path}.{k}" if path else k)
+                        if result is not None:
+                            return result
+                elif hasattr(d, 'shape') and len(d.shape) == 2:
+                    if 'Dense_1' in path and 'kernel' in path:
+                        obj_dim, hidden_dim = d.shape
+                        return int(obj_dim)
+                return None
+            return find_dense1_kernel(params)
+        
+        inferred_obj_dim = infer_obj_dim_from_params(self.agent.meta_state.params)
+        if inferred_obj_dim is not None:
+            self.expected_obj_dim = inferred_obj_dim
+            print(f"Info: Inferred expected_obj_dim={inferred_obj_dim} from loaded model.")
+        else:
+            # Fallback to config
+            num_concepts = self.config.concepts.label_high_level_concept + 1
+            n_obj_feats_with_labels = self.config.environment.n_obj_feats + num_concepts
+            self.expected_obj_dim = self.config.environment.frame_stack_size * n_obj_feats_with_labels
+            print(f"Warning: Could not infer obj_dim from model, using config value: {self.expected_obj_dim}")
+        
         # Try to get base environment for rendering
         try:
             self.base_env = env._env._env  # Unwrap to get base environment for rendering
@@ -273,6 +301,25 @@ class AgentVisualization:
             adapted_labels = obs.object_labels
             adapted_events = obs.object_events
         
+        # Adapt object feature dimension (obj_dim) to match model's expected dimension
+        current_obj_dim = adapted_objects.shape[-1]
+        if current_obj_dim < self.expected_obj_dim:
+            # Pad object features with zeros
+            if adapted_objects.ndim == 2:
+                # Unbatched: [max_objs, features] -> [max_objs, expected_features]
+                padding = jnp.zeros((adapted_objects.shape[0], self.expected_obj_dim - current_obj_dim))
+                adapted_objects = jnp.concatenate([adapted_objects, padding], axis=-1)
+            else:
+                # Batched: [batch, max_objs, features] -> [batch, max_objs, expected_features]
+                padding = jnp.zeros((adapted_objects.shape[0], adapted_objects.shape[1], self.expected_obj_dim - current_obj_dim))
+                adapted_objects = jnp.concatenate([adapted_objects, padding], axis=-1)
+        elif current_obj_dim > self.expected_obj_dim:
+            # Truncate object features
+            if adapted_objects.ndim == 2:
+                adapted_objects = adapted_objects[:, :self.expected_obj_dim]
+            else:
+                adapted_objects = adapted_objects[:, :, :self.expected_obj_dim]
+        
         # Return adapted observation
         return ConceptObs(
             global_features=adapted_global,
@@ -333,11 +380,11 @@ class AgentVisualization:
             agent_state_batched = self.agent_state
         
         # Meta Q-values
+        # Labels are now part of objects, so no separate object_labels parameter needed
         self.meta_q_values = self.agent.meta_state.apply_fn(
             self.agent.meta_state.params,
             obs_batched.global_features,
             obs_batched.objects,
-            obs_batched.object_labels,
             obs_batched.object_mask
         )
         
@@ -1009,6 +1056,41 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
     if inferred_num_heads != 2:
         print(f"Info: Inferred num_heads={inferred_num_heads} from saved model parameters.")
     
+    # Infer obj_dim from meta policy params (Dense_1 processes objects)
+    def infer_obj_dim(params):
+        """Infer obj_dim from Dense_1 layer which processes objects"""
+        def find_dense1_kernel(d, path=""):
+            """Recursively find Dense_1 kernel"""
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    result = find_dense1_kernel(v, f"{path}.{k}" if path else k)
+                    if result is not None:
+                        return result
+            elif hasattr(d, 'shape') and len(d.shape) == 2:
+                # Dense_1 processes objects: shape is [obj_dim, hidden_dim]
+                if 'Dense_1' in path and 'kernel' in path:
+                    obj_dim, hidden_dim = d.shape
+                    return int(obj_dim)
+            return None
+        
+        return find_dense1_kernel(params)
+    
+    inferred_obj_dim = infer_obj_dim(meta_params)
+    if inferred_obj_dim is None:
+        # Fallback: compute from config
+        num_concepts = config.concepts.label_high_level_concept + 1
+        n_obj_feats_with_labels = config.environment.n_obj_feats + num_concepts
+        inferred_obj_dim = config.environment.frame_stack_size * n_obj_feats_with_labels
+        print(f"Warning: Could not infer obj_dim from model, using config value: {inferred_obj_dim}")
+    else:
+        # Compute what config would give us
+        num_concepts = config.concepts.label_high_level_concept + 1
+        n_obj_feats_with_labels = config.environment.n_obj_feats + num_concepts
+        config_obj_dim = config.environment.frame_stack_size * n_obj_feats_with_labels
+        if inferred_obj_dim != config_obj_dim:
+            print(f"Warning: Config would compute obj_dim={config_obj_dim}, but model was trained with obj_dim={inferred_obj_dim}.")
+            print(f"Using inferred obj_dim={inferred_obj_dim} to match loaded model.")
+    
     # Infer number of actions from loaded sub_params if needed
     # The last layer of sub_policy has shape [hidden_dim, num_actions]
     def find_num_actions(params):
@@ -1044,10 +1126,12 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
     
     # Create a dummy observation to initialize the agent
     num_concepts = config.concepts.label_high_level_concept + 1
+    # Use inferred obj_dim instead of computing from config
+    obj_dim_flat = inferred_obj_dim
     dummy_obs = ConceptObs(
         global_features=jnp.zeros((1, config.environment.n_global_feats)),
         capabilities=jnp.zeros((1, config.concepts.n_capabilities)),
-        objects=jnp.zeros((1, config.environment.max_objs, config.environment.n_obj_feats)),
+        objects=jnp.zeros((1, config.environment.max_objs, obj_dim_flat)),
         object_mask=jnp.zeros((1, config.environment.max_objs)),
         object_labels=jnp.zeros((1, config.environment.max_objs, num_concepts), dtype=jnp.float32),  # Multi-hot encoding
         object_events=jnp.zeros((1, config.environment.max_objs), dtype=jnp.int32),
@@ -1059,8 +1143,9 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
     
     # 1. Meta Policy - create with inferred hidden_dim
     from src.agent.components.meta_policy import MetaPolicyQNetwork
-    obj_dim = config.environment.frame_stack_size * config.environment.n_obj_feats
     num_concepts = config.concepts.label_high_level_concept + 1
+    # Use inferred obj_dim to match the loaded model
+    obj_dim = inferred_obj_dim
     
     # Create network with the inferred hidden_dim and num_heads
     meta_net = MetaPolicyQNetwork(
@@ -1078,8 +1163,7 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
     meta_state = RLTrainState.create(
         apply_fn=meta_net.apply,
         params=meta_params,
-        tx=meta_tx,
-        target_params=jax.tree_util.tree_map(lambda x: x, meta_params)  # Clone for target
+        tx=meta_tx
     )
     
     # 2. Instance Selector - create normally (should match)
@@ -1111,8 +1195,7 @@ def load_agent(model_path: str, config: Config) -> RelationalAgent:
     sub_state = RLTrainState.create(
         apply_fn=sub_net.apply,
         params=sub_params,
-        tx=sub_tx,
-        target_params=jax.tree_util.tree_map(lambda x: x, sub_params)
+        tx=sub_tx
     )
     
     # Create agent directly with constructed states
@@ -1156,7 +1239,7 @@ def main():
     print("Agent loaded successfully!")
     
     # Create environment
-    base_env = make_atari_env('seaquest', mods_config=["disable_surfacing_death"])
+    base_env = make_atari_env('seaquest')
     atari_wrapper = AtariWrapper(
         base_env,
         frame_stack_size=config.environment.frame_stack_size,

@@ -8,7 +8,7 @@ import flax.linen as nn
 from flax.training.train_state import TrainState
 import optax
 import chex
-from typing import Tuple
+from typing import Tuple, Optional
 from src.rl_utils import RLTrainState
 
 class SubPolicyQNetwork(nn.Module):
@@ -30,29 +30,22 @@ class SubPolicyQNetwork(nn.Module):
 
     @nn.compact
     def __call__(self, global_features: chex.Array, relative_vec: chex.Array, capabilities: chex.Array):
-        # --- 1. Normalize Inputs ---
-        # Seaquest screen is roughly 160x210. 
-        # relative_vec is (target - player), so range is approx [-160, 160].
-        # We divide by 160.0 to squash it to ~[-1.0, 1.0]
-        norm_rel_vec = relative_vec / 160.0
+
         
-        # Globals are already roughly normalized in the wrapper, 
-        # but the Orchestrator might need to ensure they are consistent.
-        # global_features: [Batch, N_Globals]
-        
-        # --- 2. Input Fusion ---
+        # --- Input Fusion ---
         # Concatenate: [Globals, Relative_Vector, Capabilities]
         # This gives the "Default" concept access to Oxygen (in Globals) 
         # even if Relative_Vector is zeroed out.
-        x = jnp.concatenate([global_features, norm_rel_vec, capabilities], axis=-1)
+        x = jnp.concatenate([global_features, relative_vec, capabilities], axis=-1)
 
         # 3. Logic Body
         for dim in self.hidden_dims:
             x = nn.Dense(features=dim)(x)
-            x = nn.LayerNorm()(x)
-            x = nn.relu(x)
+            x = nn.relu(x)        # Activation first
+            x = nn.LayerNorm()(x) # Norm last (features are now 0-mean, 1-std)
 
         # 4. Action Head
+        # Now the input 'x' is perfectly normalized for the PQN L2 mechanism
         q_values = nn.Dense(features=self.num_actions)(x)
         return q_values
 
@@ -65,11 +58,16 @@ class SubPolicy:
     @staticmethod
     def create_train_state(key, num_actions: int, learning_rate: float, 
                            hidden_dims: Tuple[int, ...], cap_dim: int = 4, 
-                           num_concepts: int = 7, global_dim: int = 10) -> RLTrainState:
+                           num_concepts: int = 7, global_dim: int = 10,
+                           max_grad_norm: Optional[float] = None,
+                           lr_linear_decay: bool = False,
+                           total_steps: Optional[int] = None) -> RLTrainState:
         """
         Initializes the model parameters and optimizer with target network support.
         Note: capabilities input includes concept context, so total input size is cap_dim + num_concepts.
         """
+        from src.rl_utils import create_optimizer
+        
         net = SubPolicyQNetwork(num_actions=num_actions, hidden_dims=hidden_dims)
         
         # Dummy inputs for shape inference
@@ -80,7 +78,12 @@ class SubPolicy:
         
         params = net.init(key, d_glob, d_rel, d_cap)
         
-        tx = optax.adam(learning_rate=learning_rate)
+        tx = create_optimizer(
+            learning_rate=learning_rate,
+            max_grad_norm=max_grad_norm,
+            lr_linear_decay=lr_linear_decay,
+            total_steps=total_steps
+        )
         
         return RLTrainState.create(
             apply_fn=net.apply,
