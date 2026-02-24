@@ -1,3 +1,5 @@
+# type: ignore
+# pyright: reportGeneralTypeIssues=false
 import functools
 import jax
 import jax.numpy as jnp
@@ -8,8 +10,8 @@ from typing import Optional
 from flax import struct
 import chex
 
-from src.environments.seaquest.datatypes import ConceptObs
-import src.environments.seaquest.seaquest_constants as const
+from .datatypes import ConceptObs
+from . import seaquest_constants as const
 from src.config import Config, get_default_config
 
 class SeaquestConceptWrapper(JaxatariWrapper):
@@ -53,7 +55,7 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         num_concepts = self.config.concepts.label_high_level_concept + 1
         return spaces.Dict({
             # Dashboard (Oxygen, Ammo, etc.)
-            "global_features": spaces.Box(0.0, 2.0, (self.n_global_feats,), jnp.float32),
+            "global_features": spaces.Box(0.0, 2.0, (self.n_global_feats * self.stack_size,), jnp.float32),
             
             # Capabilities
             "capabilities": spaces.Box(0.0, 1.0, (const.N_CAPABILITIES,), jnp.float32),
@@ -183,7 +185,8 @@ class SeaquestConceptWrapper(JaxatariWrapper):
             x / self.SCREEN_WIDTH, 
             y / self.SCREEN_HEIGHT, 
             w / self.SCREEN_WIDTH, 
-            h / self.SCREEN_HEIGHT
+            h / self.SCREEN_HEIGHT,
+            active
         ], axis=-1)
         
         # create multi-hot encoding of labels
@@ -306,7 +309,7 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         flat_objects = objs_T.reshape(n_objs, -1)
 
         # Take Latest Globals/Masks
-        latest_globals = globals_stack[-1]
+        flat_globals = globals_stack.reshape(-1)
         latest_mask = mask_stack[-1]
         
         # Extract labels from latest frame's objects for backward compatibility
@@ -328,22 +331,27 @@ class SeaquestConceptWrapper(JaxatariWrapper):
         # 2. Inject Dynamic Shooting Vector (from player orientation)
         # Extract orientation from global_features (index 9) and denormalize from [0, 1] back to [-1, 1]
         # Normalized: 0.0 = -1 (left), 1.0 = 1 (right)
-        player_orientation_norm = latest_globals[9]
+        player_orientation_norm = flat_globals[9] # Note: is discarded right now anyway, we might not even keep the 'globals'
         player_orientation = player_orientation_norm * 2.0 - 1.0  # Denormalize: 0.0 -> -1.0, 1.0 -> 1.0
         facing_vec = self._orientation_to_facing_vec(player_orientation)
         caps = caps.at[const.CAP_FACING_X].set(facing_vec[0])
         caps = caps.at[const.CAP_FACING_Y].set(facing_vec[1])
 
-        # Events should always be a JAX array (zeros on reset, detected events on step)
-        # No need for None check - always a valid JAX array
+        # We use jax.flatten_util.ravel_pytree which handles ANY structure (Tuple, List, Array, Nested)
+        # coming from AtariWrapper (obs_stack).
+        flat_raw, _ = jax.flatten_util.ravel_pytree(obs_stack)
+        # Normalize to [0, 1]
+        flat_raw = flat_raw.astype(jnp.float32) / 255.0
+        
 
         return ConceptObs(
-            global_features=latest_globals,
+            global_features=flat_globals,
             capabilities=caps,
             objects=flat_objects,
             object_mask=latest_mask,
             object_labels=latest_labels,
             object_events=events,
+            flat_raw_observations=flat_raw,
             active_concept=jnp.array(0, dtype=jnp.int32),
             active_target_idx=jnp.array(0, dtype=jnp.int32)
         )

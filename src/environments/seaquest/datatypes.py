@@ -36,6 +36,8 @@ class ConceptObs:
     # Event Flags: 0=Not Triggered, 1=Triggered (e.g. collected a diver, got hit by a shark, etc.) meaning is label specific
     object_events: chex.Array 
 
+    flat_raw_observations: chex.Array # Shape: [Batch, Flat_Obs_Size]
+
     # --- 3. Internal Agent State (The "Bus") ---
     # These are filled dynamically during the agent's forward pass.
     
