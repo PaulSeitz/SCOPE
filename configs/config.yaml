@@ -1,0 +1,23 @@
+# config.yaml
+
+defaults:
+  - experiment: seaquest_skills
+  - _self_
+
+# --- Weights & Biases Settings ---
+ENTITY: null                  # Set to your wandb username or team name if applicable
+PROJECT: "concept_based_learning"
+WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during debugging
+
+# --- Global Run Settings ---
+SEED: 42
+NUM_SEEDS: 1                  # Number of concurrent seeds to run via vmap
+SAVE_PATH: "./outputs/models" # Where to save trained parameters
+LOAD_PATH: null               # Set to path if you want to load a checkpoint
+LOAD_PARAMS: False            # Toggle to True when resuming or evaluating
+
+# --- Video recording during/every training ---
+RECORD_VIDEO: True           # If true, record rollout videos (e.g. to wandb)
+VIDEO_EVERY_N_UPDATES: 5000   # Record a video every N updates (used if training is run in chunks)
+VIDEO_AT_END: True            # Always record one video at the end of training when RECORD_VIDEO is true
+VIDEO_MAX_FRAMES: 2000        # Cap episode length for recording (avoid huge files)

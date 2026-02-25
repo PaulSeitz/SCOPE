@@ -1,0 +1,35 @@
+# experiment/seaquest_skills.yaml
+
+# --- Environment & Algorithm Names ---
+ALG_NAME: "hierarchical_pqn"
+ENV_NAME: "Seaquest"
+
+alg:
+  # --- Custom Architecture Dimensions ---
+  NUM_SKILLS: 3               # DESTROY, COLLECT, AVOID
+  MAX_OBJECTS: 34             # 33 game objects + 1 dummy surface waypoint
+  EGO_ACTION_DIM: 18          # The 18 translated egocentric actions
+  HIDDEN_SIZE: 128            # Slightly wider since it relies purely on distance/angle
+  NUM_LAYERS: 3
+
+  # --- Environment Wrappers ---
+  STICKY_ACTIONS: False
+  EPISODIC_LIFE: True
+
+  # --- PQN Rollout Hyperparameters ---
+  TOTAL_TIMESTEPS: 100_000_000 # Total frames to train
+  NUM_ENVS: 1024               # Number of parallel environments
+  NUM_STEPS: 128                # Transitions per env per update (~305 updates for 10M steps; was 128 → ~76)
+
+  # --- PQN Update Hyperparameters ---
+  NUM_EPOCHS: 4               # SGD epochs over the rollout data
+  NUM_MINIBATCHES: 32          # Divides (NUM_ENVS * NUM_STEPS)
+  GAMMA: 0.95                 # Discount factor
+  LAMBDA: 0.95                # GAE / Lambda return smoothing parameter
+  LR: 0.00025                 # Learning rate (2.5e-4 is standard for Atari)
+  MAX_GRAD_NORM: 0.5          # Gradient clipping
+
+  # --- Exploration (Epsilon-Greedy) ---
+  EPS_START: 1.0              # Start 100% random
+  EPS_FINISH: 0.05            # End at 5% random
+  EPS_DECAY: 0.15              # Reach EPS_FINISH halfway through training (50%)

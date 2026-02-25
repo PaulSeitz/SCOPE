@@ -9,6 +9,11 @@ import wandb
 
 CURRENT_VIDEO_THREAD = None
 
+# Skill index 0 = DESTROY, 1 = COLLECT, 2 = AVOID (matches label_to_skill_idx in train_agent)
+SKILL_NAMES = ["DESTROY", "COLLECT", "AVOID"]
+TARGET_OUTLINE_COLOR = (255, 50, 50)  # Red, same as label_visualizer LABEL_DESTROY
+TARGET_OUTLINE_WIDTH = 3
+
 class SidebarRenderer:
     def __init__(self, frame_shape, sidebar_width=50, font_size=15, text_color=(255, 255, 255), bg_color=(0, 0, 0), highlight_color=(50, 50, 200)):
         """
@@ -72,9 +77,10 @@ class SidebarRenderer:
         pygame.quit()
 
 
-def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False):
+def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False,
+                   target_obj_idxs=None, objects_bbox=None):
     global CURRENT_VIDEO_THREAD
-    
+
     if renderer is None:
         return
 
@@ -87,8 +93,9 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
 
     # Start new thread as daemon so it doesn't block shutdown
     CURRENT_VIDEO_THREAD = threading.Thread(
-        target=collect_video, 
+        target=collect_video,
         args=(states, active_agents, combined_qs, dones, step, renderer, modif),
+        kwargs={"target_obj_idxs": target_obj_idxs, "objects_bbox": objects_bbox},
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
     CURRENT_VIDEO_THREAD.start()
@@ -96,14 +103,44 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
 def add_active_agent(screen, active_agent_num: int):
     font = pygame.font.Font(None, 50)
     text_surface = font.render(f"active agent: {active_agent_num}", True, (255, 255, 255)) 
-    screen.blit(text_surface, (300, 300)) 
+    screen.blit(text_surface, (300, 300))
 
-def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False):
+
+def draw_target_outline(frame, target_idx, obj_x, obj_y, obj_w, obj_h, active):
+    """
+    Draw a red outline around the current target object on a single frame.
+    frame: (3, H, W) numpy uint8 RGB
+    target_idx: int index into object arrays
+    obj_x, obj_y, obj_w, obj_h, active: 1D arrays of length max_objects
+    """
+    if target_idx < 0 or target_idx >= len(active) or not active[target_idx]:
+        return frame
+    x = int(obj_x[target_idx])
+    y = int(obj_y[target_idx])
+    w = int(obj_w[target_idx])
+    h = int(obj_h[target_idx])
+    if w <= 0 or h <= 0:
+        return frame
+    _, H, W = frame.shape
+    # Clip to frame bounds
+    x1 = max(0, min(x, W - 1))
+    y1 = max(0, min(y, H - 1))
+    x2 = max(0, min(x + w, W))
+    y2 = max(0, min(y + h, H))
+    if x1 >= x2 or y1 >= y2:
+        return frame
+    # Use pygame to draw on the frame: (3, H, W) -> (W, H, 3) for pygame
+    surf = pygame.surfarray.make_surface(frame.transpose(2, 1, 0))
+    pygame.draw.rect(surf, TARGET_OUTLINE_COLOR, (x1, y1, x2 - x1, y2 - y1), TARGET_OUTLINE_WIDTH)
+    out = np.transpose(pygame.surfarray.array3d(surf), (2, 1, 0))
+    return out
+
+
+def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,
+                  target_obj_idxs=None, objects_bbox=None):
     try:
         if wandb.run is None:
-            print("WandB not initialized, skipping video logging.")
             return
-            
         print("Rendering video...")
         video_folder = f"{wandb.run.dir}/media/videos/"
         os.makedirs(video_folder, exist_ok=True)
@@ -121,17 +158,21 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
         else:
             dones_col = dones
 
-        num_states = jnp.argmax(dones_col)
-        
-        # If no 'done' was found (argmax returns 0), use the full length
-        if num_states == 0:
-            # Get the time dimension from the first leaf of the state tree
-            leaves = jax.tree_util.tree_leaves(states)
-            if leaves:
-                num_states = leaves[0].shape[0]
-            else:
-                print("Warning: State tree empty, cannot determine video length.")
-                return
+        leaves = jax.tree_util.tree_leaves(states)
+        full_length = leaves[0].shape[0] if leaves else 0
+        if full_length == 0:
+            print("Warning: State tree empty, cannot determine video length.")
+            return
+
+        # If any step had done=True, show frames [0 .. first_done_idx] inclusive (include terminal frame)
+        # Otherwise show full rollout (hit VIDEO_MAX_FRAMES without done)
+        has_done = jnp.any(dones_col > 0.5)
+        first_done_idx = jnp.argmax(dones_col)
+        num_states = int(jnp.where(has_done, first_done_idx + 1, full_length))
+
+        if num_states < 1:
+            print("Warning: No frames to render (empty rollout or done on step 0). Skipping video.")
+            return
 
         # Slice the states to the correct length
         states_reduced = jax.tree_util.tree_map(lambda x: x[:num_states], states)
@@ -150,37 +191,37 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             frames = np.transpose(frames, (0, 3, 1, 2))  # (T, H, W, 3) -> (T, 3, H, W)
             # Note: If the video is rotated/flipped, the transpose may need adjustment.
 
-        # [Optional: Sidebar Logic]
+        # [Optional: Target outline] Draw red outline around current target object per frame
+        if target_obj_idxs is not None and objects_bbox is not None:
+            ox, oy, ow, oh, oactive = objects_bbox
+            for i in range(len(frames)):
+                idx = int(target_obj_idxs[i])
+                frames[i] = draw_target_outline(
+                    frames[i], idx,
+                    ox[i], oy[i], ow[i], oh[i], oactive[i],
+                )
+
+        # [Optional: Sidebar Logic] Skill names + Q-values
         if active_agents is not None and combined_qs is not None:
             sidebar_renderer = SidebarRenderer(frames[0].shape)
-            
-            # New frame buffer with sidebar space
             current_w = frames.shape[3]
             new_w = current_w + sidebar_renderer.sidebar_width
-            
             new_frames = np.zeros((frames.shape[0], frames.shape[1], frames.shape[2], new_w), dtype=np.uint8)
-            
             for i in range(len(frames)):
-                texts = [(f"Option {t_i}:", f"{t:.2f}") for t_i, t in enumerate(combined_qs[i])]
+                # Use skill names (DESTROY, COLLECT, AVOID) instead of "Option 0", "Option 1", ...
+                skill_labels = [SKILL_NAMES[t_i] if t_i < len(SKILL_NAMES) else f"Option {t_i}" for t_i in range(len(combined_qs[i]))]
+                texts = [(f"{name}:", f"{t:.2f}") for name, t in zip(skill_labels, combined_qs[i])]
                 new_frames[i] = sidebar_renderer.render(frames[i], texts, active_agents[i])
-            
             frames = new_frames
 
-        fps = 30
-        name = f"video_{step}"
-        if modif:
-            name = f"video_{step}_modif"
-        
-        # Check if wandb is actually active before logging
-        if wandb.run is not None:
-            try:
-                video = wandb.Video(frames, fps=fps, format="mp4")
-                wandb.log({name: video}, step=wandb.run.step)
-            except (RuntimeError, Exception) as e:
-                print(f"Warning: Failed to log video to WandB: {e}")
-        else:
-            print("WandB run not active, video generated but not logged.")
-
+        name = f"video_{step}_modif" if modif else f"video_{step}"
+        try:
+            wandb.log(
+                {name: wandb.Video(frames, fps=30, format="mp4")},
+                step=wandb.run.step,
+            )
+        except Exception as e:
+            print(f"Warning: Failed to log video: {e}")
         print("Video done.")
     except Exception as e:
         print(f"Error in collect_video: {e}")

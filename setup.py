@@ -7,7 +7,8 @@ setup(
     name="concept-based-learning",
     version="0.1.0",
     description="Concept-based hierarchical reinforcement learning",
-    packages=find_packages(),
+    packages=find_packages(where="src", include=["concept_based_learning*"]),
+    package_dir={"": "src"},
     python_requires=">=3.8",
     install_requires=[
         "jax",
