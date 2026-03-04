@@ -1,3 +1,4 @@
+from flax.linen.fp8_ops import Fp8DotGeneralBase
 import jax
 import jax.numpy as jnp
 from flax import struct
@@ -7,13 +8,8 @@ from jaxatari.environment import JAXAtariAction as Atari
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.environments.datatypes import LabeledObjectObservation, LABEL_DESTROY, LABEL_COLLECT, LABEL_AVOID, LABEL_NOOP
 
-
-def extract_all_skills_rewards(prev_player, next_player, prev_target, next_target):
-    """
-    Evaluates pure mechanical transitions for the single selected target object.
-    Uses only the last frame of any stacked entity (transition outcome).
-    Returns: jnp.array([destroy_reward, collect_reward, avoid_reward]) with shape (3,).
-    """
+# TODO: we can probably rewrite this to just check if enemies / divers went off screen and if yes not award any reward
+def extract_all_skills_rewards(prev_player, next_player, prev_target, next_target, prev_projectiles, next_projectiles):
     def last_frame(e):
         return jax.tree_util.tree_map(lambda x: x[-1] if x.ndim > 0 else x, e)
 
@@ -21,94 +17,75 @@ def extract_all_skills_rewards(prev_player, next_player, prev_target, next_targe
     next_player = last_frame(next_player)
     prev_target = last_frame(prev_target)
     next_target = last_frame(next_target)
+    prev_projectiles = last_frame(prev_projectiles)
+    next_projectiles = last_frame(next_projectiles)
 
-    # --- Helper Functions ---
-    def get_center(entity):
-        return entity.x + (entity.width / 2.0), entity.y + (entity.height / 2.0)
-
-    def check_collision(p, t):
-        overlap_x = jnp.maximum(0, jnp.minimum(p.x + p.width, t.x + t.width) - jnp.maximum(p.x, t.x))
-        overlap_y = jnp.maximum(0, jnp.minimum(p.y + p.height, t.y + t.height) - jnp.maximum(p.y, t.y))
-        return jnp.logical_and(overlap_x > 0, overlap_y > 0)
-
-    # Calculate states
-    px, py = get_center(prev_player)
-    tx, ty = get_center(prev_target)
-    npx, npy = get_center(next_player)
-    ntx, nty = get_center(next_target)
-
-    d_prev = jnp.sqrt((px - tx)**2 + (py - ty)**2)
-    d_next = jnp.sqrt((npx - ntx)**2 + (npy - nty)**2)
-    delta_d = d_prev - d_next  # Positive if getting closer
-
-    is_colliding = check_collision(next_player, next_target)
+    # A "success" event is when the current target was active and becomes inactive
     was_active = prev_target.active == 1
     is_active = next_target.active == 1
-    deactivated = jnp.logical_and(was_active, jnp.logical_not(is_active))
-    
-    # Catch if the agent rammed the target this frame
-    rammed = jnp.logical_and(was_active, is_colliding)
+    success = jnp.logical_and(was_active, jnp.logical_not(is_active))
 
-    # ==========================================
-    # 1. DESTROY: "Sniper" Shape (Strict Anti-Ram)
-    # Goal: Align Y, face target, shoot, do NOT touch.
-    # ==========================================
-    # Sparse objective: ONLY reward if it died AND we didn't ram it
-    destroy_sparse = jnp.where(jnp.logical_and(deactivated, jnp.logical_not(rammed)), 1.0, 0.0)
-    
-    # Massive anti-ramming penalty to override any perceived benefit of colliding
-    destroy_anti_ram = jnp.where(rammed, -5.0, 0.0)
-    
-    # Dense Y-alignment (reward for reducing delta_y)
-    dy_prev = jnp.abs(py - ty)
-    dy_next = jnp.abs(npy - nty)
-    y_alignment_reward = jnp.where(was_active, (dy_prev - dy_next) * 0.05, 0.0)
-    
-    # Dense Facing bonus
-    is_facing_right = prev_player.orientation < 180.0
-    target_is_right = tx > px
-    correct_facing = is_facing_right == target_is_right
-    facing_bonus = jnp.where(
-        jnp.logical_and(jnp.logical_and(was_active, correct_facing), dy_prev < 10.0), 
-        0.02, 
-        0.0
-    )
-    
-    destroy_reward = destroy_sparse + destroy_anti_ram + y_alignment_reward + facing_bonus
+    # Require that the player is spatially close to the target when it disappears.
+    # This avoids rewarding off-screen despawns.
+    #
+    # We approximate "close" via bounding box overlap on the previous frame.
+    p_left = prev_player.x
+    p_right = prev_player.x + prev_player.width
+    p_top = prev_player.y
+    p_bottom = prev_player.y + prev_player.height
 
-    # ==========================================
-    # 2. COLLECT: "Breadcrumb + Timer" Shape
-    # Goal: Overlap bounding boxes as fast as possible.
-    # ==========================================
-    collect_sparse = jnp.where(rammed, 1.0, 0.0)
-    
-    # Dense breadcrumb trail so it knows *how* to find the target
-    collect_dense = jnp.where(was_active, delta_d * 0.1, 0.0)
-    
-    # Time penalty to create urgency
-    collect_step_penalty = jnp.where(was_active, -0.01, 0.0)
-    
-    collect_reward = collect_sparse + collect_dense + collect_step_penalty
+    t_left = prev_target.x
+    t_right = prev_target.x + prev_target.width
+    t_top = prev_target.y
+    t_bottom = prev_target.y + prev_target.height
 
-    # ==========================================
-    # 3. AVOID: "Potential Field" Shape
-    # Goal: Bouncing the agent away without farming.
-    # ==========================================
-    SAFE_DISTANCE = jnp.maximum(prev_player.width, prev_target.width) * 1.5 
-    
-    def phi(distance):
-        return jnp.where(
-            distance < SAFE_DISTANCE, 
-            -((SAFE_DISTANCE - distance) / SAFE_DISTANCE), 
-            0.0
-        )
-    
-    avoid_potential_reward = jnp.where(was_active, phi(d_next) - phi(d_prev), 0.0)
-    avoid_sparse = jnp.where(rammed, -1.0, 0.0)
-    
-    avoid_reward = avoid_potential_reward + avoid_sparse
+    horizontal_overlap = jnp.logical_and(p_left <= t_right, p_right >= t_left)
+    vertical_overlap = jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
+    near_player = jnp.logical_and(horizontal_overlap, vertical_overlap)
+
+    close_success = jnp.logical_and(success, near_player)
+
+    # [collect] +1 reward for actually collecting (player close when target disappears)
+    collect_reward = jnp.where(close_success, 1.0, 0.0)
+
+    # For destroy, require that the player missile is the cause:
+    # - target becomes inactive (success)
+    # - the player missile is active
+    # - missile bounding box overlaps the target bounding box
+    #
+    # In the native SeaquestObservation, `projectiles` contains:
+    # index 0 → player torpedo, indices 1–4 → enemy torpedoes.
+    def select_player_missile(obj_obs):
+        # Take projectile index 0 along the object axis.
+        return jax.tree_util.tree_map(lambda x: x[0] if x.ndim > 0 else x, obj_obs)
+
+    prev_player_missile = select_player_missile(prev_projectiles)
+
+    m_left = prev_player_missile.x
+    m_right = prev_player_missile.x + prev_player_missile.width
+    m_top = prev_player_missile.y
+    m_bottom = prev_player_missile.y + prev_player_missile.height
+
+    # Reuse target bounds from above
+    missile_horizontal_overlap = jnp.logical_and(m_left <= t_right, m_right >= t_left)
+    missile_vertical_overlap = jnp.logical_and(m_top <= t_bottom, m_bottom >= t_top)
+    missile_overlap = jnp.logical_and(missile_horizontal_overlap, missile_vertical_overlap)
+
+    missile_active = prev_player_missile.active == 1
+    destroy_success = jnp.logical_and(success, jnp.logical_and(missile_active, missile_overlap))
+
+    # [destroy] +1 reward for destroying via missile hit
+    destroy_reward = jnp.where(destroy_success, 1.0, 0.0)
+
+    # [avoid] base reward comes purely from being alive (handled in the trainer)
+    avoid_reward = jnp.zeros_like(destroy_reward)
 
     return jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
+
+
+# TODO: might be more fitting in the policy?
+BLOCK_SURFACE_ASCENT: bool = True
+SURFACE_Y_THRESHOLD: float = 50.0
 
 
 def seaquest_action_mapper(ego_action: jnp.ndarray, global_features: Any) -> jnp.ndarray:
@@ -167,10 +144,36 @@ def seaquest_action_mapper(ego_action: jnp.ndarray, global_features: Any) -> jnp
         Atari.DOWNRIGHTFIRE      # 17: BACKWARD_LEFT_FIRE
     ], dtype=jnp.int32)
 
-    # 4. Dynamically select the correct map
+    # 4. Dynamically select the correct map and propose an action
     chosen_map = jnp.where(is_facing_right, map_right, map_left)
-    
-    return chosen_map[ego_action]
+    proposed_action = chosen_map[ego_action]
+
+    # 5. Optional: block further ascent when close to the surface
+    if not BLOCK_SURFACE_ASCENT:
+        return proposed_action
+
+    # Player's vertical position on the most recent frame (smaller y = higher up)
+    player_y = global_features.player.y[-1]
+    near_surface = player_y <= SURFACE_Y_THRESHOLD
+
+    # Actions that move the player upward in screen space
+    up_like_actions = jnp.array(
+        [
+            Atari.UP,
+            Atari.UPFIRE,
+            Atari.UPRIGHT,
+            Atari.UPLEFT,
+            Atari.UPRIGHTFIRE,
+            Atari.UPLEFTFIRE,
+        ],
+        dtype=jnp.int32,
+    )
+    is_up_like = jnp.any(proposed_action == up_like_actions)
+
+    block_up = jnp.logical_and(near_surface, is_up_like)
+    safe_action = Atari.NOOP
+
+    return jnp.where(block_up, safe_action, proposed_action)
 
 class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
@@ -221,7 +224,7 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         pad_size = self.max_objects - all_x.shape[0]  # 34 - 33 = 1
 
         dummy_x = jnp.array([obs.player.x])  # Track player's X to go straight up!
-        dummy_y = jnp.array([20])             # Top of the playable water area
+        dummy_y = jnp.array([46])            # Top of the playable water area (clamped player min Y)
         dummy_w = jnp.array([10])
         dummy_h = jnp.array([10])
         dummy_active = jnp.array([1])         # Make it active so the skill pursues it

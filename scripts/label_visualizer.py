@@ -13,8 +13,16 @@ from jaxatari.wrappers import JaxatariWrapper, AtariState, AtariWrapper
 from jaxatari.environment import ObjectObservation
 from jaxatari import make as make_atari_env
 
-from concept_based_learning.environments.datatypes import LABEL_NOOP, LABEL_DESTROY, LABEL_COLLECT, LABEL_AVOID, LabeledObjectObservation
-from concept_based_learning.environments.seaquest.seaquest_label import SeaquestSemanticWrapper
+from src.concept_based_learning.environments.datatypes import (
+    LABEL_NOOP,
+    LABEL_DESTROY,
+    LABEL_COLLECT,
+    LABEL_AVOID,
+    LabeledObjectObservation,
+)
+from src.concept_based_learning.environments.seaquest.seaquest_label import (
+    SeaquestSemanticWrapper,
+)
 
 
 # ==============================================================================

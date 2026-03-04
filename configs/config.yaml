@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 # --- Weights & Biases Settings ---
-ENTITY: null                  # Set to your wandb username or team name if applicable
+ENTITY: "paul-seitz-tu-darmstadt"                  # Set to your wandb username or team name if applicable
 PROJECT: "concept_based_learning"
 WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during debugging
 

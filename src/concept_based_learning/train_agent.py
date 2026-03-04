@@ -18,10 +18,17 @@ import chex
 import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
+
 from concept_based_learning.egocentric_transformation import get_ego_obs
 from concept_based_learning.environments.datatypes import ConceptObservation
-from concept_based_learning.environments.seaquest.seaquest_policy import get_heuristic_target, NO_TARGET_IDX
-from src.concept_based_learning.environments.seaquest.seaquest_label import extract_all_skills_rewards, seaquest_action_mapper
+from concept_based_learning.environments.seaquest.seaquest_policy import (
+    get_heuristic_target,
+    NO_TARGET_IDX,
+)
+from concept_based_learning.environments.seaquest.seaquest_label import (
+    extract_all_skills_rewards,
+    seaquest_action_mapper,
+)
 
 
 class QNetwork(nn.Module):
@@ -167,20 +174,33 @@ def make_train(config, env, test_env, renderer=None):
         # ===============================================================
         # 1) AGENT INITIALIZATION
         # ===============================================================
-        def create_agent(rng_key, network, obs_len):
+        # Single optimizer definition shared across all skills and phases
+        tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.radam(learning_rate=lr),
+        )
+
+        def create_agent(rng_key, network, obs_len, init_params=None):
             """
             Create one `CustomTrainState` for a Q-network with input length `obs_len`.
+
+            If `init_params` is provided, reuse those weights (for curriculum phases)
+            instead of sampling new ones.
             """
-            init_x = jnp.zeros(obs_len)
-            network_variables = network.init(rng_key, init_x, train=False)
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.radam(learning_rate=lr),
-            )
+            if init_params is None:
+                init_x = jnp.zeros(obs_len)
+                network_variables = network.init(rng_key, init_x, train=False)
+                params_local = network_variables["params"]
+                batch_stats_local = network_variables.get("batch_stats", {})
+            else:
+                params_local = init_params
+                # We currently do not track normalization statistics; keep empty dict.
+                batch_stats_local = {}
+
             return CustomTrainState.create(
                 apply_fn=network.apply,
-                params=network_variables["params"],
-                batch_stats=network_variables.get("batch_stats", {}),
+                params=params_local,
+                batch_stats=batch_stats_local,
                 tx=tx,
             )
 
@@ -199,9 +219,16 @@ def make_train(config, env, test_env, renderer=None):
         )
         ego_feat_dim = int(probe_ego.shape[-1])
 
-        train_states = jax.vmap(create_agent, in_axes=(0, None, None))(
-            rng_keys, skill_network, ego_feat_dim
-        )
+        # `params` is expected to be a PyTree matching `train_states.params`
+        # with leading dimension NUM_SKILLS when resuming from a previous phase.
+        if params is None:
+            train_states = jax.vmap(create_agent, in_axes=(0, None, None, None))(
+                rng_keys, skill_network, ego_feat_dim, None
+            )
+        else:
+            train_states = jax.vmap(create_agent, in_axes=(0, None, None, 0))(
+                rng_keys, skill_network, ego_feat_dim, params
+            )
 
         # ===============================================================
         # 2) TRAINING LOOP BODY
@@ -213,7 +240,7 @@ def make_train(config, env, test_env, renderer=None):
             - Build Transition objects
             - Compute PQN-style lambda returns and perform SGD epochs
             """
-            train_states, expl_state, rng = runner_state
+            train_states, expl_state, running_returns, rng = runner_state
 
             # -----------------------------
             # 2.1 SAMPLE PHASE
@@ -225,13 +252,31 @@ def make_train(config, env, test_env, renderer=None):
                 Uses the **fixed** heuristic meta-policy to choose a target
                 object for each environment, then runs all skills on the
                 corresponding egocentric state.
-                """
-                last_obs, env_state, rng = carry
-                rng, rng_skill = jax.random.split(rng, 2)
 
-                # SYSTEM 2: Heuristic meta-policy over objects
+                Also tracks episode returns per environment so we can log
+                episodic returns to wandb.
+                """
+                (
+                    last_obs,
+                    env_state,
+                    running_returns,
+                    rng,
+                    completed_returns_sum,
+                    num_completed,
+                    last_targets,
+                ) = carry
+
+                # Split RNG for this step into: carry-forward, skills, and meta-policy
+                rng, rng_step = jax.random.split(rng)
+                rng_skill, rng_policy = jax.random.split(rng_step)
+
+                # SYSTEM 2: Heuristic meta-policy over objects (per env)
+                policy_rngs = jax.random.split(rng_policy, config["NUM_ENVS"])
                 target_obj_idxs = jax.vmap(get_heuristic_target)(
-                    last_obs.raw_observation, last_obs.objects
+                    last_obs.raw_observation,
+                    last_obs.objects,
+                    last_targets,
+                    policy_rngs,
                 )
                 # When no target (NO_TARGET_IDX), use index 0 for safe indexing; we force NOOP action below
                 safe_target_idxs = jnp.where(
@@ -300,16 +345,36 @@ def make_train(config, env, test_env, renderer=None):
 
                 # Map across the batch of environments
                 skill_rewards = jax.vmap(extract_all_skills_rewards)(
-                    last_obs.raw_observation.player,  # prev_player
-                    new_obs.raw_observation.player,   # next_player
-                    prev_targets,                     # prev_target 
-                    next_targets                      # next_target
+                    last_obs.raw_observation.player,        # prev_player
+                    new_obs.raw_observation.player,         # next_player
+                    prev_targets,                           # prev_target
+                    next_targets,                           # next_target
+                    last_obs.raw_observation.projectiles,   # prev_projectiles (player + enemy missiles)
+                    new_obs.raw_observation.projectiles,    # next_projectiles
                 )
+
+                # [avoid] +0.01 for being alive (i.e., no life lost this step)
+                alive_bonus = jnp.where(life_lost == 0, 0.01, 0.0)
+                skill_rewards = skill_rewards.at[:, 2].add(alive_bonus)
 
                 # Next-step ego obs for TD targets (per env)
                 next_ego_obses = jax.vmap(get_ego_obs)(
                     new_obs.raw_observation, new_obs.objects, safe_target_idxs
                 )
+
+                # --- Episode return tracking ---
+                # running_returns: accumulated return since last episode start, per env
+                episode_return = running_returns + raw_rewards
+                done_float = new_done.astype(jnp.float32)
+
+                # Accumulate completed episode returns and counts within this rollout
+                completed_returns_sum = completed_returns_sum + jnp.sum(
+                    episode_return * done_float
+                )
+                num_completed = num_completed + jnp.sum(done_float)
+
+                # Reset running return to 0 where episode finished, otherwise keep accumulating
+                running_returns = episode_return * (1.0 - done_float)
 
                 transition = Transition(
                     target_idx=target_obj_idxs,
@@ -323,15 +388,47 @@ def make_train(config, env, test_env, renderer=None):
                     env_reward=raw_rewards,
                 )
 
-                return (new_obs, new_env_state, rng), (transition, info)
+                return (
+                    new_obs,
+                    new_env_state,
+                    running_returns,
+                    rng,
+                    completed_returns_sum,
+                    num_completed,
+                    target_obj_idxs,
+                ), (transition, info)
 
             rng, _rng = jax.random.split(rng)
-            (*expl_state, rng), (transitions, infos) = jax.lax.scan(
+            init_completed_returns = jnp.array(0.0, dtype=jnp.float32)
+            init_num_completed = jnp.array(0.0, dtype=jnp.float32)
+            init_last_targets = jnp.full(
+                (config["NUM_ENVS"],),
+                NO_TARGET_IDX,
+                dtype=jnp.int32,
+            )
+            carry_final, (transitions, infos) = jax.lax.scan(
                 _step_env,
-                (*expl_state, _rng),
+                (
+                    *expl_state,
+                    running_returns,
+                    _rng,
+                    init_completed_returns,
+                    init_num_completed,
+                    init_last_targets,
+                ),
                 None,
                 config["NUM_STEPS"],
             )
+            (
+                last_obs,
+                env_state,
+                running_returns,
+                rng,
+                completed_returns_sum,
+                num_completed,
+                _last_targets,
+            ) = carry_final
+            expl_state = (last_obs, env_state)
 
             # ---------------------------------------------------------
             # 2.2 UPDATE PHASE (PQN & Off-Policy)
@@ -421,8 +518,11 @@ def make_train(config, env, test_env, renderer=None):
                                 axis=-1,
                             ).squeeze(axis=-1)
 
-                            # Do not learn from no-target (NOOP) steps; they use dummy object indexing
-                            valid = (minibatch.target_idx != NO_TARGET_IDX)
+                            # STRICT ON-POLICY MASK: Only learn if there is a target AND this skill was driving
+                            valid = jnp.logical_and(
+                                minibatch.target_idx != NO_TARGET_IDX,
+                                minibatch.active_skill == skill_idx
+                            )
                             sq_err = jnp.square(chosen_action_qvals - target)
                             loss = (sq_err * valid).sum() / (valid.sum() + 1e-8)
                             return loss, (updates, chosen_action_qvals)
@@ -494,13 +594,22 @@ def make_train(config, env, test_env, renderer=None):
             # Environment reward (mean raw game reward over rollout)
             metrics["env/reward_mean"] = jnp.mean(transitions.env_reward)
 
-            # If env info dict provides episode statistics (e.g. returns), log their means as well
+            # If env info dict provides additional statistics, log their means as well
             try:
                 info_metrics = {f"info/{k}": jnp.mean(v) for k, v in infos.items()}
                 metrics.update(info_metrics)
             except AttributeError:
                 # infos is not a mapping; ignore
                 pass
+
+            # Episodic return: mean completed episode return over this rollout.
+            # This uses the per-env running returns tracked across updates,
+            # so episodes that span multiple rollouts are handled correctly.
+            mean_episodic_return = completed_returns_sum / jnp.maximum(
+                1.0, num_completed
+            )
+            metrics["returned_episode_returns"] = mean_episodic_return
+            metrics["env/episodic_return"] = mean_episodic_return
 
             # Global counters
             metrics["update_steps"] = train_states.n_updates[0]
@@ -528,13 +637,14 @@ def make_train(config, env, test_env, renderer=None):
 
                 jax.debug.callback(_wandb_log_cb, metrics)
 
-            runner_state = (train_states, tuple(expl_state), rng)
+            runner_state = (train_states, tuple(expl_state), running_returns, rng)
             return runner_state, metrics
 
         # Initial reset
         rng, _rng = jax.random.split(rng)
         expl_state = vmap_reset(config["NUM_ENVS"])(_rng)
-        runner_state = (train_states, expl_state, _rng)
+        running_returns = jnp.zeros(config["NUM_ENVS"], dtype=jnp.float32)
+        runner_state = (train_states, expl_state, running_returns, _rng)
 
         # Unroll NUM_UPDATES update steps
         runner_state, metrics = jax.lax.scan(
@@ -549,7 +659,7 @@ def make_train(config, env, test_env, renderer=None):
         runner_state may be batched by NUM_SEEDS; we use the first seed.
         """
         max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
-        train_states, _expl_state, rng = runner_state
+        train_states, _expl_state, _running_returns, rng = runner_state
 
         # Use first seed if batched
         def _first(x):
@@ -575,9 +685,20 @@ def make_train(config, env, test_env, renderer=None):
         obj_h_list = []
         obj_active_list = []
 
+        # Persistent target and RNG state for the heuristic meta-policy
+        rng, rng_policy = jax.random.split(rng)
+        prev_target_idx = NO_TARGET_IDX
+
         for _ in range(max_frames):
-            target_obj_idxs = get_heuristic_target(obs.raw_observation, obs.objects)
+            rng, step_key = jax.random.split(rng)
+            target_obj_idxs = get_heuristic_target(
+                obs.raw_observation,
+                obs.objects,
+                prev_target_idx,
+                step_key,
+            )
             target_obj_idxs = int(jnp.ravel(target_obj_idxs)[0])
+            prev_target_idx = target_obj_idxs
 
             if target_obj_idxs == NO_TARGET_IDX:
                 # No object on screen → NOOP

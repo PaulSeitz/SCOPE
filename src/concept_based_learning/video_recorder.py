@@ -78,7 +78,8 @@ class SidebarRenderer:
 
 
 def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False,
-                   target_obj_idxs=None, objects_bbox=None):
+                   target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
+                   wandb_step: int | None = None, distances=None, angles=None):
     global CURRENT_VIDEO_THREAD
 
     if renderer is None:
@@ -95,7 +96,14 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
     CURRENT_VIDEO_THREAD = threading.Thread(
         target=collect_video,
         args=(states, active_agents, combined_qs, dones, step, renderer, modif),
-        kwargs={"target_obj_idxs": target_obj_idxs, "objects_bbox": objects_bbox},
+        kwargs={
+            "target_obj_idxs": target_obj_idxs,
+            "objects_bbox": objects_bbox,
+            "video_key": video_key,
+            "wandb_step": wandb_step,
+            "distances": distances,
+            "angles": angles,
+        },
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
     CURRENT_VIDEO_THREAD.start()
@@ -136,8 +144,38 @@ def draw_target_outline(frame, target_idx, obj_x, obj_y, obj_w, obj_h, active):
     return out
 
 
+def add_distance_angle_text(frame, distance, angle):
+    """
+    Overlay the current skill input (distance, angle) at the bottom-center of the frame.
+    frame: (3, H, W) numpy uint8 RGB
+    distance: float (pixels)
+    angle: float (radians)
+    """
+    if distance is None or np.isnan(distance):
+        return frame
+
+    pygame.init()
+    pygame.font.init()
+
+    _, H, W = frame.shape
+    surf = pygame.surfarray.make_surface(frame.transpose(2, 1, 0))
+
+    # Slightly smaller font so it stays within the frame borders.
+    font = pygame.font.Font(None, 20)
+    text = f"skill: d={distance:.1f}, a={angle:.2f}"
+    text_surface = font.render(text, True, (255, 255, 255))
+
+    x = (W - text_surface.get_width()) // 2
+    y = H - text_surface.get_height() - 10
+    surf.blit(text_surface, (x, y))
+
+    out = np.transpose(pygame.surfarray.array3d(surf), (2, 1, 0))
+    return out
+
+
 def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,
-                  target_obj_idxs=None, objects_bbox=None):
+                  target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
+                  wandb_step: int | None = None, distances=None, angles=None):
     try:
         if wandb.run is None:
             return
@@ -201,6 +239,14 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
                     ox[i], oy[i], ow[i], oh[i], oactive[i],
                 )
 
+        # [Optional: Skill input overlay] Show distance and angle at bottom-center
+        if distances is not None and angles is not None:
+            for i in range(len(frames)):
+                # distances/angles expected as 1D arrays of length T
+                d = float(distances[i])
+                a = float(angles[i])
+                frames[i] = add_distance_angle_text(frames[i], d, a)
+
         # [Optional: Sidebar Logic] Skill names + Q-values
         if active_agents is not None and combined_qs is not None:
             sidebar_renderer = SidebarRenderer(frames[0].shape)
@@ -214,12 +260,12 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
                 new_frames[i] = sidebar_renderer.render(frames[i], texts, active_agents[i])
             frames = new_frames
 
-        name = f"video_{step}_modif" if modif else f"video_{step}"
+        name = video_key or (f"video_{step}_modif" if modif else f"video_{step}")
         try:
-            wandb.log(
-                {name: wandb.Video(frames, fps=30, format="mp4")},
-                step=wandb.run.step,
-            )
+            log_kwargs = {}
+            if wandb_step is not None:
+                log_kwargs["step"] = int(wandb_step)
+            wandb.log({name: wandb.Video(frames, fps=30, format="mp4")}, **log_kwargs)
         except Exception as e:
             print(f"Warning: Failed to log video: {e}")
         print("Video done.")
