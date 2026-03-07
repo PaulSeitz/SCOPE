@@ -6,7 +6,16 @@ from typing import Any
 from jaxatari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
-from concept_based_learning.environments.datatypes import LabeledObjectObservation, LABEL_DESTROY, LABEL_COLLECT, LABEL_AVOID, LABEL_NOOP
+from concept_based_learning.environments.datatypes import (
+    LabeledObjectObservation,
+    LABEL_DESTROY,
+    LABEL_COLLECT,
+    LABEL_AVOID,
+    LABEL_NOOP,
+)
+from concept_based_learning.environments.seaquest.seaquest_policy import (
+    SURFACE_DUMMY_IDX,
+)
 
 # TODO: we can probably rewrite this to just check if enemies / divers went off screen and if yes not award any reward
 def extract_all_skills_rewards(prev_player, next_player, prev_target, next_target, prev_projectiles, next_projectiles):
@@ -88,7 +97,11 @@ BLOCK_SURFACE_ASCENT: bool = True
 SURFACE_Y_THRESHOLD: float = 50.0
 
 
-def seaquest_action_mapper(ego_action: jnp.ndarray, global_features: Any) -> jnp.ndarray:
+def seaquest_action_mapper(
+    ego_action: jnp.ndarray,
+    global_features: Any,
+    target_idx: jnp.ndarray,
+) -> jnp.ndarray:
     """
     Translates the full 18-space Egocentric Action to Seaquest Atari Actions.
     global_features: The unflattened SeaquestObservation PyTree stack.
@@ -170,7 +183,11 @@ def seaquest_action_mapper(ego_action: jnp.ndarray, global_features: Any) -> jnp
     )
     is_up_like = jnp.any(proposed_action == up_like_actions)
 
-    block_up = jnp.logical_and(near_surface, is_up_like)
+    # Allow surfacing (going above the threshold) only when the current
+    # target is the generic surface-waypoint COLLECT object.
+    surfacing_target = target_idx == SURFACE_DUMMY_IDX
+
+    block_up = jnp.logical_and(near_surface, jnp.logical_and(is_up_like, jnp.logical_not(surfacing_target)))
     safe_action = Atari.NOOP
 
     return jnp.where(block_up, safe_action, proposed_action)

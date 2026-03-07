@@ -6,7 +6,7 @@ from concept_based_learning.environments.datatypes import LabeledObjectObservati
 
 def get_ego_obs(raw_observation, objects, target_idx):
     """
-    Computes [distance, angle, sin(ori), cos(ori)] for ALL frames in the stack.
+    Computes [dx_ego, dy_ego, sin(ori), cos(ori)] for ALL frames in the stack.
     Universally compatible with both 360-degree top-down games and 2D side-scrollers.
     """
     def get_single_frame_ego(p_x, p_y, p_w, p_h, p_ori, t_x, t_y, t_w, t_h):
@@ -25,24 +25,27 @@ def get_ego_obs(raw_observation, objects, target_idx):
         
         # 2. Shift to Jaxatari's system (where Up is 0, Right is pi/2)
         jaxatari_absolute_angle = cartesian_angle + (jnp.pi / 2.0)
-        
         p_ori_rad = p_ori * (jnp.pi / 180.0)
         
         # 3. Calculate relative angle safely
         relative_angle = jaxatari_absolute_angle - p_ori_rad
         relative_angle = jnp.arctan2(jnp.sin(relative_angle), jnp.cos(relative_angle))
         
-        # Output 4 features so the network knows its absolute facing
-        ori_sin = jnp.sin(p_ori_rad)
-        ori_cos = jnp.cos(p_ori_rad)
-
+        # 4. Convert to Egocentric Cartesian Coordinates
+        # relative_angle = 0 is straight ahead, so cos() gives forward/backward axis
+        # sin() gives the lateral (left/right or up/down relative to facing) axis
+        dx_ego = distance * jnp.cos(relative_angle)
+        dy_ego = distance * jnp.sin(relative_angle)
+        
+        # Output 4 features, normalizing by rough screen dimensions
         return jnp.array([
-            distance / 264.0, 
-            relative_angle / jnp.pi,
-            ori_sin,
-            ori_cos
+            dx_ego / 160.0, 
+            dy_ego / 210.0,
+            jnp.sin(p_ori_rad),
+            jnp.cos(p_ori_rad)
         ], dtype=jnp.float32)
 
+    
     # [The rest of the slice and vmap code remains exactly the same]
     t_x_history = objects.x[:, target_idx]
     t_y_history = objects.y[:, target_idx]

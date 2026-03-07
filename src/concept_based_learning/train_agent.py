@@ -318,7 +318,9 @@ def make_train(config, env, test_env, renderer=None):
                 )
 
                 global_actions = jax.vmap(seaquest_action_mapper)(
-                    chosen_ego_actions, last_obs.raw_observation
+                    chosen_ego_actions,
+                    last_obs.raw_observation,
+                    target_obj_idxs,
                 )
                 global_actions = jnp.where(
                     target_obj_idxs == NO_TARGET_IDX, 0, global_actions
@@ -431,7 +433,7 @@ def make_train(config, env, test_env, renderer=None):
             expl_state = (last_obs, env_state)
 
             # ---------------------------------------------------------
-            # 2.2 UPDATE PHASE (PQN & Off-Policy)
+            # 2.2 UPDATE PHASE (PQN & Off-Policy / On-Policy)
             # ---------------------------------------------------------
             def _update_skill(train_state, skill_idx, rng):
                 """
@@ -439,8 +441,9 @@ def make_train(config, env, test_env, renderer=None):
 
                 - Builds λ-returns using the skill-specific rewards.
                 - Reuses data for multiple SGD epochs over shuffled minibatches.
-                - OFF-POLICY: the action used is the one chosen by the **active** skill,
-                  but all skills share that action for their updates.
+                - Action indices are taken from the skill that was active during data collection.
+                  Whether all skills learn from all transitions (off-policy) or only from their own
+                  active transitions (on-policy) is controlled by `config["OFF_POLICY"]`.
                 """
                 # Update total timesteps counter
                 train_state = train_state.replace(
@@ -507,22 +510,26 @@ def make_train(config, env, test_env, renderer=None):
                         def _loss_fn(params):
                             q_vals, updates = skill_network.apply(
                                 {"params": params, "batch_stats": train_state.batch_stats},
-                                minibatch.ego_obs,
+                                minibatch["ego_obs"],
                                 train=True,
                                 mutable=["batch_stats"],
                             )
-                            # OFF-POLICY: all skills use the same `ego_action` indices.
                             chosen_action_qvals = jnp.take_along_axis(
                                 q_vals,
-                                jnp.expand_dims(minibatch.ego_action, axis=-1),
+                                jnp.expand_dims(minibatch["ego_action"], axis=-1),
                                 axis=-1,
                             ).squeeze(axis=-1)
 
-                            # STRICT ON-POLICY MASK: Only learn if there is a target AND this skill was driving
-                            valid = jnp.logical_and(
-                                minibatch.target_idx != NO_TARGET_IDX,
-                                minibatch.active_skill == skill_idx
-                            )
+                            # OFF_POLICY=True  → all skills learn from all transitions where a target exists
+                            # OFF_POLICY=False → strictly on-policy: only the skill that was active learns
+                            if config.get("OFF_POLICY", True):
+                                valid = minibatch["target_idx"] != NO_TARGET_IDX
+                            else:
+                                valid = jnp.logical_and(
+                                    minibatch["target_idx"] != NO_TARGET_IDX,
+                                    minibatch["active_skill"] == skill_idx,
+                                )
+
                             sq_err = jnp.square(chosen_action_qvals - target)
                             loss = (sq_err * valid).sum() / (valid.sum() + 1e-8)
                             return loss, (updates, chosen_action_qvals)
@@ -541,18 +548,39 @@ def make_train(config, env, test_env, renderer=None):
                     def preprocess_transition(x, rng):
                         """
                         Turn [num_steps, num_envs, ...] into:
-                        - Flattened batch of size num_steps*num_envs
+                        - Flattened batch of size num_steps * num_envs
                         - Shuffled
                         - Reshaped into [NUM_MINIBATCHES, batch_size_per_minibatch, ...]
+
+                        We always treat the first two axes as [num_steps, num_envs]
+                        and flatten them together so that envs are also shuffled.
                         """
-                        x = x.reshape(-1, *x.shape[2:])
+                        num_steps, num_envs = x.shape[:2]
+                        rest_shape = x.shape[2:]
+
+                        # [num_steps, num_envs, ...] -> [num_steps * num_envs, ...]
+                        x = x.reshape(num_steps * num_envs, *rest_shape)
                         x = jax.random.permutation(rng, x)
-                        x = x.reshape(config["NUM_MINIBATCHES"], -1, *x.shape[1:])
+
+                        # Now split into minibatches of equal size
+                        total_batch = num_steps * num_envs
+                        assert total_batch % config["NUM_MINIBATCHES"] == 0, (
+                            f"total_batch={total_batch} must be divisible by "
+                            f"NUM_MINIBATCHES={config['NUM_MINIBATCHES']}"
+                        )
+                        x = x.reshape(config["NUM_MINIBATCHES"], -1, *rest_shape)
                         return x
 
                     rng, _rng = jax.random.split(rng)
+                    # Only fields with leading axes [num_steps, num_envs, ...] are needed for SGD.
+                    train_batch = {
+                        "target_idx": transitions.target_idx,
+                        "ego_obs": transitions.ego_obs,
+                        "ego_action": transitions.ego_action,
+                        "active_skill": transitions.active_skill,
+                    }
                     minibatches = jax.tree.map(
-                        lambda x: preprocess_transition(x, _rng), transitions
+                        lambda x: preprocess_transition(x, _rng), train_batch
                     )
                     targets_batch = preprocess_transition(lambda_targets, _rng)
 
@@ -652,24 +680,25 @@ def make_train(config, env, test_env, renderer=None):
         )
         return {"runner_state": runner_state, "metrics": metrics}
 
-    def eval_rollout(runner_state, step_number, max_frames=None):
+    def eval_rollout(runner_state, eval_rng, step_number, max_frames=None):
         """
         Run one evaluation episode on test_env with the current policy (greedy),
         collect (states, active_agents, combined_qs, dones) for video recording.
         runner_state may be batched by NUM_SEEDS; we use the first seed.
         """
         max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
-        train_states, _expl_state, _running_returns, rng = runner_state
+        train_states, _expl_state, _running_returns, _train_rng = runner_state
 
-        # Use first seed if batched
+        # Use first seed's parameters if batched; evaluation RNG is
+        # provided separately via `eval_rng` so that eval randomness is
+        # decoupled from the training RNG stream.
         def _first(x):
             if hasattr(x, "ndim") and x.ndim > 0:
                 return x[0]
             return x
 
         train_states = jax.tree_util.tree_map(_first, train_states)
-        rng = _first(rng)
-        rng = jax.random.fold_in(rng, 0)
+        rng = jax.random.fold_in(eval_rng, 0)
 
         rng, rng_reset = jax.random.split(rng)
         obs, state = test_env.reset(rng_reset)
@@ -725,7 +754,9 @@ def make_train(config, env, test_env, renderer=None):
                 combined_q = np.array(jnp.max(q_vals, axis=-1))
                 chosen_ego = jnp.argmax(q_vals[active_skills])
                 global_action = seaquest_action_mapper(
-                    chosen_ego, obs.raw_observation
+                    chosen_ego,
+                    obs.raw_observation,
+                    target_obj_idxs,
                 )
                 active_skills = int(active_skills)
 

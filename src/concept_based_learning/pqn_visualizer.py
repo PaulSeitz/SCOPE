@@ -239,7 +239,13 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
 
             combined_q = np.array(jnp.max(q_vals, axis=-1))
             chosen_ego = int(jnp.argmax(q_vals[active_skill_idx]))
-            global_action = int(seaquest_action_mapper(chosen_ego, obs.raw_observation))
+            global_action = int(
+                seaquest_action_mapper(
+                    chosen_ego,
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                )
+            )
 
         # Step the environment
         obs, state, _reward, done, _info = env.step(state, global_action)
@@ -410,7 +416,13 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
             q_vals = jnp.squeeze(q_vals, axis=1)
 
             chosen_ego = int(jnp.argmax(q_vals[active_skill_idx]))
-            global_action = int(seaquest_action_mapper(chosen_ego, obs.raw_observation))
+            global_action = int(
+                seaquest_action_mapper(
+                    chosen_ego,
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                )
+            )
 
         # Step env
         obs, state, _reward, done, _info = env.step(state, global_action)
@@ -500,12 +512,13 @@ def main():
         "--modpack",
         type=str,
         choices=["base", "collect", "destroy", "avoid"],
-        default="destroy",
+        default="base",
         help="Which Seaquest modpack to use: one of 'base', 'collect', 'destroy', or 'avoid'.",
     )
     parser.add_argument(
         "--live",
         action="store_true",
+        default=True,
         help="Run a live interactive visualization instead of logging a video.",
     )
     args = parser.parse_args()

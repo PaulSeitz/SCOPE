@@ -30,13 +30,18 @@ def outer_make_train(config):
 
     sticky_actions = config.get("STICKY_ACTIONS", False)
     episodic_life = config.get("EPISODIC_LIFE", False)
-    game_mods = config.get("GAME_MODS", None)
+    # Training vs eval environment modifications can differ. By default,
+    # eval inherits the training `GAME_MODS` if no explicit
+    # `EVAL_GAME_MODS` are provided.
+    train_game_mods = config.get("GAME_MODS", None)
+    eval_game_mods = config.get("EVAL_GAME_MODS", train_game_mods)
 
     def create_env(train: bool = False):
         # 1. Base Environment
-        if game_mods:
+        mods = train_game_mods if train else eval_game_mods
+        if mods:
             # Mods are configured as a list in Hydra; JaxAtari expects a set.
-            env = make_atari_env('seaquest', mods=set(game_mods))
+            env = make_atari_env('seaquest', mods=set(mods))
         else:
             env = make_atari_env('seaquest')
         
@@ -84,6 +89,7 @@ def single_run(config):
         )
 
     rng = jax.random.PRNGKey(base_config["SEED"])
+    eval_seed = base_config.get("EVAL_SEED", base_config["SEED"] + 1)
     num_seeds = base_config.get("NUM_SEEDS", 1)
 
     # --------------------------------------------------------------
@@ -159,8 +165,12 @@ def single_run(config):
             if phase_config.get("WANDB_MODE", "disabled") != "disabled" and wandb.run is not None:
                 print(f"Recording end-of-phase video for '{phase_name}'...")
                 step = phase_config.get("NUM_UPDATES", 0)
+                eval_rng = jax.random.PRNGKey(eval_seed)
                 states, active_agents, combined_qs, dones, target_obj_idxs, objects_bbox = eval_rollout_fn(
-                    runner_state, step, phase_config.get("VIDEO_MAX_FRAMES", 2000)
+                    runner_state,
+                    eval_rng,
+                    step,
+                    phase_config.get("VIDEO_MAX_FRAMES", 2000),
                 )
                 video_key = f"video/{phase_idx + 1:02d}_{phase_name}"
                 video_callback(

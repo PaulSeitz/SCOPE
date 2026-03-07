@@ -12,6 +12,7 @@ WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during 
 # --- Global Run Settings ---
 SEED: 42
 NUM_SEEDS: 1                  # Number of concurrent seeds to run via vmap
+EVAL_SEED: 43                 # Separate RNG seed used for evaluation rollouts
 SAVE_PATH: "./outputs/models" # Where to save trained parameters
 LOAD_PATH: null               # Set to path if you want to load a checkpoint
 LOAD_PARAMS: False            # Toggle to True when resuming or evaluating
