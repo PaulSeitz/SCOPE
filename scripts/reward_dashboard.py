@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Interactive Reward Dashboard for Seaquest
-Displays the game with real-time reward information while playing.
+Interactive Reward Dashboard for Atari environments with semantic wrappers.
+
+By default this is wired to Seaquest via EnvManager, but you can also import
+this module and construct a `RewardDashboard` manually by passing your own
+environment, renderer, and env-specific hooks.
 """
 import sys
 from dataclasses import dataclass
@@ -11,27 +14,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pygame
-from jaxatari import make as make_atari_env
-from jaxatari.environment import ObjectObservation
-from jaxatari.games.jax_seaquest import SeaquestRenderer
-from jaxatari.wrappers import AtariWrapper
 
-from concept_based_learning.config import get_default_config
-
-from concept_based_learning.environments.seaquest.seaquest_label import (
-    SeaquestSemanticWrapper,
-    extract_all_skills_rewards,
-)
 from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
     LABEL_DESTROY,
     LABEL_COLLECT,
     LABEL_AVOID,
 )
-from concept_based_learning.environments.seaquest.seaquest_policy import (
-    get_heuristic_target,
-    NO_TARGET_IDX,
-)
+from concept_based_learning.environments.env_manager import EnvManager
 
 # Color constants
 BLACK = (0, 0, 0)
@@ -56,16 +46,42 @@ LABEL_NAMES = {
     LABEL_AVOID: "Avoid",
 }
 
-# Object type names (Player Missile removed from object list)
+# Object type names for display.
+# For non-Seaquest environments this will gracefully fall back to "Obj <idx>".
 OBJECT_NAMES = [
-    "Shark 1", "Shark 2", "Shark 3", "Shark 4", "Shark 5", "Shark 6",  # 0-5
-    "Shark 7", "Shark 8", "Shark 9", "Shark 10", "Shark 11", "Shark 12",  # 6-11
-    "Sub 1", "Sub 2", "Sub 3", "Sub 4", "Sub 5", "Sub 6",  # 12-17
-    "Sub 7", "Sub 8", "Sub 9", "Sub 10", "Sub 11", "Sub 12",  # 18-23
-    "Diver 1", "Diver 2", "Diver 3", "Diver 4",  # 24-27
-    "Enemy Missile 1", "Enemy Missile 2", "Enemy Missile 3", "Enemy Missile 4",  # 28-31
-    "Surface Sub",  # 32
-    # Player Missile removed - handled via capabilities (can_fire)
+    "Obj 0",
+    "Obj 1",
+    "Obj 2",
+    "Obj 3",
+    "Obj 4",
+    "Obj 5",
+    "Obj 6",
+    "Obj 7",
+    "Obj 8",
+    "Obj 9",
+    "Obj 10",
+    "Obj 11",
+    "Obj 12",
+    "Obj 13",
+    "Obj 14",
+    "Obj 15",
+    "Obj 16",
+    "Obj 17",
+    "Obj 18",
+    "Obj 19",
+    "Obj 20",
+    "Obj 21",
+    "Obj 22",
+    "Obj 23",
+    "Obj 24",
+    "Obj 25",
+    "Obj 26",
+    "Obj 27",
+    "Obj 28",
+    "Obj 29",
+    "Obj 30",
+    "Obj 31",
+    "Obj 32",
 ]
 
 @dataclass
@@ -98,18 +114,33 @@ ACTION_DOWNLEFTFIRE = 17
 
 
 class RewardDashboard:
-    def __init__(self, env, screen_width=800, screen_height=600, config=None):
+    def __init__(
+        self,
+        env,
+        renderer,
+        *,
+        env_name: str,
+        get_heuristic_target,
+        no_target_idx,
+        reward_extractor,
+        screen_width=800,
+        screen_height=600,
+    ):
         self.env = env
-        self.config = config if config is not None else get_default_config()
-        
+        self.renderer = renderer
+        self.env_name = env_name
+        self.get_heuristic_target = get_heuristic_target
+        self.no_target_idx = no_target_idx
+        self.reward_extractor = reward_extractor
+
         # Initialize pygame
         pygame.init()
         self.screen = pygame.display.set_mode((screen_width, screen_height))
-        pygame.display.set_caption("Seaquest Reward Dashboard")
+        pygame.display.set_caption(f"{self.env_name.title()} Reward Dashboard")
         self.font = pygame.font.Font(None, 20)
         self.small_font = pygame.font.Font(None, 16)
         self.bold_font = pygame.font.Font(None, 24)
-        
+
         # Game state
         self.obs = None
         self.state = None
@@ -120,41 +151,31 @@ class RewardDashboard:
         self.total_global_reward = 0.0
         self.rng_key = jax.random.key(42)
         self.last_object_events = None  # Boolean mask of objects that produced reward last step
-        self.prev_target_idx = NO_TARGET_IDX
-        self.current_target_idx = NO_TARGET_IDX
+        self.prev_target_idx = self.no_target_idx
+        self.current_target_idx = self.no_target_idx
 
-        # Cache reward configuration (matches training + visualization helpers)
-        self.reward_scale = float(self.config.reward.reward_scale)
-        self.bonus_success = float(self.config.reward.bonus_success)
-        self.penalty_failure = float(self.config.reward.penalty_failure)
-        self.aim_bonus_scale = float(self.config.reward.aim_bonus_scale)
-        self.global_score_scale = float(self.config.reward.global_score_scale)
-        
         # Freeze/step controls
         self.frozen = False
         self.step_mode = False
         self.target_fps = 30
         self.actual_fps = 0.0
         self.fps_history = []
-        
+
         # Reward history buffer (to show rewards for objects that just disappeared)
         self.reward_history = []  # List of (step_count, obj_idx, label_name, reward_val, event_triggered)
         self.history_duration = 120  # Show rewards for 5 steps after event
-        
+
         # Display settings
         self.game_scale = 2  # Scale factor for game rendering
         self.game_width = 160 * self.game_scale
         self.game_height = 210 * self.game_scale
         self.panel_width = screen_width - self.game_width - 20
         self.panel_start_x = self.game_width + 20
-        
+
         # Column layout for horizontal display
         self.num_columns = 3
         self.column_width = self.panel_width // self.num_columns
         self.column_spacing = 10
-        
-        # Renderer for the underlying Seaquest game state
-        self.renderer = SeaquestRenderer()
         
     def reset(self):
         """Reset the environment"""
@@ -167,64 +188,82 @@ class RewardDashboard:
         self.total_global_reward = 0.0
         self.reward_history = []  # Clear history on reset
         self.last_object_events = None
-        self.prev_target_idx = NO_TARGET_IDX
-        self.current_target_idx = NO_TARGET_IDX
+        self.prev_target_idx = self.no_target_idx
+        self.current_target_idx = self.no_target_idx
         
     def step(self, action):
         """Step the environment and compute rewards"""
         self.prev_obs = self.obs
         self.prev_state = self.state
         self.obs, self.state, reward, done, info = self.env.step(self.state, action)
-        
+
         # Compute rewards if we have previous state
         if self.prev_obs is not None:
-            # Compute per-object concept rewards using the new semantic wrapper.
-            # We mirror the skill reward computation used in the new trainer
-            # (see `extract_all_skills_rewards` in `seaquest_label.py`).
+            # First, ask the environment-specific heuristic which object is the target.
+            try:
+                self.rng_key, key_policy = jax.random.split(self.rng_key)
+                prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
+                target_idx = self.get_heuristic_target(
+                    self.obs.raw_observation,
+                    self.obs.objects,
+                    prev_idx,
+                    key_policy,
+                )
+                target_idx_int = int(jnp.ravel(target_idx)[0])
+            except Exception:
+                target_idx_int = self.no_target_idx
+
+            self.prev_target_idx = target_idx_int
+            self.current_target_idx = target_idx_int
+
+            # Compute concept rewards only for the currently selected target.
             objects = self.obs.objects
             prev_objects = self.prev_obs.objects
+
             # objects.x has shape [stack_size, max_objects]
             num_objects = int(objects.x.shape[1])
             concept_rewards = np.zeros((3, num_objects), dtype=np.float32)
-            
-            def slice_target(obj_obs, obj_idx: int) -> ObjectObservation:
-                """
-                Extract one object's trajectory across the frame stack.
 
-                We intentionally only keep the fields used by `extract_all_skills_rewards`
-                (x/y/width/height/active). Other ObjectObservation fields are filled with zeros
-                to avoid shape pitfalls from default-valued leaves in the semantic wrapper.
+            def slice_target(obj_obs, obj_idx: int):
                 """
-                x = obj_obs.x[:, obj_idx]
-                y = obj_obs.y[:, obj_idx]
-                w = obj_obs.width[:, obj_idx]
-                h = obj_obs.height[:, obj_idx]
-                a = obj_obs.active[:, obj_idx]
-                zeros = jnp.zeros_like(x)
-                return ObjectObservation(
-                    x=x,
-                    y=y,
-                    width=w,
-                    height=h,
-                    active=a,
-                    visual_id=zeros,
-                    state=zeros,
-                    orientation=zeros,
-                )
-            
-            for obj_idx in range(num_objects):
-                prev_target = slice_target(prev_objects, obj_idx)
-                next_target = slice_target(objects, obj_idx)
-                # Compute DESTROY / COLLECT / AVOID rewards for this object
-                rewards_vec = extract_all_skills_rewards(
-                    self.prev_obs.raw_observation.player,
-                    self.obs.raw_observation.player,
+                Extract one object's trajectory across the frame stack as a PyTree
+                matching the semantic wrapper's object structure.
+
+                Handles both stacked arrays (shape [T, N]) and per-frame arrays
+                (shape [N]), while leaving scalars / non-array leaves untouched.
+                """
+
+                def _slice_leaf(x):
+                    # Non-array leaves (e.g., ints) are returned unchanged.
+                    if not hasattr(x, "ndim"):
+                        return x
+                    # Scalars have no object axis.
+                    if x.ndim == 0:
+                        return x
+                    # Per-frame object arrays: [N] -> scalar for this object.
+                    if x.ndim == 1:
+                        if 0 <= obj_idx < x.shape[0]:
+                            return x[obj_idx]
+                        return x
+                    # Stacked arrays: [T, N] (or [..., N]) -> slice along last axis.
+                    if 0 <= obj_idx < x.shape[-1]:
+                        return x[..., obj_idx]
+                    return x
+
+                return jax.tree_util.tree_map(_slice_leaf, obj_obs)
+
+            if 0 <= target_idx_int < num_objects:
+                prev_target = slice_target(prev_objects, target_idx_int)
+                next_target = slice_target(objects, target_idx_int)
+                rewards_vec = self.reward_extractor(
+                    self.prev_obs.raw_observation,
+                    self.obs.raw_observation,
                     prev_target,
                     next_target,
-                    self.prev_obs.raw_observation.projectiles,
-                    self.obs.raw_observation.projectiles,
                 )
-                concept_rewards[:, obj_idx] = np.asarray(jax.device_get(rewards_vec))
+                concept_rewards[:, target_idx_int] = np.asarray(
+                    jax.device_get(rewards_vec)
+                )
             
             # Global reward: use the raw environment reward (game score delta)
             self.multi_reward = MultiReward(
@@ -272,23 +311,6 @@ class RewardDashboard:
                             'event': True
                         })
 
-            # Update heuristic target index "from the agent perspective"
-            try:
-                self.rng_key, key_policy = jax.random.split(self.rng_key)
-                prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
-                target_idx = get_heuristic_target(
-                    self.obs.raw_observation,
-                    self.obs.objects,
-                    prev_idx,
-                    key_policy,
-                )
-                target_idx_int = int(jnp.ravel(target_idx)[0])
-            except Exception:
-                target_idx_int = NO_TARGET_IDX
-
-            self.prev_target_idx = target_idx_int
-            self.current_target_idx = target_idx_int
-        
         # Clean up old history entries
         self.reward_history = [
             h for h in self.reward_history 
@@ -368,16 +390,33 @@ class RewardDashboard:
         
         # Show game state info
         if self.obs is not None:
-            info_lines = [
-                "Seaquest Game",
-                "",
-                f"Oxygen: {float(self.obs.raw_observation.oxygen_level[-1]) * 64:.0f}/64",
-                f"Divers: {float(self.obs.raw_observation.collected_divers[-1]):.0f}/6",
-                f"Lives: {int(self.state.atari_state.env_state.lives) if self.state is not None else 0}",
-                "",
-                "Rendering not available",
-                "Check game state in panel"
-            ]
+            info_lines = [f"{self.env_name.title()} Game", ""]
+
+            raw = getattr(self.obs, "raw_observation", None)
+            if raw is not None:
+                if hasattr(raw, "oxygen_level"):
+                    info_lines.append(
+                        f"Oxygen: {float(raw.oxygen_level[-1]) * 64:.0f}/64"
+                    )
+                if hasattr(raw, "collected_divers"):
+                    info_lines.append(
+                        f"Divers: {float(raw.collected_divers[-1]):.0f}/6"
+                    )
+
+            if self.state is not None and hasattr(self.state, "atari_state"):
+                try:
+                    lives = int(self.state.atari_state.env_state.lives)
+                    info_lines.append(f"Lives: {lives}")
+                except Exception:
+                    pass
+
+            info_lines.extend(
+                [
+                    "",
+                    "Rendering not available",
+                    "Check game state in panel",
+                ]
+            )
             y_offset = 20
             for line in info_lines:
                 text = self.small_font.render(line, True, WHITE)
@@ -392,7 +431,7 @@ class RewardDashboard:
         if (
             self.obs is None
             or self.current_target_idx is None
-            or self.current_target_idx == NO_TARGET_IDX
+            or self.current_target_idx == self.no_target_idx
         ):
             return
 
@@ -414,7 +453,8 @@ class RewardDashboard:
         y = int(y_arr[idx])
         w = int(w_arr[idx])
         h = int(h_arr[idx])
-        if w <= 0 or h <= 0:
+        # Skip degenerate or 1-pixel bounding boxes which are often invisible anyway.
+        if w <= 1 or h <= 1:
             return
 
         # Game frame is drawn at (10, 10) scaled by game_scale
@@ -617,13 +657,26 @@ class RewardDashboard:
             info_title = self.small_font.render("Game State:", True, WHITE)
             self.screen.blit(info_title, (x, current_y))
             current_y += 20
-            
-            info_lines = [
-                f"Oxygen: {float(self.obs.raw_observation.oxygen_level[-1]) * 64:.0f}/64",
-                f"Divers: {float(self.obs.raw_observation.collected_divers[-1]):.0f}/6",
-                f"Lives: {int(self.state.atari_state.env_state.lives) if self.state is not None else 0}",
-            ]
-            
+
+            info_lines = []
+            raw = getattr(self.obs, "raw_observation", None)
+            if raw is not None:
+                if hasattr(raw, "oxygen_level"):
+                    info_lines.append(
+                        f"Oxygen: {float(raw.oxygen_level[-1]) * 64:.0f}/64"
+                    )
+                if hasattr(raw, "collected_divers"):
+                    info_lines.append(
+                        f"Divers: {float(raw.collected_divers[-1]):.0f}/6"
+                    )
+
+            if self.state is not None and hasattr(self.state, "atari_state"):
+                try:
+                    lives = int(self.state.atari_state.env_state.lives)
+                    info_lines.append(f"Lives: {lives}")
+                except Exception:
+                    pass
+
             for line in info_lines:
                 surface = self.small_font.render(line, True, WHITE)
                 self.screen.blit(surface, (x, current_y))
@@ -728,26 +781,27 @@ class RewardDashboard:
 
 def main():
     """Main entry point"""
-    # Get config
-    config = get_default_config()
-    
-    # Create environment with settings for manual play using the new semantic wrapper
-    base_env = make_atari_env("seaquest")
-    atari_wrapper = AtariWrapper(
-        base_env,
-        frame_stack_size=1,
-        frame_skip=1,  # No frame skipping for manual play
-        sticky_actions=False,  # No sticky actions for manual control
-        episodic_life=False,  # Don't end episode on life loss for manual play
-        first_fire=False,  # Don't auto-fire on reset
-        noop_reset=0,  # No noop actions on reset
-        clip_reward=False,
-        max_pooling=False,
-    )
-    env = SeaquestSemanticWrapper(atari_wrapper)
-    
+    # Default environment name; can be changed by editing this constant
+    # or by importing this module and constructing your own dashboard.
+    env_name = "phoenix"
+
+    # Use EnvManager to construct the environment and renderer in the same way
+    # as the training / visualization pipelines.
+    manager = EnvManager()
+    env, renderer = manager.make_env(env_name, {}, train=False)
+    components = manager.get_components(env_name)
+
     # Create dashboard
-    dashboard = RewardDashboard(env, screen_width=1200, screen_height=600, config=config)
+    dashboard = RewardDashboard(
+        env,
+        renderer,
+        env_name=env_name,
+        get_heuristic_target=components.get_heuristic_target,
+        no_target_idx=components.no_target_idx,
+        reward_extractor=components.reward_extractor,
+        screen_width=1200,
+        screen_height=600,
+    )
     
     # Run
     try:

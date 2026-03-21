@@ -1,0 +1,54 @@
+ALG_NAME: "hierarchical_pqn"
+ENV_NAME: "choppercommand"
+
+# Environment modification hooks
+GAME_MODS: null
+EVAL_GAME_MODS: null
+
+alg:
+  # Architecture dimensions (must match source model for INIT_MODEL_PATH)
+
+  INIT_MODEL_PATH: "./outputs/models/Seaquest_learned_skill_checkpoint/hierarchical_pqn_Seaquest_seed42.safetensors"
+
+  NUM_SKILLS: 3
+  MAX_OBJECTS: 34
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 64
+  NUM_LAYERS: 2
+
+  # Environment wrappers
+  STICKY_ACTIONS: False
+  EPISODIC_LIFE: True
+
+  # PQN rollout hyperparameters
+  TOTAL_TIMESTEPS: 10_000_000
+  NUM_ENVS: 512
+  NUM_STEPS: 32
+
+  # PQN update hyperparameters
+  NUM_EPOCHS: 2
+  NUM_MINIBATCHES: 128
+  GAMMA: 0.99
+  LAMBDA: 0.65
+  LR: 0.00025
+  MAX_GRAD_NORM: 0.8
+
+  # Policy style for skill updates
+  OFF_POLICY: false
+
+  # Exploration (epsilon-greedy)
+  EPS_START: 1.0
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.5
+
+  # Curriculum disabled for simple few-shot transfer
+  CURRICULUM_ENABLED: false
+  CURRICULUM_PHASES: ["collect", "destroy", "avoid"]
+  CURRICULUM_MODS:
+    collect:
+      - collect_curriculum
+    destroy:
+      - destroy_curriculum
+    avoid:
+      - avoid_curriculum
+

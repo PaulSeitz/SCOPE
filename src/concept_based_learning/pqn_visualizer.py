@@ -11,19 +11,11 @@ from omegaconf import OmegaConf
 from safetensors.flax import load_file
 from flax.traverse_util import unflatten_dict
 
-from jaxatari import make as make_atari_env
-from jaxatari.wrappers import AtariWrapper
-from jaxatari.games.jax_seaquest import SeaquestRenderer
-
 from concept_based_learning.egocentric_transformation import get_ego_obs
 from concept_based_learning.environments.datatypes import ConceptObservation
-from concept_based_learning.environments.seaquest.seaquest_label import (
-    SeaquestSemanticWrapper,
-    seaquest_action_mapper,
-)
-from concept_based_learning.environments.seaquest.seaquest_policy import (
-    get_heuristic_target,
-    NO_TARGET_IDX,
+from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.choppercommand.choppercommand_policy import (
+    debug_heuristic_snapshot,
 )
 from concept_based_learning.train_agent import QNetwork
 from concept_based_learning.video_recorder import (
@@ -90,24 +82,15 @@ def load_params_from_file(filename):
 
 def create_eval_env(config):
     """
-    Create the Seaquest evaluation environment + renderer using the same
-    wrappers as the new training pipeline (AtariWrapper + SeaquestSemanticWrapper).
+    Create the evaluation environment + renderer using the same semantic
+    wrappers as the training pipeline, selected via the EnvManager.
+
+    The choice of environment (Seaquest vs others) is driven by
+    `config["ENV_NAME"]`, which can be overridden on the command line.
     """
-    game_mods = config.get("GAME_MODS", None)
-    sticky_actions = config.get("STICKY_ACTIONS", False)
-    episodic_life = config.get("EPISODIC_LIFE", False)
-
-    if game_mods:
-        env = make_atari_env("seaquest", mods=set(game_mods))
-    else:
-        env = make_atari_env("seaquest")
-
-    # Evaluation uses a non-sticky, non-episodic-life wrapper for clean rollouts,
-    # mirroring `outer_make_train(train=False)` in main.py.
-    env = AtariWrapper(env, sticky_actions=False, episodic_life=False)
-    env = SeaquestSemanticWrapper(env)
-
-    renderer = SeaquestRenderer()
+    env_name = config.get("ENV_NAME", "Seaquest")
+    manager = EnvManager()
+    env, renderer = manager.make_env(env_name, config, train=False)
     return env, renderer
 
 
@@ -133,9 +116,23 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
     hidden_size = config["HIDDEN_SIZE"]
     num_layers = config["NUM_LAYERS"]
     seed = config["SEED"]
+    restrict_fire_for_non_destroy = bool(
+        config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
+    )
+    restrict_fire_for_non_destroy = bool(
+        config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
+    )
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
 
     env, renderer = create_eval_env(config)
+
+    # Environment-specific hooks (meta-policy, action mapping, NO_TARGET sentinel)
+    env_name = config.get("ENV_NAME", "Seaquest")
+    manager = EnvManager()
+    components = manager.get_components(env_name)
+    heuristic_target = components.get_heuristic_target
+    no_target_idx = components.no_target_idx
+    action_mapper = components.action_mapper
 
     # Build the shared skill Q-network (one set of params per skill)
     skill_network = QNetwork(
@@ -184,13 +181,16 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
     obj_active_list = []
 
     # Persistent target index for the heuristic meta-policy
-    prev_target_idx = NO_TARGET_IDX
+    prev_target_idx = no_target_idx
+    # Track lives so we can terminate ChopperCommand recordings on first death.
+    is_chopper = env_name.lower() == "choppercommand"
+    prev_lives = int(state.atari_state.env_state.lives)
 
     for _ in range(max_frames):
         rng, step_key = jax.random.split(rng)
 
         # Heuristic meta-policy selects a target object
-        target_obj_idx = get_heuristic_target(
+        target_obj_idx = heuristic_target(
             obs.raw_observation,
             obs.objects,
             prev_target_idx,
@@ -199,7 +199,7 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
         target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
         prev_target_idx = target_obj_idx
 
-        if target_obj_idx == NO_TARGET_IDX:
+        if target_obj_idx == no_target_idx:
             # No valid target on screen → NOOP, dummy Q values.
             global_action = 0
             active_skill_idx = 0
@@ -220,11 +220,16 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
 
             # Extract the most recent frame's distance and angle from the ego features.
-            # Each frame contributes [distance/264, angle/pi, sin(ori), cos(ori)];
+            # Each frame contributes [dx_ego/160, dy_ego/210, sin(ori), cos(ori)];
             # the last 4 entries correspond to the latest frame.
             last_frame_ego = ego_obs[-4:]
-            distance = float(last_frame_ego[0] * 264.0)
-            angle = float(last_frame_ego[1] * jnp.pi)
+            dx_norm = last_frame_ego[0]
+            dy_norm = last_frame_ego[1]
+            # Recover approximate pixel-space dx, dy and distance
+            dx_pix = dx_norm * 160.0
+            dy_pix = dy_norm * 210.0
+            distance = float(jnp.sqrt(dx_pix**2 + dy_pix**2))
+            angle = float(jnp.arctan2(dy_pix, dx_pix))
 
             # Evaluate all skills' Q-values on the current ego observation.
             def apply_one(params_for_skill):
@@ -238,9 +243,17 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
             q_vals = jnp.squeeze(q_vals, axis=1)      # [num_skills, ego_action_dim]
 
             combined_q = np.array(jnp.max(q_vals, axis=-1))
-            chosen_ego = int(jnp.argmax(q_vals[active_skill_idx]))
+
+            fire_indices = jnp.array(
+                [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
+            )
+            q_active = q_vals[active_skill_idx]
+            if restrict_fire_for_non_destroy and active_skill_idx != 0:
+                q_active = q_active.at[fire_indices].set(-jnp.inf)
+
+            chosen_ego = int(jnp.argmax(q_active))
             global_action = int(
-                seaquest_action_mapper(
+                action_mapper(
                     chosen_ego,
                     obs.raw_observation,
                     jnp.array(target_obj_idx, dtype=jnp.int32),
@@ -249,6 +262,14 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
 
         # Step the environment
         obs, state, _reward, done, _info = env.step(state, global_action)
+
+        # For ChopperCommand, end the recorded episode on the first life loss.
+        if is_chopper:
+            current_lives = int(state.atari_state.env_state.lives)
+            life_lost = prev_lives - current_lives
+            prev_lives = current_lives
+            if life_lost > 0 and not done:
+                done = True
 
         # Record state & debug info
         states_list.append(state)
@@ -314,9 +335,20 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
     hidden_size = config["HIDDEN_SIZE"]
     num_layers = config["NUM_LAYERS"]
     seed = config["SEED"]
+    restrict_fire_for_non_destroy = bool(
+        config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
+    )
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
 
     env, renderer = create_eval_env(config)
+
+    # Environment-specific hooks (meta-policy, action mapping, NO_TARGET sentinel)
+    env_name = config.get("ENV_NAME", "Seaquest")
+    manager = EnvManager()
+    components = manager.get_components(env_name)
+    heuristic_target = components.get_heuristic_target
+    no_target_idx = components.no_target_idx
+    action_mapper = components.action_mapper
 
     skill_network = QNetwork(
         action_dim=ego_action_dim,
@@ -346,7 +378,7 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
 
     # Pygame setup
     pygame.init()
-    pygame.display.set_caption("Hierarchical PQN Live Visualization - Seaquest")
+    pygame.display.set_caption("Hierarchical PQN Live Visualization")
     font = pygame.font.Font(None, 20)
 
     # Get one rendered frame to determine window size
@@ -362,8 +394,17 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
 
     clock = pygame.time.Clock()
     running = True
-    prev_target_idx = NO_TARGET_IDX
+    prev_target_idx = no_target_idx
     frame_count = 0
+
+    def reset_env_episode():
+        nonlocal obs, state, prev_target_idx, rng
+        rng_local, rng_reset_local = jax.random.split(rng)
+        obs_local, state_local = env.reset(rng_reset_local)
+        obs = obs_local
+        state = state_local
+        rng = rng_local
+        prev_target_idx = no_target_idx
 
     while running and frame_count < max_frames:
         # Handle quit events
@@ -372,11 +413,22 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
                 running = False
             elif event.type == pygame.KEYDOWN and event.key in (pygame.K_q, pygame.K_ESCAPE):
                 running = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                reset_env_episode()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_s:
+                # Snapshot the current heuristic view of the scene.
+                # This is especially useful for ChopperCommand debugging, but will run
+                # for any env that provides compatible observations.
+                snap = debug_heuristic_snapshot(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                )
 
         rng, step_key = jax.random.split(rng)
 
         # Heuristic meta-policy selects a target object
-        target_obj_idx = get_heuristic_target(
+        target_obj_idx = heuristic_target(
             obs.raw_observation,
             obs.objects,
             prev_target_idx,
@@ -385,7 +437,7 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
         target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
         prev_target_idx = target_obj_idx
 
-        if target_obj_idx == NO_TARGET_IDX:
+        if target_obj_idx == no_target_idx:
             global_action = 0
             active_skill_idx = 0
             distance = np.nan
@@ -402,8 +454,12 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
 
             last_frame_ego = ego_obs[-4:]
-            distance = float(last_frame_ego[0] * 264.0)
-            angle = float(last_frame_ego[1] * jnp.pi)
+            dx_norm = last_frame_ego[0]
+            dy_norm = last_frame_ego[1]
+            dx_pix = dx_norm * 160.0
+            dy_pix = dy_norm * 210.0
+            distance = float(jnp.sqrt(dx_pix**2 + dy_pix**2))
+            angle = float(jnp.arctan2(dy_pix, dx_pix))
 
             def apply_one(params_for_skill):
                 return skill_network.apply(
@@ -415,9 +471,16 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
             q_vals = jax.vmap(apply_one)(params_tree)
             q_vals = jnp.squeeze(q_vals, axis=1)
 
-            chosen_ego = int(jnp.argmax(q_vals[active_skill_idx]))
+            fire_indices = jnp.array(
+                [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
+            )
+            q_active = q_vals[active_skill_idx]
+            if restrict_fire_for_non_destroy and active_skill_idx != 0:
+                q_active = q_active.at[fire_indices].set(-jnp.inf)
+
+            chosen_ego = int(jnp.argmax(q_active))
             global_action = int(
-                seaquest_action_mapper(
+                action_mapper(
                     chosen_ego,
                     obs.raw_observation,
                     jnp.array(target_obj_idx, dtype=jnp.int32),
@@ -435,7 +498,7 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
             frame = np.stack([frame] * 3, axis=-1)
 
         # Add a red border around the selected target object (same style as videos).
-        if target_obj_idx != NO_TARGET_IDX:
+        if target_obj_idx != no_target_idx:
             ox = np.array(obs.objects.x[-1])
             oy = np.array(obs.objects.y[-1])
             ow = np.array(obs.objects.width[-1])
@@ -460,20 +523,20 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
 
         # Draw distance/angle text at bottom-center (if a valid target exists)
         if not np.isnan(distance):
-            text = f"skill: d={distance:.1f}, a={angle:.2f}"
+            text = f"skill: d={distance:.1f}px, a={angle:.2f} rad"
             text_surface = font.render(text, True, (255, 255, 255))
             tx = (window_size[0] - text_surface.get_width()) // 2
             ty = window_size[1] - text_surface.get_height() - 10
             screen.blit(text_surface, (tx, ty))
 
         pygame.display.flip()
-        clock.tick(30)
+        clock.tick(10)
         frame_count += 1
 
         if done:
             rng, rng_reset = jax.random.split(rng)
             obs, state = env.reset(rng_reset)
-            prev_target_idx = NO_TARGET_IDX
+            prev_target_idx = no_target_idx
 
     pygame.quit()
 
@@ -516,14 +579,28 @@ def main():
         help="Which Seaquest modpack to use: one of 'base', 'collect', 'destroy', or 'avoid'.",
     )
     parser.add_argument(
-        "--live",
+        "--record",
         action="store_true",
-        default=True,
-        help="Run a live interactive visualization instead of logging a video.",
+        default=False,
+        help="Record a video of the agent playing the environment.",
+    )
+    parser.add_argument(
+        "--env-name",
+        type=str,
+        default=None,
+        help=(
+            "Override ENV_NAME from the loaded config. "
+            "Determines which environment wrapper, meta-policy, and action "
+            "mapping are used by the visualizer."
+        ),
     )
     args = parser.parse_args()
 
     base_config = load_base_config()
+
+    # Optionally override the environment used for visualization.
+    if args.env_name is not None:
+        base_config["ENV_NAME"] = args.env_name
     if args.seed is not None:
         base_config["SEED"] = args.seed
 
@@ -550,14 +627,14 @@ def main():
         params_tree = load_params_from_file(args.model)
 
     # If requested, run live interactive visualization and exit.
-    if args.live:
+    if not args.record:
         run_live_visualization(base_config, params_tree=params_tree, max_frames=args.max_frames)
         return
 
     # Initialize wandb so that `video_recorder` can log the video (offline by default).
     if base_config.get("WANDB_MODE", "disabled") != "disabled":
         wandb.init(
-            entity=base_config.get("ENTITY", None),
+            entity=base_config.get("ENTITY", "paul-seitz-tu-darmstadt"),
             project=base_config.get("PROJECT", "concept_based_learning"),
             tags=[
                 base_config.get("ALG_NAME", "hierarchical_pqn").upper(),

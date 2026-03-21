@@ -13,6 +13,7 @@ WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during 
 SEED: 42
 NUM_SEEDS: 1                  # Number of concurrent seeds to run via vmap
 EVAL_SEED: 43                 # Separate RNG seed used for evaluation rollouts
+# ENV_SEED_BASE: 42           # Optional; default SEED. Each train env gets ENV_SEED_BASE+env_id so skills see diverse layouts. Auto-reset on episode end uses fresh RNG.
 SAVE_PATH: "./outputs/models" # Where to save trained parameters
 LOAD_PATH: null               # Set to path if you want to load a checkpoint
 LOAD_PARAMS: False            # Toggle to True when resuming or evaluating
@@ -21,4 +22,4 @@ LOAD_PARAMS: False            # Toggle to True when resuming or evaluating
 RECORD_VIDEO: True           # If true, record rollout videos (e.g. to wandb)
 VIDEO_EVERY_N_UPDATES: 5000   # Record a video every N updates (used if training is run in chunks)
 VIDEO_AT_END: True            # Always record one video at the end of training when RECORD_VIDEO is true
-VIDEO_MAX_FRAMES: 2000        # Cap episode length for recording (avoid huge files)
+VIDEO_MAX_FRAMES: 600        # Cap episode length for recording (avoid huge files)

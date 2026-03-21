@@ -9,61 +9,51 @@ from safetensors.flax import save_file
 import hydra
 from omegaconf import OmegaConf
 
-from jaxatari.games.jax_seaquest import JaxSeaquest, SeaquestRenderer
-from jaxatari import make as make_atari_env
-from jaxatari.wrappers import AtariWrapper
-
-# Import your custom architecture components
-# (Adjust the import paths if your folder structure differs slightly)
-from src.concept_based_learning.environments.seaquest.seaquest_label import SeaquestSemanticWrapper
+from src.concept_based_learning.environments.env_manager import EnvManager
 from src.concept_based_learning.train_agent import make_train
 from src.concept_based_learning.video_recorder import video_callback, wait_for_video_finish
+from src.concept_based_learning.pqn_visualizer import load_params_from_file
 
 
 def outer_make_train(config):
     """
-    Constructs the Seaquest environments with the custom semantic wrappers
-    and passes them to the training factory.
+    Constructs the environments with the custom semantic wrappers defined
+    in `EnvManager` and passes them to the training factory.
     """
-    if config.get("ENV_NAME", "Seaquest") != "Seaquest":
-        raise NotImplementedError("This pipeline is currently optimized for Seaquest.")
+    env_name = config.get("ENV_NAME", "Seaquest")
 
-    sticky_actions = config.get("STICKY_ACTIONS", False)
-    episodic_life = config.get("EPISODIC_LIFE", False)
-    # Training vs eval environment modifications can differ. By default,
-    # eval inherits the training `GAME_MODS` if no explicit
-    # `EVAL_GAME_MODS` are provided.
+    manager = EnvManager()
+    components = manager.get_components(env_name)
+    # Training vs eval environment modifications can differ.
+    # By default, eval should inherit the training `GAME_MODS` when
+    # `EVAL_GAME_MODS` is absent *or* explicitly set to null in the config.
     train_game_mods = config.get("GAME_MODS", None)
-    eval_game_mods = config.get("EVAL_GAME_MODS", train_game_mods)
+    raw_eval_game_mods = config.get("EVAL_GAME_MODS", None)
+    eval_game_mods = train_game_mods if raw_eval_game_mods is None else raw_eval_game_mods
 
-    def create_env(train: bool = False):
-        # 1. Base Environment
-        mods = train_game_mods if train else eval_game_mods
-        if mods:
-            # Mods are configured as a list in Hydra; JaxAtari expects a set.
-            env = make_atari_env('seaquest', mods=set(mods))
+    def create_env_with_mods(game_mods, train: bool):
+        local_cfg = dict(config)
+        if game_mods is not None:
+            local_cfg["GAME_MODS"] = game_mods
         else:
-            env = make_atari_env('seaquest')
-        
-        # 2. Standard Atari Wrapper
-        if train:
-            env = AtariWrapper(env, sticky_actions=sticky_actions, episodic_life=episodic_life, max_episode_length=27000)
-        else:
-            env = AtariWrapper(env, sticky_actions=False, episodic_life=False)
-            
-        # 3. Custom Semantic Wrapper
-        # This replaces the ObjectCentricWrapper and FlattenObservationWrapper
-        # by directly injecting the DESTROY, COLLECT, and AVOID labels.
-        env = SeaquestSemanticWrapper(env)
-        
-        return env
+            local_cfg.pop("GAME_MODS", None)
+        env, renderer = manager.make_env(env_name, local_cfg, train=train)
+        return env, renderer
 
-    env = create_env(train=True)
-    test_env = create_env(train=False)
-    renderer = SeaquestRenderer()
+    env, _ = create_env_with_mods(train_game_mods, train=True)
+    test_env, renderer = create_env_with_mods(eval_game_mods, train=False)
 
     # Call the hierarchical training loop; returns (train_fn, eval_rollout_fn)
-    train_fn, eval_rollout_fn = make_train(config, env, test_env, renderer)
+    train_fn, eval_rollout_fn = make_train(
+        config,
+        env,
+        test_env,
+        renderer,
+        get_heuristic_target=components.get_heuristic_target,
+        no_target_idx=components.no_target_idx,
+        action_mapper=components.action_mapper,
+        extract_all_skills_rewards=components.reward_extractor,
+    )
     return train_fn, eval_rollout_fn, renderer
 
 
@@ -116,7 +106,17 @@ def single_run(config):
         phase_timesteps = [total_timesteps] * n_phases
 
     global_t0 = time.time()
+
+    # Optional: initialize skill network weights from a pre-trained model
+    # to enable few-shot / transfer learning across environments.
+    init_model_path = base_config.get("INIT_MODEL_PATH", None)
     prev_params = None  # Shared skill network weights across phases
+    if init_model_path is not None:
+        print(f"Initializing skills from pre-trained model: {init_model_path}")
+        prev_params = load_params_from_file(init_model_path)
+
+    # Global step offset so wandb steps increase across curriculum phases (no reset per phase)
+    global_step_offset = 0
 
     for phase_idx, ((phase_name, phase_mods), phase_steps) in enumerate(zip(phases, phase_timesteps)):
         print(f"\n=== Starting phase {phase_idx + 1}/{n_phases}: {phase_name} ===")
@@ -128,6 +128,14 @@ def single_run(config):
             phase_config["GAME_MODS"] = list(phase_mods)
         else:
             phase_config.pop("GAME_MODS", None)
+
+        # Same formula as in train_agent.make_train for NUM_UPDATES (needed for step offset)
+        num_updates_this_phase = (
+            phase_config["TOTAL_TIMESTEPS"]
+            // phase_config.get("NUM_STEPS", 128)
+            // phase_config.get("NUM_ENVS", 512)
+        )
+        phase_config["STEP_OFFSET"] = global_step_offset
 
         # Seed splitting per phase for reproducibility
         rng, rng_phase = jax.random.split(rng)
@@ -157,6 +165,7 @@ def single_run(config):
         prev_params = first_train_states.params
 
         # Optionally record a video at the end of each phase (e.g. for wandb)
+        global_step_end_of_phase = global_step_offset + num_updates_this_phase
         if (
             phase_config.get("RECORD_VIDEO")
             and phase_config.get("VIDEO_AT_END", True)
@@ -164,12 +173,11 @@ def single_run(config):
         ):
             if phase_config.get("WANDB_MODE", "disabled") != "disabled" and wandb.run is not None:
                 print(f"Recording end-of-phase video for '{phase_name}'...")
-                step = phase_config.get("NUM_UPDATES", 0)
                 eval_rng = jax.random.PRNGKey(eval_seed)
                 states, active_agents, combined_qs, dones, target_obj_idxs, objects_bbox = eval_rollout_fn(
                     runner_state,
                     eval_rng,
-                    step,
+                    global_step_end_of_phase,
                     phase_config.get("VIDEO_MAX_FRAMES", 2000),
                 )
                 video_key = f"video/{phase_idx + 1:02d}_{phase_name}"
@@ -178,11 +186,12 @@ def single_run(config):
                     active_agents,
                     combined_qs,
                     dones,
-                    step,
+                    global_step_end_of_phase,
                     renderer,
                     target_obj_idxs=target_obj_idxs,
                     objects_bbox=objects_bbox,
                     video_key=video_key,
+                    wandb_step=global_step_end_of_phase,
                 )
                 wait_for_video_finish()
             else:
@@ -190,6 +199,8 @@ def single_run(config):
                     f"RECORD_VIDEO/VIDEO_AT_END set for phase '{phase_name}' "
                     "but wandb disabled; skipping video."
                 )
+
+        global_step_offset = global_step_end_of_phase
 
     print(f"\nAll phases completed in {time.time() - global_t0:.2f} seconds.")
 
