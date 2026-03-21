@@ -1,0 +1,55 @@
+ALG_NAME: "hierarchical_pqn"
+ENV_NAME: "phoenix"
+
+# Environment modification hooks
+GAME_MODS: null
+EVAL_GAME_MODS: null
+
+alg:
+  # Training Phoenix skills **from scratch** (no INIT_MODEL_PATH).
+
+  NUM_SKILLS: 3
+  MAX_OBJECTS: 225 # 8 Enemies + 8 Enemy Bullets + 1 Boss + 204 Boss Blocks
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 2
+
+  # If true, COLLECT and AVOID skills cannot choose FIRE ego actions.
+  # Only the DESTROY skill (index 0) is allowed to fire.
+  RESTRICT_FIRE_FOR_NON_DESTROY: true
+
+  # Environment wrappers
+  STICKY_ACTIONS: False
+  EPISODIC_LIFE: True
+
+  # PQN rollout hyperparameters
+  TOTAL_TIMESTEPS: 50_000_000
+  NUM_ENVS: 512
+  NUM_STEPS: 32
+
+  # PQN update hyperparameters
+  NUM_EPOCHS: 2
+  NUM_MINIBATCHES: 32
+  GAMMA: 0.99
+  LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
+
+  # Policy style for skill updates
+  OFF_POLICY: false
+
+  # Exploration (epsilon-greedy)
+  EPS_START: 1.0
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.5
+
+  # Curriculum disabled: we just want to see whether
+  # the meta-policy + skills can learn at all.
+  CURRICULUM_ENABLED: false
+  CURRICULUM_PHASES: ["destroy", "avoid"]
+  CURRICULUM_MODS:
+    destroy:
+      - destroy_curriculum
+    avoid:
+      - avoid_curriculum
+
