@@ -7,13 +7,16 @@ this module and construct a `RewardDashboard` manually by passing your own
 environment, renderer, and env-specific hooks.
 """
 import sys
+import os
+import argparse
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pygame
+from omegaconf import OmegaConf
 
 from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
@@ -123,6 +126,11 @@ class RewardDashboard:
         get_heuristic_target,
         no_target_idx,
         reward_extractor,
+        extract_life_lost,
+        action_mapper=None,
+        no_target_global_action=0,
+        fixed_target_idx=None,
+        env_config=None,
         screen_width=800,
         screen_height=600,
     ):
@@ -132,6 +140,14 @@ class RewardDashboard:
         self.get_heuristic_target = get_heuristic_target
         self.no_target_idx = no_target_idx
         self.reward_extractor = reward_extractor
+        self.extract_life_lost = extract_life_lost
+        self.action_mapper = action_mapper
+        self.no_target_global_action = int(no_target_global_action)
+        self.fixed_target_idx = fixed_target_idx
+        self.env_config = dict(env_config or {})
+        self.compute_rewards_for_all_objects = (
+            str(self.env_name).lower() == "skillbootcamp"
+        )
 
         # Initialize pygame
         pygame.init()
@@ -195,26 +211,34 @@ class RewardDashboard:
         """Step the environment and compute rewards"""
         self.prev_obs = self.obs
         self.prev_state = self.state
+
+        # Determine tracked target from the pre-step observation, matching training semantics.
+        tracked_target_idx = self.no_target_idx
+        if self.prev_obs is not None:
+            try:
+                if self.fixed_target_idx is not None:
+                    tracked_target_idx = int(self.fixed_target_idx)
+                else:
+                    self.rng_key, key_policy = jax.random.split(self.rng_key)
+                    prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
+                    target_idx = self.get_heuristic_target(
+                        self.prev_obs.raw_observation,
+                        self.prev_obs.objects,
+                        prev_idx,
+                        key_policy,
+                    )
+                    tracked_target_idx = int(jnp.ravel(target_idx)[0])
+            except Exception:
+                tracked_target_idx = self.no_target_idx
+
+        self.prev_target_idx = tracked_target_idx
+        self.current_target_idx = tracked_target_idx
+
         self.obs, self.state, reward, done, info = self.env.step(self.state, action)
 
         # Compute rewards if we have previous state
         if self.prev_obs is not None:
-            # First, ask the environment-specific heuristic which object is the target.
-            try:
-                self.rng_key, key_policy = jax.random.split(self.rng_key)
-                prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
-                target_idx = self.get_heuristic_target(
-                    self.obs.raw_observation,
-                    self.obs.objects,
-                    prev_idx,
-                    key_policy,
-                )
-                target_idx_int = int(jnp.ravel(target_idx)[0])
-            except Exception:
-                target_idx_int = self.no_target_idx
-
-            self.prev_target_idx = target_idx_int
-            self.current_target_idx = target_idx_int
+            target_idx_int = tracked_target_idx
 
             # Compute concept rewards only for the currently selected target.
             objects = self.obs.objects
@@ -252,18 +276,89 @@ class RewardDashboard:
 
                 return jax.tree_util.tree_map(_slice_leaf, obj_obs)
 
-            if 0 <= target_idx_int < num_objects:
-                prev_target = slice_target(prev_objects, target_idx_int)
-                next_target = slice_target(objects, target_idx_int)
-                rewards_vec = self.reward_extractor(
-                    self.prev_obs.raw_observation,
-                    self.obs.raw_observation,
-                    prev_target,
-                    next_target,
-                )
-                concept_rewards[:, target_idx_int] = np.asarray(
-                    jax.device_get(rewards_vec)
-                )
+            life_lost = self.extract_life_lost(self.prev_state, self.state)
+
+            def _info_get(info_obj, key: str, default=0):
+                if isinstance(info_obj, dict):
+                    return info_obj.get(key, default)
+                if info_obj is not None and hasattr(info_obj, key):
+                    return getattr(info_obj, key)
+                return default
+
+            def _as_int01(x: Any) -> int:
+                arr = np.asarray(jax.device_get(x))
+                if arr.size == 0:
+                    return 0
+                return int(arr.reshape(-1)[0] != 0)
+
+            swd = _as_int01(_info_get(info, "step_win_destroy", 0))
+            swc = _as_int01(_info_get(info, "step_win_collect", 0))
+            sfa = _as_int01(_info_get(info, "step_fail_avoid", 0))
+            sfd = _as_int01(_info_get(info, "step_fail_destroy_touch", 0))
+            swa = _as_int01(_info_get(info, "step_win_avoid", 0))
+
+            if self.compute_rewards_for_all_objects:
+                # Bootcamp debugging: compute rewards for all object slots so we don't miss
+                # events just because the heuristic tracked another object this step.
+                for obj_idx in range(num_objects):
+                    prev_target = slice_target(prev_objects, obj_idx)
+                    next_target = slice_target(objects, obj_idx)
+                    reward_out = self.reward_extractor(
+                        self.prev_obs.raw_observation,
+                        self.obs.raw_observation,
+                        prev_target,
+                        next_target,
+                        life_lost,
+                        info,
+                        self.env_config,
+                    )
+                    rewards_vec = reward_out[0] if isinstance(reward_out, tuple) else reward_out
+                    rewards_np = np.asarray(jax.device_get(rewards_vec), dtype=np.float32)
+                    concept_rewards[:, obj_idx] = rewards_np
+                    if np.any(np.abs(rewards_np) > 1e-6):
+                        obj_labels = np.array(self.obs.objects.semantic_label[-1])
+                        label_id = int(obj_labels[obj_idx]) if obj_idx < len(obj_labels) else -1
+                        label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
+                        obj_name = (
+                            OBJECT_NAMES[obj_idx]
+                            if obj_idx < len(OBJECT_NAMES)
+                            else f"Obj {obj_idx}"
+                        )
+                        print(
+                            "[reward_any_object] "
+                            f"step={self.step_count} obj_idx={obj_idx} obj={obj_name} "
+                            f"label={label_name} rewards={rewards_np.tolist()} "
+                            f"global_reward={float(reward):+.3f} done={bool(done)} "
+                            f"info={{win_destroy:{swd}, win_collect:{swc}, fail_avoid:{sfa}, "
+                            f"fail_destroy_touch:{sfd}, win_avoid:{swa}}}"
+                        )
+            else:
+                if 0 <= target_idx_int < num_objects:
+                    prev_target = slice_target(prev_objects, target_idx_int)
+                    next_target = slice_target(objects, target_idx_int)
+                    reward_out = self.reward_extractor(
+                        self.prev_obs.raw_observation,
+                        self.obs.raw_observation,
+                        prev_target,
+                        next_target,
+                        life_lost,
+                        info,
+                        self.env_config,
+                    )
+                    rewards_vec = reward_out[0] if isinstance(reward_out, tuple) else reward_out
+                    concept_rewards[:, target_idx_int] = np.asarray(jax.device_get(rewards_vec))
+                    tracked_vec = np.asarray(jax.device_get(rewards_vec), dtype=np.float32)
+                    if np.any(np.abs(tracked_vec) > 1e-6):
+                        print(
+                            "[tracked_reward] "
+                            f"step={self.step_count} "
+                            f"target_idx={target_idx_int} "
+                            f"reward_vec={tracked_vec.tolist()} "
+                            f"global_reward={float(reward):+.3f} "
+                            f"done={bool(done)} "
+                            f"info={{win_destroy:{swd}, win_collect:{swc}, fail_avoid:{sfa}, "
+                            f"fail_destroy_touch:{sfd}, win_avoid:{swa}}}"
+                        )
             
             # Global reward: use the raw environment reward (game score delta)
             self.multi_reward = MultiReward(
@@ -310,6 +405,19 @@ class RewardDashboard:
                             'reward': reward_val,
                             'event': True
                         })
+                        # Runtime debug log: reward events for the currently tracked object.
+                        if obj_idx == int(self.current_target_idx):
+                            reward_vec = concept_rewards_np[:, obj_idx].tolist()
+                            print(
+                                "[reward_event] "
+                                f"step={self.step_count} "
+                                f"target_idx={obj_idx} "
+                                f"target={obj_name} "
+                                f"label={label_name} "
+                                f"reward={reward_val:+.3f} "
+                                f"reward_vec={reward_vec} "
+                                f"global_reward={float(self.multi_reward.global_reward):+.3f}"
+                            )
 
         # Clean up old history entries
         self.reward_history = [
@@ -781,15 +889,41 @@ class RewardDashboard:
 
 def main():
     """Main entry point"""
-    # Default environment name; can be changed by editing this constant
-    # or by importing this module and constructing your own dashboard.
-    env_name = "phoenix"
+    parser = argparse.ArgumentParser(description="Interactive reward dashboard")
+    parser.add_argument(
+        "--experiment",
+        default="skillbootcamp_skills",
+        help="Experiment config name from configs/experiment (without .yaml).",
+    )
+    parser.add_argument(
+        "--env-name",
+        default=None,
+        help="Override ENV_NAME from experiment config.",
+    )
+    parser.add_argument(
+        "--train-env",
+        action="store_true",
+        help="Use training wrapper settings (defaults to eval wrapper).",
+    )
+    args = parser.parse_args()
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    base_cfg_path = os.path.join(repo_root, "configs", "config.yaml")
+    exp_cfg_path = os.path.join(repo_root, "configs", "experiment", f"{args.experiment}.yaml")
+    if not os.path.exists(exp_cfg_path):
+        raise FileNotFoundError(f"Experiment config not found: {exp_cfg_path}")
+
+    base_cfg = OmegaConf.to_container(OmegaConf.load(base_cfg_path), resolve=True)
+    exp_cfg = OmegaConf.to_container(OmegaConf.load(exp_cfg_path), resolve=True)
+    merged_cfg = {**base_cfg, **exp_cfg, **exp_cfg.get("alg", {})}
+    env_name = str(args.env_name or merged_cfg.get("ENV_NAME", "seaquest"))
 
     # Use EnvManager to construct the environment and renderer in the same way
     # as the training / visualization pipelines.
     manager = EnvManager()
-    env, renderer = manager.make_env(env_name, {}, train=False)
+    env, renderer = manager.make_env(env_name, merged_cfg, train=bool(args.train_env))
     components = manager.get_components(env_name)
+    fixed_target_idx = components.fixed_target_idx_from_config(merged_cfg)
 
     # Create dashboard
     dashboard = RewardDashboard(
@@ -799,6 +933,10 @@ def main():
         get_heuristic_target=components.get_heuristic_target,
         no_target_idx=components.no_target_idx,
         reward_extractor=components.reward_extractor,
+        extract_life_lost=components.extract_life_lost,
+        action_mapper=components.action_mapper,
+        fixed_target_idx=fixed_target_idx,
+        env_config=merged_cfg,
         screen_width=1200,
         screen_height=600,
     )

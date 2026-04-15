@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from jaxatari.games.jax_choppercommand import ChopperCommandConstants
 
 from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
@@ -21,6 +22,23 @@ MAX_TARGET_DISTANCE = 150.0
 
 
 X_AXIS_WEIGHT = 1.0  # NOTE: can be used, but with 1.0 it already trained very successfully
+CHOPPER_NO_MOVE_PAUSE_TIMER = ChopperCommandConstants().DEATH_PAUSE_FRAMES + 2
+
+
+def apply_meta_mask_overrides(raw_obs, active_masks, config):
+    return active_masks
+
+
+def get_forced_target_override(raw_obs, current_targets, config, rng=None):
+    return current_targets
+
+
+def get_idle_action_override(env_state, current_ego_actions, no_target_mask, config):
+    pause_timer = env_state.atari_state.env_state.pause_timer
+    in_no_move = pause_timer == jnp.asarray(
+        CHOPPER_NO_MOVE_PAUSE_TIMER, dtype=pause_timer.dtype
+    )
+    return jnp.logical_and(no_target_mask, in_no_move)
 
 # NOTE: taken more or less from seaquest_policy.py, e.g. also using hysteresis but without surfacing logic
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):

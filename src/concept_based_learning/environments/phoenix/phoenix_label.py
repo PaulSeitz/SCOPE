@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 from typing import Any
-from jaxatari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.environments.datatypes import (
@@ -48,14 +47,22 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     )
     destroy_failure = (life_lost > 0) & is_destroy_target & hit_by_assigned
     avoid_failure = (life_lost > 0) & (prev_target.semantic_label == LABEL_AVOID) & hit_by_assigned
+    avoid_success = jnp.logical_and(
+        prev_target.semantic_label == LABEL_AVOID,
+        jnp.logical_and(success, jnp.logical_not(hit_by_assigned)),
+    )
 
-    destroy_reward = jnp.where(destroy_success & (life_lost == 0), 1.0, 0.0)
+    destroy_reward = jnp.where(
+        destroy_success & (life_lost == 0),
+        1.0,
+        jnp.where(destroy_failure, -1.0, 0.0),
+    )
     collect_reward = jnp.zeros_like(destroy_reward)
-    avoid_reward = jnp.where(avoid_failure, -1.0, 0.0)
+    avoid_reward = jnp.where(avoid_success, 1.0, jnp.where(avoid_failure, -1.0, 0.0))
 
     destroy_done = destroy_success | destroy_failure
     collect_done = jnp.zeros_like(destroy_reward, dtype=jnp.bool_)
-    avoid_done = avoid_failure
+    avoid_done = avoid_success | avoid_failure
 
     rewards = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
     skill_done = jnp.array([destroy_done, collect_done, avoid_done], dtype=jnp.bool_)
@@ -69,33 +76,31 @@ def phoenix_action_mapper(
 ) -> jnp.ndarray:
     """
     Translates the 18-space Egocentric Action to Phoenix environment indices.
-    Because we force the orientation to 90 degrees (Right) to keep the network 
-    In-Distribution, the agent's axes are rotated. 
-    Forward = Visual Right. Backward = Visual Left. Left = Visual Up. Right = Visual Down.
-    
-    Phoenix Indices: 
-    0=NOOP, 1=FIRE, 2=RIGHT, 3=LEFT, 4=DOWN(Shield), 5=RIGHTFIRE, 6=LEFTFIRE, 7=DOWNFIRE
+    Because the ship naturally faces UP (90 degrees), FORWARD = UP, LEFT = LEFT, etc.
+    We project diagonal/impossible actions to valid Phoenix actions.
     """
-    
+    # Phoenix runs with a reduced action set in this project.
+    # To preserve "shoot intent" when transferring 18-dim Seaquest skills,
+    # collapse any *_FIRE ego action to plain FIRE.
     action_map = jnp.array([
-        0,  # 0: NOOP -> 0 (NOOP)
-        1,  # 1: FIRE -> 1 (FIRE)
-        2,  # 2: FORWARD -> 2 (RIGHT to align X)
-        4,  # 3: RIGHT -> 4 (DOWN / Shield)
-        1,  # 4: LEFT -> 1 (Target is ABOVE, so FIRE at it!)
-        3,  # 5: BACKWARD -> 3 (LEFT to align X)
-        2,  # 6: FORWARD_RIGHT -> 2 (RIGHT)
-        5,  # 7: FORWARD_LEFT -> 5 (RIGHTFIRE - aligning and shooting)
-        3,  # 8: BACKWARD_RIGHT -> 3 (LEFT)
-        6,  # 9: BACKWARD_LEFT -> 6 (LEFTFIRE - aligning and shooting)
-        5,  # 10: FORWARD_FIRE -> 5 (RIGHTFIRE)
-        7,  # 11: RIGHT_FIRE -> 7 (DOWNFIRE)
-        1,  # 12: LEFT_FIRE -> 1 (FIRE)
-        6,  # 13: BACKWARD_FIRE -> 6 (LEFTFIRE)
-        5,  # 14: FORWARD_RIGHT_FIRE -> 5 (RIGHTFIRE)
-        5,  # 15: FORWARD_LEFT_FIRE -> 5 (RIGHTFIRE)
-        6,  # 16: BACKWARD_RIGHT_FIRE -> 6 (LEFTFIRE)
-        6   # 17: BACKWARD_LEFT_FIRE -> 6 (LEFTFIRE)
+        0,  # 0: NOOP -> NOOP
+        1,  # 1: FIRE -> FIRE
+        0,  # 2: FORWARD -> NOOP (no upward movement)
+        2,  # 3: RIGHT -> RIGHT
+        3,  # 4: LEFT -> LEFT
+        4,  # 5: BACKWARD -> DOWN / Shield
+        2,  # 6: FORWARD_RIGHT -> RIGHT
+        3,  # 7: FORWARD_LEFT -> LEFT
+        2,  # 8: BACKWARD_RIGHT -> RIGHT
+        3,  # 9: BACKWARD_LEFT -> LEFT
+        1,  # 10: FORWARD_FIRE -> FIRE
+        1,  # 11: RIGHT_FIRE -> FIRE
+        1,  # 12: LEFT_FIRE -> FIRE
+        1,  # 13: BACKWARD_FIRE -> FIRE
+        1,  # 14: FORWARD_RIGHT_FIRE -> FIRE
+        1,  # 15: FORWARD_LEFT_FIRE -> FIRE
+        1,  # 16: BACKWARD_RIGHT_FIRE -> FIRE
+        1,  # 17: BACKWARD_LEFT_FIRE -> FIRE
     ], dtype=jnp.int32)
 
     return action_map[ego_action]

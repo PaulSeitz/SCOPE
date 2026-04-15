@@ -41,15 +41,13 @@ def build_ego_grid_inputs(
     Construct a batch of ego feature vectors for a 2D sweep over (dx_ego, dy_ego).
 
     The underlying training features come from `get_ego_obs`, which produces
-    a flattened stack of:
-        [dx_ego / 160, dy_ego / 210, sin(ori), cos(ori)]
-    for each frame in the stack.
+    a flattened stack of `EGO_OBS_CHANNELS_PER_FRAME` features per frame (see `egocentric_transformation`).
 
     We approximate the network's inputs by:
     - Filling all features with zeros
-    - Setting ONLY the last frame's 4 features:
-        [-4] = dx_ego (already normalized)
-        [-3] = dy_ego (already normalized)
+    - Setting ONLY the last frame's spatial/orientation slots:
+        [-10] = dx_ego (already normalized)
+        [-9] = dy_ego (already normalized)
         [-2] = sin(orientation_rad)
         [-1] = cos(orientation_rad)
 
@@ -66,8 +64,8 @@ def build_ego_grid_inputs(
     batch_size = flat_dx.shape[0]
     ego_batch = jnp.zeros((batch_size, ego_feat_dim), dtype=jnp.float32)
 
-    ego_batch = ego_batch.at[:, -4].set(flat_dx)
-    ego_batch = ego_batch.at[:, -3].set(flat_dy)
+    ego_batch = ego_batch.at[:, -10].set(flat_dx)
+    ego_batch = ego_batch.at[:, -9].set(flat_dy)
 
     sin_o = jnp.sin(orientation_rad)
     cos_o = jnp.cos(orientation_rad)

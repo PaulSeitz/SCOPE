@@ -51,6 +51,63 @@ DANGER_RELEASE_RANGE = 40.0
 X_AXIS_WEIGHT = 1.0 # NOTE: deactivated for now
 
 
+def _surface_required_from_raw(raw_observation):
+    return jax.vmap(
+        lambda ro: jnp.logical_or(
+            ro.oxygen_level[-1] < OXYGEN_LOW_THRESHOLD,
+            ro.collected_divers[-1] >= 6,
+        )
+    )(raw_observation)
+
+
+def apply_meta_mask_overrides(raw_obs, active_masks, config):
+    if active_masks.shape[-1] <= SURFACE_DUMMY_IDX:
+        return active_masks
+
+    always_active = bool(config.get("ALWAYS_ACTIVE_SURFACE_TARGET", False))
+    if always_active:
+        return active_masks.at[:, SURFACE_DUMMY_IDX].set(True)
+
+    force_surface = _surface_required_from_raw(raw_obs)
+    return active_masks.at[:, SURFACE_DUMMY_IDX].set(
+        jnp.logical_and(active_masks[:, SURFACE_DUMMY_IDX], force_surface)
+    )
+
+
+def get_forced_target_override(raw_obs, current_targets, config, rng=None):
+    if current_targets.ndim == 0:
+        return current_targets
+
+    force_surface = _surface_required_from_raw(raw_obs)
+
+    # Optional exploration assist: sample the surface target while forcing is true.
+    surface_pick_prob = float(config.get("SURFACE_PICK_PROB", 0.0))
+    if rng is not None and surface_pick_prob > 0.0:
+        rng_surface = jax.random.split(rng, current_targets.shape[0])
+        pick_surface = jax.vmap(lambda r: jax.random.uniform(r, ()) < surface_pick_prob)(
+            rng_surface
+        )
+        pick_surface = jnp.logical_and(force_surface, pick_surface)
+        current_targets = jnp.where(
+            pick_surface,
+            jnp.array(SURFACE_DUMMY_IDX, dtype=current_targets.dtype),
+            current_targets,
+        )
+
+    force_override = bool(config.get("FORCE_SURFACE_OVERRIDE", False))
+    if force_override:
+        current_targets = jnp.where(
+            force_surface,
+            jnp.array(SURFACE_DUMMY_IDX, dtype=current_targets.dtype),
+            current_targets,
+        )
+    return current_targets
+
+
+def get_idle_action_override(env_state, current_ego_actions, no_target_mask, config):
+    return jnp.zeros_like(no_target_mask, dtype=jnp.bool_)
+
+
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
     Continuous utility Seaquest targeting rule.

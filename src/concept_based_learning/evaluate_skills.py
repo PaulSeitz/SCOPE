@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from concept_based_learning.egocentric_transformation import get_ego_obs
+from concept_based_learning.ego_action_space import fire_ego_action_indices
 from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.pqn_visualizer import (
     load_base_config,
@@ -127,10 +128,7 @@ def evaluate_skills(
                 q_vals = jax.vmap(apply_one)(local_params_tree)  # [num_skills, 1, A]
                 q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, A]
 
-                # FIRE-related ego action indices in the shared 18D space.
-                fire_indices = jnp.array(
-                    [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
-                )
+                fire_indices = fire_ego_action_indices(ego_action_dim)
 
                 q_active = q_vals[active_skill_idx]
                 if restrict_fire_for_non_destroy and active_skill_idx != 0:

@@ -3,7 +3,7 @@ Hierarchical PQN-style trainer for Concept-Based Learning.
 
 This file implements:
 - A shared `QNetwork` MLP used for skills (System 1)
-- A fixed, heuristic meta-policy (System 2) imported from a local file
+- Meta-policy-driven (learned or heuristic) target selection (System 2)
 - A `Transition` container that stores egocentric observations
 - PQN-style update logic with Lambda-returns and SGD epochs
 - Off-policy updates: all skills learn from the chosen action simultaneously
@@ -20,6 +20,9 @@ import flax.linen as nn
 from flax.training.train_state import TrainState
 
 from concept_based_learning.egocentric_transformation import get_ego_obs
+from concept_based_learning.ego_action_space import fire_ego_action_indices
+#from concept_based_learning.basic_mlp_network import MetaQNetwork
+from concept_based_learning.affordance_pointer_network import MetaQNetwork
 from concept_based_learning.environments.datatypes import ConceptObservation
 
 
@@ -92,10 +95,16 @@ def make_train(
     test_env,
     renderer=None,
     *,
+    frozen_meta_params=None,
     get_heuristic_target,
     no_target_idx,
     action_mapper,
     extract_all_skills_rewards,
+    extract_life_lost,
+    fixed_target_idx_from_config,
+    meta_mask_hook,
+    forced_target_hook,
+    idle_action_hook,
 ):
     """
     Factory that creates a `train(rng, params, batch_stats)` function.
@@ -104,7 +113,11 @@ def make_train(
     - TOTAL_TIMESTEPS, NUM_STEPS, NUM_ENVS, NUM_MINIBATCHES, NUM_EPOCHS
     - GAMMA, LAMBDA, LR, MAX_GRAD_NORM
     - NUM_SKILLS, MAX_OBJECTS, EGO_ACTION_DIM, HIDDEN_SIZE, NUM_LAYERS
+      (``EGO_ACTION_DIM`` is typically 6 or 18; bootcamp/SeaQuest mappers use the same 18-slot layout)
     - EPS_START, EPS_FINISH, EPS_DECAY
+
+    Reward extraction is provided by the environment via `extract_all_skills_rewards`,
+    which uses a uniform signature and may optionally consume `info`.
     """
 
     # ---------------------------------------------------------------
@@ -118,6 +131,13 @@ def make_train(
     NUM_SKILLS = config["NUM_SKILLS"]
     MAX_OBJECTS = config["MAX_OBJECTS"]
     EGO_ACTION_DIM = config["EGO_ACTION_DIM"]
+    step_offset_updates = int(config.get("STEP_OFFSET", 0))
+    step_offset_timesteps = int(
+        config.get(
+            "STEP_OFFSET_TIMESTEPS",
+            step_offset_updates * config["NUM_STEPS"] * config["NUM_ENVS"],
+        )
+    )
 
     # Human-readable skill names for wandb (e.g. DESTROY, COLLECT, AVOID). Fallback: skill_0, skill_1, ...
     _raw_skill_names = config.get("SKILL_NAMES")
@@ -137,15 +157,16 @@ def make_train(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
 
-    # In the shared 18D egocentric action space we use across games, indices
-    # with explicit FIRE semantics are:
-    #   1: FIRE
-    #   10–17: *_FIRE directional combos
-    # These indices are consistent with the comments in the various
-    # *action_mapper functions (Seaquest, ChopperCommand, SpaceInvaders, Phoenix).
-    FIRE_EGO_ACTION_INDICES = jnp.array(
-        [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
-    )
+    _custom_fire = config.get("FIRE_EGO_ACTION_INDICES")
+    if _custom_fire is not None:
+        FIRE_EGO_ACTION_INDICES = jnp.array(list(_custom_fire), dtype=jnp.int32)
+    else:
+        # 18-dim Atari-style: FIRE + directional FIRE combos. 6-dim Bootcamp: FIRE only (index 1).
+        FIRE_EGO_ACTION_INDICES = fire_ego_action_indices(EGO_ACTION_DIM)
+    # Keep NOOP (ego action 0) always available, even if custom FIRE indices are misconfigured.
+    NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
+
+    fixed_target_idx = fixed_target_idx_from_config(config)
 
     # Shared Q-network for skills (used by both train and eval_rollout)
     skill_network = QNetwork(
@@ -153,7 +174,24 @@ def make_train(
         hidden_size=config["HIDDEN_SIZE"],
         num_layers=config["NUM_LAYERS"],
     )
-
+    use_learned_meta_policy = frozen_meta_params is not None
+    if use_learned_meta_policy:
+        meta_network = MetaQNetwork(
+            action_dim=MAX_OBJECTS,
+            hidden_size=config.get("META_HIDDEN_SIZE", 256),
+            num_skills=NUM_SKILLS 
+        )
+        # Meta-target exploration during skill finetuning.
+        # Supports either ratio (<=1.0) or explicit update count (>1.0).
+        meta_eps_start = float(
+            config.get("SKILL_FINETUNE_META_EPS_START", config.get("EPS_START", 0.2))
+        )
+        meta_eps_finish = float(
+            config.get("SKILL_FINETUNE_META_EPS_FINISH", config.get("EPS_FINISH", 0.01))
+        )
+        meta_eps_decay_cfg = float(
+            config.get("SKILL_FINETUNE_META_EPS_DECAY", config.get("EPS_DECAY", 0.8))
+        )
     # Vectorized env helpers
     # Reset with given keys (used for auto-reset with fresh RNG; also for probe)
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset)(jax.random.split(rng, n_envs))
@@ -201,8 +239,23 @@ def make_train(
         re-initialized internally.
         """
         eps_scheduler = optax.linear_schedule(
-            config["EPS_START"], config["EPS_FINISH"], config["EPS_DECAY"]
+            config["EPS_START"],
+            config["EPS_FINISH"],
+            (
+                int(max(1, round(config["NUM_UPDATES"] * float(config["EPS_DECAY"]))))
+                if float(config["EPS_DECAY"]) <= 1.0
+                else int(max(1, round(float(config["EPS_DECAY"]))))
+            ),
         )
+        if use_learned_meta_policy:
+            meta_eps_decay_steps = (
+                int(max(1, round(config["NUM_UPDATES"] * meta_eps_decay_cfg)))
+                if meta_eps_decay_cfg <= 1.0
+                else int(max(1, round(meta_eps_decay_cfg)))
+            )
+            meta_eps_scheduler = optax.linear_schedule(
+                meta_eps_start, meta_eps_finish, meta_eps_decay_steps
+            )
         lr = config["LR"]
 
         # ===============================================================
@@ -283,8 +336,9 @@ def make_train(
                 """
                 Step the vectorized environment once.
 
-                Uses the **fixed** heuristic meta-policy to choose a target
-                object for each environment, then runs all skills on the
+                Uses either the learned meta-policy snapshot (when provided)
+                or the fixed heuristic meta-policy to choose a target object
+                for each environment, then runs all skills on the
                 corresponding egocentric state.
 
                 Also tracks episode returns per environment so we can log
@@ -305,14 +359,56 @@ def make_train(
                 rng_reset, rng_step = jax.random.split(rng_rest)
                 rng_skill, rng_policy = jax.random.split(rng_step)
 
-                # SYSTEM 2: Heuristic meta-policy over objects (per env)
+                # SYSTEM 2: target-object selection for each env.
                 policy_rngs = jax.random.split(rng_policy, config["NUM_ENVS"])
-                target_obj_idxs = jax.vmap(get_heuristic_target)(
-                    last_obs.raw_observation,
-                    last_obs.objects,
-                    last_targets,
-                    policy_rngs,
-                )
+                if use_learned_meta_policy:
+                    active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(
+                        last_obs.objects
+                    )
+                    active_masks = meta_mask_hook(
+                        last_obs.raw_observation, active_masks, config
+                    )
+
+                    any_active = jnp.any(active_masks, axis=-1)
+                    fallback_mask = jnp.zeros_like(active_masks).at[:, 0].set(True)
+                    safe_masks = jnp.where(any_active[:, None], active_masks, fallback_mask)
+                    meta_q_vals = jax.vmap(
+                        lambda obs, objs: meta_network.apply(
+                            {"params": frozen_meta_params}, obs, objs, train=False
+                        )
+                    )(last_obs.raw_observation, last_obs.objects)
+                    meta_eps = jnp.full(
+                        config["NUM_ENVS"],
+                        meta_eps_scheduler(train_states.n_updates[0]),
+                    )
+                    target_obj_idxs = jax.vmap(eps_greedy_exploration)(
+                        policy_rngs, meta_q_vals, meta_eps, safe_masks
+                    )
+                    target_obj_idxs = forced_target_hook(
+                        last_obs.raw_observation,
+                        target_obj_idxs,
+                        config,
+                        rng_policy,
+                    )
+                    target_obj_idxs = jnp.where(
+                        any_active,
+                        target_obj_idxs.astype(jnp.int32),
+                        jnp.full_like(target_obj_idxs, no_target_idx, dtype=jnp.int32),
+                    )
+                else:
+                    if fixed_target_idx is not None:
+                        target_obj_idxs = jnp.full(
+                            (config["NUM_ENVS"],),
+                            fixed_target_idx,
+                            dtype=jnp.int32,
+                        )
+                    else:
+                        target_obj_idxs = jax.vmap(get_heuristic_target)(
+                            last_obs.raw_observation,
+                            last_obs.objects,
+                            last_targets,
+                            policy_rngs,
+                        )
                 # When no target, use index 0 for safe indexing; we force NOOP action below
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
@@ -338,24 +434,31 @@ def make_train(
                     )
                     _rngs = jax.random.split(rng_skill, config["NUM_ENVS"])
                     eps = jnp.full(config["NUM_ENVS"], eps_scheduler(train_state.n_updates))
-                    if restrict_fire_for_non_destroy:
-                        # Destroy is always skill index 0 under the label → skill mapping.
-                        # For non-destroy skills, mask out all FIRE-related ego actions.
-                        def build_mask_for_skill(idx):
-                            base_row = jnp.ones((EGO_ACTION_DIM,), dtype=bool)
-                            return jax.lax.cond(
-                                idx == 0,
-                                lambda r: r,
-                                lambda r: r.at[FIRE_EGO_ACTION_INDICES].set(False),
-                                base_row,
-                            )
 
-                        mask_row = build_mask_for_skill(skill_idx)
-                        mask = jnp.broadcast_to(
-                            mask_row, (config["NUM_ENVS"], EGO_ACTION_DIM)
+                    invalid_ego_actions = config.get("INVALID_EGO_ACTIONS", [])
+
+                    def build_mask_for_skill(idx):
+                        base_row = jnp.ones((EGO_ACTION_DIM,), dtype=bool)
+
+                        # Apply general environment masking (e.g., Phoenix forward limits).
+                        if invalid_ego_actions:
+                            invalid_arr = jnp.array(invalid_ego_actions, dtype=jnp.int32)
+                            base_row = base_row.at[invalid_arr].set(False)
+                        # Ensure NOOP remains selectable as a stable/idle option.
+                        base_row = base_row.at[0].set(True)
+
+                        # Apply skill-specific masking (e.g., block FIRE for Collect/Avoid).
+                        return jax.lax.cond(
+                            idx == 0,
+                            lambda r: r,
+                            lambda r: r.at[NON_NOOP_FIRE_EGO_ACTION_INDICES].set(False) if restrict_fire_for_non_destroy else r,
+                            base_row,
                         )
-                    else:
-                        mask = None
+
+                    mask_row = build_mask_for_skill(skill_idx)
+                    mask = jnp.broadcast_to(
+                        mask_row, (config["NUM_ENVS"], EGO_ACTION_DIM)
+                    )
 
                     ego_action = jax.vmap(eps_greedy_exploration)(_rngs, q_vals, eps, mask)
                     return ego_action, q_vals
@@ -368,18 +471,27 @@ def make_train(
                 chosen_ego_actions = all_ego_actions[
                     active_skills, jnp.arange(config["NUM_ENVS"])
                 ]
+                no_target = target_obj_idxs == no_target_idx
                 # When no target on screen, do NOOP (ego action 0 → global action 0)
+                chosen_ego_actions = jnp.where(no_target, 0, chosen_ego_actions)
+
+                use_fire_start = idle_action_hook(
+                    env_state, chosen_ego_actions, no_target, config
+                )
                 chosen_ego_actions = jnp.where(
-                    target_obj_idxs == no_target_idx, 0, chosen_ego_actions
+                    use_fire_start,
+                    jnp.ones((config["NUM_ENVS"],), dtype=jnp.int32),
+                    chosen_ego_actions,
                 )
 
+                # Map egocentric action (0 .. EGO_ACTION_DIM-1) → global ALE index, then step.
                 global_actions = jax.vmap(action_mapper)(
                     chosen_ego_actions,
                     last_obs.raw_observation,
                     target_obj_idxs,
                 )
                 global_actions = jnp.where(
-                    target_obj_idxs == no_target_idx, 0, global_actions
+                    no_target & jnp.logical_not(use_fire_start), 0, global_actions
                 )
 
                 new_obs, new_env_state, raw_rewards, new_done, info = vmap_step(
@@ -392,10 +504,8 @@ def make_train(
                 new_obs = _merge_reset_where_done(new_obs, reset_obs, new_done)
                 new_env_state = _merge_reset_where_done(new_env_state, reset_state, new_done)
 
-                # Compute life loss per environment (positive when a life is lost)
-                prev_lives = env_state.atari_state.env_state.lives
-                next_lives = new_env_state.atari_state.env_state.lives
-                life_lost = prev_lives - next_lives
+                # Compute life loss per environment via env hook (positive when a life is lost)
+                life_lost = extract_life_lost(env_state, new_env_state)
 
                 # We need to extract the target object specifically for the current environments
                 def get_target_obj(objects, idx):
@@ -413,12 +523,17 @@ def make_train(
                 # Golden rule: a skill receives done=True only if the transition is
                 # terminal because the **assigned target** caused it (success or
                 # failure with that object). Everything else is truncation.
-                rewards_and_masks = jax.vmap(extract_all_skills_rewards)(
-                    last_obs.raw_observation,  # prev_raw_obs
-                    new_obs.raw_observation,   # next_raw_obs
-                    prev_targets,              # prev_target
-                    next_targets,              # next_target
-                    life_lost,                 # >0 when a life was lost this step
+                rewards_and_masks = jax.vmap(
+                    lambda pr, nr, pt, nt, ll, inf: extract_all_skills_rewards(
+                        pr, nr, pt, nt, ll, inf, config
+                    )
+                )(
+                    last_obs.raw_observation,
+                    new_obs.raw_observation,
+                    prev_targets,
+                    next_targets,
+                    life_lost,
+                    info,
                 )
                 skill_rewards, skill_done = rewards_and_masks
 
@@ -712,7 +827,8 @@ def make_train(
 
             # Global counters
             metrics["update_steps"] = train_states.n_updates[0]
-            metrics["env/step"] = train_states.timesteps[0]
+            metrics["global/update_steps"] = step_offset_updates + train_states.n_updates[0]
+            metrics["env/step"] = step_offset_timesteps + train_states.timesteps[0]
 
             # Stream metrics to wandb via JAX host callback (one log per update)
             if config.get("WANDB_MODE", "disabled") != "disabled":
@@ -793,23 +909,39 @@ def make_train(
         obj_active_list = []
 
         # Persistent target and RNG state for the heuristic meta-policy
-        rng, rng_policy = jax.random.split(rng)
+        rng, _rng_policy = jax.random.split(rng)
         prev_target_idx = no_target_idx
 
         for _ in range(max_frames):
             rng, step_key = jax.random.split(rng)
-            target_obj_idxs = get_heuristic_target(
-                obs.raw_observation,
-                obs.objects,
-                prev_target_idx,
-                step_key,
-            )
-            target_obj_idxs = int(jnp.ravel(target_obj_idxs)[0])
+            if fixed_target_idx is not None:
+                target_obj_idxs = fixed_target_idx
+            else:
+                target_obj_idxs = get_heuristic_target(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target_idx,
+                    step_key,
+                )
+                target_obj_idxs = int(jnp.ravel(target_obj_idxs)[0])
             prev_target_idx = target_obj_idxs
 
             if target_obj_idxs == no_target_idx:
-                # No object on screen → NOOP
+                # No object on screen → NOOP unless env hook requests idle override.
                 global_action = 0
+                use_idle_override = idle_action_hook(
+                    state,
+                    jnp.asarray([0], dtype=jnp.int32),
+                    jnp.asarray([True], dtype=jnp.bool_),
+                    config,
+                )[0]
+                if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
+                    ga = action_mapper(
+                        jnp.asarray(1, dtype=jnp.int32),
+                        obs.raw_observation,
+                        jnp.asarray(0, dtype=jnp.int32),
+                    )
+                    global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
                 active_skills = 0  # display as first row in sidebar
                 combined_q = np.array([0.0, 0.0, 0.0])  # dummy Q for sidebar
             else:

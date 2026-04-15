@@ -79,7 +79,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     )
     destroy_failure = jnp.logical_and(is_destroy, jnp.logical_and(life_lost > 0, hit_by_assigned))
     destroy_done = jnp.logical_or(destroy_success, destroy_failure)
-    destroy_reward = jnp.where(destroy_success, 1.0, 0.0)
+    destroy_reward = jnp.where(destroy_success, 1.0, 0)
 
     # --- AVOID ---
     is_avoid = prev_target.semantic_label == LABEL_AVOID
@@ -96,7 +96,8 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     return rewards, skill_done
 
 # Controls whether to block upward movement near the surface (legacy behavior).
-BLOCK_SURFACE_ASCENT: bool = True
+# Disabled by default so skills can freely learn ascent behavior.
+BLOCK_SURFACE_ASCENT: bool = False
 SURFACE_Y_THRESHOLD: float = 50.0
 
 
@@ -279,14 +280,12 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         with fewer than 6 divers. This prevents the game-over signal from
         resetting the episode in those cases while still allowing normal deaths.
         """
-        obs_stack, new_atari_state, reward, done, info = self._env.step(
-            state.atari_state, action
-        )
+        semantic_obs, new_state, reward, done, info = super().step(state, action)
 
         # Inspect the most recent native Seaquest frame to detect surfacing deaths.
         # `obs_stack` is a stacked SeaquestObservation PyTree; take the last frame.
         last_obs = jax.tree_util.tree_map(
-            lambda x: x[-1] if jnp.ndim(x) > 0 else x, obs_stack
+            lambda x: x[-1] if jnp.ndim(x) > 0 else x, semantic_obs.raw_observation
         )
         player_y = last_obs.player.y
         oxygen = last_obs.oxygen_level
@@ -308,8 +307,5 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         # Neutralize the death signal and any associated reward spike.
         done = jnp.where(surfacing_death, False, done)
         reward = jnp.where(surfacing_death, 0.0, reward)
-
-        semantic_obs = self._process_stack(obs_stack)
-        new_state = SemanticState(atari_state=new_atari_state)
 
         return semantic_obs, new_state, reward, done, info

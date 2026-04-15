@@ -9,17 +9,24 @@ from concept_based_learning.environments.datatypes import (
 
 NO_TARGET_IDX = -1
 # Danger range for AVOID objects (in pixels / world units).
-CLOSE_DANGER_RANGE = 40.0
-X_AXIS_WEIGHT = 1.0
+CLOSE_DANGER_RANGE = 15.0
+X_AXIS_WEIGHT = 0.5
+# Added to distance for enemy bullets that are clearly moving away from the player
+# (e.g. already past the ship on x), so approaching shots win when ranking threats.
+RECEDING_AVOID_PENALTY = 80.0
+# Minimum per-frame speed squared (pixels^2) before we trust the velocity-based sign.
+MIN_BULLET_SPEED_SQ = 1.0
 
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
     Heuristic Phoenix targeting rule.
 
-    - By default, select the closest active object (any label).
+    - By default, select the closest active DESTROY target (boss / enemies).
     - If any AVOID object comes within CLOSE_DANGER_RANGE, override and
-      select the closest such AVOID object instead.
+      select among those AVOID objects; enemy shots that are still moving
+      toward the player are prioritized over shots that are already receding
+      (e.g. past the ship but still nearby in Euclidean distance).
     """
     # Player position (last frame)
     px = raw_observation.player.x[-1]
@@ -52,6 +59,27 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     # Slight x-axis weighting kept, but overall we just care about proximity.
     distances = jnp.sqrt((X_AXIS_WEIGHT * dx) ** 2 + dy ** 2)
 
+    # Artificially subtract distance from the previously tracked target to make it sticky.
+    HYSTERESIS_BONUS = 50.0
+    is_prev_target = jnp.arange(distances.shape[0]) == prev_target_idx
+    distances = jnp.where(
+        jnp.logical_and(is_prev_target, active_mask),
+        distances - HYSTERESIS_BONUS,
+        distances,
+    )
+
+    # Per-frame velocity from the last two stacked frames (toward player iff dot > 0).
+    ox_stack = objects.x
+    oy_stack = objects.y
+    vx = ox_stack[-1].astype(jnp.float32) - ox_stack[-2].astype(jnp.float32)
+    vy = oy_stack[-1].astype(jnp.float32) - oy_stack[-2].astype(jnp.float32)
+    dx_f = dx.astype(jnp.float32)
+    dy_f = dy.astype(jnp.float32)
+    approach = vx * dx_f + vy * dy_f
+    speed_sq = vx * vx + vy * vy
+    has_velocity = speed_sq > MIN_BULLET_SPEED_SQ
+    is_receding = jnp.logical_and(has_velocity, approach < 0.0)
+
     labels = objects.semantic_label[-1]
 
     # ------------------------------------------------------------------
@@ -77,8 +105,13 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     valid_close_avoid = jnp.logical_and(is_close_avoid, active_mask)
     have_valid_close_avoid = jnp.any(valid_close_avoid)
 
-    # Among close AVOID objects, pick the nearest one.
-    avoid_distances = jnp.where(valid_close_avoid, distances, large_distance)
+    # Among close AVOID objects, pick the best by adjusted distance: deprioritize
+    # bullets moving away from the player so we do not fixate on shots that already passed.
+    receding_bullet = jnp.logical_and(is_avoid, is_receding)
+    avoid_rank_distance = jnp.where(
+        receding_bullet, distances + RECEDING_AVOID_PENALTY, distances
+    )
+    avoid_distances = jnp.where(valid_close_avoid, avoid_rank_distance, large_distance)
     best_avoid_idx = jnp.argmin(avoid_distances).astype(jnp.int32)
 
     # Apply danger override on top of destroy targeting.

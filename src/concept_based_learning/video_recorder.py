@@ -79,7 +79,8 @@ class SidebarRenderer:
 
 def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                    target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
-                   wandb_step: int | None = None, distances=None, angles=None):
+                   wandb_step: int | None = None, distances=None, angles=None,
+                   video_output_path: str | None = None):
     global CURRENT_VIDEO_THREAD
 
     if renderer is None:
@@ -103,6 +104,7 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
             "wandb_step": wandb_step,
             "distances": distances,
             "angles": angles,
+            "video_output_path": video_output_path,
         },
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
@@ -173,15 +175,43 @@ def add_distance_angle_text(frame, distance, angle):
     return out
 
 
+def _write_frames_mp4(frames_chw: np.ndarray, path: str, fps: int = 30) -> None:
+    """frames_chw: (T, C, H, W) uint8 RGB."""
+    try:
+        import cv2
+    except ImportError:
+        print(
+            "Warning: OpenCV (cv2) not installed; cannot save video to disk. "
+            "Install opencv-python or enable wandb logging."
+        )
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    _, _, h, w = frames_chw.shape
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
+    if not writer.isOpened():
+        print(f"Warning: cv2.VideoWriter could not open path {path!r}")
+        return
+    for i in range(len(frames_chw)):
+        fr = np.transpose(frames_chw[i], (1, 2, 0))
+        fr_bgr = cv2.cvtColor(fr, cv2.COLOR_RGB2BGR)
+        writer.write(fr_bgr)
+    writer.release()
+    print(f"Saved video to {path}")
+
+
 def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                   target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
-                  wandb_step: int | None = None, distances=None, angles=None):
+                  wandb_step: int | None = None, distances=None, angles=None,
+                  video_output_path: str | None = None):
     try:
-        if wandb.run is None:
+        use_wandb = wandb.run is not None
+        if not use_wandb and not video_output_path:
             return
         print("Rendering video...")
-        video_folder = f"{wandb.run.dir}/media/videos/"
-        os.makedirs(video_folder, exist_ok=True)
+        if use_wandb:
+            video_folder = f"{wandb.run.dir}/media/videos/"
+            os.makedirs(video_folder, exist_ok=True)
         
         # Unwrap the exact wrapper chain: LogWrapper -> SubPolicyAdapter -> SeaquestConceptWrapper -> AtariWrapper -> base state
         # LogWrapper stores the next env's state in .env_state
@@ -261,13 +291,16 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             frames = new_frames
 
         name = video_key or (f"video_{step}_modif" if modif else f"video_{step}")
-        try:
-            log_kwargs = {}
-            if wandb_step is not None:
-                log_kwargs["step"] = int(wandb_step)
-            wandb.log({name: wandb.Video(frames, fps=30, format="mp4")}, **log_kwargs)
-        except Exception as e:
-            print(f"Warning: Failed to log video: {e}")
+        if use_wandb:
+            try:
+                log_kwargs = {}
+                if wandb_step is not None:
+                    log_kwargs["step"] = int(wandb_step)
+                wandb.log({name: wandb.Video(frames, fps=30, format="mp4")}, **log_kwargs)
+            except Exception as e:
+                print(f"Warning: Failed to log video: {e}")
+        if video_output_path:
+            _write_frames_mp4(frames, video_output_path, fps=30)
         print("Video done.")
     except Exception as e:
         print(f"Error in collect_video: {e}")

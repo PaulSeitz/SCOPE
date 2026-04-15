@@ -74,7 +74,11 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     avoid_failure = (life_lost > 0) & (prev_target.semantic_label == LABEL_AVOID) & hit_by_assigned
 
     collect_reward = jnp.where(collect_success & (life_lost == 0), 1.0, 0.0)
-    destroy_reward = jnp.where(destroy_success & (life_lost == 0), 1.0, 0.0)
+    destroy_reward = jnp.where(
+        destroy_success & (life_lost == 0),
+        1.0,
+        jnp.where(destroy_failure, -1.0, 0.0),
+    )
     avoid_reward = jnp.where(avoid_failure, -1.0, 0.0)
 
     collect_done = collect_success
@@ -136,7 +140,49 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         final_labels_unpadded = jnp.concatenate([enemy_labels, truck_labels, enemy_missile_labels])
 
         is_on_screen = (final_x_unpadded + final_w_unpadded > 0) & (final_x_unpadded < 160)
+
+        # Inject a single virtual waypoint from an off-screen enemy so the
+        # meta-policy can navigate toward incoming threats without any trainer logic.
+        is_enemy = final_labels_unpadded == LABEL_DESTROY
+        is_offscreen_enemy = jnp.logical_and(
+            is_enemy,
+            jnp.logical_and(final_active_unpadded > 0, jnp.logical_not(is_on_screen)),
+        )
+        has_virtual_waypoint = jnp.any(is_offscreen_enemy)
+        virtual_idx = jnp.argmax(is_offscreen_enemy).astype(jnp.int32)
+
+        enemy_x = final_x_unpadded[virtual_idx]
+        enemy_w = final_w_unpadded[virtual_idx]
+        enemy_y = final_y_unpadded[virtual_idx]
+        offscreen_left = (enemy_x + enemy_w) <= 0
+        virtual_x = jnp.where(
+            offscreen_left,
+            jnp.asarray(0, dtype=final_x_unpadded.dtype),
+            jnp.asarray(159, dtype=final_x_unpadded.dtype),
+        )
+        virtual_y = jnp.clip(
+            enemy_y,
+            jnp.asarray(0, dtype=final_y_unpadded.dtype),
+            jnp.asarray(210, dtype=final_y_unpadded.dtype),
+        )
+
+        final_x_unpadded = final_x_unpadded.at[virtual_idx].set(
+            jnp.where(has_virtual_waypoint, virtual_x, final_x_unpadded[virtual_idx])
+        )
+        final_y_unpadded = final_y_unpadded.at[virtual_idx].set(
+            jnp.where(has_virtual_waypoint, virtual_y, final_y_unpadded[virtual_idx])
+        )
+        final_labels_unpadded = final_labels_unpadded.at[virtual_idx].set(
+            jnp.where(has_virtual_waypoint, LABEL_COLLECT, final_labels_unpadded[virtual_idx])
+        )
+        final_active_unpadded = final_active_unpadded.at[virtual_idx].set(
+            jnp.where(has_virtual_waypoint, 1, final_active_unpadded[virtual_idx])
+        )
+
         final_active_unpadded = jnp.where(is_on_screen, final_active_unpadded, 0)
+        final_active_unpadded = final_active_unpadded.at[virtual_idx].set(
+            jnp.where(has_virtual_waypoint, 1, final_active_unpadded[virtual_idx])
+        )
 
         # --- Array Padding to MAX_OBJECTS (84) ---
         pad_size = self.max_objects - final_x_unpadded.shape[0]

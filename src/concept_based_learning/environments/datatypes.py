@@ -70,6 +70,7 @@ class SemanticState:
     """Wraps the AtariState to track wrapper-specific internal state."""
 
     atari_state: AtariState
+    obs_stack: Any = None
 
 
 # Backwards-compatible alias used by wrappers

@@ -11,12 +11,18 @@ from omegaconf import OmegaConf
 from safetensors.flax import load_file
 from flax.traverse_util import unflatten_dict
 
-from concept_based_learning.egocentric_transformation import get_ego_obs
+from concept_based_learning.ego_action_space import fire_ego_action_indices
+from concept_based_learning.egocentric_transformation import (
+    EGO_OBS_CHANNELS_PER_FRAME,
+    get_ego_obs,
+)
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
 )
+#from concept_based_learning.basic_mlp_network import MetaQNetwork
+from concept_based_learning.affordance_pointer_network import MetaQNetwork
 from concept_based_learning.train_agent import QNetwork
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -67,6 +73,37 @@ def load_base_config():
     return base_config
 
 
+def resolve_config_path(path):
+    """
+    Resolve a config/CLI path for loading or saving artifacts.
+
+    Hydra changes the process working directory to each run's output folder
+    (e.g. ``outputs/YYYY-MM-DD/HH-MM-SS/``). Relative paths like ``./outputs/models/...``
+    must therefore be interpreted relative to the directory where the user
+    launched the job, not the Hydra run directory.
+
+    - Absolute paths are returned normalized unchanged.
+    - Relative paths are joined with Hydra's original cwd when available,
+      otherwise ``os.getcwd()``.
+    """
+    if path is None:
+        return None
+    if not isinstance(path, str):
+        path = str(path)
+    path = path.strip()
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    try:
+        from hydra.utils import get_original_cwd
+
+        base = get_original_cwd()
+    except Exception:
+        base = os.getcwd()
+    return os.path.normpath(os.path.join(base, path))
+
+
 def load_params_from_file(filename):
     """
     Load a PyTree of parameters from a .safetensors file.
@@ -75,8 +112,16 @@ def load_params_from_file(filename):
     on a parameter pytree that matches the skill Q-network params used in training
     (typically something like `train_states.params` from the trainer).
     """
-    print(f"Loading weights from: {filename}")
-    flattened_dict = load_file(filename)
+    resolved = resolve_config_path(filename)
+    print(f"Loading weights from: {resolved}")
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {resolved}\n"
+            f"  (config path was: {filename!r})\n"
+            "  Train skills first (e.g. TRAIN_MODE=skills_only) so SAVE_PATH writes the "
+            ".safetensors file, or set INIT_MODEL_PATH to an existing file."
+        )
+    flattened_dict = load_file(resolved)
     return unflatten_dict(flattened_dict, sep=",")
 
 
@@ -102,7 +147,46 @@ def label_to_skill_idx(label, num_skills: int):
     return jnp.clip(label - 1, 0, num_skills - 1)
 
 
-def run_eval_rollout(config, params_tree=None, max_frames=None):
+def _select_target_with_meta(
+    obs,
+    config,
+    meta_network,
+    meta_params,
+    meta_mask_hook,
+    forced_target_hook,
+    no_target_idx,
+):
+    """Select a target index using a learned meta-policy checkpoint."""
+    meta_q_vals = meta_network.apply(
+        {"params": meta_params},
+        obs.raw_observation,
+        obs.objects,
+        train=False,
+    )
+    active_mask = obs.objects.active[-1] > 0.5
+    active_mask = meta_mask_hook(
+        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+        jnp.expand_dims(active_mask, 0),
+        config,
+    )[0]
+    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
+    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    if meta_use_noop_target and 0 <= meta_noop_target_idx < int(config["MAX_OBJECTS"]):
+        active_mask = active_mask.at[meta_noop_target_idx].set(True)
+
+    any_active = jnp.any(active_mask)
+    valid_qs = jnp.where(active_mask, meta_q_vals, -jnp.inf)
+    target_idx = jnp.argmax(valid_qs)
+    target_idx = forced_target_hook(
+        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+        jnp.expand_dims(target_idx, 0),
+        config,
+    )[0]
+    target_idx = jnp.where(any_active, target_idx, no_target_idx)
+    return int(target_idx)
+
+
+def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None):
     """
     Run a single evaluation rollout with the hierarchical PQN-style agent:
     - Fixed heuristic meta-policy to choose a target object.
@@ -119,6 +203,8 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
+    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
+    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
@@ -133,6 +219,17 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
     heuristic_target = components.get_heuristic_target
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
+    forced_target_hook = components.forced_target_hook
+    idle_action_hook = components.idle_action_hook
+    meta_mask_hook = components.meta_mask_hook
+
+    meta_network = None
+    if meta_params is not None:
+        meta_network = MetaQNetwork(
+            action_dim=config["MAX_OBJECTS"],
+            hidden_size=config.get("META_HIDDEN_SIZE", 256),
+            num_skills=num_skills  
+        )
 
     # Build the shared skill Q-network (one set of params per skill)
     skill_network = QNetwork(
@@ -182,26 +279,56 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
 
     # Persistent target index for the heuristic meta-policy
     prev_target_idx = no_target_idx
-    # Track lives so we can terminate ChopperCommand recordings on first death.
-    is_chopper = env_name.lower() == "choppercommand"
-    prev_lives = int(state.atari_state.env_state.lives)
-
     for _ in range(max_frames):
         rng, step_key = jax.random.split(rng)
 
-        # Heuristic meta-policy selects a target object
-        target_obj_idx = heuristic_target(
-            obs.raw_observation,
-            obs.objects,
-            prev_target_idx,
-            step_key,
-        )
-        target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+        if meta_network is None:
+            # Heuristic meta-policy selects a target object
+            target_obj_idx = heuristic_target(
+                obs.raw_observation,
+                obs.objects,
+                prev_target_idx,
+                step_key,
+            )
+            target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            target_obj_idx = int(
+                forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                    config,
+                )[0]
+            )
+        else:
+            target_obj_idx = _select_target_with_meta(
+                obs,
+                config,
+                meta_network,
+                meta_params,
+                meta_mask_hook,
+                forced_target_hook,
+                no_target_idx,
+            )
         prev_target_idx = target_obj_idx
 
-        if target_obj_idx == no_target_idx:
-            # No valid target on screen → NOOP, dummy Q values.
+        is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+        if target_obj_idx == no_target_idx or is_meta_noop:
+            # No valid target on screen → NOOP, unless env hook requests an idle override.
             global_action = 0
+            use_idle_override = idle_action_hook(
+                state,
+                jnp.asarray([0], dtype=jnp.int32),
+                jnp.asarray([True], dtype=jnp.bool_),
+                config,
+            )[0]
+            if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
+                ga = action_mapper(
+                    jnp.asarray(1, dtype=jnp.int32),
+                    obs.raw_observation,
+                    jnp.asarray(0, dtype=jnp.int32),
+                )
+                global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
             active_skill_idx = 0
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan
@@ -220,9 +347,8 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
 
             # Extract the most recent frame's distance and angle from the ego features.
-            # Each frame contributes [dx_ego/160, dy_ego/210, sin(ori), cos(ori)];
-            # the last 4 entries correspond to the latest frame.
-            last_frame_ego = ego_obs[-4:]
+            # See `get_ego_obs` / `EGO_OBS_CHANNELS_PER_FRAME` for the per-frame layout.
+            last_frame_ego = ego_obs[-EGO_OBS_CHANNELS_PER_FRAME:]
             dx_norm = last_frame_ego[0]
             dy_norm = last_frame_ego[1]
             # Recover approximate pixel-space dx, dy and distance
@@ -244,9 +370,7 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
 
             combined_q = np.array(jnp.max(q_vals, axis=-1))
 
-            fire_indices = jnp.array(
-                [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
-            )
+            fire_indices = fire_ego_action_indices(ego_action_dim)
             q_active = q_vals[active_skill_idx]
             if restrict_fire_for_non_destroy and active_skill_idx != 0:
                 q_active = q_active.at[fire_indices].set(-jnp.inf)
@@ -262,14 +386,6 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
 
         # Step the environment
         obs, state, _reward, done, _info = env.step(state, global_action)
-
-        # For ChopperCommand, end the recorded episode on the first life loss.
-        if is_chopper:
-            current_lives = int(state.atari_state.env_state.lives)
-            life_lost = prev_lives - current_lives
-            prev_lives = current_lives
-            if life_lost > 0 and not done:
-                done = True
 
         # Record state & debug info
         states_list.append(state)
@@ -324,7 +440,7 @@ def run_eval_rollout(config, params_tree=None, max_frames=None):
     )
 
 
-def run_live_visualization(config, params_tree=None, max_frames=None):
+def run_live_visualization(config, params_tree=None, meta_params=None, max_frames=None):
     """
     Run a live, interactive visualization loop using pygame.
     The agent acts in the environment step-by-step and the current frame is
@@ -338,6 +454,8 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
+    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
+    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
 
     env, renderer = create_eval_env(config)
@@ -349,6 +467,17 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
     heuristic_target = components.get_heuristic_target
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
+    forced_target_hook = components.forced_target_hook
+    idle_action_hook = components.idle_action_hook
+    meta_mask_hook = components.meta_mask_hook
+
+    meta_network = None
+    if meta_params is not None:
+        meta_network = MetaQNetwork(
+            action_dim=config["MAX_OBJECTS"],
+            hidden_size=config.get("META_HIDDEN_SIZE", 256),
+            num_skills=num_skills  
+        )
 
     skill_network = QNetwork(
         action_dim=ego_action_dim,
@@ -427,18 +556,52 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
 
         rng, step_key = jax.random.split(rng)
 
-        # Heuristic meta-policy selects a target object
-        target_obj_idx = heuristic_target(
-            obs.raw_observation,
-            obs.objects,
-            prev_target_idx,
-            step_key,
-        )
-        target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+        if meta_network is None:
+            # Heuristic meta-policy selects a target object
+            target_obj_idx = heuristic_target(
+                obs.raw_observation,
+                obs.objects,
+                prev_target_idx,
+                step_key,
+            )
+            target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            target_obj_idx = int(
+                forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                    config,
+                )[0]
+            )
+        else:
+            target_obj_idx = _select_target_with_meta(
+                obs,
+                config,
+                meta_network,
+                meta_params,
+                meta_mask_hook,
+                forced_target_hook,
+                no_target_idx,
+            )
         prev_target_idx = target_obj_idx
 
-        if target_obj_idx == no_target_idx:
+        is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+        if target_obj_idx == no_target_idx or is_meta_noop:
             global_action = 0
+            use_idle_override = idle_action_hook(
+                state,
+                jnp.asarray([0], dtype=jnp.int32),
+                jnp.asarray([True], dtype=jnp.bool_),
+                config,
+            )[0]
+            if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
+                ga = action_mapper(
+                    jnp.asarray(1, dtype=jnp.int32),
+                    obs.raw_observation,
+                    jnp.asarray(0, dtype=jnp.int32),
+                )
+                global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
             active_skill_idx = 0
             distance = np.nan
             angle = np.nan
@@ -453,7 +616,7 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
 
-            last_frame_ego = ego_obs[-4:]
+            last_frame_ego = ego_obs[-EGO_OBS_CHANNELS_PER_FRAME:]
             dx_norm = last_frame_ego[0]
             dy_norm = last_frame_ego[1]
             dx_pix = dx_norm * 160.0
@@ -471,9 +634,7 @@ def run_live_visualization(config, params_tree=None, max_frames=None):
             q_vals = jax.vmap(apply_one)(params_tree)
             q_vals = jnp.squeeze(q_vals, axis=1)
 
-            fire_indices = jnp.array(
-                [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
-            )
+            fire_indices = fire_ego_action_indices(ego_action_dim)
             q_active = q_vals[active_skill_idx]
             if restrict_fire_for_non_destroy and active_skill_idx != 0:
                 q_active = q_active.at[fire_indices].set(-jnp.inf)
@@ -594,6 +755,16 @@ def main():
             "mapping are used by the visualizer."
         ),
     )
+    parser.add_argument(
+        "--meta-model",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a learned meta-policy checkpoint "
+            "(*_meta.safetensors). If set, target selection uses MetaQNetwork "
+            "instead of the heuristic meta-policy."
+        ),
+    )
     args = parser.parse_args()
 
     base_config = load_base_config()
@@ -625,10 +796,20 @@ def main():
         if not os.path.exists(args.model):
             raise FileNotFoundError(f"Model not found: {args.model}")
         params_tree = load_params_from_file(args.model)
+    meta_params = None
+    if args.meta_model is not None:
+        if not os.path.exists(args.meta_model):
+            raise FileNotFoundError(f"Meta model not found: {args.meta_model}")
+        meta_params = load_params_from_file(args.meta_model)
 
     # If requested, run live interactive visualization and exit.
     if not args.record:
-        run_live_visualization(base_config, params_tree=params_tree, max_frames=args.max_frames)
+        run_live_visualization(
+            base_config,
+            params_tree=params_tree,
+            meta_params=meta_params,
+            max_frames=args.max_frames,
+        )
         return
 
     # Initialize wandb so that `video_recorder` can log the video (offline by default).
@@ -657,7 +838,12 @@ def main():
         distances,
         angles,
         renderer,
-    ) = run_eval_rollout(base_config, params_tree=params_tree, max_frames=args.max_frames)
+    ) = run_eval_rollout(
+        base_config,
+        params_tree=params_tree,
+        meta_params=meta_params,
+        max_frames=args.max_frames,
+    )
 
     # Use the existing video logging utility to create and log the video.
     step = 0

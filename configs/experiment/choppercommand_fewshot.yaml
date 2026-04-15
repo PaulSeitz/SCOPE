@@ -1,5 +1,6 @@
 ALG_NAME: "hierarchical_pqn"
 ENV_NAME: "choppercommand"
+TRAIN_MODE: "skills_only"
 
 # Environment modification hooks
 GAME_MODS: null
@@ -17,6 +18,7 @@ alg:
   NUM_LAYERS: 2
 
   # Environment wrappers
+  FIRST_FIRE: true
   STICKY_ACTIONS: False
   EPISODIC_LIFE: True
 

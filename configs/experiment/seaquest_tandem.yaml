@@ -1,0 +1,55 @@
+ALG_NAME: "hierarchical_pqn"
+ENV_NAME: "seaquest"
+TRAIN_MODE: "tandem"
+
+# Tandem currently runs directly on the configured env (no curriculum staging).
+GAME_MODS: null
+EVAL_GAME_MODS: null
+
+alg:
+  # Shared architecture
+  NUM_SKILLS: 3
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
+  MAX_OBJECTS: 34
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+
+  # Meta head
+  META_HIDDEN_SIZE: 256
+  META_LR: 0.00005
+  META_SWITCH_PENALTY: -0.005
+  META_DEATH_PENALTY: -5.0
+
+  # Skill optimizer (if omitted, LR is used)
+  SKILL_LR: 0.00025
+
+  # Environment wrappers
+  FIRST_FIRE: true
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: True
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
+  FRAME_STACK_SIZE: 4
+
+  # Rollout/update settings
+  TOTAL_TIMESTEPS: 15_000_000
+  NUM_ENVS: 1024
+  NUM_STEPS: 64
+  NUM_EPOCHS: 2
+  NUM_MINIBATCHES: 64
+  GAMMA: 0.99
+  LAMBDA: 0.65
+  LR: 0.00001
+  MAX_GRAD_NORM: 0.8
+
+  # Exploration
+  EPS_START: 1.0
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.8
+  META_EPS_START: 0.2
+
+  # Skill updates
+  OFF_POLICY: false
+  # Warmup phase: use env-specific heuristic target selector (System 2 frozen-by-behavior)
+  # for the first N tandem updates to bootstrap skill learning signal.
+  SKILL_WARMUP_UPDATES: 600

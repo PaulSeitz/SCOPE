@@ -3,6 +3,7 @@
 # --- Environment & Algorithm Names ---
 ALG_NAME: "hierarchical_pqn"
 ENV_NAME: "seaquest"
+TRAIN_MODE: "skills_only"
 
 # --- Environment modification hooks ---
 # Training uses `GAME_MODS` (potentially phase-specific via curriculum),
@@ -21,34 +22,38 @@ alg:
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]  # wandb keys: skill_DESTROY/td_loss, etc.
   MAX_OBJECTS: 34             # 33 game objects + 1 dummy surface waypoint
   EGO_ACTION_DIM: 18          # The 18 translated egocentric actions
-  HIDDEN_SIZE: 64            # Slightly wider since it relies purely on distance/angle
+  HIDDEN_SIZE: 128            # Slightly wider since it relies purely on distance/angle
   NUM_LAYERS: 3
 
   # If true, COLLECT and AVOID skills cannot choose FIRE ego actions.
-  # Only the DESTROY skill (index 0) is allowed to fire.
+  # Only the DESTROY skill (index 0) is allowed to fire.s
   RESTRICT_FIRE_FOR_NON_DESTROY: false
 
   # --- Environment Wrappers ---
+  # FIRST_FIRE: jaxatari AtariWrapper sends one FIRE immediately after each reset (ALE “start”).
+  FIRST_FIRE: true
   STICKY_ACTIONS: false
   EPISODIC_LIFE: True
+  # Keep explicit so downstream meta-only runs can match the skill checkpoint.
+  FRAME_STACK_SIZE: 4
 
   # --- PQN Rollout Hyperparameters ---
   # Scale: more NUM_ENVS = faster collection; keep (NUM_ENVS * NUM_STEPS) fixed so
   # NUM_UPDATES and minibatch size stay the same → same stability, faster wall-clock.
-  TOTAL_TIMESTEPS: 100_000_000 # Total frames to train
+  TOTAL_TIMESTEPS: 60_000_000 # Total frames to train
   NUM_ENVS: 1024              # Parallel environments (was 512; 1024*64 = 512*128)
-  NUM_STEPS: 64               # Steps per env per update (shorter rollouts balance more envs; batch = 65536)
+  NUM_STEPS: 128               # Steps per env per update (shorter rollouts balance more envs; batch = 65536)
 
   # --- PQN Update Hyperparameters ---
-  NUM_EPOCHS: 3               # SGD epochs over rollout (2→3: more gradient steps per rollout, better sample use)
+  NUM_EPOCHS: 2               # SGD epochs over rollout (2→3: more gradient steps per rollout, better sample use)
   NUM_MINIBATCHES: 64          # Must divide NUM_ENVS*NUM_STEPS; 65536/64 = 1024 minibatch (unchanged)
   GAMMA: 0.99                 # Discount factor
   LAMBDA: 0.65                # GAE / Lambda return smoothing parameter
-  LR: 0.0001                  # Learning rate (2.5e-4 is standard for Atari)
+  LR: 0.00025                  # Learning rate (2.5e-4 is standard for Atari)
   MAX_GRAD_NORM: 0.8          # Gradient clipping
 
   # --- Policy Style for Skill Updates ---
-  OFF_POLICY: true            # If true, all skills learn from all transitions with a target.
+  OFF_POLICY: false            # If true, all skills learn from all transitions with a target.
                               # If false, use strict on-policy updates (only active skill learns).
 
   # --- Exploration (Epsilon-Greedy) ---
@@ -58,8 +63,9 @@ alg:
 
   # --- Curriculum Learning over Skills ---
   # When enabled, TOTAL_TIMESTEPS will be split evenly across phases.
-  CURRICULUM_ENABLED: false
-  CURRICULUM_PHASES: ["collect", "destroy", "avoid"]
+  CURRICULUM_ENABLED: true
+  #CURRICULUM_PHASES: ["collect", "destroy", "avoid"]
+  CURRICULUM_PHASES: ["destroy", "collect", "avoid"]
   CURRICULUM_MODS:
     collect:
       - collect_curriculum

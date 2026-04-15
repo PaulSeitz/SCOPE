@@ -1,7 +1,7 @@
 # config.yaml
 
 defaults:
-  - experiment: seaquest_skills
+  - experiment: seaquest_tandem
   - _self_
 
 # --- Weights & Biases Settings ---
@@ -17,6 +17,11 @@ EVAL_SEED: 43                 # Separate RNG seed used for evaluation rollouts
 SAVE_PATH: "./outputs/models" # Where to save trained parameters
 LOAD_PATH: null               # Set to path if you want to load a checkpoint
 LOAD_PARAMS: False            # Toggle to True when resuming or evaluating
+INIT_MODEL_PATH: null         # Optional path to pre-trained skill params for transfer/meta-only runs
+
+# Eval/test env mods: null = same as training (default; curriculum videos match trained env).
+# Set to a list of mod names to override eval only; use [] only to force unmodified env for eval.
+EVAL_GAME_MODS: null
 
 # --- Video recording during/every training ---
 RECORD_VIDEO: True           # If true, record rollout videos (e.g. to wandb)
