@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 from flax import struct
 from typing import Any
-from jaxatari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.environments.datatypes import (
@@ -12,6 +11,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_NOOP,
 )
+from concept_based_learning.observations.action_space import make_ego_action_mapper
 
 
 def _bbox_overlap(player, target):
@@ -90,26 +90,12 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     return rewards, skill_done
 
 
-def choppercommand_action_mapper(ego_action: jnp.ndarray, global_features: Any, target_idx: jnp.ndarray) -> jnp.ndarray:
-    player_ori = global_features.player.orientation[-1] 
-    is_facing_right = player_ori < 180.0
-    
-    map_right = jnp.array([
-        Atari.NOOP, Atari.FIRE, Atari.RIGHT, Atari.DOWN, Atari.UP, Atari.LEFT,
-        Atari.DOWNRIGHT, Atari.UPRIGHT, Atari.DOWNLEFT, Atari.UPLEFT,
-        Atari.RIGHTFIRE, Atari.DOWNFIRE, Atari.UPFIRE, Atari.LEFTFIRE,
-        Atari.DOWNRIGHTFIRE, Atari.UPRIGHTFIRE, Atari.DOWNLEFTFIRE, Atari.UPLEFTFIRE
-    ], dtype=jnp.int32)
-    
-    map_left = jnp.array([
-        Atari.NOOP, Atari.FIRE, Atari.LEFT, Atari.UP, Atari.DOWN, Atari.RIGHT,
-        Atari.UPLEFT, Atari.DOWNLEFT, Atari.UPRIGHT, Atari.DOWNRIGHT,
-        Atari.LEFTFIRE, Atari.UPFIRE, Atari.DOWNFIRE, Atari.RIGHTFIRE,
-        Atari.UPLEFTFIRE, Atari.DOWNLEFTFIRE, Atari.UPRIGHTFIRE, Atari.DOWNRIGHTFIRE
-    ], dtype=jnp.int32)
-
-    chosen_map = jnp.where(is_facing_right, map_right, map_left)
-    return chosen_map[ego_action]
+choppercommand_action_mapper = make_ego_action_mapper(
+    noop_action=0,
+    fire_action=1,
+    move_table=     [3, 8, 5, 9, 4, 7, 2, 6],
+    move_fire_table=[11, 16, 13, 17, 12, 15, 10, 14],
+)
 
 
 class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):

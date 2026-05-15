@@ -4,6 +4,8 @@
 ALG_NAME: "hierarchical_pqn"
 ENV_NAME: "seaquest"
 TRAIN_MODE: "skills_only"
+USE_LEGACY_EGO_OBS: true
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: true
 
 # --- Environment modification hooks ---
 # Training uses `GAME_MODS` (potentially phase-specific via curriculum),
@@ -40,7 +42,7 @@ alg:
   # --- PQN Rollout Hyperparameters ---
   # Scale: more NUM_ENVS = faster collection; keep (NUM_ENVS * NUM_STEPS) fixed so
   # NUM_UPDATES and minibatch size stay the same → same stability, faster wall-clock.
-  TOTAL_TIMESTEPS: 60_000_000 # Total frames to train
+  TOTAL_TIMESTEPS: 20_000_000 # Total frames to train
   NUM_ENVS: 1024              # Parallel environments (was 512; 1024*64 = 512*128)
   NUM_STEPS: 128               # Steps per env per update (shorter rollouts balance more envs; batch = 65536)
 
@@ -60,16 +62,3 @@ alg:
   EPS_START: 1.0              # Start 100% random
   EPS_FINISH: 0.05            # End at 5% random
   EPS_DECAY: 0.8              # Reach EPS_FINISH halfway through training (50%)
-
-  # --- Curriculum Learning over Skills ---
-  # When enabled, TOTAL_TIMESTEPS will be split evenly across phases.
-  CURRICULUM_ENABLED: true
-  #CURRICULUM_PHASES: ["collect", "destroy", "avoid"]
-  CURRICULUM_PHASES: ["destroy", "collect", "avoid"]
-  CURRICULUM_MODS:
-    collect:
-      - collect_curriculum
-    destroy:
-      - destroy_curriculum
-    avoid:
-      - avoid_curriculum

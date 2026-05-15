@@ -13,6 +13,10 @@ WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during 
 SEED: 42
 NUM_SEEDS: 1                  # Number of concurrent seeds to run via vmap
 EVAL_SEED: 43                 # Separate RNG seed used for evaluation rollouts
+# If true, use the pre-refactor 10-channel egocentric observation format.
+USE_LEGACY_EGO_OBS: false
+# Seaquest only: if true, use the pre-refactor orientation-relative action mapper.
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 # ENV_SEED_BASE: 42           # Optional; default SEED. Each train env gets ENV_SEED_BASE+env_id so skills see diverse layouts. Auto-reset on episode end uses fresh RNG.
 SAVE_PATH: "./outputs/models" # Where to save trained parameters
 LOAD_PATH: null               # Set to path if you want to load a checkpoint

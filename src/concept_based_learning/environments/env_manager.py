@@ -10,7 +10,6 @@ from jaxatari.games.jax_seaquest import SeaquestRenderer
 from jaxatari.games.jax_choppercommand import ChopperCommandRenderer
 from jaxatari.games.jax_spaceinvaders import SpaceInvadersRenderer
 from jaxatari.games.jax_phoenix import PhoenixRenderer
-from jaxatari.games.jax_skillbootcamp import BootcampRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -20,17 +19,17 @@ from concept_based_learning.environments.datatypes import (
     LABEL_COLLECT,
     LABEL_AVOID,
 )
-from concept_based_learning.environments.seaquest.seaquest_label import (
+from concept_based_learning.environments.seaquest.label import (
     SeaquestSemanticWrapper,
     seaquest_action_mapper,
     extract_all_skills_rewards,
+    set_seaquest_action_mapper,
 )
-from concept_based_learning.environments.seaquest.seaquest_policy import (
+from concept_based_learning.environments.seaquest.heuristic_policy import (
     get_heuristic_target,
     NO_TARGET_IDX,
     apply_meta_mask_overrides as seaquest_meta_mask_hook,
     get_forced_target_override as seaquest_forced_target_hook,
-    get_idle_action_override as seaquest_idle_action_hook,
 )
 
 from concept_based_learning.environments.choppercommand.choppercommand_label import (
@@ -43,7 +42,6 @@ from concept_based_learning.environments.choppercommand.choppercommand_policy im
     NO_TARGET_IDX as choppercommand_NO_TARGET_IDX,
     apply_meta_mask_overrides as choppercommand_meta_mask_hook,
     get_forced_target_override as choppercommand_forced_target_hook,
-    get_idle_action_override as choppercommand_idle_action_hook,
 )
 
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_label import (
@@ -105,10 +103,6 @@ def _default_meta_mask_hook(raw_obs, active_masks, config):
 
 def _default_forced_target_hook(raw_obs, current_target, config, rng=None):
     return current_target
-
-
-def _default_idle_action_hook(env_state, current_ego_actions, no_target_mask, config):
-    return jnp.zeros_like(no_target_mask, dtype=bool)
 
 
 def _default_fixed_target_idx_from_config(config: Dict[str, Any]) -> Optional[int]:
@@ -260,7 +254,6 @@ class EnvComponents:
     resolve_curriculum_mods: Callable[..., Optional[List[str]]]
     meta_mask_hook: Callable[..., Any]
     forced_target_hook: Callable[..., Any]
-    idle_action_hook: Callable[..., Any]
 
 
 class EnvManager:
@@ -293,7 +286,6 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=seaquest_meta_mask_hook,
             forced_target_hook=seaquest_forced_target_hook,
-            idle_action_hook=seaquest_idle_action_hook,
         )
 
         # ChopperCommand registration
@@ -313,7 +305,6 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=choppercommand_meta_mask_hook,
             forced_target_hook=choppercommand_forced_target_hook,
-            idle_action_hook=choppercommand_idle_action_hook,
         )
 
         self._registry["spaceinvaders"] = EnvComponents(
@@ -332,7 +323,6 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
-            idle_action_hook=_default_idle_action_hook,
         )
 
         self._registry["phoenix"] = EnvComponents(
@@ -349,24 +339,6 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
-            idle_action_hook=_default_idle_action_hook,
-        )
-
-        self._registry["skillbootcamp"] = EnvComponents(
-            name="SkillBootcamp",
-            jax_game_id="skillbootcamp",
-            semantic_wrapper_cls=BootcampSemanticWrapper,
-            renderer_cls=BootcampRenderer,
-            get_heuristic_target=bootcamp_get_heuristic_target,
-            no_target_idx=bootcamp_NO_TARGET_IDX,
-            action_mapper=bootcamp_action_mapper,
-            reward_extractor=_bootcamp_reward_extractor,
-            fixed_target_idx_from_config=_bootcamp_fixed_target_idx_from_config,
-            extract_life_lost=_default_extract_life_lost,
-            resolve_curriculum_mods=_bootcamp_resolve_curriculum_mods,
-            meta_mask_hook=_default_meta_mask_hook,
-            forced_target_hook=_default_forced_target_hook,
-            idle_action_hook=_default_idle_action_hook,
         )
 
     def available_envs(self):
@@ -394,6 +366,10 @@ class EnvManager:
         are read from the provided config dict.
         """
         components = self.get_components(env_name)
+        if components.jax_game_id == "seaquest":
+            set_seaquest_action_mapper(
+                bool(config.get("USE_LEGACY_SEAQUEST_ACTION_MAPPER", False))
+            )
 
         game_mods = _normalize_game_mods(config.get("GAME_MODS", None))
         sticky_actions = config.get("STICKY_ACTIONS", False)

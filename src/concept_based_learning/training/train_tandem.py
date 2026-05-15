@@ -1,0 +1,752 @@
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+import optax
+
+from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.observations.egocentric import get_ego_obs
+from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork, CustomTrainState
+from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.environments.datatypes import TandemTransition
+from concept_based_learning.training.schedules import eps_decay_transition_steps
+
+
+def make_tandem_train(
+    config,
+    env,
+    test_env,
+    renderer=None,
+    *,
+    no_target_idx,
+    get_heuristic_target,
+    action_mapper,
+    extract_all_skills_rewards,
+    extract_life_lost,
+    meta_mask_hook,
+    forced_target_hook,
+):
+    del test_env, renderer
+
+    config["NUM_UPDATES"] = (
+        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
+    )
+    assert (config["NUM_STEPS"] * config["NUM_ENVS"]) % config["NUM_MINIBATCHES"] == 0, (
+        "NUM_MINIBATCHES must divide NUM_STEPS * NUM_ENVS"
+    )
+
+    num_skills = config["NUM_SKILLS"]
+    max_objects = config["MAX_OBJECTS"]
+    ego_action_dim = config["EGO_ACTION_DIM"]
+    skill_warmup_updates = int(config.get("SKILL_WARMUP_UPDATES", 0))
+    meta_learn_during_warmup = bool(config.get("META_LEARN_DURING_WARMUP", False))
+
+    def label_to_skill_idx(label):
+        return jnp.clip(label - 1, 0, num_skills - 1)
+
+    def make_linear_schedule(start, finish, decay_cfg):
+        return optax.linear_schedule(
+            start, finish, eps_decay_transition_steps(decay_cfg, config["NUM_UPDATES"])
+        )
+
+    skill_eps_schedule = make_linear_schedule(
+        config["EPS_START"],
+        config["EPS_FINISH"],
+        config["EPS_DECAY"],
+    )
+    meta_eps_schedule = make_linear_schedule(
+        config.get("META_EPS_START", config["EPS_START"]),
+        config.get("META_EPS_FINISH", config["EPS_FINISH"]),
+        config.get("META_EPS_DECAY", config["EPS_DECAY"]),
+    )
+
+    skill_network = SkillQNetwork(
+        action_dim=ego_action_dim,
+        hidden_size=config["HIDDEN_SIZE"],
+        num_layers=config["NUM_LAYERS"],
+    )
+    meta_network = MetaQNetwork(
+        action_dim=max_objects,
+        hidden_size=config.get("META_HIDDEN_SIZE", 256),
+    )
+
+    vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset)(
+        jax.random.split(rng, n_envs)
+    )
+    vmap_step = lambda env_state, action: jax.vmap(env.step)(env_state, action)
+
+    def merge_reset_where_done(new_tree, reset_tree, done):
+        def _replace(new_leaf, reset_leaf):
+            expand = (config["NUM_ENVS"],) + (1,) * (new_leaf.ndim - 1)
+            return jnp.where(jnp.reshape(done, expand), reset_leaf, new_leaf)
+
+        return jax.tree_util.tree_map(_replace, new_tree, reset_tree)
+
+    def eps_greedy_exploration(rng, q_vals, eps, mask=None):
+        rng_a, rng_e = jax.random.split(rng)
+        valid_q_vals = q_vals if mask is None else jnp.where(mask, q_vals, -jnp.inf)
+        greedy_actions = jnp.argmax(valid_q_vals, axis=-1)
+        if mask is not None:
+            random_logits = jnp.where(mask, 0.0, -1e9)
+            random_actions = jax.random.categorical(rng_a, random_logits)
+        else:
+            random_actions = jax.random.randint(
+                rng_a,
+                shape=greedy_actions.shape,
+                minval=0,
+                maxval=q_vals.shape[-1],
+            )
+        return jnp.where(
+            jax.random.uniform(rng_e, greedy_actions.shape) < eps,
+            random_actions,
+            greedy_actions,
+        )
+
+    def preprocess_transition(x, rng_perm):
+        num_steps, num_envs = x.shape[:2]
+        rest_shape = x.shape[2:]
+        x = x.reshape(num_steps * num_envs, *rest_shape)
+        x = jax.random.permutation(rng_perm, x)
+        x = x.reshape(config["NUM_MINIBATCHES"], -1, *rest_shape)
+        return x
+
+    def train(rng, init_meta_params=None, init_skill_params=None):
+        lr_skill = config.get("SKILL_LR", config["LR"])
+        lr_meta = config.get("META_LR", config["LR"] * 0.1)
+
+        tx_skill = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.radam(learning_rate=lr_skill),
+        )
+        tx_meta = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.radam(learning_rate=lr_meta),
+        )
+
+        rng, _rng = jax.random.split(rng)
+        probe_obs_batched, _ = vmap_reset(1)(_rng)
+        probe_obs = jax.tree_util.tree_map(lambda x: x[0], probe_obs_batched)
+        probe_ego = get_ego_obs(
+            probe_obs.raw_observation,
+            probe_obs.objects,
+            jnp.array(0, dtype=jnp.int32),
+        )
+
+        meta_vars = meta_network.init(
+            rng, probe_obs.raw_observation, probe_obs.objects, train=False
+        )
+        meta_state = CustomTrainState.create(
+            apply_fn=meta_network.apply,
+            params=meta_vars["params"] if init_meta_params is None else init_meta_params,
+            batch_stats={},
+            tx=tx_meta,
+        )
+
+        def create_skill_state(rng_key, init_p):
+            vars = skill_network.init(rng_key, probe_ego, train=False)
+            return CustomTrainState.create(
+                apply_fn=skill_network.apply,
+                params=vars["params"] if init_p is None else init_p,
+                batch_stats=vars.get("batch_stats", {}),
+                tx=tx_skill,
+            )
+
+        rng_keys = jax.random.split(rng, num_skills)
+        skill_states = jax.vmap(
+            create_skill_state,
+            in_axes=(0, 0 if init_skill_params is not None else None),
+        )(rng_keys, init_skill_params)
+
+        def _update_step(runner_state, _):
+            meta_state, skill_states, expl_state, running_returns, rng = runner_state
+
+            def _step_env(carry, _t):
+                (
+                    last_obs,
+                    env_state,
+                    running_returns,
+                    rng,
+                    completed_returns_sum,
+                    num_completed,
+                    last_targets,
+                ) = carry
+                rng, rng_meta, rng_skill = jax.random.split(rng, 3)
+
+                meta_q_vals = jax.vmap(
+                    lambda obs, objs: meta_network.apply(
+                        {"params": meta_state.params}, obs, objs, train=False
+                    )
+                )(last_obs.raw_observation, last_obs.objects)
+                active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(last_obs.objects)
+                active_masks = meta_mask_hook(last_obs.raw_observation, active_masks, config)
+                active_any = jnp.any(active_masks, axis=-1)
+
+                eps_meta = jnp.full(
+                    config["NUM_ENVS"],
+                    meta_eps_schedule(jnp.maximum(0, meta_state.n_updates - skill_warmup_updates)),
+                )
+                policy_rngs = jax.random.split(rng_meta, config["NUM_ENVS"])
+                use_heuristic_warmup = meta_state.n_updates < skill_warmup_updates
+                target_obj_idxs = jax.vmap(eps_greedy_exploration)(
+                    policy_rngs,
+                    meta_q_vals,
+                    eps_meta,
+                    active_masks,
+                )
+                heuristic_targets = jax.vmap(get_heuristic_target)(
+                    last_obs.raw_observation,
+                    last_obs.objects,
+                    last_targets,
+                    policy_rngs,
+                )
+                target_obj_idxs = jnp.where(
+                    use_heuristic_warmup & (heuristic_targets != no_target_idx),
+                    heuristic_targets,
+                    target_obj_idxs,
+                )
+                target_obj_idxs = target_obj_idxs.astype(jnp.int32)
+                target_obj_idxs = jnp.where(
+                    active_any,
+                    target_obj_idxs,
+                    jnp.full_like(target_obj_idxs, no_target_idx, dtype=jnp.int32),
+                )
+                target_obj_idxs = jax.lax.cond(
+                    use_heuristic_warmup,
+                    lambda x: x,
+                    lambda x: forced_target_hook(last_obs.raw_observation, x, config, rng_meta),
+                    target_obj_idxs,
+                )
+                safe_target_idxs = jnp.where(
+                    target_obj_idxs == no_target_idx, 0, target_obj_idxs
+                )
+
+                raw_labels = jax.vmap(lambda labels, idx: labels[-1, idx])(
+                    last_obs.objects.semantic_label, safe_target_idxs
+                )
+                active_skills = label_to_skill_idx(raw_labels)
+                ego_obses = jax.vmap(get_ego_obs)(
+                    last_obs.raw_observation, last_obs.objects, safe_target_idxs
+                )
+
+                def compute_skill_actions(state, skill_idx):
+                    q_vals = skill_network.apply(
+                        {"params": state.params, "batch_stats": state.batch_stats},
+                        ego_obses,
+                        train=False,
+                    )
+                    eps_skill = jnp.full(
+                        config["NUM_ENVS"],
+                        skill_eps_schedule(meta_state.n_updates),
+                    )
+
+                    invalid_ego_actions = config.get("INVALID_EGO_ACTIONS", [])
+                    restrict_fire_for_non_destroy = bool(
+                        config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
+                    )
+                    _custom_fire = config.get("FIRE_EGO_ACTION_INDICES")
+
+                    if _custom_fire is not None:
+                        FIRE_EGO_ACTION_INDICES = jnp.array(
+                            list(_custom_fire), dtype=jnp.int32
+                        )
+                    else:
+                        FIRE_EGO_ACTION_INDICES = fire_ego_action_indices(
+                            ego_action_dim
+                        )
+
+                    def build_mask_for_skill(idx):
+                        base_row = jnp.ones((ego_action_dim,), dtype=bool)
+                        if invalid_ego_actions:
+                            invalid_arr = jnp.array(
+                                invalid_ego_actions, dtype=jnp.int32
+                            )
+                            base_row = base_row.at[invalid_arr].set(False)
+                        base_row = base_row.at[0].set(True)
+                        return jax.lax.cond(
+                            idx == 0,
+                            lambda r: r,
+                            lambda r: (
+                                r.at[FIRE_EGO_ACTION_INDICES].set(False).at[0].set(True)
+                                if restrict_fire_for_non_destroy
+                                else r
+                            ),
+                            base_row,
+                        )
+
+                    mask_row = build_mask_for_skill(skill_idx)
+                    mask = jnp.broadcast_to(mask_row, (config["NUM_ENVS"], ego_action_dim))
+
+                    ego_action = jax.vmap(eps_greedy_exploration)(
+                        jax.random.split(rng_skill, config["NUM_ENVS"]),
+                        q_vals,
+                        eps_skill,
+                        mask=mask,
+                    )
+                    return ego_action, q_vals
+
+                all_ego_actions, all_skill_q_vals = jax.vmap(compute_skill_actions)(
+                    skill_states, jnp.arange(num_skills, dtype=jnp.int32)
+                )
+                chosen_ego_actions = all_ego_actions[
+                    active_skills, jnp.arange(config["NUM_ENVS"])
+                ]
+                no_target = target_obj_idxs == no_target_idx
+                chosen_ego_actions = jnp.where(no_target, 0, chosen_ego_actions)
+
+                global_actions = jax.vmap(action_mapper)(
+                    chosen_ego_actions, last_obs.raw_observation, target_obj_idxs, last_obs.objects
+                )
+                global_actions = jnp.where(no_target, 0, global_actions)
+
+                new_obs, new_env_state, env_reward, new_done, info = vmap_step(
+                    env_state, global_actions
+                )
+                life_lost = extract_life_lost(env_state, new_env_state)
+                done_due_to_life_lost = jnp.logical_and(new_done, life_lost > 0)
+
+                episode_return = running_returns + env_reward
+                done_float = new_done.astype(jnp.float32)
+                completed_returns_sum = completed_returns_sum + jnp.sum(
+                    episode_return * done_float
+                )
+                num_completed = num_completed + jnp.sum(done_float)
+                running_returns = episode_return * (1.0 - done_float)
+
+                prev_targets = jax.vmap(
+                    lambda objs, idx: jax.tree_util.tree_map(
+                        lambda x: jnp.take(x, idx, axis=-1), objs
+                    )
+                )(last_obs.objects, safe_target_idxs)
+                next_targets = jax.vmap(
+                    lambda objs, idx: jax.tree_util.tree_map(
+                        lambda x: jnp.take(x, idx, axis=-1), objs
+                    )
+                )(new_obs.objects, safe_target_idxs)
+                skill_rewards, skill_done = jax.vmap(
+                    lambda pr, nr, pt, nt, ll, inf: extract_all_skills_rewards(
+                        pr, nr, pt, nt, ll, inf, config
+                    )
+                )(
+                    last_obs.raw_observation,
+                    new_obs.raw_observation,
+                    prev_targets,
+                    next_targets,
+                    life_lost,
+                    info,
+                )
+
+                changed_target = target_obj_idxs != last_targets
+                was_valid_target = jnp.logical_and(
+                    last_targets >= 0, last_targets < max_objects
+                )
+                apply_penalty = jnp.logical_and(changed_target, was_valid_target)
+                processed_rewards = jnp.sign(env_reward)
+                meta_death_penalty = float(config.get("META_DEATH_PENALTY", -5.0))
+                meta_switch_penalty = float(config.get("META_SWITCH_PENALTY", -0.5))
+                processed_rewards = processed_rewards + jnp.where(
+                    done_due_to_life_lost,
+                    meta_death_penalty,
+                    0.0,
+                ).astype(processed_rewards.dtype)
+                meta_reward = processed_rewards + jnp.where(
+                    apply_penalty,
+                    meta_switch_penalty,
+                    0.0,
+                ).astype(processed_rewards.dtype)
+
+                rng, rng_reset = jax.random.split(rng)
+                reset_obs, reset_state = vmap_reset(config["NUM_ENVS"])(rng_reset)
+                next_obs_for_rollout = merge_reset_where_done(
+                    new_obs, reset_obs, new_done
+                )
+                next_state_for_rollout = merge_reset_where_done(
+                    new_env_state, reset_state, new_done
+                )
+                next_active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(
+                    next_obs_for_rollout.objects
+                )
+                next_active_masks = meta_mask_hook(
+                    next_obs_for_rollout.raw_observation, next_active_masks, config
+                )
+                next_ego_obses = jax.vmap(get_ego_obs)(
+                    next_obs_for_rollout.raw_observation,
+                    next_obs_for_rollout.objects,
+                    safe_target_idxs,
+                )
+
+                transition = TandemTransition(
+                    done=new_done,
+                    obs=last_obs.raw_observation,
+                    objects=last_obs.objects,
+                    next_obs=next_obs_for_rollout.raw_observation,
+                    next_objects=next_obs_for_rollout.objects,
+                    target_idx=target_obj_idxs,
+                    meta_q_val=meta_q_vals,
+                    meta_reward=meta_reward,
+                    active_mask=active_masks,
+                    next_active_mask=next_active_masks,
+                    ego_obs=ego_obses,
+                    next_ego_obs=next_ego_obses,
+                    ego_action=chosen_ego_actions,
+                    active_skill=active_skills,
+                    skill_q_val=all_skill_q_vals,
+                    skill_rewards=skill_rewards,
+                    skill_done=skill_done,
+                )
+                return (
+                    next_obs_for_rollout,
+                    next_state_for_rollout,
+                    running_returns,
+                    rng,
+                    completed_returns_sum,
+                    num_completed,
+                    target_obj_idxs,
+                ), transition
+
+            rng, _rng = jax.random.split(rng)
+            init_targets = jnp.full(
+                (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
+            )
+            carry_final, transitions = jax.lax.scan(
+                _step_env,
+                (
+                    *expl_state,
+                    running_returns,
+                    _rng,
+                    jnp.array(0.0, dtype=jnp.float32),
+                    jnp.array(0.0, dtype=jnp.float32),
+                    init_targets,
+                ),
+                None,
+                config["NUM_STEPS"],
+            )
+            (
+                last_obs,
+                env_state,
+                running_returns,
+                rng,
+                completed_returns_sum,
+                num_completed,
+                _last_targets,
+            ) = carry_final
+            expl_state = (last_obs, env_state)
+
+            meta_state = meta_state.replace(
+                timesteps=meta_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
+            )
+
+            skip_meta_update = jnp.logical_and(
+                meta_state.n_updates < skill_warmup_updates,
+                not meta_learn_during_warmup,
+            )
+
+            last_next_obs = jax.tree_util.tree_map(
+                lambda x: x[-1], transitions.next_obs
+            )
+            last_next_objects = jax.tree_util.tree_map(
+                lambda x: x[-1], transitions.next_objects
+            )
+            last_meta_q = jax.vmap(
+                lambda obs, objs: meta_network.apply(
+                    {"params": meta_state.params}, obs, objs, train=False
+                )
+            )(last_next_obs, last_next_objects)
+            next_active_mask = transitions.next_active_mask[-1]
+            next_active_any = jnp.any(next_active_mask, axis=-1)
+            masked_last_q = jnp.max(
+                jnp.where(next_active_mask, last_meta_q, -jnp.inf), axis=-1
+            )
+            last_q = jnp.where(next_active_any, masked_last_q, 0.0)
+            last_q = last_q * (1 - transitions.done[-1])
+
+            def _meta_get_target(lambda_returns_and_next_q, transition):
+                lambda_returns, next_q = lambda_returns_and_next_q
+                target_bootstrap = (
+                    transition.meta_reward
+                    + config["GAMMA"] * (1 - transition.done) * next_q
+                )
+                delta = lambda_returns - next_q
+                lambda_returns = (
+                    target_bootstrap + config["GAMMA"] * config["LAMBDA"] * delta
+                )
+                lambda_returns = (
+                    (1 - transition.done) * lambda_returns
+                    + transition.done * transition.meta_reward
+                )
+
+                prev_active_mask = transition.active_mask
+                prev_active_any = jnp.any(prev_active_mask, axis=-1)
+                masked_next_q = jnp.max(
+                    jnp.where(prev_active_mask, transition.meta_q_val, -jnp.inf),
+                    axis=-1,
+                )
+                next_q = jnp.where(prev_active_any, masked_next_q, 0.0)
+                return (lambda_returns, next_q), lambda_returns
+
+            meta_lambda_returns = transitions.meta_reward[-1] + config["GAMMA"] * last_q
+            _, meta_targets_scan = jax.lax.scan(
+                _meta_get_target,
+                (meta_lambda_returns, last_q),
+                jax.tree.map(lambda x: x[:-1], transitions),
+                reverse=True,
+            )
+            meta_lambda_targets = jnp.concatenate(
+                (meta_targets_scan, meta_lambda_returns[jnp.newaxis])
+            )
+
+            def _meta_learn_epoch(carry, _):
+                m_state, rng_meta_upd = carry
+                rng_meta_upd, rng_perm = jax.random.split(rng_meta_upd)
+
+                meta_batch = {
+                    "obs": transitions.obs,
+                    "objects": transitions.objects,
+                    "target_idx": transitions.target_idx,
+                    "active_mask": transitions.active_mask,
+                }
+                minibatches = jax.tree.map(
+                    lambda x: preprocess_transition(x, rng_perm),
+                    meta_batch,
+                )
+                target_batches = preprocess_transition(meta_lambda_targets, rng_perm)
+
+                def _meta_learn_phase(carry_phase, minibatch_and_target):
+                    m_state_phase, rng_phase = carry_phase
+                    minibatch, target = minibatch_and_target
+
+                    def _loss_fn(params):
+                        q_vals = jax.vmap(
+                            lambda obs, objs: meta_network.apply(
+                                {"params": params}, obs, objs, train=True
+                            )
+                        )(minibatch["obs"], minibatch["objects"])
+                        chosen_q = jnp.take_along_axis(
+                            q_vals,
+                            jnp.expand_dims(minibatch["target_idx"], -1),
+                            axis=-1,
+                        ).squeeze(axis=-1)
+                        valid = jnp.any(minibatch["active_mask"], axis=-1)
+                        loss = (jnp.square(chosen_q - target) * valid).sum() / (
+                            valid.sum() + 1e-8
+                        )
+                        return loss, chosen_q
+
+                    (loss, qvals), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
+                        m_state_phase.params
+                    )
+                    update_scale = jnp.where(skip_meta_update, 0.0, 1.0)
+                    grads = jax.tree_util.tree_map(lambda g: g * update_scale, grads)
+                    m_state_phase = m_state_phase.apply_gradients(grads=grads)
+                    m_state_phase = m_state_phase.replace(
+                        grad_steps=m_state_phase.grad_steps + 1
+                    )
+                    return (m_state_phase, rng_phase), (loss, qvals)
+
+                (m_state, rng_meta_upd), (loss, qvals) = jax.lax.scan(
+                    _meta_learn_phase,
+                    (m_state, rng_meta_upd),
+                    (minibatches, target_batches),
+                )
+                return (m_state, rng_meta_upd), (loss, qvals)
+
+            (meta_state, rng), (meta_loss, meta_qvals) = jax.lax.scan(
+                _meta_learn_epoch,
+                (meta_state, rng),
+                None,
+                config["NUM_EPOCHS"],
+            )
+            meta_state = meta_state.replace(n_updates=meta_state.n_updates + 1)
+
+            def _update_single_skill(s_state, skill_idx, rng_s):
+                s_state = s_state.replace(
+                    timesteps=s_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
+                )
+
+                last_q = skill_network.apply(
+                    {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                    transitions.next_ego_obs[-1],
+                    train=False,
+                )
+                last_q_max = jnp.max(last_q, axis=-1)
+                last_step_done = transitions.skill_done[-1, :, skill_idx]
+                last_q_max = last_q_max * (1 - last_step_done)
+                last_step_reward = transitions.skill_rewards[-1, :, skill_idx]
+                lambda_returns = last_step_reward + config["GAMMA"] * last_q_max
+
+                def _skill_get_target(lambda_returns_and_next_q, transition):
+                    lambda_ret, next_q = lambda_returns_and_next_q
+                    step_reward = transition.skill_rewards[..., skill_idx]
+                    step_done = transition.skill_done[..., skill_idx]
+                    target_bootstrap = (
+                        step_reward + config["GAMMA"] * (1 - step_done) * next_q
+                    )
+                    delta = lambda_ret - next_q
+                    lambda_ret = (
+                        target_bootstrap + config["GAMMA"] * config["LAMBDA"] * delta
+                    )
+                    lambda_ret = (1 - step_done) * lambda_ret + step_done * step_reward
+                    next_q_val = jnp.max(transition.skill_q_val[skill_idx], axis=-1)
+                    return (lambda_ret, next_q_val), lambda_ret
+
+                _, targets = jax.lax.scan(
+                    _skill_get_target,
+                    (lambda_returns, last_q_max),
+                    jax.tree.map(lambda x: x[:-1], transitions),
+                    reverse=True,
+                )
+                skill_lambda_targets = jnp.concatenate(
+                    (targets, lambda_returns[jnp.newaxis])
+                )
+
+                def _learn_epoch(carry, _):
+                    s_state_epoch, rng_epoch = carry
+                    rng_epoch, rng_perm = jax.random.split(rng_epoch)
+
+                    train_batch = {
+                        "target_idx": transitions.target_idx,
+                        "ego_obs": transitions.ego_obs,
+                        "ego_action": transitions.ego_action,
+                        "active_skill": transitions.active_skill,
+                    }
+                    minibatches = jax.tree.map(
+                        lambda x: preprocess_transition(x, rng_perm),
+                        train_batch,
+                    )
+                    targets_batch = preprocess_transition(skill_lambda_targets, rng_perm)
+
+                    def _learn_phase(carry_phase, minibatch_and_target):
+                        s_state_phase, rng_phase = carry_phase
+                        minibatch, target = minibatch_and_target
+
+                        def _loss_fn(params):
+                            q_vals, updates = skill_network.apply(
+                                {
+                                    "params": params,
+                                    "batch_stats": s_state_phase.batch_stats,
+                                },
+                                minibatch["ego_obs"],
+                                train=True,
+                                mutable=["batch_stats"],
+                            )
+                            chosen_q = jnp.take_along_axis(
+                                q_vals,
+                                jnp.expand_dims(minibatch["ego_action"], axis=-1),
+                                axis=-1,
+                            ).squeeze(axis=-1)
+                            if config.get("OFF_POLICY", True):
+                                valid = minibatch["target_idx"] != no_target_idx
+                            else:
+                                valid = jnp.logical_and(
+                                    minibatch["target_idx"] != no_target_idx,
+                                    minibatch["active_skill"] == skill_idx,
+                                )
+                            loss = (jnp.square(chosen_q - target) * valid).sum() / (
+                                valid.sum() + 1e-8
+                            )
+                            return loss, (updates, chosen_q)
+
+                        (loss, (updates, qvals)), grads = jax.value_and_grad(
+                            _loss_fn, has_aux=True
+                        )(s_state_phase.params)
+                        s_state_phase = s_state_phase.apply_gradients(grads=grads)
+                        s_state_phase = s_state_phase.replace(
+                            grad_steps=s_state_phase.grad_steps + 1,
+                            batch_stats=updates["batch_stats"],
+                        )
+                        return (s_state_phase, rng_phase), (loss, qvals)
+
+                    (s_state_epoch, rng_epoch), (loss, qvals) = jax.lax.scan(
+                        _learn_phase,
+                        (s_state_epoch, rng_epoch),
+                        (minibatches, targets_batch),
+                    )
+                    return (s_state_epoch, rng_epoch), (loss, qvals)
+
+                (s_state, rng_s), (skill_loss, skill_qvals) = jax.lax.scan(
+                    _learn_epoch,
+                    (s_state, rng_s),
+                    None,
+                    config["NUM_EPOCHS"],
+                )
+                s_state = s_state.replace(n_updates=s_state.n_updates + 1)
+                return s_state, (
+                    skill_loss[-1].mean(),
+                    skill_qvals[-1].mean(),
+                )
+
+            rngs = jax.random.split(rng, num_skills)
+            skill_states, skill_metrics = jax.vmap(
+                _update_single_skill,
+                in_axes=(0, 0, 0),
+            )(skill_states, jnp.arange(num_skills), rngs)
+
+            mean_episodic_return = completed_returns_sum / jnp.maximum(1.0, num_completed)
+            valid_target_mask = (transitions.target_idx != no_target_idx).astype(
+                jnp.float32
+            )
+            reward_nonzero = (transitions.meta_reward != 0).astype(jnp.float32)
+            skill_reward_nonzero = (jnp.abs(transitions.skill_rewards) > 0).astype(
+                jnp.float32
+            )
+            if config.get("OFF_POLICY", True):
+                skill_valid_mask = jnp.broadcast_to(
+                    valid_target_mask[..., None], transitions.skill_rewards.shape
+                )
+            else:
+                skill_valid_mask = jnp.logical_and(
+                    valid_target_mask[..., None] > 0,
+                    transitions.active_skill[..., None]
+                    == jnp.arange(num_skills, dtype=jnp.int32),
+                )
+                skill_valid_mask = skill_valid_mask.astype(jnp.float32)
+
+            metrics = {
+                "meta_policy/td_loss": meta_loss[-1].mean(),
+                "meta_policy/qvals": meta_qvals[-1].mean(),
+                "env/reward_mean": jnp.mean(transitions.meta_reward),
+                "env/reward_nonzero_frac": jnp.mean(reward_nonzero),
+                "env/reward_max": jnp.max(transitions.meta_reward),
+                "env/done_frac": jnp.mean(transitions.done.astype(jnp.float32)),
+                "env/episodic_return": mean_episodic_return,
+                "returned_episode_returns": mean_episodic_return,
+                "meta_policy/valid_target_frac": jnp.mean(valid_target_mask),
+                "meta_policy/eps": meta_eps_schedule(meta_state.n_updates),
+                "skill_policy/eps": skill_eps_schedule(meta_state.n_updates),
+                "skill/td_loss_mean": jnp.mean(skill_metrics[0]),
+                "skill/qvals_mean": jnp.mean(skill_metrics[1]),
+                "skill/valid_transition_frac": jnp.mean(skill_valid_mask),
+                "skill/reward_nonzero_frac": jnp.mean(skill_reward_nonzero),
+                "warmup/heuristic_active": (
+                    meta_state.n_updates < skill_warmup_updates
+                ).astype(jnp.float32),
+                "warmup/meta_frozen": skip_meta_update.astype(jnp.float32),
+                "update_steps": meta_state.n_updates,
+                "global/update_steps": meta_state.n_updates,
+                "env/step": meta_state.timesteps,
+            }
+
+            if config.get("WANDB_MODE", "disabled") != "disabled":
+                def _wandb_log_cb(m):
+                    try:
+                        import wandb
+                        if wandb.run is not None:
+                            log_dict = {k: float(np.asarray(v).mean()) for k, v in m.items()}
+                            step = int(log_dict.get("global/update_steps", 0))
+                            wandb.log(log_dict, step=step)
+                    except Exception:
+                        pass
+
+                jax.debug.callback(_wandb_log_cb, metrics)
+
+            return (meta_state, skill_states, expl_state, running_returns, rng), metrics
+
+        rng, _rng = jax.random.split(rng)
+        init_expl = jax.vmap(env.reset)(jax.random.split(_rng, config["NUM_ENVS"]))
+        init_running_returns = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.float32)
+        runner_state = (meta_state, skill_states, init_expl, init_running_returns, rng)
+        runner_state, metrics = jax.lax.scan(
+            _update_step, runner_state, None, config["NUM_UPDATES"]
+        )
+        return {"runner_state": runner_state, "metrics": metrics}
+
+    return train

@@ -1,9 +1,8 @@
 import jax
 import jax.numpy as jnp
 from typing import Any
-from jaxatari.environment import JAXAtariAction as Atari
-
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
+from concept_based_learning.observations.action_space import make_ego_action_mapper
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
@@ -62,39 +61,14 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     return rewards, skill_done
 
 
-def spaceinvaders_action_mapper(
-    ego_action: jnp.ndarray,
-    global_features: Any,
-    target_idx: jnp.ndarray,
-) -> jnp.ndarray:
-    """
-    Translates the 18-space Egocentric Action to Space Invaders environment indices.
-    The environment expects an index from 0 to 5:
-    0=NOOP, 1=FIRE, 2=RIGHT, 3=LEFT, 4=RIGHTFIRE, 5=LEFTFIRE
-    """
-    
-    action_map = jnp.array([
-        0,  # 0: NOOP -> 0 (NOOP)
-        1,  # 1: FIRE -> 1 (FIRE)
-        0,  # 2: FORWARD -> 0 (NOOP, can't move up)
-        2,  # 3: RIGHT -> 2 (RIGHT)
-        3,  # 4: LEFT -> 3 (LEFT)
-        0,  # 5: BACKWARD -> 0 (NOOP, can't move down)
-        2,  # 6: FORWARD_RIGHT -> 2 (RIGHT)
-        3,  # 7: FORWARD_LEFT -> 3 (LEFT)
-        2,  # 8: BACKWARD_RIGHT -> 2 (RIGHT)
-        3,  # 9: BACKWARD_LEFT -> 3 (LEFT)
-        1,  # 10: FORWARD_FIRE -> 1 (FIRE)
-        4,  # 11: RIGHT_FIRE -> 4 (RIGHTFIRE)
-        5,  # 12: LEFT_FIRE -> 5 (LEFTFIRE)
-        1,  # 13: BACKWARD_FIRE -> 1 (FIRE)
-        4,  # 14: FORWARD_RIGHT_FIRE -> 4 (RIGHTFIRE)
-        5,  # 15: FORWARD_LEFT_FIRE -> 5 (LEFTFIRE)
-        4,  # 16: BACKWARD_RIGHT_FIRE -> 4 (RIGHTFIRE)
-        5   # 17: BACKWARD_LEFT_FIRE -> 5 (LEFTFIRE)
-    ], dtype=jnp.int32)
-
-    return action_map[ego_action]
+# SpaceInvaders: purely horizontal movement, 6 actions (0=NOOP,1=FIRE,2=RIGHT,3=LEFT,4=RIGHTFIRE,5=LEFTFIRE).
+# Direction table maps the 8 world directions to horizontal actions; UP/DOWN collapse to NOOP/FIRE.
+spaceinvaders_action_mapper = make_ego_action_mapper(
+    noop_action=0,
+    fire_action=1,
+    move_table=     [2, 2, 0, 3, 3, 3, 0, 2],   # R DR D DL L UL U UR
+    move_fire_table=[4, 4, 1, 5, 5, 5, 1, 4],
+)
 
 
 class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):

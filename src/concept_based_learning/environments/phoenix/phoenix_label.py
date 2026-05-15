@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from typing import Any
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
+from concept_based_learning.observations.action_space import make_ego_action_mapper
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
@@ -69,41 +70,14 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     return rewards, skill_done
 
 
-def phoenix_action_mapper(
-    ego_action: jnp.ndarray,
-    global_features: Any,
-    target_idx: jnp.ndarray,
-) -> jnp.ndarray:
-    """
-    Translates the 18-space Egocentric Action to Phoenix environment indices.
-    Because the ship naturally faces UP (90 degrees), FORWARD = UP, LEFT = LEFT, etc.
-    We project diagonal/impossible actions to valid Phoenix actions.
-    """
-    # Phoenix runs with a reduced action set in this project.
-    # To preserve "shoot intent" when transferring 18-dim Seaquest skills,
-    # collapse any *_FIRE ego action to plain FIRE.
-    action_map = jnp.array([
-        0,  # 0: NOOP -> NOOP
-        1,  # 1: FIRE -> FIRE
-        0,  # 2: FORWARD -> NOOP (no upward movement)
-        2,  # 3: RIGHT -> RIGHT
-        3,  # 4: LEFT -> LEFT
-        4,  # 5: BACKWARD -> DOWN / Shield
-        2,  # 6: FORWARD_RIGHT -> RIGHT
-        3,  # 7: FORWARD_LEFT -> LEFT
-        2,  # 8: BACKWARD_RIGHT -> RIGHT
-        3,  # 9: BACKWARD_LEFT -> LEFT
-        1,  # 10: FORWARD_FIRE -> FIRE
-        1,  # 11: RIGHT_FIRE -> FIRE
-        1,  # 12: LEFT_FIRE -> FIRE
-        1,  # 13: BACKWARD_FIRE -> FIRE
-        1,  # 14: FORWARD_RIGHT_FIRE -> FIRE
-        1,  # 15: FORWARD_LEFT_FIRE -> FIRE
-        1,  # 16: BACKWARD_RIGHT_FIRE -> FIRE
-        1,  # 17: BACKWARD_LEFT_FIRE -> FIRE
-    ], dtype=jnp.int32)
-
-    return action_map[ego_action]
+# Phoenix: horizontal movement + shield (DOWN); ship fires upward so all *_FIRE collapses to FIRE.
+# Direction table (R DR D DL L UL U UR) → (RIGHT, RIGHT, DOWN/shield, LEFT, LEFT, LEFT, NOOP, RIGHT)
+phoenix_action_mapper = make_ego_action_mapper(
+    noop_action=0,
+    fire_action=1,
+    move_table=     [2, 2, 4, 3, 3, 3, 0, 2],
+    move_fire_table=[1, 1, 1, 1, 1, 1, 1, 1],
+)
 
 
 class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):

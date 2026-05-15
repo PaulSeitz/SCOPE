@@ -1,6 +1,7 @@
 import os
 import time
 import copy
+import functools
 import warnings
 import jax
 import jax.numpy as jnp
@@ -11,10 +12,12 @@ import hydra
 from omegaconf import OmegaConf
 
 from src.concept_based_learning.environments.env_manager import EnvManager
+from src.concept_based_learning.environments.heuristics import get_nearest_object_target
 from src.concept_based_learning.curriculum import build_skill_phases
-from src.concept_based_learning.train_agent import make_train
-from src.concept_based_learning.train_meta_agent import make_meta_train
-from src.concept_based_learning.train_tandem import make_tandem_train
+from src.concept_based_learning.training.train_skills import make_train
+from src.concept_based_learning._legacy.train_meta_agent import make_meta_train
+from src.concept_based_learning.training.train_tandem import make_tandem_train
+from src.concept_based_learning.observations.egocentric import set_ego_obs_format
 from src.concept_based_learning.video_recorder import video_callback, wait_for_video_finish
 from src.concept_based_learning.pqn_visualizer import (
     load_params_from_file,
@@ -44,6 +47,11 @@ def _safe_checkpoint_path(base_path, init_model_path=None):
     return f"{root}_finetuned{ext}"
 
 
+def _configure_ego_obs_format(config: dict) -> None:
+    """Select legacy vs target-aligned ego observations for this run."""
+    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+
+
 def outer_make_train(config, frozen_meta_params=None):
     """
     Constructs the environments with the custom semantic wrappers defined
@@ -58,6 +66,7 @@ def outer_make_train(config, frozen_meta_params=None):
     supports both (see ``bootcamp_action_mapper`` module docstring).
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(config)
 
     manager = EnvManager()
     components = manager.get_components(env_name)
@@ -80,6 +89,15 @@ def outer_make_train(config, frozen_meta_params=None):
     env, _ = create_env_with_mods(train_game_mods, train=True)
     test_env, renderer = create_env_with_mods(eval_game_mods, train=False)
 
+    # Match tandem: optional env-agnostic nearest-object heuristic vs env-specific policy.
+    heuristic_mode = config.get("HEURISTIC_MODE", "env_specific")
+    if heuristic_mode == "nearest":
+        heuristic_fn = functools.partial(
+            get_nearest_object_target, no_target_idx=components.no_target_idx
+        )
+    else:
+        heuristic_fn = components.get_heuristic_target
+
     # Call the hierarchical training loop; returns (train_fn, eval_rollout_fn)
     train_fn, eval_rollout_fn = make_train(
         config,
@@ -87,7 +105,7 @@ def outer_make_train(config, frozen_meta_params=None):
         test_env,
         renderer,
         frozen_meta_params=frozen_meta_params,
-        get_heuristic_target=components.get_heuristic_target,
+        get_heuristic_target=heuristic_fn,
         no_target_idx=components.no_target_idx,
         action_mapper=components.action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
@@ -95,7 +113,6 @@ def outer_make_train(config, frozen_meta_params=None):
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
-        idle_action_hook=components.idle_action_hook,
     )
     return train_fn, eval_rollout_fn, renderer
 
@@ -106,6 +123,7 @@ def outer_make_meta_train(config, frozen_skill_params):
     Meta training is intentionally forced onto the unmodified base environment.
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(config)
 
     manager = EnvManager()
     components = manager.get_components(env_name)
@@ -139,11 +157,21 @@ def outer_make_tandem_train(config):
     Tandem training runs on the configured base environment without curriculum phases.
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(config)
 
     manager = EnvManager()
     components = manager.get_components(env_name)
     env, _ = manager.make_env(env_name, config, train=True)
     test_env, renderer = manager.make_env(env_name, config, train=False)
+
+    heuristic_mode = config.get("HEURISTIC_MODE", "env_specific")
+    if heuristic_mode == "nearest":
+        no_target_idx = components.no_target_idx
+        heuristic_fn = functools.partial(
+            get_nearest_object_target, no_target_idx=no_target_idx
+        )
+    else:
+        heuristic_fn = components.get_heuristic_target
 
     train_fn = make_tandem_train(
         config,
@@ -151,13 +179,12 @@ def outer_make_tandem_train(config):
         test_env,
         renderer,
         no_target_idx=components.no_target_idx,
-        get_heuristic_target=components.get_heuristic_target,
+        get_heuristic_target=heuristic_fn,
         action_mapper=components.action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
-        idle_action_hook=components.idle_action_hook,
     )
     return train_fn, renderer
 

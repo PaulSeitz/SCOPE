@@ -76,3 +76,47 @@ class SemanticState:
 # Backwards-compatible alias used by wrappers
 SemanticObservation = ConceptObservation
 
+
+@chex.dataclass(frozen=True)
+class MetaTransition:
+    """Transition for the Meta-Policy (System 2) using global rewards."""
+
+    obs: Any
+    objects: Any
+    action: chex.Array
+    reward: chex.Array
+    done: chex.Array
+    next_obs: Any
+    next_objects: Any
+    q_val: chex.Array
+    active_mask: chex.Array
+    next_active_mask: chex.Array
+
+
+@chex.dataclass(frozen=True)
+class TandemTransition:
+    """Unified rollout buffer for tandem (joint System 1 + System 2) training."""
+
+    # Shared
+    done: chex.Array
+
+    # Meta-policy (System 2)
+    obs: Any
+    objects: Any
+    next_obs: Any
+    next_objects: Any
+    target_idx: chex.Array
+    meta_q_val: chex.Array
+    meta_reward: chex.Array
+    active_mask: chex.Array
+    next_active_mask: chex.Array
+
+    # Skills (System 1)
+    ego_obs: chex.Array
+    next_ego_obs: chex.Array
+    ego_action: chex.Array
+    active_skill: chex.Array
+    skill_q_val: chex.Array
+    skill_rewards: chex.Array
+    skill_done: chex.Array
+

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 
-from concept_based_learning.train_agent import QNetwork
+from concept_based_learning.networks.skill_network import QNetwork
 from concept_based_learning.pqn_visualizer import load_base_config, load_params_from_file
 
 

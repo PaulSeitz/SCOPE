@@ -11,19 +11,23 @@ from omegaconf import OmegaConf
 from safetensors.flax import load_file
 from flax.traverse_util import unflatten_dict
 
-from concept_based_learning.ego_action_space import fire_ego_action_indices
-from concept_based_learning.egocentric_transformation import (
-    EGO_OBS_CHANNELS_PER_FRAME,
+from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.observations.egocentric import (
+    MAX_DIST,
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT,
+    ego_obs_channels_per_frame,
     get_ego_obs,
+    set_ego_obs_format,
+    using_legacy_ego_obs,
 )
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
 )
-#from concept_based_learning.basic_mlp_network import MetaQNetwork
-from concept_based_learning.affordance_pointer_network import MetaQNetwork
-from concept_based_learning.train_agent import QNetwork
+from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.networks.skill_network import QNetwork
 from concept_based_learning.video_recorder import (
     video_callback,
     wait_for_video_finish,
@@ -195,6 +199,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     Returns the same tensors that `video_recorder.video_callback` expects.
     """
+    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -220,7 +225,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
-    idle_action_hook = components.idle_action_hook
     meta_mask_hook = components.meta_mask_hook
 
     meta_network = None
@@ -228,7 +232,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         meta_network = MetaQNetwork(
             action_dim=config["MAX_OBJECTS"],
             hidden_size=config.get("META_HIDDEN_SIZE", 256),
-            num_skills=num_skills  
         )
 
     # Build the shared skill Q-network (one set of params per skill)
@@ -314,21 +317,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
-            # No valid target on screen → NOOP, unless env hook requests an idle override.
             global_action = 0
-            use_idle_override = idle_action_hook(
-                state,
-                jnp.asarray([0], dtype=jnp.int32),
-                jnp.asarray([True], dtype=jnp.bool_),
-                config,
-            )[0]
-            if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
-                ga = action_mapper(
-                    jnp.asarray(1, dtype=jnp.int32),
-                    obs.raw_observation,
-                    jnp.asarray(0, dtype=jnp.int32),
-                )
-                global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
             active_skill_idx = 0
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan
@@ -348,14 +337,32 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
             # Extract the most recent frame's distance and angle from the ego features.
             # See `get_ego_obs` / `EGO_OBS_CHANNELS_PER_FRAME` for the per-frame layout.
-            last_frame_ego = ego_obs[-EGO_OBS_CHANNELS_PER_FRAME:]
-            dx_norm = last_frame_ego[0]
-            dy_norm = last_frame_ego[1]
-            # Recover approximate pixel-space dx, dy and distance
-            dx_pix = dx_norm * 160.0
-            dy_pix = dy_norm * 210.0
-            distance = float(jnp.sqrt(dx_pix**2 + dy_pix**2))
-            angle = float(jnp.arctan2(dy_pix, dx_pix))
+            channels_per_frame = ego_obs_channels_per_frame()
+            last_frame_ego = ego_obs[-channels_per_frame:]
+            if using_legacy_ego_obs():
+                dx_pix = float(last_frame_ego[0] * SCREEN_WIDTH)
+                dy_pix = float(last_frame_ego[1] * SCREEN_HEIGHT)
+                distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
+                angle = float(jnp.arctan2(dy_pix, dx_pix))
+            else:
+                distance = float(last_frame_ego[0] * MAX_DIST)
+                p_cx = float(
+                    obs.raw_observation.player.x[-1]
+                    + obs.raw_observation.player.width[-1] / 2.0
+                )
+                p_cy = float(
+                    obs.raw_observation.player.y[-1]
+                    + obs.raw_observation.player.height[-1] / 2.0
+                )
+                t_cx = float(
+                    obs.objects.x[-1, target_obj_idx]
+                    + obs.objects.width[-1, target_obj_idx] / 2.0
+                )
+                t_cy = float(
+                    obs.objects.y[-1, target_obj_idx]
+                    + obs.objects.height[-1, target_obj_idx] / 2.0
+                )
+                angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
             # Evaluate all skills' Q-values on the current ego observation.
             def apply_one(params_for_skill):
@@ -381,6 +388,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                     chosen_ego,
                     obs.raw_observation,
                     jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
                 )
             )
 
@@ -446,6 +454,7 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
     The agent acts in the environment step-by-step and the current frame is
     rendered to a window, with the skill input (distance, angle) shown at the bottom.
     """
+    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -468,7 +477,6 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
-    idle_action_hook = components.idle_action_hook
     meta_mask_hook = components.meta_mask_hook
 
     meta_network = None
@@ -476,7 +484,6 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
         meta_network = MetaQNetwork(
             action_dim=config["MAX_OBJECTS"],
             hidden_size=config.get("META_HIDDEN_SIZE", 256),
-            num_skills=num_skills  
         )
 
     skill_network = QNetwork(
@@ -589,19 +596,6 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
             global_action = 0
-            use_idle_override = idle_action_hook(
-                state,
-                jnp.asarray([0], dtype=jnp.int32),
-                jnp.asarray([True], dtype=jnp.bool_),
-                config,
-            )[0]
-            if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
-                ga = action_mapper(
-                    jnp.asarray(1, dtype=jnp.int32),
-                    obs.raw_observation,
-                    jnp.asarray(0, dtype=jnp.int32),
-                )
-                global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
             active_skill_idx = 0
             distance = np.nan
             angle = np.nan
@@ -616,13 +610,32 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
 
-            last_frame_ego = ego_obs[-EGO_OBS_CHANNELS_PER_FRAME:]
-            dx_norm = last_frame_ego[0]
-            dy_norm = last_frame_ego[1]
-            dx_pix = dx_norm * 160.0
-            dy_pix = dy_norm * 210.0
-            distance = float(jnp.sqrt(dx_pix**2 + dy_pix**2))
-            angle = float(jnp.arctan2(dy_pix, dx_pix))
+            channels_per_frame = ego_obs_channels_per_frame()
+            last_frame_ego = ego_obs[-channels_per_frame:]
+            if using_legacy_ego_obs():
+                dx_pix = float(last_frame_ego[0] * SCREEN_WIDTH)
+                dy_pix = float(last_frame_ego[1] * SCREEN_HEIGHT)
+                distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
+                angle = float(jnp.arctan2(dy_pix, dx_pix))
+            else:
+                distance = float(last_frame_ego[0] * MAX_DIST)
+                p_cx = float(
+                    obs.raw_observation.player.x[-1]
+                    + obs.raw_observation.player.width[-1] / 2.0
+                )
+                p_cy = float(
+                    obs.raw_observation.player.y[-1]
+                    + obs.raw_observation.player.height[-1] / 2.0
+                )
+                t_cx = float(
+                    obs.objects.x[-1, target_obj_idx]
+                    + obs.objects.width[-1, target_obj_idx] / 2.0
+                )
+                t_cy = float(
+                    obs.objects.y[-1, target_obj_idx]
+                    + obs.objects.height[-1, target_obj_idx] / 2.0
+                )
+                angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
             def apply_one(params_for_skill):
                 return skill_network.apply(
@@ -645,6 +658,7 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
                     chosen_ego,
                     obs.raw_observation,
                     jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
                 )
             )
 

@@ -20,7 +20,7 @@ from src.concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LabeledObjectObservation,
 )
-from src.concept_based_learning.environments.seaquest.seaquest_label import (
+from src.concept_based_learning.environments.seaquest.label import (
     SeaquestSemanticWrapper,
 )
 

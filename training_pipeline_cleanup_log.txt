@@ -1,0 +1,34 @@
+Training pipeline cleanup work log
+=================================
+
+- 2026-03-30: Initialized cleanup log.
+- 2026-03-30: Extended `EnvComponents` in `src/concept_based_learning/environments/env_manager.py` with uniform trainer hooks:
+  - fixed target selection from config
+  - uniform reward extractor signature (includes `info`)
+  - uniform life-loss extractor
+  - env-provided curriculum mod resolution
+- 2026-03-30: Updated env registrations to use wrappers for 5-arg reward extractors and bootcamp-specific reward handling and curriculum mod defaults.
+- 2026-03-30: Normalized env lookup in `EnvManager.get_components()` via `.lower()` to remove casing footgun.
+- 2026-03-30: Refactored `train_agent.py` to remove env-name branches:
+  - fixed-target selection now comes from `EnvComponents.fixed_target_idx_from_config`
+  - reward extraction now uses a uniform signature and always receives `info`
+  - life-loss computation now uses `EnvComponents.extract_life_lost`
+- 2026-03-30: Refactored `train_meta_agent.py` to use `EnvComponents.extract_life_lost` instead of accessing Atari state directly.
+- 2026-03-30: Updated `main.py` wiring to pass the new hooks into `make_train` / `make_meta_train`.
+- 2026-03-30: Hard-removed training modes other than `skills_only` and `meta_only` from `main.py` (deleted sequential/end-to-end scheduling logic and helpers).
+- 2026-03-30: Removed experiment config `configs/experiment/seaquest_end_to_end.yaml` (mode no longer supported).
+- 2026-03-30: Extracted curriculum planning into `src/concept_based_learning/curriculum.py` and rewired `main.py` to use it (phases, mod resolution via env hooks, and step offsets).
+- 2026-03-30: Added warnings in `main.py` when `TOTAL_TIMESTEPS` is not divisible by `NUM_STEPS * NUM_ENVS` (visibility into silently dropped timesteps).
+- 2026-03-30: Restored epsilon-decay semantics: `EPS_DECAY` is passed to `optax.linear_schedule` as `transition_steps` (not a fraction of `NUM_UPDATES`).
+- 2026-03-30: Removed stale `FREEZE_SKILLS_DURING_META` config keys/comments from meta-only experiment YAMLs (no longer used after mode cleanup).
+- 2026-03-30: Validation runs:
+  - `skills_only` smoke run completed successfully (small override run).
+  - `meta_only` run validates expected fast-fail when checkpoint path is invalid.
+  - `meta_only` smoke run completed successfully with matching frozen-skill architecture overrides.
+- 2026-03-30: Updated `scripts/reward_dashboard.py` for new config/hook flow:
+  - loads experiment config from `configs/experiment/*.yaml` and merges like `main.py`
+  - uses env hooks `extract_life_lost`, fixed target from config, and uniform reward extractor signature
+  - adds CLI flags (`--experiment`, `--env-name`, `--train-env`) to target bootcamp quickly
+- 2026-03-30: Hardened bootcamp reward wrapper in `env_manager.py` to support scalar `life_lost` calls from tools like the dashboard.
+- 2026-03-30: Bootcamp env fix: overrode `BootcampSemanticWrapper.step()` to always populate canonical `info` keys (`step_win_destroy`, etc.) using underlying sticky `info_sticky_*` fields when available, so reward events aren't lost on terminal or frame-skip transitions.
+
