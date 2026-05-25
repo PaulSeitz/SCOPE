@@ -16,8 +16,14 @@ import optax
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import QNetwork, CustomTrainState, Transition
-from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.environments.datatypes import ConceptObservation
+from concept_based_learning.environments.meta_target_mask import (
+    build_meta_target_mask,
+    is_meta_noop_target,
+    meta_noop_target_enabled,
+    meta_noop_target_idx,
+)
 from concept_based_learning.training.schedules import eps_decay_transition_steps
 
 
@@ -83,6 +89,9 @@ def make_train(
         FIRE_EGO_ACTION_INDICES = fire_ego_action_indices(EGO_ACTION_DIM)
     NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
 
+    meta_noop_enabled = meta_noop_target_enabled(config)
+    meta_noop_idx = meta_noop_target_idx(config)
+
     fixed_target_idx = fixed_target_idx_from_config(config)
 
     skill_network = QNetwork(
@@ -92,11 +101,7 @@ def make_train(
     )
     use_learned_meta_policy = frozen_meta_params is not None
     if use_learned_meta_policy:
-        meta_network = MetaQNetwork(
-            action_dim=MAX_OBJECTS,
-            hidden_size=config.get("META_HIDDEN_SIZE", 256),
-            num_skills=NUM_SKILLS,
-        )
+        meta_network = create_meta_network(config)
         meta_eps_start = float(
             config.get("SKILL_FINETUNE_META_EPS_START", config.get("EPS_START", 0.2))
         )
@@ -211,12 +216,11 @@ def make_train(
 
                 policy_rngs = jax.random.split(rng_policy, config["NUM_ENVS"])
                 if use_learned_meta_policy:
-                    active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(
-                        last_obs.objects
-                    )
-                    active_masks = meta_mask_hook(
-                        last_obs.raw_observation, active_masks, config
-                    )
+                    active_masks = jax.vmap(
+                        lambda objs, raw: build_meta_target_mask(
+                            objs, raw, config, hook=meta_mask_hook
+                        )
+                    )(last_obs.objects, last_obs.raw_observation)
 
                     any_active = jnp.any(active_masks, axis=-1)
                     fallback_mask = jnp.zeros_like(active_masks).at[:, 0].set(True)
@@ -313,8 +317,14 @@ def make_train(
                 chosen_ego_actions = all_ego_actions[
                     active_skills, jnp.arange(config["NUM_ENVS"])
                 ]
-                no_target = target_obj_idxs == no_target_idx
-                chosen_ego_actions = jnp.where(no_target, 0, chosen_ego_actions)
+                meta_noop = is_meta_noop_target(
+                    target_obj_idxs,
+                    config,
+                    noop_idx=meta_noop_idx,
+                    enabled=meta_noop_enabled,
+                )
+                force_noop = jnp.logical_or(target_obj_idxs == no_target_idx, meta_noop)
+                chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
                 global_actions = jax.vmap(action_mapper)(
                     chosen_ego_actions,
@@ -322,7 +332,7 @@ def make_train(
                     target_obj_idxs,
                     last_obs.objects,
                 )
-                global_actions = jnp.where(no_target, 0, global_actions)
+                global_actions = jnp.where(force_noop, 0, global_actions)
 
                 new_obs, new_env_state, raw_rewards, new_done, info = vmap_step(
                     env_state, global_actions
@@ -355,6 +365,10 @@ def make_train(
                     info,
                 )
                 skill_rewards, skill_done = rewards_and_masks
+                if meta_noop_enabled:
+                    skill_rewards = jnp.where(
+                        meta_noop[:, jnp.newaxis], 0.0, skill_rewards
+                    )
 
                 next_ego_obses = jax.vmap(get_ego_obs)(
                     new_obs.raw_observation, new_obs.objects, safe_target_idxs
@@ -501,6 +515,10 @@ def make_train(
                                 valid = jnp.logical_and(
                                     minibatch["target_idx"] != no_target_idx,
                                     minibatch["active_skill"] == skill_idx,
+                                )
+                            if meta_noop_enabled:
+                                valid = jnp.logical_and(
+                                    valid, minibatch["target_idx"] != meta_noop_idx
                                 )
 
                             sq_err = jnp.square(chosen_action_qvals - target)
