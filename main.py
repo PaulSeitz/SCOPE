@@ -193,9 +193,14 @@ def single_run(config):
     """
     Executes a single training run with Weights & Biases logging.
     """
-    # Flatten: Hydra puts experiment config under "experiment", alg params under "experiment.alg"
+    # Flatten: experiment yaml -> ``experiment`` group; alg block merged on top.
     exp = config.get("experiment", {})
-    base_config = {**config, **exp, **exp.get("alg", {})}
+    root = {k: v for k, v in config.items() if k != "experiment"}
+    base_config = {
+        **root,
+        **{k: v for k, v in exp.items() if k != "alg"},
+        **exp.get("alg", {}),
+    }
 
     alg_name = base_config.get("ALG_NAME", "hierarchical_pqn")
     env_name = str(base_config.get("ENV_NAME", "Seaquest"))

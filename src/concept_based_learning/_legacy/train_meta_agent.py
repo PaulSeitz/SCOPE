@@ -23,8 +23,8 @@ from concept_based_learning.egocentric_transformation import (
 from concept_based_learning.ego_action_space import fire_ego_action_indices
 from concept_based_learning.train_agent import QNetwork as SkillQNetwork
 from concept_based_learning.training.schedules import eps_decay_transition_steps
-#from concept_based_learning.basic_mlp_network import MetaQNetwork, MetaTransition
-from concept_based_learning.affordance_pointer_network import MetaQNetwork, MetaTransition
+from concept_based_learning.environments.datatypes import MetaTransition
+from concept_based_learning.networks.meta_factory import create_meta_network
 
 
 class CustomTrainState(TrainState):
@@ -102,11 +102,7 @@ def make_meta_train(
     )
 
     # 2. System 2 (Meta-Policy) - LEARNED
-    meta_network = MetaQNetwork(
-        action_dim=MAX_OBJECTS,
-        hidden_size=config.get("META_HIDDEN_SIZE", 256),
-        num_skills=NUM_SKILLS 
-    )
+    meta_network = create_meta_network(config)
 
     # Vectorized env helpers
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset)(jax.random.split(rng, n_envs))

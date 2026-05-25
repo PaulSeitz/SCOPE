@@ -1,7 +1,5 @@
 import jax
 import jax.numpy as jnp
-from flax import struct
-from typing import Any
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.environments.datatypes import (
@@ -11,18 +9,14 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_NOOP,
 )
+from concept_based_learning.environments.skill_rewards import (
+    pack_skill_rewards,
+    reward_transition_context,
+    standard_avoid_outcomes,
+    standard_collect_success,
+    standard_destroy_outcomes,
+)
 from concept_based_learning.observations.action_space import make_ego_action_mapper
-
-
-def _bbox_overlap(player, target):
-    """True if player and target bounding boxes overlap (e.g. collision)."""
-    p_left, p_right = player.x, player.x + player.width
-    p_top, p_bottom = player.y, player.y + player.height
-    t_left, t_right = target.x, target.x + target.width
-    t_top, t_bottom = target.y, target.y + target.height
-    horiz = jnp.logical_and(p_left <= t_right, p_right >= t_left)
-    vert = jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
-    return jnp.logical_and(horiz, vert)
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -30,64 +24,43 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     Returns (rewards, skill_done). skill_done[k] is True only when the transition
     is terminal for skill k because the assigned target caused it (golden rule).
     """
-    def last_frame(e):
-        return jax.tree_util.tree_map(lambda x: x[-1] if x.ndim > 0 else x, e)
+    del next_raw_obs
 
-    prev_player = last_frame(prev_raw_obs.player)
-    next_player = last_frame(next_raw_obs.player)
-    prev_target = last_frame(prev_target)
-    next_target = last_frame(next_target)
+    (
+        _prev_player,
+        prev_target,
+        _next_target,
+        disappeared,
+        hit_by_assigned,
+        near_player,
+        at_screen_edge,
+    ) = reward_transition_context(prev_raw_obs, prev_target, next_target)
 
-    was_active = prev_target.active == 1
-    is_active = next_target.active == 1
-    target_destroyed = jnp.logical_and(was_active, jnp.logical_not(is_active))
-
-    hit_by_assigned = _bbox_overlap(prev_player, prev_target)
-
-    t_left = prev_target.x
-    t_right = prev_target.x + prev_target.width
-    t_top = prev_target.y
-    t_bottom = prev_target.y + prev_target.height
-    p_left = prev_player.x
-    p_right = prev_player.x + prev_player.width
-    p_top = prev_player.y
-    p_bottom = prev_player.y + prev_player.height
-    player_overlap = jnp.logical_and(
-        jnp.logical_and(p_left <= t_right, p_right >= t_left),
-        jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
+    destroy_success, destroy_failure = standard_destroy_outcomes(
+        prev_target,
+        disappeared=disappeared,
+        hit_by_assigned=hit_by_assigned,
+        at_screen_edge=at_screen_edge,
+        life_lost=life_lost,
     )
-
-    is_collect_target = prev_target.semantic_label == LABEL_COLLECT
-    collect_success = jnp.logical_and(
-        is_collect_target,
-        jnp.logical_and(was_active, player_overlap),
+    collect_success = standard_collect_success(
+        prev_target,
+        disappeared=disappeared,
+        near_player=near_player,
     )
-
-    # Destroy: assigned enemy died and we didn't crash into it → we must have shot it.
-    is_destroy_target = prev_target.semantic_label == LABEL_DESTROY
-    destroy_success = jnp.logical_and(
-        is_destroy_target,
-        jnp.logical_and(target_destroyed, jnp.logical_not(hit_by_assigned)),
+    avoid_success, avoid_failure = standard_avoid_outcomes(
+        prev_target,
+        disappeared=disappeared,
+        hit_by_assigned=hit_by_assigned,
+        life_lost=life_lost,
     )
-
-    destroy_failure = (life_lost > 0) & is_destroy_target & hit_by_assigned
-    avoid_failure = (life_lost > 0) & (prev_target.semantic_label == LABEL_AVOID) & hit_by_assigned
-
-    collect_reward = jnp.where(collect_success & (life_lost == 0), 1.0, 0.0)
-    destroy_reward = jnp.where(
-        destroy_success & (life_lost == 0),
-        1.0,
-        jnp.where(destroy_failure, -1.0, 0.0),
+    return pack_skill_rewards(
+        destroy_success=destroy_success,
+        destroy_failure=destroy_failure,
+        collect_success=collect_success,
+        avoid_success=avoid_success,
+        avoid_failure=avoid_failure,
     )
-    avoid_reward = jnp.where(avoid_failure, -1.0, 0.0)
-
-    collect_done = collect_success
-    destroy_done = destroy_success | destroy_failure
-    avoid_done = avoid_failure
-
-    rewards = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done, collect_done, avoid_done], dtype=jnp.bool_)
-    return rewards, skill_done
 
 
 choppercommand_action_mapper = make_ego_action_mapper(
@@ -101,7 +74,7 @@ choppercommand_action_mapper = make_ego_action_mapper(
 class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         # Reduced from 85 to 84 since we removed the dummy waypoint
-        super().__init__(env, max_objects=84) 
+        super().__init__(env, max_objects=85) 
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         jets = obs.jets
@@ -170,8 +143,8 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
             jnp.where(has_virtual_waypoint, 1, final_active_unpadded[virtual_idx])
         )
 
-        # --- Array Padding to MAX_OBJECTS (84) ---
-        pad_size = self.max_objects - final_x_unpadded.shape[0]
+        # --- Array Padding to game_max_objects (84) ---
+        pad_size = self.game_max_objects - final_x_unpadded.shape[0]
         
         pad_x = jnp.zeros(pad_size, dtype=jnp.float32)
         pad_y = jnp.zeros(pad_size, dtype=jnp.float32)

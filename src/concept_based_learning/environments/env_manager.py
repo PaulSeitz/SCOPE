@@ -10,6 +10,7 @@ from jaxatari.games.jax_seaquest import SeaquestRenderer
 from jaxatari.games.jax_choppercommand import ChopperCommandRenderer
 from jaxatari.games.jax_spaceinvaders import SpaceInvadersRenderer
 from jaxatari.games.jax_phoenix import PhoenixRenderer
+from jaxatari.games.jax_freeway import FreewayRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -24,6 +25,8 @@ from concept_based_learning.environments.seaquest.label import (
     seaquest_action_mapper,
     extract_all_skills_rewards,
     set_seaquest_action_mapper,
+    set_seaquest_ascent_block,
+    set_seaquest_surfacing_death_guard,
 )
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     get_heuristic_target,
@@ -63,6 +66,19 @@ from concept_based_learning.environments.phoenix.phoenix_policy import (
     get_heuristic_target as phoenix_get_heuristic_target,
     NO_TARGET_IDX as phoenix_NO_TARGET_IDX,
 )
+from concept_based_learning.environments.meta_target_mask import phoenix_meta_mask_hook
+
+from concept_based_learning.environments.freeway.freeway_label import (
+    FreewaySemanticWrapper,
+    freeway_action_mapper,
+    extract_all_skills_rewards as freeway_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.freeway.freeway_policy import (
+    NO_TARGET_IDX as freeway_NO_TARGET_IDX,
+)
+from concept_based_learning.environments.generic_heuristic import (
+    get_heuristic_target as generic_get_heuristic_target,
+)
 
 from concept_based_learning.environments.bootcamp.bootcamp_label import (
     BootcampSemanticWrapper,
@@ -97,7 +113,8 @@ def _atari_wrapper_supports(param_name: str) -> bool:
     return param_name in inspect.signature(AtariWrapper.__init__).parameters
 
 
-def _default_meta_mask_hook(raw_obs, active_masks, config):
+def _default_meta_mask_hook(raw_obs, active_masks, config, objects=None):
+    del raw_obs, config, objects
     return active_masks
 
 
@@ -117,11 +134,35 @@ def _default_resolve_curriculum_mods(
     return mods_list if mods_list else None
 
 
+def _lives_from_env_state(env_state: Any) -> jnp.ndarray:
+    """Read remaining lives from a JAXAtari env_state (field name varies by game)."""
+    if hasattr(env_state, "lives"):
+        return env_state.lives
+    if hasattr(env_state, "player_lives"):
+        return env_state.player_lives
+    raise AttributeError(
+        "env_state has no `lives` or `player_lives` field; "
+        "register a custom extract_life_lost for this game."
+    )
+
+
 def _default_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
-    # Default assumes JAXAtari-like state tree and returns (prev_lives - next_lives).
-    prev_lives = prev_env_state.atari_state.env_state.lives
-    next_lives = next_env_state.atari_state.env_state.lives
+    prev_es = prev_env_state.atari_state.env_state
+    next_es = next_env_state.atari_state.env_state
+    prev_lives = _lives_from_env_state(prev_es)
+    next_lives = _lives_from_env_state(next_es)
     return (prev_lives - next_lives).astype(jnp.int32)
+
+
+def _freeway_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
+    """
+    Freeway has no lives; treat the start of a collision cooldown as a 'life lost'
+    event so the AVOID skill receives the appropriate failure signal.
+    """
+    prev_es = prev_env_state.atari_state.env_state
+    next_es = next_env_state.atari_state.env_state
+    collision = jnp.logical_and(prev_es.cooldown == 0, next_es.cooldown > 0)
+    return collision.astype(jnp.int32)
 
 
 def _wrap_reward_extractor_5arg(reward_extractor_5arg: Callable[..., Any]):
@@ -337,6 +378,22 @@ class EnvManager:
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=phoenix_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["freeway"] = EnvComponents(
+            name="Freeway",
+            jax_game_id="freeway",
+            semantic_wrapper_cls=FreewaySemanticWrapper,
+            renderer_cls=FreewayRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=freeway_NO_TARGET_IDX,
+            action_mapper=freeway_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(freeway_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_freeway_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
         )
@@ -369,6 +426,12 @@ class EnvManager:
         if components.jax_game_id == "seaquest":
             set_seaquest_action_mapper(
                 bool(config.get("USE_LEGACY_SEAQUEST_ACTION_MAPPER", False))
+            )
+            set_seaquest_ascent_block(
+                bool(config.get("USE_LEGACY_SEAQUEST_ASCENT_BLOCK", True))
+            )
+            set_seaquest_surfacing_death_guard(
+                bool(config.get("USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD", False))
             )
 
         game_mods = _normalize_game_mods(config.get("GAME_MODS", None))

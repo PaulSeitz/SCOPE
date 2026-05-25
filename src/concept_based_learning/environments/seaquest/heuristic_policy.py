@@ -26,7 +26,8 @@ from concept_based_learning.environments.datatypes import (
 NO_TARGET_IDX = -1
 
 # Index of the custom surface-only waypoint object; it must never be chosen
-SURFACE_DUMMY_IDX = 33
+# Last game-object slot (index 0 is reserved meta NOOP).
+SURFACE_DUMMY_IDX = 34
 
 # Index of the real surface submarine in the flattened object list
 SURFACE_SUB_IDX = 28
@@ -52,23 +53,33 @@ X_AXIS_WEIGHT = 1.0 # NOTE: deactivated for now
 
 
 def _surface_required_from_raw(raw_observation):
-    return jax.vmap(
-        lambda ro: jnp.logical_or(
-            ro.oxygen_level[-1] < OXYGEN_LOW_THRESHOLD,
-            ro.collected_divers[-1] >= 6,
-        )
-    )(raw_observation)
+    """True when surfacing is required (low O2 or six divers). Supports batched raw obs."""
+    last = jax.tree_util.tree_map(
+        lambda x: x[..., -1] if jnp.ndim(x) > 0 else x, raw_observation
+    )
+    return jnp.logical_or(
+        last.oxygen_level < OXYGEN_LOW_THRESHOLD,
+        last.collected_divers >= 6,
+    )
 
 
-def apply_meta_mask_overrides(raw_obs, active_masks, config):
+def apply_meta_mask_overrides(raw_obs, active_masks, config, objects=None):
+    del objects
     if active_masks.shape[-1] <= SURFACE_DUMMY_IDX:
         return active_masks
 
     always_active = bool(config.get("ALWAYS_ACTIVE_SURFACE_TARGET", False))
+    force_surface = _surface_required_from_raw(raw_obs)
+    if active_masks.ndim == 1:
+        force_surface = jnp.reshape(force_surface, ())
+        if always_active:
+            return active_masks.at[SURFACE_DUMMY_IDX].set(True)
+        return active_masks.at[SURFACE_DUMMY_IDX].set(
+            jnp.logical_and(active_masks[SURFACE_DUMMY_IDX], force_surface)
+        )
+
     if always_active:
         return active_masks.at[:, SURFACE_DUMMY_IDX].set(True)
-
-    force_surface = _surface_required_from_raw(raw_obs)
     return active_masks.at[:, SURFACE_DUMMY_IDX].set(
         jnp.logical_and(active_masks[:, SURFACE_DUMMY_IDX], force_surface)
     )
@@ -106,8 +117,9 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None):
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
-    Continuous utility Seaquest targeting rule.
+    Seaquest targeting rule with local semantic priority.
     """
+    del prev_target_idx, rng
     # Extract current frame data
     px = raw_observation.player.x[-1]
     py = raw_observation.player.y[-1]
@@ -136,40 +148,30 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     weighted_distances = jnp.sqrt((X_AXIS_WEIGHT * dx) ** 2 + dy ** 2)
 
     # ---------------------------------------------------------------------
-    # Continuous Utility Scoring
+    # Local semantic-priority target selection
     # ---------------------------------------------------------------------
     labels = objects.semantic_label[-1]
 
-    # Semantic base weights
-    avoid_weight = 750.0
-    destroy_weight = 500.0
+    avoid_mask = jnp.logical_and(normal_active_mask, labels == LABEL_AVOID)
+    destroy_mask = jnp.logical_and(normal_active_mask, labels == LABEL_DESTROY)
+    collect_mask = jnp.logical_and(normal_active_mask, labels == LABEL_COLLECT)
 
-    # Dynamically boost COLLECT weight as we approach 6 divers so that
-    # collection cleanly outranks destruction, especially near surfacing.
-    collected_divers = raw_observation.collected_divers[-1]
-    collected_divers_f = collected_divers.astype(jnp.float32)
-    collect_weight = 600.0 + 100.0 * jnp.clip(collected_divers_f / 6.0, 0.0, 1.0)
+    avoid_dist = jnp.where(avoid_mask, weighted_distances, jnp.inf)
+    destroy_dist = jnp.where(destroy_mask, weighted_distances, jnp.inf)
+    collect_dist = jnp.where(collect_mask, weighted_distances, jnp.inf)
 
-    weights = jnp.where(
-        labels == LABEL_AVOID,
-        avoid_weight,
-        jnp.where(
-            labels == LABEL_DESTROY,
-            destroy_weight,
-            jnp.where(labels == LABEL_COLLECT, collect_weight, 0.0),
-        ),
+    best_avoid_idx = jnp.argmin(avoid_dist).astype(jnp.int32)
+    best_destroy_idx = jnp.argmin(destroy_dist).astype(jnp.int32)
+    best_collect_idx = jnp.argmin(collect_dist).astype(jnp.int32)
+
+    any_avoid = jnp.any(avoid_mask)
+    any_destroy = jnp.any(destroy_mask)
+    # Priority: AVOID > DESTROY > COLLECT
+    best_normal_idx = jnp.where(
+        any_avoid,
+        best_avoid_idx,
+        jnp.where(any_destroy, best_destroy_idx, best_collect_idx),
     )
-
-    # Hysteresis: Force commitment—massive multiplier so we lock on until target is dead/collected or emergency override
-    hysteresis_multiplier = jnp.where(idxs == prev_target_idx, 20.0, 1.0)
-
-    # Compute continuous score: (Weight / (Distance + epsilon)) * Hysteresis
-    epsilon = 1.0
-    scores = (weights / (weighted_distances + epsilon)) * hysteresis_multiplier
-
-    # Mask out inactive objects and the surface dummy
-    masked_scores = jnp.where(normal_active_mask, scores, -jnp.inf)
-    best_normal_idx = jnp.argmax(masked_scores).astype(jnp.int32)
 
     # ---------------------------------------------------------------------
     # Surfacing Logic (Oxygen / Divers)
@@ -177,42 +179,27 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     oxygen = raw_observation.oxygen_level[-1]
     oxygen_low = oxygen < OXYGEN_LOW_THRESHOLD
 
+    collected_divers = raw_observation.collected_divers[-1]
     have_full_divers = collected_divers >= 6
 
     force_surface = jnp.logical_or(oxygen_low, have_full_divers)
 
     # ---------------------------------------------------------------------
-    # Danger Overrides & Surface Deadlock Prevention
+    # Danger override
     # ---------------------------------------------------------------------
     is_threat = jnp.logical_or(labels == LABEL_AVOID, labels == LABEL_DESTROY)
-
-    # Dynamic threshold (spatial hysteresis). If we were already targeting this threat,
-    # use the larger release range so we don't flicker; otherwise use the strict close range.
-    dynamic_danger_thresholds = jnp.where(
-        idxs == prev_target_idx,
-        DANGER_RELEASE_RANGE,
-        CLOSE_DANGER_RANGE,
-    )
-
-    is_close_danger = jnp.logical_and(distances <= dynamic_danger_thresholds, is_threat)
+    is_close_danger = jnp.logical_and(distances <= CLOSE_DANGER_RANGE, is_threat)
     is_close_danger = jnp.logical_and(is_close_danger, normal_active_mask)
 
-    # If we are actively surfacing, the surface sub is no longer a "danger"
+    # If we are actively surfacing, ignore the real surface sub as a danger
     is_surface_sub = (idxs == SURFACE_SUB_IDX)
     ignore_danger = jnp.logical_and(force_surface, is_surface_sub)
-
     valid_close_danger = jnp.logical_and(
         is_close_danger, jnp.logical_not(ignore_danger)
     )
-
-    # When oxygen is critically low, ignore immediate dangers and commit to surfacing.
-    oxygen_critical = oxygen < CRITICAL_OXYGEN_THRESHOLD
-    have_valid_danger = jnp.logical_and(jnp.any(valid_close_danger), jnp.logical_not(oxygen_critical))
-
-    # If there are valid close dangers, pick the one with the highest utility score.
-    # scores already includes the hysteresis multiplier, so we stick to the threat we're engaging.
-    danger_scores = jnp.where(valid_close_danger, scores, -jnp.inf)
-    best_danger_idx = jnp.argmax(danger_scores).astype(jnp.int32)
+    have_valid_danger = jnp.any(valid_close_danger)
+    danger_dist = jnp.where(valid_close_danger, distances, jnp.inf)
+    best_danger_idx = jnp.argmin(danger_dist).astype(jnp.int32)
 
     # ---------------------------------------------------------------------
     # Final Target Selection

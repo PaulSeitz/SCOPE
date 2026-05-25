@@ -14,6 +14,7 @@ from .datatypes import (
     LabeledObjectObservation,
     NUM_LABELS,
 )
+from .meta_object_layout import prepend_meta_noop_slot
 
 
 class JaxatariSemanticBaseWrapper(JaxatariWrapper):
@@ -27,7 +28,9 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         self.frame_skip = int(getattr(self._env, "_cbl_frame_skip", 1))
         self.clip_reward = bool(getattr(self._env, "_cbl_clip_reward", False))
         self._single_frame_api = not hasattr(self._env, "frame_stack_size")
+        # Total slots in observations: index 0 = meta NOOP, indices 1.. = game objects.
         self.max_objects = max_objects
+        self.game_max_objects = max_objects - 1
 
         # Note: We wrap the original observation space inside a Dict space
         self._observation_space = self._make_observation_space()
@@ -116,6 +119,7 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         """
         # We vmap over the first axis (the frame stack)
         objects_stack = jax.vmap(self._extract_frame_objects)(obs_stack)
+        objects_stack = jax.vmap(prepend_meta_noop_slot)(objects_stack)
 
         return SemanticObservation(
             raw_observation=obs_stack,  # Pass through the raw stacked observation

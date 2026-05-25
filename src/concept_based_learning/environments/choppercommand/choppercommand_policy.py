@@ -22,7 +22,8 @@ MAX_TARGET_DISTANCE = 150.0
 X_AXIS_WEIGHT = 1.0  # NOTE: can be used, but with 1.0 it already trained very successfully
 
 
-def apply_meta_mask_overrides(raw_obs, active_masks, config):
+def apply_meta_mask_overrides(raw_obs, active_masks, config, objects=None):
+    del raw_obs, config, objects
     return active_masks
 
 

@@ -22,7 +22,7 @@ alg:
   # --- Custom Architecture Dimensions ---
   NUM_SKILLS: 3               # DESTROY, COLLECT, AVOID
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]  # wandb keys: skill_DESTROY/td_loss, etc.
-  MAX_OBJECTS: 84
+  MAX_OBJECTS: 85             # slot 0 = meta NOOP; up to 84 game objects
   EGO_ACTION_DIM: 18          # The 18 translated egocentric actions
   HIDDEN_SIZE: 128
   NUM_LAYERS: 2

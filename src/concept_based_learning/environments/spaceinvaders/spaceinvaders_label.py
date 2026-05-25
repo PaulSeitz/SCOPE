@@ -11,15 +11,12 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 
-def _bbox_overlap(player, target):
-    """True if player and target bounding boxes overlap (e.g. collision)."""
-    p_left, p_right = player.x, player.x + player.width
-    p_top, p_bottom = player.y, player.y + player.height
-    t_left, t_right = target.x, target.x + target.width
-    t_top, t_bottom = target.y, target.y + target.height
-    horiz = jnp.logical_and(p_left <= t_right, p_right >= t_left)
-    vert = jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
-    return jnp.logical_and(horiz, vert)
+from concept_based_learning.environments.skill_rewards import (
+    pack_skill_rewards,
+    reward_transition_context,
+    standard_avoid_outcomes,
+    standard_destroy_outcomes,
+)
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -27,38 +24,38 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     Returns (rewards, skill_done). skill_done[k] is True only when the transition
     is terminal for skill k because the assigned target caused it (golden rule).
     """
-    def last_frame(e):
-        return jax.tree_util.tree_map(lambda x: x[-1] if x.ndim > 0 else x, e)
+    del next_raw_obs
 
-    prev_target = last_frame(prev_target)
-    next_target = last_frame(next_target)
-    prev_player = last_frame(prev_raw_obs.player)
+    (
+        _prev_player,
+        prev_target,
+        _next_target,
+        disappeared,
+        hit_by_assigned,
+        _near_player,
+        at_screen_edge,
+    ) = reward_transition_context(prev_raw_obs, prev_target, next_target)
 
-    was_active = prev_target.active == 1
-    is_active = next_target.active == 1
-    success = jnp.logical_and(was_active, jnp.logical_not(is_active))
-
-    hit_by_assigned = _bbox_overlap(prev_player, prev_target)
-
-    is_destroy_target = prev_target.semantic_label == LABEL_DESTROY
-    destroy_success = jnp.logical_and(
-        is_destroy_target,
-        jnp.logical_and(success, jnp.logical_not(hit_by_assigned)),
+    destroy_success, destroy_failure = standard_destroy_outcomes(
+        prev_target,
+        disappeared=disappeared,
+        hit_by_assigned=hit_by_assigned,
+        at_screen_edge=at_screen_edge,
+        life_lost=life_lost,
     )
-    destroy_failure = (life_lost > 0) & is_destroy_target & hit_by_assigned
-    avoid_failure = (life_lost > 0) & (prev_target.semantic_label == LABEL_AVOID) & hit_by_assigned
-
-    destroy_reward = jnp.where(destroy_success & (life_lost == 0), 1.0, 0.0)
-    collect_reward = jnp.zeros_like(destroy_reward)
-    avoid_reward = jnp.where(avoid_failure, -1.0, 0.0)
-
-    destroy_done = destroy_success | destroy_failure
-    collect_done = jnp.zeros_like(destroy_reward, dtype=jnp.bool_)
-    avoid_done = avoid_failure
-
-    rewards = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done, collect_done, avoid_done], dtype=jnp.bool_)
-    return rewards, skill_done
+    avoid_success, avoid_failure = standard_avoid_outcomes(
+        prev_target,
+        disappeared=disappeared,
+        hit_by_assigned=hit_by_assigned,
+        life_lost=life_lost,
+    )
+    return pack_skill_rewards(
+        destroy_success=destroy_success,
+        destroy_failure=destroy_failure,
+        collect_success=jnp.array(False),
+        avoid_success=avoid_success,
+        avoid_failure=avoid_failure,
+    )
 
 
 # SpaceInvaders: purely horizontal movement, 6 actions (0=NOOP,1=FIRE,2=RIGHT,3=LEFT,4=RIGHTFIRE,5=LEFTFIRE).
@@ -74,7 +71,7 @@ spaceinvaders_action_mapper = make_ego_action_mapper(
 class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         # 36 Enemies + 3 Enemy Bullets + 1 UFO = 40 active objects
-        super().__init__(env, max_objects=40)
+        super().__init__(env, max_objects=41)
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         """

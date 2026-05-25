@@ -7,8 +7,14 @@ import optax
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork, CustomTrainState
-from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.environments.datatypes import TandemTransition
+from concept_based_learning.environments.meta_target_mask import (
+    build_meta_target_mask,
+    is_meta_noop_target,
+    meta_noop_target_enabled,
+    meta_noop_target_idx,
+)
 from concept_based_learning.training.schedules import eps_decay_transition_steps
 
 
@@ -40,6 +46,10 @@ def make_tandem_train(
     ego_action_dim = config["EGO_ACTION_DIM"]
     skill_warmup_updates = int(config.get("SKILL_WARMUP_UPDATES", 0))
     meta_learn_during_warmup = bool(config.get("META_LEARN_DURING_WARMUP", False))
+    meta_num_epochs = int(config.get("META_NUM_EPOCHS", config["NUM_EPOCHS"]))
+    skill_freeze_after_updates = int(config.get("SKILL_FREEZE_AFTER_UPDATES", 0))
+    meta_noop_enabled = meta_noop_target_enabled(config)
+    meta_noop_idx = meta_noop_target_idx(config)
 
     def label_to_skill_idx(label):
         return jnp.clip(label - 1, 0, num_skills - 1)
@@ -65,10 +75,7 @@ def make_tandem_train(
         hidden_size=config["HIDDEN_SIZE"],
         num_layers=config["NUM_LAYERS"],
     )
-    meta_network = MetaQNetwork(
-        action_dim=max_objects,
-        hidden_size=config.get("META_HIDDEN_SIZE", 256),
-    )
+    meta_network = create_meta_network(config)
 
     vmap_reset = lambda n_envs: lambda rng: jax.vmap(env.reset)(
         jax.random.split(rng, n_envs)
@@ -177,8 +184,11 @@ def make_tandem_train(
                         {"params": meta_state.params}, obs, objs, train=False
                     )
                 )(last_obs.raw_observation, last_obs.objects)
-                active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(last_obs.objects)
-                active_masks = meta_mask_hook(last_obs.raw_observation, active_masks, config)
+                active_masks = jax.vmap(
+                    lambda objs, raw: build_meta_target_mask(
+                        objs, raw, config, hook=meta_mask_hook
+                    )
+                )(last_obs.objects, last_obs.raw_observation)
                 active_any = jnp.any(active_masks, axis=-1)
 
                 eps_meta = jnp.full(
@@ -290,13 +300,19 @@ def make_tandem_train(
                 chosen_ego_actions = all_ego_actions[
                     active_skills, jnp.arange(config["NUM_ENVS"])
                 ]
-                no_target = target_obj_idxs == no_target_idx
-                chosen_ego_actions = jnp.where(no_target, 0, chosen_ego_actions)
+                meta_noop = is_meta_noop_target(
+                    target_obj_idxs,
+                    config,
+                    noop_idx=meta_noop_idx,
+                    enabled=meta_noop_enabled,
+                )
+                force_noop = jnp.logical_or(target_obj_idxs == no_target_idx, meta_noop)
+                chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
                 global_actions = jax.vmap(action_mapper)(
                     chosen_ego_actions, last_obs.raw_observation, target_obj_idxs, last_obs.objects
                 )
-                global_actions = jnp.where(no_target, 0, global_actions)
+                global_actions = jnp.where(force_noop, 0, global_actions)
 
                 new_obs, new_env_state, env_reward, new_done, info = vmap_step(
                     env_state, global_actions
@@ -334,25 +350,40 @@ def make_tandem_train(
                     life_lost,
                     info,
                 )
+                if meta_noop_enabled:
+                    skill_rewards = jnp.where(
+                        meta_noop[:, jnp.newaxis], 0.0, skill_rewards
+                    )
 
                 changed_target = target_obj_idxs != last_targets
                 was_valid_target = jnp.logical_and(
                     last_targets >= 0, last_targets < max_objects
                 )
                 apply_penalty = jnp.logical_and(changed_target, was_valid_target)
-                processed_rewards = jnp.sign(env_reward)
+
+                # Blended meta reward: λ * env_reward + (1-λ) * active_skill_reward.
+                # λ=1.0 → full env reward (default); λ=0.0 → full skill reward.
+                # skill_rewards is already noop-zeroed above; no extra masking needed.
+                meta_reward_lambda = float(config.get("META_REWARD_LAMBDA", 1.0))
+                base_env_reward = jnp.sign(env_reward)
+                active_skill_reward = skill_rewards[
+                    jnp.arange(config["NUM_ENVS"]), active_skills
+                ]
+                blended_reward = (
+                    meta_reward_lambda * base_env_reward
+                    + (1.0 - meta_reward_lambda) * active_skill_reward
+                )
                 meta_death_penalty = float(config.get("META_DEATH_PENALTY", -5.0))
                 meta_switch_penalty = float(config.get("META_SWITCH_PENALTY", -0.5))
-                processed_rewards = processed_rewards + jnp.where(
-                    done_due_to_life_lost,
-                    meta_death_penalty,
-                    0.0,
-                ).astype(processed_rewards.dtype)
-                meta_reward = processed_rewards + jnp.where(
-                    apply_penalty,
-                    meta_switch_penalty,
-                    0.0,
-                ).astype(processed_rewards.dtype)
+                meta_reward = (
+                    blended_reward
+                    + jnp.where(
+                        done_due_to_life_lost, meta_death_penalty, 0.0
+                    ).astype(blended_reward.dtype)
+                    + jnp.where(
+                        apply_penalty, meta_switch_penalty, 0.0
+                    ).astype(blended_reward.dtype)
+                )
 
                 rng, rng_reset = jax.random.split(rng)
                 reset_obs, reset_state = vmap_reset(config["NUM_ENVS"])(rng_reset)
@@ -362,12 +393,11 @@ def make_tandem_train(
                 next_state_for_rollout = merge_reset_where_done(
                     new_env_state, reset_state, new_done
                 )
-                next_active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(
-                    next_obs_for_rollout.objects
-                )
-                next_active_masks = meta_mask_hook(
-                    next_obs_for_rollout.raw_observation, next_active_masks, config
-                )
+                next_active_masks = jax.vmap(
+                    lambda objs, raw: build_meta_target_mask(
+                        objs, raw, config, hook=meta_mask_hook
+                    )
+                )(next_obs_for_rollout.objects, next_obs_for_rollout.raw_observation)
                 next_ego_obses = jax.vmap(get_ego_obs)(
                     next_obs_for_rollout.raw_observation,
                     next_obs_for_rollout.objects,
@@ -392,6 +422,7 @@ def make_tandem_train(
                     skill_q_val=all_skill_q_vals,
                     skill_rewards=skill_rewards,
                     skill_done=skill_done,
+                    env_reward=base_env_reward,
                 )
                 return (
                     next_obs_for_rollout,
@@ -553,7 +584,7 @@ def make_tandem_train(
                 _meta_learn_epoch,
                 (meta_state, rng),
                 None,
-                config["NUM_EPOCHS"],
+                meta_num_epochs,
             )
             meta_state = meta_state.replace(n_updates=meta_state.n_updates + 1)
 
@@ -640,6 +671,10 @@ def make_tandem_train(
                                     minibatch["target_idx"] != no_target_idx,
                                     minibatch["active_skill"] == skill_idx,
                                 )
+                            if meta_noop_enabled:
+                                valid = jnp.logical_and(
+                                    valid, minibatch["target_idx"] != meta_noop_idx
+                                )
                             loss = (jnp.square(chosen_q - target) * valid).sum() / (
                                 valid.sum() + 1e-8
                             )
@@ -648,6 +683,9 @@ def make_tandem_train(
                         (loss, (updates, qvals)), grads = jax.value_and_grad(
                             _loss_fn, has_aux=True
                         )(s_state_phase.params)
+                        grads = jax.tree_util.tree_map(
+                            lambda g: g * jnp.where(skills_frozen, 0.0, 1.0), grads
+                        )
                         s_state_phase = s_state_phase.apply_gradients(grads=grads)
                         s_state_phase = s_state_phase.replace(
                             grad_steps=s_state_phase.grad_steps + 1,
@@ -674,6 +712,11 @@ def make_tandem_train(
                     skill_qvals[-1].mean(),
                 )
 
+            skills_frozen = jnp.logical_and(
+                skill_freeze_after_updates > 0,
+                meta_state.n_updates >= skill_freeze_after_updates,
+            )
+
             rngs = jax.random.split(rng, num_skills)
             skill_states, skill_metrics = jax.vmap(
                 _update_single_skill,
@@ -684,7 +727,7 @@ def make_tandem_train(
             valid_target_mask = (transitions.target_idx != no_target_idx).astype(
                 jnp.float32
             )
-            reward_nonzero = (transitions.meta_reward != 0).astype(jnp.float32)
+            reward_nonzero = (transitions.env_reward != 0).astype(jnp.float32)
             skill_reward_nonzero = (jnp.abs(transitions.skill_rewards) > 0).astype(
                 jnp.float32
             )
@@ -703,13 +746,17 @@ def make_tandem_train(
             metrics = {
                 "meta_policy/td_loss": meta_loss[-1].mean(),
                 "meta_policy/qvals": meta_qvals[-1].mean(),
-                "env/reward_mean": jnp.mean(transitions.meta_reward),
+                "meta_policy/reward_mean": jnp.mean(transitions.meta_reward),
+                "env/reward_mean": jnp.mean(transitions.env_reward),
                 "env/reward_nonzero_frac": jnp.mean(reward_nonzero),
-                "env/reward_max": jnp.max(transitions.meta_reward),
+                "env/reward_max": jnp.max(transitions.env_reward),
                 "env/done_frac": jnp.mean(transitions.done.astype(jnp.float32)),
                 "env/episodic_return": mean_episodic_return,
                 "returned_episode_returns": mean_episodic_return,
                 "meta_policy/valid_target_frac": jnp.mean(valid_target_mask),
+                "meta_policy/targetable_objects_mean": jnp.mean(
+                    jnp.sum(transitions.active_mask.astype(jnp.float32), axis=-1)
+                ),
                 "meta_policy/eps": meta_eps_schedule(meta_state.n_updates),
                 "skill_policy/eps": skill_eps_schedule(meta_state.n_updates),
                 "skill/td_loss_mean": jnp.mean(skill_metrics[0]),
@@ -720,6 +767,7 @@ def make_tandem_train(
                     meta_state.n_updates < skill_warmup_updates
                 ).astype(jnp.float32),
                 "warmup/meta_frozen": skip_meta_update.astype(jnp.float32),
+                "skill/frozen": skills_frozen.astype(jnp.float32),
                 "update_steps": meta_state.n_updates,
                 "global/update_steps": meta_state.n_updates,
                 "env/step": meta_state.timesteps,

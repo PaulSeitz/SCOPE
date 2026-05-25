@@ -40,6 +40,27 @@ def ego_obs_channels_per_frame() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Player entity accessor (supports different field names across games)
+# ---------------------------------------------------------------------------
+
+def _get_player(raw_observation):
+    """Return the player entity from a raw observation.
+
+    Most games expose ``raw_observation.player``; Freeway uses
+    ``raw_observation.chicken``.  Additional aliases can be added here
+    without touching the rest of the module.
+    """
+    if hasattr(raw_observation, "player"):
+        return raw_observation.player
+    if hasattr(raw_observation, "chicken"):
+        return raw_observation.chicken
+    raise AttributeError(
+        f"Cannot find a player entity in {type(raw_observation).__name__}. "
+        "Expected 'player' or 'chicken' attribute."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Per-frame geometry (vmapped over the frame stack)
 # ---------------------------------------------------------------------------
 
@@ -154,6 +175,7 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     t_w_hist = objects.width[:, target_idx]
     t_h_hist = objects.height[:, target_idx]
 
+    player = _get_player(raw_observation)
     (
         distances,
         thetas,
@@ -162,11 +184,11 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
         p_cxs, p_cys,
         t_ws,  t_hs,
     ) = jax.vmap(_frame_geometry_target_aligned)(
-        raw_observation.player.x,
-        raw_observation.player.y,
-        raw_observation.player.width,
-        raw_observation.player.height,
-        raw_observation.player.orientation,
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        player.orientation,
         t_x_hist, t_y_hist, t_w_hist, t_h_hist,
     )
 
@@ -219,6 +241,7 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     t_w_history = objects.width[:, target_idx]
     t_h_history = objects.height[:, target_idx]
 
+    player = _get_player(raw_observation)
     (
         dx_ego,
         dy_ego,
@@ -232,11 +255,11 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
         t_cx,
         t_cy,
     ) = jax.vmap(_single_frame_geom_legacy)(
-        raw_observation.player.x,
-        raw_observation.player.y,
-        raw_observation.player.width,
-        raw_observation.player.height,
-        raw_observation.player.orientation,
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        player.orientation,
         t_x_history,
         t_y_history,
         t_w_history,

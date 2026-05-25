@@ -10,7 +10,7 @@ alg:
   # Shared architecture — must match step 3 and step 4 exactly
   NUM_SKILLS: 3
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
-  MAX_OBJECTS: 34
+  MAX_OBJECTS: 35
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128
   NUM_LAYERS: 3

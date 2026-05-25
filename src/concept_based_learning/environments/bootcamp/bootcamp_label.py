@@ -76,7 +76,7 @@ class BootcampSemanticWrapper(JaxatariSemanticBaseWrapper):
     """Flattens BootcampObservation into padded ``LabeledObjectObservation`` stacks."""
 
     def __init__(self, env):
-        super().__init__(env, max_objects=8)
+        super().__init__(env, max_objects=9)
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         last_e = obs.enemies
@@ -92,7 +92,7 @@ class BootcampSemanticWrapper(JaxatariSemanticBaseWrapper):
             dtype=jnp.int32,
         )
         n = all_x.shape[0]
-        pad = self.max_objects - n
+        pad = self.game_max_objects - n
         z = jnp.zeros(pad, dtype=all_x.dtype)
         pad_active = jnp.zeros(pad, dtype=jnp.int32)
         pad_labels = jnp.full(pad, LABEL_NOOP, dtype=jnp.int32)

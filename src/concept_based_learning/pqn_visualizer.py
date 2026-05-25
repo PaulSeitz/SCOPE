@@ -17,6 +17,7 @@ from concept_based_learning.observations.egocentric import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
     ego_obs_channels_per_frame,
+    _get_player,
     get_ego_obs,
     set_ego_obs_format,
     using_legacy_ego_obs,
@@ -26,7 +27,8 @@ from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
 )
-from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.networks.meta_factory import create_meta_network
+from concept_based_learning.environments.meta_target_mask import build_meta_target_mask
 from concept_based_learning.networks.skill_network import QNetwork
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -40,9 +42,9 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def load_base_config():
+def load_base_config(experiment: str | None = None):
     """
-    Load the global config and the default Seaquest experiment config,
+    Load the global config and an experiment config,
     then merge them into a single flat dict similar to `single_run` in main.py.
     """
     root = _project_root()
@@ -51,18 +53,16 @@ def load_base_config():
     global_cfg_path = root / "configs" / "config.yaml"
     global_cfg = OmegaConf.load(global_cfg_path)
 
-    # Determine default experiment from Hydra-style defaults list
-    # Hydra-style defaults is a list of DictConfig entries.
-    # They are not plain dicts, so we must not restrict the type check.
-    defaults = global_cfg.get("defaults", [])
-    exp_name = None
-    for entry in defaults:
-        # `entry` is typically a DictConfig; use .get instead of isinstance(..., dict).
-        if hasattr(entry, "get"):
-            maybe_exp = entry.get("experiment", None)
-            if maybe_exp is not None:
-                exp_name = maybe_exp
-                break
+    exp_name = experiment
+    if exp_name is None:
+        # Determine default experiment from Hydra-style defaults list
+        defaults = global_cfg.get("defaults", [])
+        for entry in defaults:
+            if hasattr(entry, "get"):
+                maybe_exp = entry.get("experiment", None)
+                if maybe_exp is not None:
+                    exp_name = maybe_exp
+                    break
     if exp_name is None:
         raise ValueError("Could not find an 'experiment' entry in configs/config.yaml defaults.")
 
@@ -129,6 +129,183 @@ def load_params_from_file(filename):
     return unflatten_dict(flattened_dict, sep=",")
 
 
+def _checkpoint_base_stem(stem: str) -> str:
+    """Strip a skills suffix so sibling meta/config files share the same base name."""
+    if stem.endswith("_skills"):
+        return stem[: -len("_skills")]
+    return stem
+
+
+def find_checkpoint_config_path(model_path: str) -> str | None:
+    """
+    Locate the training config saved next to a checkpoint by main.py
+    (``{base}_config.yaml``).
+    """
+    resolved = resolve_config_path(model_path)
+    if resolved is None:
+        return None
+    candidate = Path(resolved).parent / f"{_checkpoint_base_stem(Path(resolved).stem)}_config.yaml"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _infer_env_name_from_checkpoint_path(model_path: str) -> str | None:
+    """Guess ENV_NAME from ``.../outputs/models/<env>/...`` layout used by main.py."""
+    resolved = resolve_config_path(model_path)
+    if resolved is None:
+        return None
+    parent = Path(resolved).parent.name
+    known = {"seaquest", "phoenix", "choppercommand", "spaceinvaders"}
+    return parent if parent in known else None
+
+
+def load_config_for_checkpoint(model_path: str, base_config: dict) -> tuple[dict, bool]:
+    """Merge a saved training config over the visualizer defaults when available."""
+    cfg_path = find_checkpoint_config_path(model_path)
+    if cfg_path is not None:
+        exp_cfg = OmegaConf.load(cfg_path)
+        exp_dict = OmegaConf.to_container(exp_cfg, resolve=True)
+        merged = {**base_config, **exp_dict, **exp_dict.get("alg", {})}
+        print(f"Loaded training config from: {cfg_path}")
+        return merged, True
+
+    env_guess = _infer_env_name_from_checkpoint_path(model_path)
+    if env_guess is not None and base_config.get("ENV_NAME") != env_guess:
+        print(
+            f"No *_config.yaml next to checkpoint; using ENV_NAME={env_guess!r} "
+            f"from parent directory (was {base_config.get('ENV_NAME')!r})."
+        )
+        return {**base_config, "ENV_NAME": env_guess}, False
+    return base_config, False
+
+
+def resolve_tandem_checkpoint_paths(
+    skill_path: str | None,
+    meta_path: str | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve skill and meta checkpoint paths for tandem runs.
+
+    Tandem training writes ``*_skills.safetensors`` and ``*_meta.safetensors``.
+    When only the skills file is passed, auto-load the sibling meta file if present.
+    """
+    if skill_path is None:
+        return None, resolve_config_path(meta_path) if meta_path else None
+    skill_resolved = resolve_config_path(skill_path)
+    if meta_path is not None:
+        return skill_resolved, resolve_config_path(meta_path)
+    meta_candidate = (
+        Path(skill_resolved).parent
+        / f"{_checkpoint_base_stem(Path(skill_resolved).stem)}_meta.safetensors"
+    )
+    if meta_candidate.is_file():
+        print(f"Auto-detected meta checkpoint: {meta_candidate}")
+        return skill_resolved, str(meta_candidate)
+    return skill_resolved, None
+
+
+def _unwrap_stacked_skill_params(params_tree):
+    """Return a single-skill param subtree and the number of stacked skills."""
+    kernel = params_tree["Dense_0"]["kernel"]
+    arr = np.asarray(kernel)
+    if arr.ndim == 3:
+        num_skills = int(arr.shape[0])
+        single = jax.tree_util.tree_map(lambda x: x[0], params_tree)
+        return single, num_skills
+    return params_tree, 1
+
+
+def infer_skill_hparams_from_params(params_tree) -> dict:
+    """
+    Infer skill Q-network hyperparameters from a checkpoint parameter tree.
+
+    Expects Flax ``QNetwork`` param keys ``Dense_0`` … ``Dense_{NUM_LAYERS}``.
+    """
+    sample, num_skills = _unwrap_stacked_skill_params(params_tree)
+    dense_indices = sorted(
+        int(key.split("_", 1)[1])
+        for key in sample
+        if key.startswith("Dense_") and key.split("_", 1)[1].isdigit()
+    )
+    if not dense_indices:
+        raise ValueError("Skill checkpoint has no Dense_* layers; cannot infer architecture.")
+
+    first = sample[f"Dense_{dense_indices[0]}"]["kernel"]
+    last = sample[f"Dense_{dense_indices[-1]}"]["kernel"]
+    ego_in = int(first.shape[0])
+    hidden_size = int(first.shape[1])
+    ego_action_dim = int(last.shape[1])
+    num_layers = len(dense_indices) - 1
+
+    channels_per_frame = ego_obs_channels_per_frame()
+    frame_stack_size = (
+        ego_in // channels_per_frame if ego_in % channels_per_frame == 0 else None
+    )
+
+    return {
+        "HIDDEN_SIZE": hidden_size,
+        "NUM_LAYERS": num_layers,
+        "EGO_ACTION_DIM": ego_action_dim,
+        "NUM_SKILLS": num_skills,
+        "FRAME_STACK_SIZE": frame_stack_size,
+        "_ckpt_ego_in": ego_in,
+    }
+
+
+def ensure_skill_params_stack(params_tree, num_skills: int):
+    """Ensure skill params are stacked along axis 0 for ``jax.vmap`` over skills."""
+    kernel = np.asarray(params_tree["Dense_0"]["kernel"])
+    if kernel.ndim == 2:
+        return jax.tree_util.tree_map(
+            lambda p: jnp.stack([p] * num_skills, axis=0),
+            params_tree,
+        )
+    return params_tree
+
+
+def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
+    """Override skill architecture fields so the network matches the checkpoint."""
+    inferred = infer_skill_hparams_from_params(params_tree)
+    ckpt_in = inferred.pop("_ckpt_ego_in")
+    frame_stack_size = inferred.get("FRAME_STACK_SIZE")
+    updated = {**config, **{k: v for k, v in inferred.items() if v is not None}}
+    if int(config.get("HIDDEN_SIZE", -1)) != int(updated["HIDDEN_SIZE"]):
+        print(
+            f"Using checkpoint HIDDEN_SIZE={updated['HIDDEN_SIZE']} "
+            f"(default config had {config.get('HIDDEN_SIZE')})."
+        )
+    if frame_stack_size is not None and int(
+        config.get("FRAME_STACK_SIZE", frame_stack_size)
+    ) != int(frame_stack_size):
+        print(
+            f"Using checkpoint FRAME_STACK_SIZE={frame_stack_size} "
+            f"(default config had {config.get('FRAME_STACK_SIZE')})."
+        )
+    updated["_ckpt_ego_in"] = ckpt_in
+    return updated
+
+
+def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
+    """Fail fast when the eval env's ego observation length does not match the checkpoint."""
+    ckpt_in = config.pop("_ckpt_ego_in", None)
+    if ckpt_in is None:
+        return
+    if int(ego_feat_dim) == int(ckpt_in):
+        return
+    channels_per_frame = ego_obs_channels_per_frame()
+    need_stack = (
+        ckpt_in // channels_per_frame
+        if ckpt_in % channels_per_frame == 0
+        else "?"
+    )
+    raise ValueError(
+        f"Skill checkpoint expects MLP input size {ckpt_in}, but this environment's "
+        f"egocentric observation length is {ego_feat_dim}. "
+        f"Ego length is {channels_per_frame} × frame stack. Set FRAME_STACK_SIZE to "
+        f"{need_stack} (and ENV_NAME to the game the checkpoint was trained on), or pass "
+        f"the matching *_config.yaml via a checkpoint saved by main.py."
+    )
+
+
 def create_eval_env(config):
     """
     Create the evaluation environment + renderer using the same semantic
@@ -167,16 +344,14 @@ def _select_target_with_meta(
         obs.objects,
         train=False,
     )
-    active_mask = obs.objects.active[-1] > 0.5
-    active_mask = meta_mask_hook(
+    active_mask = build_meta_target_mask(
+        obs.objects,
         jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
-        jnp.expand_dims(active_mask, 0),
         config,
-    )[0]
-    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
-    if meta_use_noop_target and 0 <= meta_noop_target_idx < int(config["MAX_OBJECTS"]):
-        active_mask = active_mask.at[meta_noop_target_idx].set(True)
+        hook=meta_mask_hook,
+    )
+    if active_mask.ndim > 1:
+        active_mask = active_mask[0]
 
     any_active = jnp.any(active_mask)
     valid_qs = jnp.where(active_mask, meta_q_vals, -jnp.inf)
@@ -229,10 +404,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     meta_network = None
     if meta_params is not None:
-        meta_network = MetaQNetwork(
-            action_dim=config["MAX_OBJECTS"],
-            hidden_size=config.get("META_HIDDEN_SIZE", 256),
-        )
+        meta_network = create_meta_network(config)
 
     # Build the shared skill Q-network (one set of params per skill)
     skill_network = QNetwork(
@@ -253,6 +425,9 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         jnp.array(0, dtype=jnp.int32),
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
+    validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
+    if params_tree is not None:
+        params_tree = ensure_skill_params_stack(params_tree, int(config["NUM_SKILLS"]))
 
     # Initialize parameters if none were provided.
     if params_tree is None:
@@ -347,12 +522,12 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             else:
                 distance = float(last_frame_ego[0] * MAX_DIST)
                 p_cx = float(
-                    obs.raw_observation.player.x[-1]
-                    + obs.raw_observation.player.width[-1] / 2.0
+                    _get_player(obs.raw_observation).x[-1]
+                    + _get_player(obs.raw_observation).width[-1] / 2.0
                 )
                 p_cy = float(
-                    obs.raw_observation.player.y[-1]
-                    + obs.raw_observation.player.height[-1] / 2.0
+                    _get_player(obs.raw_observation).y[-1]
+                    + _get_player(obs.raw_observation).height[-1] / 2.0
                 )
                 t_cx = float(
                     obs.objects.x[-1, target_obj_idx]
@@ -448,7 +623,13 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     )
 
 
-def run_live_visualization(config, params_tree=None, meta_params=None, max_frames=None):
+def run_live_visualization(
+    config,
+    params_tree=None,
+    meta_params=None,
+    max_frames=None,
+    fps: int | None = None,
+):
     """
     Run a live, interactive visualization loop using pygame.
     The agent acts in the environment step-by-step and the current frame is
@@ -465,7 +646,9 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
     meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
-    max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
+    # VIDEO_MAX_FRAMES is for recorded rollouts; live pygame runs until quit unless capped.
+    frame_limit = max_frames
+    display_fps = int(fps if fps is not None else config.get("VISUALIZER_FPS", 15))
 
     env, renderer = create_eval_env(config)
 
@@ -481,10 +664,7 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
 
     meta_network = None
     if meta_params is not None:
-        meta_network = MetaQNetwork(
-            action_dim=config["MAX_OBJECTS"],
-            hidden_size=config.get("META_HIDDEN_SIZE", 256),
-        )
+        meta_network = create_meta_network(config)
 
     skill_network = QNetwork(
         action_dim=ego_action_dim,
@@ -502,6 +682,9 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
         jnp.array(0, dtype=jnp.int32),
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
+    validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
+    if params_tree is not None:
+        params_tree = ensure_skill_params_stack(params_tree, int(config["NUM_SKILLS"]))
 
     if params_tree is None:
         init_x = jnp.zeros(ego_feat_dim)
@@ -542,7 +725,7 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
         rng = rng_local
         prev_target_idx = no_target_idx
 
-    while running and frame_count < max_frames:
+    while running and (frame_limit is None or frame_count < frame_limit):
         # Handle quit events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -620,12 +803,12 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
             else:
                 distance = float(last_frame_ego[0] * MAX_DIST)
                 p_cx = float(
-                    obs.raw_observation.player.x[-1]
-                    + obs.raw_observation.player.width[-1] / 2.0
+                    _get_player(obs.raw_observation).x[-1]
+                    + _get_player(obs.raw_observation).width[-1] / 2.0
                 )
                 p_cy = float(
-                    obs.raw_observation.player.y[-1]
-                    + obs.raw_observation.player.height[-1] / 2.0
+                    _get_player(obs.raw_observation).y[-1]
+                    + _get_player(obs.raw_observation).height[-1] / 2.0
                 )
                 t_cx = float(
                     obs.objects.x[-1, target_obj_idx]
@@ -705,7 +888,7 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
             screen.blit(text_surface, (tx, ty))
 
         pygame.display.flip()
-        clock.tick(10)
+        clock.tick(display_fps)
         frame_count += 1
 
         if done:
@@ -713,6 +896,8 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
             obs, state = env.reset(rng_reset)
             prev_target_idx = no_target_idx
 
+    if frame_limit is not None and frame_count >= frame_limit:
+        print(f"Live visualization stopped after {frame_count} frames (--max-frames={frame_limit}).")
     pygame.quit()
 
 
@@ -731,7 +916,16 @@ def main():
         "--max-frames",
         type=int,
         default=None,
-        help="Maximum number of frames to render in the video (defaults to VIDEO_MAX_FRAMES from config).",
+        help=(
+            "Cap total frames. Record mode defaults to VIDEO_MAX_FRAMES from config (600). "
+            "Live pygame mode runs until you close the window unless this is set."
+        ),
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Live window refresh rate in frames per second (default: 15, or VISUALIZER_FPS in config).",
     )
     parser.add_argument(
         "--seed",
@@ -776,12 +970,24 @@ def main():
         help=(
             "Optional path to a learned meta-policy checkpoint "
             "(*_meta.safetensors). If set, target selection uses MetaQNetwork "
-            "instead of the heuristic meta-policy."
+            "instead of the heuristic meta-policy. When loading a tandem "
+            "*_skills.safetensors file, the sibling *_meta.safetensors is "
+            "auto-detected if present."
+        ),
+    )
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help=(
+            "Override the experiment yaml from configs/config.yaml defaults "
+            "(e.g. phoenix_tandem, phoenix_skills). Ignored when a *_config.yaml "
+            "is found next to the checkpoint."
         ),
     )
     args = parser.parse_args()
 
-    base_config = load_base_config()
+    base_config = load_base_config(experiment=args.experiment)
 
     # Optionally override the environment used for visualization.
     if args.env_name is not None:
@@ -804,17 +1010,18 @@ def main():
             )
         base_config["GAME_MODS"] = game_mods
 
-    # Optional parameter loading
+    # Optional parameter loading (skills + optional tandem meta head)
     params_tree = None
-    if args.model is not None:
-        if not os.path.exists(args.model):
-            raise FileNotFoundError(f"Model not found: {args.model}")
-        params_tree = load_params_from_file(args.model)
     meta_params = None
-    if args.meta_model is not None:
-        if not os.path.exists(args.meta_model):
-            raise FileNotFoundError(f"Meta model not found: {args.meta_model}")
-        meta_params = load_params_from_file(args.meta_model)
+    skill_path, meta_path = resolve_tandem_checkpoint_paths(args.model, args.meta_model)
+    if skill_path is not None:
+        base_config, _ = load_config_for_checkpoint(skill_path, base_config)
+        params_tree = load_params_from_file(skill_path)
+        base_config = align_config_with_skill_checkpoint(base_config, params_tree)
+    if meta_path is not None:
+        if meta_params is None:
+            base_config, _ = load_config_for_checkpoint(meta_path, base_config)
+        meta_params = load_params_from_file(meta_path)
 
     # If requested, run live interactive visualization and exit.
     if not args.record:
@@ -823,6 +1030,7 @@ def main():
             params_tree=params_tree,
             meta_params=meta_params,
             max_frames=args.max_frames,
+            fps=args.fps,
         )
         return
 

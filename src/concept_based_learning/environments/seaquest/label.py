@@ -1,8 +1,5 @@
-import functools
 import jax
 import jax.numpy as jnp
-from flax import struct
-from typing import Any
 from jaxatari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.labeling_wrapper import (
@@ -19,87 +16,110 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     SURFACE_DUMMY_IDX,
 )
+from concept_based_learning.environments.skill_rewards import (
+    pack_skill_rewards,
+    reward_transition_context,
+    standard_avoid_outcomes,
+    standard_destroy_outcomes,
+)
 from concept_based_learning.observations.action_space import make_ego_action_mapper
 
 # Smaller y is nearer the top of the playfield; surface waypoint uses y≈41 (see dummy_y below).
-SURFACE_Y_THRESHOLD = 48.0
+SURFACE_Y_THRESHOLD = 52.0
+# Synthetic surface waypoint (last game slot; index 34 after meta NOOP at 0).
+SURFACE_WAYPOINT_Y = 41.0
+AT_SURFACE_PLAYER_Y = 46.0
 
 _USE_LEGACY_SEAQUEST_ACTION_MAPPER = False
+_USE_LEGACY_SEAQUEST_ASCENT_BLOCK = True
+_USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD = False
 
-# TODO: we can probably rewrite this to just check if enemies / divers went off screen and if yes not award any reward
-def _bbox_overlap(player, target):
-    """True if player and target bounding boxes overlap (e.g. collision)."""
-    p_left = player.x
-    p_right = player.x + player.width
-    p_top = player.y
-    p_bottom = player.y + player.height
-    t_left = target.x
-    t_right = target.x + target.width
-    t_top = target.y
-    t_bottom = target.y + target.height
-    horiz = jnp.logical_and(p_left <= t_right, p_right >= t_left)
-    vert = jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
-    return jnp.logical_and(horiz, vert)
+def _is_surface_waypoint_target(target):
+    """True when the assigned target is the synthetic surface COLLECT waypoint (y≈41)."""
+    return target.y == SURFACE_WAYPOINT_Y
+
+
+def _surface_reached_success(prev_raw_obs, next_raw_obs):
+    """
+    True on the step the player actually surfaces in jax_seaquest.
+
+    Mirrors update_oxygen() surfacing: player transitions to y==46 and either
+    deposits a carried diver, begins oxygen refill, or completes a full rescue.
+    """
+    def last_scalar(obs, field):
+        val = getattr(obs, field)
+        return val[-1] if jnp.ndim(val) > 0 else val
+
+    prev_y = prev_raw_obs.player.y[-1] if jnp.ndim(prev_raw_obs.player.y) > 0 else prev_raw_obs.player.y
+    next_y = next_raw_obs.player.y[-1] if jnp.ndim(next_raw_obs.player.y) > 0 else next_raw_obs.player.y
+    surfaced = jnp.logical_and(prev_y > AT_SURFACE_PLAYER_Y, next_y == AT_SURFACE_PLAYER_Y)
+
+    prev_oxygen = last_scalar(prev_raw_obs, "oxygen_level")
+    next_oxygen = last_scalar(next_raw_obs, "oxygen_level")
+    prev_divers = last_scalar(prev_raw_obs, "collected_divers")
+    next_divers = last_scalar(next_raw_obs, "collected_divers")
+
+    divers_deposited = next_divers < prev_divers
+    oxygen_refilled = next_oxygen > prev_oxygen
+    full_rescue_reset = jnp.logical_and(prev_divers >= 6, next_divers == 0)
+
+    return jnp.logical_and(
+        surfaced,
+        jnp.logical_or(divers_deposited, jnp.logical_or(oxygen_refilled, full_rescue_reset)),
+    )
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
-    def last_frame(e):
-        return jax.tree_util.tree_map(lambda x: x[-1] if jnp.ndim(x) > 0 else x, e)
+    """
+    Seaquest skill rewards — the reward contract from the strong Mar/Apr 2026 runs.
 
-    prev_player = last_frame(prev_raw_obs.player)
-    prev_target = last_frame(prev_target)
-    next_target = last_frame(next_target)
+    All three skills are scored for the *selected object* regardless of its true
+    semantic label (hindsight relabeling), so every skill learns off-policy from
+    every transition.
+    """
+    (
+        _prev_player,
+        prev_target,
+        _next_target,
+        disappeared,
+        hit_by_assigned,
+        near_player,
+        at_screen_edge,
+    ) = reward_transition_context(prev_raw_obs, prev_target, next_target)
 
-    # Check if the target disappeared
-    was_active = prev_target.active == 1
-    is_active = next_target.active == 1
-    disappeared = jnp.logical_and(was_active, jnp.logical_not(is_active))
-
-    # Collision and Edge checks
-    hit_by_assigned = _bbox_overlap(prev_player, prev_target)
-    at_screen_edge = jnp.logical_or(prev_target.x <= 15.0, prev_target.x >= 145.0)
-
-    p_left, p_right = prev_player.x, prev_player.x + prev_player.width
-    p_top, p_bottom = prev_player.y, prev_player.y + prev_player.height
-    t_left, t_right = prev_target.x, prev_target.x + prev_target.width
-    t_top, t_bottom = prev_target.y, prev_target.y + prev_target.height
-    tolerance = 4.0
-    horizontal_overlap = jnp.logical_and(p_left - tolerance <= t_right, p_right + tolerance >= t_left)
-    vertical_overlap = jnp.logical_and(p_top - tolerance <= t_bottom, p_bottom + tolerance >= t_top)
-    near_player = jnp.logical_and(horizontal_overlap, vertical_overlap)
-
-    # --- COLLECT ---
-    is_collect = prev_target.semantic_label == LABEL_COLLECT
-    collect_success = jnp.logical_and(is_collect, jnp.logical_and(was_active, near_player))
-    collect_done = collect_success
-    collect_reward = jnp.where(collect_success, 1.0, 0.0)
-
-    # --- DESTROY ---
-    is_destroy = prev_target.semantic_label == LABEL_DESTROY
-    destroy_success = jnp.logical_and(
-        is_destroy,
-        jnp.logical_and(
-            disappeared,
-            jnp.logical_and(jnp.logical_not(hit_by_assigned), jnp.logical_not(at_screen_edge)),
-        ),
+    # The surface-waypoint test is an object-identity check (y == SURFACE_WAYPOINT_Y),
+    # not a label gate, so it stays: it selects which collect-success rule applies.
+    is_surface_waypoint = _is_surface_waypoint_target(prev_target)
+    diver_collect_success = jnp.logical_and(
+        jnp.logical_not(is_surface_waypoint),
+        jnp.logical_and(disappeared, near_player),
     )
-    destroy_failure = jnp.logical_and(is_destroy, jnp.logical_and(life_lost > 0, hit_by_assigned))
-    destroy_done = jnp.logical_or(destroy_success, destroy_failure)
-    destroy_reward = jnp.where(destroy_success, 1.0, 0)
+    surface_collect_success = jnp.logical_and(
+        is_surface_waypoint, _surface_reached_success(prev_raw_obs, next_raw_obs)
+    )
+    collect_success = jnp.logical_or(diver_collect_success, surface_collect_success)
 
-    # --- AVOID ---
-    is_avoid = prev_target.semantic_label == LABEL_AVOID
-    # Success for Avoid: The hazard disappeared off screen, and it didn't hit the player
-    avoid_success = jnp.logical_and(is_avoid, jnp.logical_and(disappeared, jnp.logical_not(hit_by_assigned)))
-    avoid_failure = jnp.logical_and(is_avoid, jnp.logical_and(life_lost > 0, hit_by_assigned))
-    avoid_done = jnp.logical_or(avoid_success, avoid_failure)
-    # +1 for successfully outlasting it, -10 for dying to it
-    avoid_reward = jnp.where(avoid_success, 1.0, jnp.where(avoid_failure, -10.0, 0.0))
+    destroy_success, destroy_failure = standard_destroy_outcomes(
+        prev_target,
+        disappeared=disappeared,
+        hit_by_assigned=hit_by_assigned,
+        at_screen_edge=at_screen_edge,
+        life_lost=life_lost,
+    )
+    avoid_success, avoid_failure = standard_avoid_outcomes(
+        prev_target,
+        disappeared=disappeared,
+        hit_by_assigned=hit_by_assigned,
+        life_lost=life_lost,
+    )
+    return pack_skill_rewards(
+        destroy_success=destroy_success,
+        destroy_failure=destroy_failure,
+        collect_success=collect_success,
+        avoid_success=avoid_success,
+        avoid_failure=avoid_failure,
+    )
 
-    rewards = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done, collect_done, avoid_done], dtype=jnp.bool_)
-
-    return rewards, skill_done
 
 def set_seaquest_action_mapper(use_legacy: bool) -> None:
     """Select legacy orientation-relative vs target-aligned Seaquest action mapper."""
@@ -109,6 +129,26 @@ def set_seaquest_action_mapper(use_legacy: bool) -> None:
 
 def using_legacy_seaquest_action_mapper() -> bool:
     return _USE_LEGACY_SEAQUEST_ACTION_MAPPER
+
+
+def set_seaquest_ascent_block(use_legacy: bool) -> None:
+    """Enable/disable legacy ascent blocking near the Seaquest surface."""
+    global _USE_LEGACY_SEAQUEST_ASCENT_BLOCK
+    _USE_LEGACY_SEAQUEST_ASCENT_BLOCK = bool(use_legacy)
+
+
+def using_legacy_seaquest_ascent_block() -> bool:
+    return _USE_LEGACY_SEAQUEST_ASCENT_BLOCK
+
+
+def set_seaquest_surfacing_death_guard(use_legacy: bool) -> None:
+    """Enable/disable legacy surfacing death guard (<6 divers near surface)."""
+    global _USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD
+    _USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD = bool(use_legacy)
+
+
+def using_legacy_seaquest_surfacing_death_guard() -> bool:
+    return _USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD
 
 
 # Target-aligned mapper: ego FORWARD always means toward θ_target.
@@ -178,13 +218,47 @@ def _legacy_orientation_relative_mapper(ego_action, raw_obs, target_idx, objects
 
 def seaquest_action_mapper(ego_action, raw_obs, target_idx, objects):
     if _USE_LEGACY_SEAQUEST_ACTION_MAPPER:
-        return _legacy_orientation_relative_mapper(ego_action, raw_obs, target_idx, objects)
-    return _target_aligned_seaquest_action_mapper(ego_action, raw_obs, target_idx, objects)
+        mapped_action = _legacy_orientation_relative_mapper(ego_action, raw_obs, target_idx, objects)
+    else:
+        mapped_action = _target_aligned_seaquest_action_mapper(ego_action, raw_obs, target_idx, objects)
+
+    near_surface = raw_obs.player.y[-1] <= SURFACE_Y_THRESHOLD
+    surface_target_exception = target_idx == SURFACE_DUMMY_IDX
+    should_block_ascent = jnp.logical_and(
+        _USE_LEGACY_SEAQUEST_ASCENT_BLOCK,
+        jnp.logical_and(near_surface, jnp.logical_not(surface_target_exception)),
+    )
+
+    ascent_actions = jnp.array(
+        [
+            Atari.UP,
+            Atari.UPLEFT,
+            Atari.UPRIGHT,
+            Atari.UPFIRE,
+            Atari.UPLEFTFIRE,
+            Atari.UPRIGHTFIRE,
+        ],
+        dtype=jnp.int32,
+    )
+    ascent_fire_actions = jnp.array(
+        [Atari.UPFIRE, Atari.UPLEFTFIRE, Atari.UPRIGHTFIRE],
+        dtype=jnp.int32,
+    )
+
+    is_ascent_action = jnp.any(mapped_action == ascent_actions)
+    is_ascent_fire_action = jnp.any(mapped_action == ascent_fire_actions)
+    blocked_replacement = jnp.where(is_ascent_fire_action, Atari.FIRE, Atari.NOOP)
+
+    return jnp.where(
+        jnp.logical_and(should_block_ascent, is_ascent_action),
+        blocked_replacement,
+        mapped_action,
+    )
 
 class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         # Seaquest has roughly 33 objects (12 sharks + 12 subs + 4 divers + 4 missiles + 1 surface sub)
-        super().__init__(env, max_objects=34)
+        super().__init__(env, max_objects=35)
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         """
@@ -225,12 +299,12 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_active = jnp.concatenate([divers.active, enemies.active, enemy_missiles_active])
         all_labels = jnp.concatenate([diver_labels, enemy_labels, enemy_missile_labels])
 
-        # 4. Pad with inactive dummy objects up to `self.max_objects` (34)
-        # Make the dummy object (Index 33) act as our "Surface Waypoint"
-        pad_size = self.max_objects - all_x.shape[0]  # 34 - 33 = 1
+        # 4. Pad with inactive dummy objects up to `self.game_max_objects` (34)
+        # Make the dummy object (last game slot) act as our "Surface Waypoint"
+        pad_size = self.game_max_objects - all_x.shape[0]  # 34 - 33 = 1
 
         dummy_x = jnp.array([obs.player.x])  # Track player's X to go straight up!
-        dummy_y = jnp.array([41])            # Slightly above the clamped top-of-water Y
+        dummy_y = jnp.array([SURFACE_WAYPOINT_Y])  # Slightly above the clamped top-of-water Y
         dummy_w = jnp.array([10])
         dummy_h = jnp.array([10])
         dummy_active = jnp.array([1])         # Make it active so the skill pursues it
@@ -253,19 +327,13 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
             semantic_label=final_labels,
         )
 
-    @functools.partial(jax.jit, static_argnums=(0,))
-    def step(
-        self, state: SemanticState, action: int
-    ):
-        """
-        Override the base step to neutralize deaths caused purely by surfacing
-        with fewer than 6 divers. This prevents the game-over signal from
-        resetting the episode in those cases while still allowing normal deaths.
-        """
+    def step(self, state: SemanticState, action: int):
+        """Optional legacy guard against immediate surfacing-death terminations."""
         semantic_obs, new_state, reward, done, info = super().step(state, action)
 
-        # Inspect the most recent native Seaquest frame to detect surfacing deaths.
-        # `obs_stack` is a stacked SeaquestObservation PyTree; take the last frame.
+        if not _USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD:
+            return semantic_obs, new_state, reward, done, info
+
         last_obs = jax.tree_util.tree_map(
             lambda x: x[-1] if jnp.ndim(x) > 0 else x, semantic_obs.raw_observation
         )
@@ -275,9 +343,6 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
 
         near_surface = player_y <= SURFACE_Y_THRESHOLD
         fewer_than_six_divers = collected_divers < 6
-
-        # Heuristic: a "surfacing death" is a terminal transition that occurs
-        # near the surface, with oxygen remaining and fewer than six divers.
         surfacing_death = jnp.logical_and(
             done,
             jnp.logical_and(
@@ -286,8 +351,6 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
             ),
         )
 
-        # Neutralize the death signal and any associated reward spike.
         done = jnp.where(surfacing_death, False, done)
         reward = jnp.where(surfacing_death, 0.0, reward)
-
         return semantic_obs, new_state, reward, done, info
