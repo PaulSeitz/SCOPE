@@ -578,6 +578,9 @@ def single_run(config):
                     distances,
                     angles,
                     renderer,
+                    slot_targets_arr,
+                    slot_active_arr,
+                    slot_skill_arr,
                 ) = run_eval_rollout(
                     tandem_config,
                     params_tree=final_skill_params,
@@ -600,6 +603,9 @@ def single_run(config):
                     video_output_path=(
                         video_output_path if not use_wandb_video else None
                     ),
+                    slot_targets=slot_targets_arr,
+                    slot_active=slot_active_arr,
+                    slot_skill_idx=slot_skill_arr,
                 )
                 wait_for_video_finish()
             else:

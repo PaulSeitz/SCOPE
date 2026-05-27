@@ -44,6 +44,10 @@ class Transition:
     skill_done: chex.Array  # [num_envs, num_skills]
     done: chex.Array
     env_reward: chex.Array
+    # Q-decomposition composition slots (K axis). None when composition disabled
+    # or for tests/legacy paths; populated by rollouts that engage composition.
+    # See environments.datatypes.CompositionSlots for field details.
+    composition: Any = None
 
 
 class CustomTrainState(TrainState):

@@ -17,7 +17,11 @@ from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import QNetwork, CustomTrainState, Transition
 from concept_based_learning.networks.meta_factory import create_meta_network
-from concept_based_learning.environments.datatypes import ConceptObservation
+from concept_based_learning.environments.datatypes import (
+    ConceptObservation,
+    CompositionSlots,
+)
+from concept_based_learning import composition as comp
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
     is_meta_noop_target,
@@ -93,6 +97,43 @@ def make_train(
     meta_noop_idx = meta_noop_target_idx(config)
 
     fixed_target_idx = fixed_target_idx_from_config(config)
+
+    # Game action space size (used by Q-decomposition scatter).
+    try:
+        num_game_actions = int(env.action_space().n)
+    except Exception:
+        num_game_actions = int(config.get("NUM_GAME_ACTIONS", 18))
+
+    # Q-decomposition composition config. K=1 keeps current behavior bit-equivalent.
+    COMPOSITION_K = int(config.get("COMPOSITION_K", 1))
+    COMPOSITION_TAU = float(config.get("COMPOSITION_TAU", 1.0))
+    COMPOSITION_SLOT_MODE = str(config.get("COMPOSITION_SLOT_MODE", "per_label"))
+    COMPOSITION_NORMALIZE = str(config.get("COMPOSITION_NORMALIZE_SKILL_Q", "zscore"))
+    COMPOSITION_WEIGHT_THRESHOLD = float(config.get("COMPOSITION_SLOT_WEIGHT_THRESHOLD", 0.0))
+    if COMPOSITION_K > 1:
+        if COMPOSITION_SLOT_MODE == "per_label":
+            assert COMPOSITION_K == NUM_SKILLS, (
+                f"per_label slot mode requires COMPOSITION_K == NUM_SKILLS "
+                f"(got K={COMPOSITION_K}, NUM_SKILLS={NUM_SKILLS})"
+            )
+    composition_enabled = COMPOSITION_K > 1
+    composition_uses_heuristic_slots = False
+    # K>1 composition supports two slot sources:
+    # 1. Learned meta_q drives select_slots (preferred).
+    # 2. Single heuristic target expanded to K slots via per-label nearest
+    #    fallback; slot weights are uniform across active slots.
+    # Fixed-target mode is incompatible with K>1.
+    if composition_enabled and fixed_target_idx is not None:
+        import warnings
+        warnings.warn(
+            "COMPOSITION_K>1 is incompatible with a fixed target; "
+            "falling back to K=1 for this run.",
+            UserWarning,
+            stacklevel=2,
+        )
+        composition_enabled = False
+    elif composition_enabled and frozen_meta_params is None:
+        composition_uses_heuristic_slots = True
 
     skill_network = QNetwork(
         action_dim=EGO_ACTION_DIM,
@@ -215,13 +256,16 @@ def make_train(
                 rng_skill, rng_policy = jax.random.split(rng_step)
 
                 policy_rngs = jax.random.split(rng_policy, config["NUM_ENVS"])
-                if use_learned_meta_policy:
-                    active_masks = jax.vmap(
-                        lambda objs, raw: build_meta_target_mask(
-                            objs, raw, config, hook=meta_mask_hook
-                        )
-                    )(last_obs.objects, last_obs.raw_observation)
 
+                # active_masks is needed for both the learned-meta path and the
+                # heuristic-K (K>1 no-meta) composition path; compute once.
+                active_masks = jax.vmap(
+                    lambda objs, raw: build_meta_target_mask(
+                        objs, raw, config, hook=meta_mask_hook
+                    )
+                )(last_obs.objects, last_obs.raw_observation)
+
+                if use_learned_meta_policy:
                     any_active = jnp.any(active_masks, axis=-1)
                     fallback_mask = jnp.zeros_like(active_masks).at[:, 0].set(True)
                     safe_masks = jnp.where(any_active[:, None], active_masks, fallback_mask)
@@ -276,10 +320,10 @@ def make_train(
                     last_obs.raw_observation, last_obs.objects, safe_target_idxs
                 )
 
-                def compute_skill_actions(train_state, skill_idx):
+                def compute_skill_actions(train_state, skill_idx, ego_obs_batch):
                     q_vals = skill_network.apply(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
-                        ego_obses,
+                        ego_obs_batch,
                         train=False,
                     )
                     _rngs = jax.random.split(rng_skill, config["NUM_ENVS"])
@@ -311,12 +355,9 @@ def make_train(
                     return ego_action, q_vals
 
                 all_ego_actions, all_skill_q_vals = jax.vmap(
-                    compute_skill_actions
-                )(train_states, jnp.arange(NUM_SKILLS, dtype=jnp.int32))
+                    compute_skill_actions, in_axes=(0, 0, None)
+                )(train_states, jnp.arange(NUM_SKILLS, dtype=jnp.int32), ego_obses)
 
-                chosen_ego_actions = all_ego_actions[
-                    active_skills, jnp.arange(config["NUM_ENVS"])
-                ]
                 meta_noop = is_meta_noop_target(
                     target_obj_idxs,
                     config,
@@ -324,15 +365,198 @@ def make_train(
                     enabled=meta_noop_enabled,
                 )
                 force_noop = jnp.logical_or(target_obj_idxs == no_target_idx, meta_noop)
-                chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
-                global_actions = jax.vmap(action_mapper)(
-                    chosen_ego_actions,
-                    last_obs.raw_observation,
-                    target_obj_idxs,
-                    last_obs.objects,
-                )
-                global_actions = jnp.where(force_noop, 0, global_actions)
+                if not composition_enabled:
+                    # ---- K=1 path: bit-equivalent to pre-composition behavior ----
+                    chosen_ego_actions = all_ego_actions[
+                        active_skills, jnp.arange(config["NUM_ENVS"])
+                    ]
+                    chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
+
+                    global_actions = jax.vmap(action_mapper)(
+                        chosen_ego_actions,
+                        last_obs.raw_observation,
+                        target_obj_idxs,
+                        last_obs.objects,
+                    )
+                    global_actions = jnp.where(force_noop, 0, global_actions)
+
+                    # Per-slot data for slot 0 only (legacy K=1 capture; rest is K=1 default).
+                    slot_target_idxs = target_obj_idxs[:, None]
+                    slot_active = (~force_noop)[:, None]
+                    slot_weights = (~force_noop).astype(jnp.float32)[:, None]
+                    slot_skill_idx = active_skills[:, None]
+                    slot_ego_obses = ego_obses[:, None, ...]
+                    slot_ego_actions = chosen_ego_actions[:, None]
+                    # all_skill_q_vals: [num_skills, num_envs, EGO_ACTION_DIM] →
+                    # [num_envs, K=1, num_skills, EGO_ACTION_DIM]
+                    slot_skill_q = jnp.transpose(all_skill_q_vals, (1, 0, 2))[:, None, :, :]
+                else:
+                    # ---- K>1 composition path ----
+                    K = COMPOSITION_K
+                    semantic_labels_now = last_obs.objects.semantic_label[:, -1, :]
+
+                    if composition_uses_heuristic_slots:
+                        # No learned meta: expand a single heuristic target into
+                        # K slots via per-label nearest fallback.
+                        player_x = last_obs.raw_observation.player.x[:, -1] + (
+                            last_obs.raw_observation.player.width[:, -1] / 2.0
+                        )
+                        player_y = last_obs.raw_observation.player.y[:, -1] + (
+                            last_obs.raw_observation.player.height[:, -1] / 2.0
+                        )
+                        obj_cx = last_obs.objects.x[:, -1, :] + (
+                            last_obs.objects.width[:, -1, :] / 2.0
+                        )
+                        obj_cy = last_obs.objects.y[:, -1, :] + (
+                            last_obs.objects.height[:, -1, :] / 2.0
+                        )
+                        slot_target_idxs, slot_active, slot_skill_idx = jax.vmap(
+                            lambda h, am, lbl, px, py, ox, oy: comp.slots_from_heuristic_target(
+                                h, am, lbl, px, py, ox, oy,
+                                no_target_idx=no_target_idx,
+                                mode=COMPOSITION_SLOT_MODE, K=K,
+                            )
+                        )(
+                            target_obj_idxs, active_masks, semantic_labels_now,
+                            player_x, player_y, obj_cx, obj_cy,
+                        )
+                    else:
+                        # 1. Select K slots ε-greedily over the deterministic meta_q.
+                        rngs_select = jax.random.split(rng_policy, config["NUM_ENVS"])
+                        _meta_eps_scalar = (
+                            meta_eps_scheduler(train_states.n_updates[0])
+                            if use_learned_meta_policy
+                            else 0.0
+                        )
+                        slot_target_idxs, slot_active, slot_skill_idx = jax.vmap(
+                            lambda rk, mq, am, lbl: comp.select_slots_eps(
+                                rk, mq, am, lbl, no_target_idx,
+                                mode=COMPOSITION_SLOT_MODE, K=K, eps=_meta_eps_scalar,
+                            )
+                        )(rngs_select, meta_q_vals, active_masks, semantic_labels_now)
+                    # slot_target_idxs: [NUM_ENVS, K], slot_active: [NUM_ENVS, K], slot_skill_idx: [NUM_ENVS, K]
+
+                    # 2. Per-slot ego observation. Result: [NUM_ENVS, K, ego_feat_dim].
+                    safe_slot_targets = jnp.where(slot_active, slot_target_idxs, 0)
+                    def per_slot_ego(raw_obs, objs, idxs):
+                        return jax.vmap(lambda i: get_ego_obs(raw_obs, objs, i))(idxs)
+                    slot_ego_obses = jax.vmap(per_slot_ego)(
+                        last_obs.raw_observation, last_obs.objects, safe_slot_targets
+                    )
+
+                    # 3. Per-slot, per-skill Q values. Run each skill over each slot's ego obs.
+                    # Reuse compute_skill_actions but vmap over slots externally to share rng.
+                    def all_skills_q_for_slot(ego_obs_for_slot):
+                        # ego_obs_for_slot: [NUM_ENVS, ego_feat_dim]
+                        _, q = jax.vmap(
+                            compute_skill_actions, in_axes=(0, 0, None)
+                        )(train_states, jnp.arange(NUM_SKILLS, dtype=jnp.int32), ego_obs_for_slot)
+                        return q  # [num_skills, NUM_ENVS, EGO_ACTION_DIM]
+                    # vmap over the K axis: input [NUM_ENVS, K, ego_feat_dim] -> in_axes=1
+                    slot_q_kfirst = jax.vmap(all_skills_q_for_slot, in_axes=1)(slot_ego_obses)
+                    # slot_q_kfirst: [K, num_skills, NUM_ENVS, EGO_ACTION_DIM]
+                    # Reorder to [NUM_ENVS, K, num_skills, EGO_ACTION_DIM].
+                    slot_skill_q = jnp.transpose(slot_q_kfirst, (2, 0, 1, 3))
+
+                    # 4. For each (env, slot): pick the active skill's Q, scatter to global.
+                    def scatter_one(slot_q, sk_idx, tgt_idx, raw_obs, objs):
+                        # slot_q: [num_skills, EGO_ACTION_DIM]; pick active skill's row.
+                        active_ego_q = slot_q[sk_idx]
+                        return comp.ego_q_to_global_q(
+                            active_ego_q, raw_obs, tgt_idx, objs,
+                            action_mapper, num_game_actions,
+                        )
+                    def scatter_one_env(slots_q, slots_sk, slots_tgt, raw_obs, objs):
+                        # slots_q: [K, num_skills, EGO_ACTION_DIM]
+                        return jax.vmap(
+                            lambda q, s, t: scatter_one(q, s, t, raw_obs, objs)
+                        )(slots_q, slots_sk, slots_tgt)
+                    slot_global_q = jax.vmap(scatter_one_env)(
+                        slot_skill_q, slot_skill_idx, safe_slot_targets,
+                        last_obs.raw_observation, last_obs.objects,
+                    )  # [NUM_ENVS, K, num_game_actions]
+
+                    # 5. Per-slot meta-Q at the chosen object.
+                    if composition_uses_heuristic_slots:
+                        # No learned meta: equal logits → softmax gives uniform
+                        # weights over active slots.
+                        slot_meta_q = jnp.where(slot_active, 0.0, -jnp.inf)
+                    else:
+                        slot_meta_q = jnp.take_along_axis(meta_q_vals, safe_slot_targets, axis=-1)
+                        slot_meta_q = jnp.where(slot_active, slot_meta_q, -jnp.inf)
+
+                    # 6. Compose: weighted sum over slots → global Q per env.
+                    composed_q, slot_weights = jax.vmap(
+                        lambda sq, mq, sa: comp.compose_global_q(
+                            sq, mq, sa, tau=COMPOSITION_TAU, normalize=COMPOSITION_NORMALIZE,
+                            weight_threshold=COMPOSITION_WEIGHT_THRESHOLD,
+                        )
+                    )(slot_global_q, slot_meta_q, slot_active)
+                    # composed_q: [NUM_ENVS, num_game_actions], slot_weights: [NUM_ENVS, K]
+
+                    # 7. Executed global action: argmax over composed Q. Fall
+                    # back to NOOP when either no slot was active (nothing to
+                    # attend to) OR when the slot-weight threshold dropped every
+                    # slot (the meta judged nothing worth attending to). Detect
+                    # the latter via the post-threshold weights sum.
+                    any_slot_active = jnp.logical_and(
+                        jnp.any(slot_active, axis=-1),
+                        jnp.sum(slot_weights, axis=-1) > 0,
+                    )
+                    greedy_global_actions = jnp.argmax(composed_q, axis=-1).astype(jnp.int32)
+                    # Action-level eps-greedy on the composed Q-vector. Reaches
+                    # the *global* action space directly — skills' per-skill
+                    # eps-greedy is computed but discarded under composition.
+                    eps_action = eps_scheduler(train_states.n_updates[0])
+                    rngs_env = jax.random.split(rng_skill, config["NUM_ENVS"])
+                    def _eps_on_composed(env_rng, q_row, gact):
+                        rng_u, rng_r = jax.random.split(env_rng)
+                        random_logits = jnp.where(jnp.isfinite(q_row), 0.0, -jnp.inf)
+                        rand_act = jax.random.categorical(rng_r, random_logits).astype(jnp.int32)
+                        u = jax.random.uniform(rng_u, ())
+                        return jnp.where(u < eps_action, rand_act, gact)
+                    global_actions = jax.vmap(_eps_on_composed)(
+                        rngs_env, composed_q, greedy_global_actions
+                    )
+                    global_actions = jnp.where(any_slot_active, global_actions, 0)
+
+                    # 8. Invert executed action to per-slot ego actions (for replay).
+                    def invert_one_env(g_act, slots_q, slots_sk, slots_tgt, slots_active, raw_obs, objs):
+                        # Pull the per-slot active-skill ego-Q [K, EGO_ACTION_DIM].
+                        active_q = jax.vmap(lambda sq, s: sq[s])(slots_q, slots_sk)
+                        return comp.invert_global_to_ego_action(
+                            g_act, active_q, slots_tgt, slots_active,
+                            raw_obs, objs, action_mapper,
+                        )
+                    slot_ego_actions = jax.vmap(invert_one_env)(
+                        global_actions, slot_skill_q, slot_skill_idx,
+                        safe_slot_targets, slot_active,
+                        last_obs.raw_observation, last_obs.objects,
+                    )
+
+                    # 9. Populate legacy single-slot fields from slot 0 so existing
+                    # loss/lambda-return code (which still reads target_idx, ego_obs,
+                    # ego_action, q_val, active_skill) keeps training on a valid
+                    # transition. We use slot 0 because it carries DESTROY in per_label
+                    # mode (matching today's "skill 0 is DESTROY" convention) and is
+                    # the obvious first-class slot in topk.
+                    slot0_active = slot_active[:, 0]
+                    slot0_target = slot_target_idxs[:, 0]
+                    target_obj_idxs = jnp.where(slot0_active, slot0_target, no_target_idx)
+                    ego_obses = slot_ego_obses[:, 0]
+                    active_skills = slot_skill_idx[:, 0]
+                    chosen_ego_actions = slot_ego_actions[:, 0]
+                    # slot_skill_q is [NUM_ENVS, K, num_skills, EGO_ACTION_DIM] →
+                    # all_skill_q_vals[skill, env, A] = slot_skill_q[env, 0, skill, A]
+                    all_skill_q_vals = jnp.transpose(slot_skill_q[:, 0], (1, 0, 2))
+                    # Re-derive force_noop from slot-0 (legacy fields).
+                    safe_target_idxs = jnp.where(target_obj_idxs == no_target_idx, 0, target_obj_idxs)
+                    meta_noop = is_meta_noop_target(
+                        target_obj_idxs, config,
+                        noop_idx=meta_noop_idx, enabled=meta_noop_enabled,
+                    )
+                    force_noop = jnp.logical_or(target_obj_idxs == no_target_idx, meta_noop)
 
                 new_obs, new_env_state, raw_rewards, new_done, info = vmap_step(
                     env_state, global_actions
@@ -374,6 +598,50 @@ def make_train(
                     new_obs.raw_observation, new_obs.objects, safe_target_idxs
                 )
 
+                # Per-slot rewards / next_ego_obs (K>1: one row per slot; K=1: a unit K axis).
+                if not composition_enabled:
+                    slot_next_ego_obses = next_ego_obses[:, None, ...]
+                    slot_rewards = skill_rewards[:, None, :]
+                    slot_skill_done = skill_done[:, None, :]
+                else:
+                    # safe_slot_targets is [NUM_ENVS, K].
+                    # Extract per-slot prev/next targets and rewards by vmapping over slots.
+                    slot_prev_targets = jax.vmap(
+                        lambda objs, idxs: jax.vmap(lambda i: get_target_obj(objs, i))(idxs)
+                    )(last_obs.objects, safe_slot_targets)
+                    slot_next_targets = jax.vmap(
+                        lambda objs, idxs: jax.vmap(lambda i: get_target_obj(objs, i))(idxs)
+                    )(new_obs.objects, safe_slot_targets)
+
+                    def per_slot_rewards(pr_raw, nr_raw, ll, inf_, slot_prev, slot_next):
+                        # slot_prev/slot_next: per-slot tree, leading axis = K.
+                        return jax.vmap(
+                            lambda pt, nt: extract_all_skills_rewards(
+                                pr_raw, nr_raw, pt, nt, ll, inf_, config
+                            )
+                        )(slot_prev, slot_next)
+                    slot_rewards, slot_skill_done = jax.vmap(per_slot_rewards)(
+                        last_obs.raw_observation,
+                        new_obs.raw_observation,
+                        life_lost,
+                        info,
+                        slot_prev_targets,
+                        slot_next_targets,
+                    )
+                    # slot_rewards: [NUM_ENVS, K, num_skills], slot_skill_done: [NUM_ENVS, K, num_skills]
+                    # Zero inactive slots.
+                    slot_rewards = jnp.where(
+                        slot_active[..., None], slot_rewards, 0.0
+                    )
+                    slot_skill_done = jnp.where(
+                        slot_active[..., None], slot_skill_done, True
+                    )
+
+                    # Per-slot next_ego_obs.
+                    slot_next_ego_obses = jax.vmap(
+                        lambda raw, objs, idxs: jax.vmap(lambda i: get_ego_obs(raw, objs, i))(idxs)
+                    )(new_obs.raw_observation, new_obs.objects, safe_slot_targets)
+
                 episode_return = running_returns + raw_rewards
                 done_float = new_done.astype(jnp.float32)
 
@@ -384,6 +652,49 @@ def make_train(
 
                 running_returns = episode_return * (1.0 - done_float)
 
+                # Composition slot capture. Under K=1 this carries the single
+                # executed (target, skill, ego_obs, ego_action) in a unit-K
+                # axis; under K>1 it carries all K slots used in the composed
+                # action. Loss code can read from either the legacy fields or
+                # this dataclass depending on the K-awareness of the migration.
+                if not composition_enabled:
+                    slot_valid = (~force_noop).astype(jnp.float32)
+                    composition = CompositionSlots(
+                        target_idxs=target_obj_idxs[:, None],
+                        slot_active=(~force_noop)[:, None],
+                        slot_weights=slot_valid[:, None],
+                        slot_skill_idx=active_skills[:, None],
+                        ego_obses=ego_obses[:, None, ...],
+                        next_ego_obses=slot_next_ego_obses,
+                        slot_ego_actions=chosen_ego_actions[:, None],
+                        slot_skill_q=jnp.transpose(all_skill_q_vals, (1, 0, 2))[:, None, :, :],
+                        slot_rewards=slot_rewards,
+                        slot_skill_done=slot_skill_done,
+                    )
+                    # Pull legacy fields from slot 0 (here, the only slot).
+                    legacy_skill_rewards = skill_rewards
+                    legacy_skill_done = skill_done
+                else:
+                    composition = CompositionSlots(
+                        target_idxs=slot_target_idxs,
+                        slot_active=slot_active,
+                        slot_weights=slot_weights,
+                        slot_skill_idx=slot_skill_idx,
+                        ego_obses=slot_ego_obses,
+                        next_ego_obses=slot_next_ego_obses,
+                        slot_ego_actions=slot_ego_actions,
+                        slot_skill_q=slot_skill_q,
+                        slot_rewards=slot_rewards,
+                        slot_skill_done=slot_skill_done,
+                    )
+                    # Legacy fields drawn from slot 0 — keeps the old loss path
+                    # functional under K>1 (it will train on slot-0 transitions
+                    # only until the loss is migrated to read from composition).
+                    legacy_skill_rewards = slot_rewards[:, 0, :]
+                    legacy_skill_done = slot_skill_done[:, 0, :]
+                    # Also reflect slot-0 next_ego_obs into the legacy field.
+                    next_ego_obses = slot_next_ego_obses[:, 0]
+
                 transition = Transition(
                     target_idx=target_obj_idxs,
                     ego_obs=ego_obses,
@@ -391,10 +702,11 @@ def make_train(
                     ego_action=chosen_ego_actions,
                     active_skill=active_skills,
                     q_val=all_skill_q_vals,
-                    rewards=skill_rewards,
-                    skill_done=skill_done,
+                    rewards=legacy_skill_rewards,
+                    skill_done=legacy_skill_done,
                     done=new_done,
                     env_reward=raw_rewards,
+                    composition=composition,
                 )
 
                 return (
@@ -444,18 +756,47 @@ def make_train(
                     timesteps=train_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
 
+                # Build K-flattened views of the per-slot data: each (env, slot)
+                # becomes an independent training tuple. With K=1 this is
+                # exactly the legacy layout (effective batch unchanged).
+                comp_data = transitions.composition
+                # Shapes carry (NUM_STEPS, NUM_ENVS, K, ...). Collapse axes 1, 2.
+                def _kflat(x):
+                    # x: (T, E, K, ...) → (T, E*K, ...)
+                    T, E, K = x.shape[:3]
+                    return x.reshape(T, E * K, *x.shape[3:])
+
+                slot_ego_obs_k       = _kflat(comp_data.ego_obses)         # (T, E*K, ego_feat)
+                slot_next_ego_obs_k  = _kflat(comp_data.next_ego_obses)    # (T, E*K, ego_feat)
+                slot_ego_action_k    = _kflat(comp_data.slot_ego_actions)  # (T, E*K)
+                slot_target_idx_k    = _kflat(comp_data.target_idxs)       # (T, E*K)
+                slot_active_k        = _kflat(comp_data.slot_active)       # (T, E*K)
+                slot_skill_idx_k     = _kflat(comp_data.slot_skill_idx)    # (T, E*K)
+                slot_rewards_k       = _kflat(comp_data.slot_rewards)      # (T, E*K, num_skills)
+                slot_skill_done_k    = _kflat(comp_data.slot_skill_done)   # (T, E*K, num_skills)
+                slot_skill_q_k       = _kflat(comp_data.slot_skill_q)      # (T, E*K, num_skills, ego_action_dim)
+
+                # Bootstrap: max Q at the post-rollout next_ego_obs for this skill.
                 last_q = skill_network.apply(
                     {"params": train_state.params, "batch_stats": train_state.batch_stats},
-                    transitions.next_ego_obs[-1],
+                    slot_next_ego_obs_k[-1],
                     train=False,
                 )
                 last_q_max = jnp.max(last_q, axis=-1)
 
+                # In-scan transition tuple: only the fields _get_target needs.
+                # Bundle as a dict so jax.tree.map / scan see a flat pytree.
+                scan_inputs = {
+                    "rewards":    slot_rewards_k,       # (T, E*K, num_skills)
+                    "skill_done": slot_skill_done_k,    # (T, E*K, num_skills)
+                    "slot_skill_q": slot_skill_q_k,     # (T, E*K, num_skills, ego_action_dim)
+                }
+
                 def _get_target(lambda_returns_and_next_q, transition):
                     lambda_returns, next_q = lambda_returns_and_next_q
 
-                    step_reward = transition.rewards[..., skill_idx]
-                    step_done = transition.skill_done[..., skill_idx]
+                    step_reward = transition["rewards"][..., skill_idx]
+                    step_done = transition["skill_done"][..., skill_idx]
 
                     target_bootstrap = (
                         step_reward + config["GAMMA"] * (1 - step_done) * next_q
@@ -468,23 +809,20 @@ def make_train(
                         (1 - step_done) * lambda_returns + step_done * step_reward
                     )
 
-                    next_q_val = jnp.max(transition.q_val[skill_idx], axis=-1)
+                    # next_q for the *previous* step's bootstrap: greedy Q of
+                    # this step's skill on this slot's ego obs.
+                    next_q_val = jnp.max(transition["slot_skill_q"][..., skill_idx, :], axis=-1)
                     return (lambda_returns, next_q_val), lambda_returns
 
-                last_step_done = transitions.skill_done[-1, :, skill_idx]
+                last_step_done = slot_skill_done_k[-1, :, skill_idx]
                 last_q_max = last_q_max * (1 - last_step_done)
-                last_step_reward = jnp.squeeze(
-                    jax.lax.dynamic_slice_in_dim(
-                        transitions.rewards[-1], skill_idx, 1, axis=-1
-                    ),
-                    axis=-1,
-                )
+                last_step_reward = slot_rewards_k[-1, :, skill_idx]
                 lambda_returns = last_step_reward + config["GAMMA"] * last_q_max
 
                 _, targets = jax.lax.scan(
                     _get_target,
                     (lambda_returns, last_q_max),
-                    jax.tree.map(lambda x: x[:-1], transitions),
+                    jax.tree.map(lambda x: x[:-1], scan_inputs),
                     reverse=True,
                 )
                 lambda_targets = jnp.concatenate((targets, lambda_returns[np.newaxis]))
@@ -509,11 +847,15 @@ def make_train(
                                 axis=-1,
                             ).squeeze(axis=-1)
 
+                            base_valid = jnp.logical_and(
+                                minibatch["slot_active"],
+                                minibatch["target_idx"] != no_target_idx,
+                            )
                             if config.get("OFF_POLICY", True):
-                                valid = minibatch["target_idx"] != no_target_idx
+                                valid = base_valid
                             else:
                                 valid = jnp.logical_and(
-                                    minibatch["target_idx"] != no_target_idx,
+                                    base_valid,
                                     minibatch["active_skill"] == skill_idx,
                                 )
                             if meta_noop_enabled:
@@ -548,10 +890,11 @@ def make_train(
 
                     rng, _rng = jax.random.split(rng)
                     train_batch = {
-                        "target_idx": transitions.target_idx,
-                        "ego_obs": transitions.ego_obs,
-                        "ego_action": transitions.ego_action,
-                        "active_skill": transitions.active_skill,
+                        "target_idx": slot_target_idx_k,
+                        "ego_obs": slot_ego_obs_k,
+                        "ego_action": slot_ego_action_k,
+                        "active_skill": slot_skill_idx_k,
+                        "slot_active": slot_active_k,
                     }
                     minibatches = jax.tree.map(
                         lambda x: preprocess_transition(x, _rng), train_batch
@@ -588,11 +931,33 @@ def make_train(
                 for i in range(NUM_SKILLS)
             }
 
-            mean_skill_rewards = jnp.mean(transitions.rewards, axis=(0, 1))
+            # Per-skill reward mean across all *active* slots (K-aware). K=1
+            # reduces to the legacy mean across (steps, envs).
+            comp_rewards = transitions.composition.slot_rewards  # (T, E, K, num_skills)
+            comp_active = transitions.composition.slot_active    # (T, E, K)
+            active_count = jnp.maximum(comp_active.sum(), 1.0)
+            mean_skill_rewards = (
+                (comp_rewards * comp_active[..., None]).sum(axis=(0, 1, 2))
+                / active_count
+            )
             for i in range(NUM_SKILLS):
                 metrics[f"skill_{skill_names[i]}/reward"] = mean_skill_rewards[i]
 
             metrics["env/reward_mean"] = jnp.mean(transitions.env_reward)
+
+            # Slot diagnostics: effective-K entropy and per-slot activity rate.
+            slot_w = transitions.composition.slot_weights  # (T, E, K)
+            slot_active_f = comp_active.astype(jnp.float32)
+            metrics["composition/slot_active_rate"] = slot_active_f.mean()
+            metrics["composition/avg_active_slots_per_step"] = slot_active_f.sum(axis=-1).mean()
+            # Effective-K = slots that survived the weight threshold.
+            metrics["composition/avg_effective_slots_per_step"] = (slot_w > 0).astype(jnp.float32).sum(axis=-1).mean()
+            # Shannon entropy of slot weights (only steps with any active slot).
+            safe_w = jnp.clip(slot_w, 1e-12, 1.0)
+            entropy = -(slot_w * jnp.log(safe_w)).sum(axis=-1)  # (T, E)
+            any_active = jnp.any(comp_active, axis=-1).astype(jnp.float32)
+            denom = jnp.maximum(any_active.sum(), 1.0)
+            metrics["composition/slot_weight_entropy"] = (entropy * any_active).sum() / denom
 
             try:
                 info_metrics = {f"info/{k}": jnp.mean(v) for k, v in infos.items()}

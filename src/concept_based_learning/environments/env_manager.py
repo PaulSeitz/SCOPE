@@ -158,10 +158,20 @@ def _freeway_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.
     """
     Freeway has no lives; treat the start of a collision cooldown as a 'life lost'
     event so the AVOID skill receives the appropriate failure signal.
+
+    Important: the env also sets a post-score stun cooldown when the chicken
+    scores (jax_freeway.step lines 375-379), which would otherwise be
+    indistinguishable from a collision-cooldown. Exclude those frames by
+    requiring that the score did NOT increment alongside the cooldown trigger.
+    Without this filter, every score event would also fire a "life lost"
+    signal — penalizing the meta for scoring and zeroing out positive
+    reinforcement.
     """
     prev_es = prev_env_state.atari_state.env_state
     next_es = next_env_state.atari_state.env_state
-    collision = jnp.logical_and(prev_es.cooldown == 0, next_es.cooldown > 0)
+    cooldown_started = jnp.logical_and(prev_es.cooldown == 0, next_es.cooldown > 0)
+    scored_this_step = next_es.score > prev_es.score
+    collision = jnp.logical_and(cooldown_started, jnp.logical_not(scored_this_step))
     return collision.astype(jnp.int32)
 
 
@@ -178,6 +188,25 @@ def _wrap_reward_extractor_5arg(reward_extractor_5arg: Callable[..., Any]):
         del info, config
         return reward_extractor_5arg(
             prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
+        )
+
+    return _wrapped
+
+
+def _wrap_freeway_reward_extractor(reward_extractor: Callable[..., Any]):
+    """Forward ``config`` to freeway's extractor (reads ``FREEWAY_AVOID_*`` keys)."""
+    def _wrapped(
+        prev_raw_obs: Any,
+        next_raw_obs: Any,
+        prev_target: Any,
+        next_target: Any,
+        life_lost: jnp.ndarray,
+        info: Optional[Dict[str, Any]],
+        config: Dict[str, Any],
+    ):
+        del info
+        return reward_extractor(
+            prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, config,
         )
 
     return _wrapped
@@ -390,7 +419,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=freeway_NO_TARGET_IDX,
             action_mapper=freeway_action_mapper,
-            reward_extractor=_wrap_reward_extractor_5arg(freeway_extract_all_skills_rewards),
+            reward_extractor=_wrap_freeway_reward_extractor(freeway_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_freeway_extract_life_lost,
             resolve_curriculum_mods=_default_resolve_curriculum_mods,

@@ -16,12 +16,12 @@ import chex
 import optax
 from flax.training.train_state import TrainState
 
-from concept_based_learning.egocentric_transformation import (
+from concept_based_learning.observations.egocentric import (
     ego_obs_channels_per_frame,
     get_ego_obs,
 )
-from concept_based_learning.ego_action_space import fire_ego_action_indices
-from concept_based_learning.train_agent import QNetwork as SkillQNetwork
+from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork
 from concept_based_learning.training.schedules import eps_decay_transition_steps
 from concept_based_learning.environments.datatypes import MetaTransition
 from concept_based_learning.networks.meta_factory import create_meta_network

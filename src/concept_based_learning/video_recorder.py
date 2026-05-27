@@ -14,6 +14,13 @@ SKILL_NAMES = ["DESTROY", "COLLECT", "AVOID"]
 TARGET_OUTLINE_COLOR = (255, 50, 50)  # Red, same as label_visualizer LABEL_DESTROY
 TARGET_OUTLINE_WIDTH = 3
 
+# Per-skill outline colors for K>1 composition rendering.
+SKILL_OUTLINE_COLORS = [
+    (255, 50, 50),    # DESTROY → red
+    (50, 200, 255),   # COLLECT → blue
+    (255, 220, 50),   # AVOID   → yellow
+]
+
 class SidebarRenderer:
     def __init__(self, frame_shape, sidebar_width=50, font_size=15, text_color=(255, 255, 255), bg_color=(0, 0, 0), highlight_color=(50, 50, 200)):
         """
@@ -80,7 +87,8 @@ class SidebarRenderer:
 def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                    target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                    wandb_step: int | None = None, distances=None, angles=None,
-                   video_output_path: str | None = None):
+                   video_output_path: str | None = None,
+                   slot_targets=None, slot_active=None, slot_skill_idx=None):
     global CURRENT_VIDEO_THREAD
 
     if renderer is None:
@@ -105,6 +113,9 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
             "distances": distances,
             "angles": angles,
             "video_output_path": video_output_path,
+            "slot_targets": slot_targets,
+            "slot_active": slot_active,
+            "slot_skill_idx": slot_skill_idx,
         },
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
@@ -114,6 +125,47 @@ def add_active_agent(screen, active_agent_num: int):
     font = pygame.font.Font(None, 50)
     text_surface = font.render(f"active agent: {active_agent_num}", True, (255, 255, 255)) 
     screen.blit(text_surface, (300, 300))
+
+
+def draw_target_outlines_multi(frame, slot_targets, slot_active, slot_skill_idx,
+                                obj_x, obj_y, obj_w, obj_h, active):
+    """Draw one colored outline per active composition slot on a single frame.
+
+    Each slot is colored by its skill index via SKILL_OUTLINE_COLORS.
+    To make overlapping borders distinguishable, inner slots are drawn with a
+    slight inset so multiple colors are visible.
+
+    frame: (3, H, W) RGB.
+    slot_targets, slot_active, slot_skill_idx: 1D arrays of length K.
+    """
+    K = len(slot_targets)
+    _, H, W = frame.shape
+    surf = pygame.surfarray.make_surface(frame.transpose(2, 1, 0))
+    for k in range(K):
+        if not bool(slot_active[k]):
+            continue
+        idx = int(slot_targets[k])
+        if idx < 0 or idx >= len(active) or not active[idx]:
+            continue
+        x = int(obj_x[idx])
+        y = int(obj_y[idx])
+        w = int(obj_w[idx])
+        h = int(obj_h[idx])
+        if w <= 0 or h <= 0:
+            continue
+        inset = k * (TARGET_OUTLINE_WIDTH + 1)
+        x1 = max(0, min(x - inset, W - 1))
+        y1 = max(0, min(y - inset, H - 1))
+        x2 = max(0, min(x + w + inset, W))
+        y2 = max(0, min(y + h + inset, H))
+        if x1 >= x2 or y1 >= y2:
+            continue
+        sk = int(slot_skill_idx[k])
+        color = SKILL_OUTLINE_COLORS[sk] if 0 <= sk < len(SKILL_OUTLINE_COLORS) else TARGET_OUTLINE_COLOR
+        pygame.draw.rect(
+            surf, color, (x1, y1, x2 - x1, y2 - y1), TARGET_OUTLINE_WIDTH,
+        )
+    return np.transpose(pygame.surfarray.array3d(surf), (2, 1, 0))
 
 
 def draw_target_outline(frame, target_idx, obj_x, obj_y, obj_w, obj_h, active):
@@ -203,7 +255,8 @@ def _write_frames_mp4(frames_chw: np.ndarray, path: str, fps: int = 30) -> None:
 def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                   target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                   wandb_step: int | None = None, distances=None, angles=None,
-                  video_output_path: str | None = None):
+                  video_output_path: str | None = None,
+                  slot_targets=None, slot_active=None, slot_skill_idx=None):
     try:
         use_wandb = wandb.run is not None
         if not use_wandb and not video_output_path:
@@ -259,8 +312,24 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             frames = np.transpose(frames, (0, 3, 1, 2))  # (T, H, W, 3) -> (T, 3, H, W)
             # Note: If the video is rotated/flipped, the transpose may need adjustment.
 
-        # [Optional: Target outline] Draw red outline around current target object per frame
-        if target_obj_idxs is not None and objects_bbox is not None:
+        # [Optional: Target outline] Draw outlines per frame.
+        # If per-slot composition data is provided, draw one colored outline
+        # per active slot (using SKILL_OUTLINE_COLORS). Otherwise fall back to
+        # the legacy single-target red outline.
+        if (
+            slot_targets is not None
+            and slot_active is not None
+            and slot_skill_idx is not None
+            and objects_bbox is not None
+        ):
+            ox, oy, ow, oh, oactive = objects_bbox
+            for i in range(len(frames)):
+                frames[i] = draw_target_outlines_multi(
+                    frames[i],
+                    slot_targets[i], slot_active[i], slot_skill_idx[i],
+                    ox[i], oy[i], ow[i], oh[i], oactive[i],
+                )
+        elif target_obj_idxs is not None and objects_bbox is not None:
             ox, oy, ow, oh, oactive = objects_bbox
             for i in range(len(frames)):
                 idx = int(target_obj_idxs[i])

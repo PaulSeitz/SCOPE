@@ -34,6 +34,19 @@ def evaluate_skills(
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
 
+    # This eval path is heuristic-only (no learned meta_q to drive slot
+    # selection), so Q-decomposition composition K>1 doesn't apply here.
+    # Warn so users training with K>1 know eval will diverge from training.
+    if int(config.get("COMPOSITION_K", 1)) > 1:
+        import warnings
+        warnings.warn(
+            "evaluate_skills uses a heuristic target and does not perform "
+            "Q-decomposition composition. Evaluation will execute the "
+            "K=1 (single-target) action selection regardless of COMPOSITION_K.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     env, _renderer = create_eval_env(config)
 
     env_name = config.get("ENV_NAME", "Seaquest")

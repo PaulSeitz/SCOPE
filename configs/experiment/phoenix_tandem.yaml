@@ -48,7 +48,7 @@ alg:
   #   0.0 → full skill reward (active skill's sparse reward for its labeled target)
   #   0.0–1.0 → linear blend of both
   # Raw env reward is always logged separately in wandb (env/reward_mean, env/episodic_return).
-  META_REWARD_LAMBDA: 0.5  # pure skill reward: meta can only profit if the skill earns reward
+  META_REWARD_LAMBDA: 1.0  # pure skill reward: meta can only profit if the skill earns reward
 
   # Skill optimizer (if omitted, LR is used)
   SKILL_LR: 0.0001
@@ -95,3 +95,31 @@ alg:
   HEURISTIC_MODE: "env_specific"
   SKILL_WARMUP_UPDATES: 0
   META_LEARN_DURING_WARMUP: false
+
+  # --- Q-decomposition composition (K>1) ---
+  # K=3 in per_label mode binds slot 0 → DESTROY (enemies), slot 1 → COLLECT,
+  # slot 2 → AVOID (bullets). Phoenix exercises all three affordance classes
+  # simultaneously (enemies above + bullets descending + occasional collect
+  # targets), which is exactly the multi-objective regime the refactor was
+  # designed for. On any given frame the composed action should jointly satisfy
+  # "shoot at the most threatening enemy" + "dodge the nearest bullet."
+  COMPOSITION_K: 3
+  COMPOSITION_SLOT_MODE: "per_label"
+  # Softmax temperature on per-slot meta-Q logits. τ=1 → weights track meta-Q
+  # spread; lower τ peaks; higher τ flattens toward uniform.
+  COMPOSITION_TAU: 0.5
+  # z-score normalize per-skill Q vectors at compose time. Phoenix has dense
+  # DESTROY positive rewards (O(+1) per enemy kill) and penalty-only AVOID
+  # rewards (O(−2) per collision); raw summation would let DESTROY dominate
+  # the composed action every frame. z-score puts both on a comparable
+  # preference scale so AVOID's relative ordering actually shapes the argmax.
+  COMPOSITION_NORMALIZE_SKILL_Q: "zscore"
+  # Hybrid meta loss: standard argmax Bellman target with softmax weighting
+  # only at action selection.
+  COMPOSITION_META_LOSS: "hybrid"
+  # Drop slots whose softmax weight falls below this threshold (then
+  # renormalize). Gives the meta a hard "ignore this affordance" mechanism;
+  # if all slots fall below threshold the executed action falls back to NOOP
+  # ("nothing worth attending to this frame"). Effective-K is logged as
+  # composition/avg_effective_slots_per_step.
+  COMPOSITION_SLOT_WEIGHT_THRESHOLD: 0.05

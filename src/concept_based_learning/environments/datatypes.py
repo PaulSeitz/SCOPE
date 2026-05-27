@@ -78,6 +78,31 @@ SemanticObservation = ConceptObservation
 
 
 @chex.dataclass(frozen=True)
+class CompositionSlots:
+    """Per-slot rollout data captured under Q-decomposition composition.
+
+    Lives alongside the existing single-slot fields on Transition/TandemTransition.
+    When COMPOSITION_K == 1, slot 0 carries the same target/skill/ego data the
+    legacy fields already hold; consumers can keep using the legacy fields.
+    Loss code that wants to use multiple slots (K > 1) reads from here instead.
+
+    Shapes carry a leading K axis after the standard num_envs (and rollout)
+    leading axes. Below shapes are written for a single env, single step.
+    """
+
+    target_idxs: chex.Array       # int32[K]
+    slot_active: chex.Array       # bool[K]
+    slot_weights: chex.Array      # float32[K] — softmax(meta_q/τ) applied at action time
+    slot_skill_idx: chex.Array    # int32[K]
+    ego_obses: chex.Array         # float32[K, ego_obs_dim]
+    next_ego_obses: chex.Array    # float32[K, ego_obs_dim]
+    slot_ego_actions: chex.Array  # int32[K] — inverse-scatter of executed global action
+    slot_skill_q: chex.Array      # float32[K, num_skills, ego_action_dim]
+    slot_rewards: chex.Array      # float32[K, num_skills]
+    slot_skill_done: chex.Array   # bool[K, num_skills]
+
+
+@chex.dataclass(frozen=True)
 class MetaTransition:
     """Transition for the Meta-Policy (System 2) using global rewards."""
 
@@ -123,4 +148,8 @@ class TandemTransition:
     # Raw environment reward (sign-clipped, before blending/penalties) — logged to wandb
     # so episodic env performance is always visible regardless of META_REWARD_LAMBDA.
     env_reward: chex.Array
+
+    # Q-decomposition composition slots (K axis). None when composition disabled
+    # or in legacy paths; CompositionSlots when populated.
+    composition: Any = None
 

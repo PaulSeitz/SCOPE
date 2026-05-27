@@ -15,12 +15,20 @@ FREEWAY_CHICKEN_W = 6
 FREEWAY_CHICKEN_H = 8
 FREEWAY_CAR_W = 8
 FREEWAY_CAR_H = 10
-FREEWAY_TOP_BORDER = 8      # player scores when chicken_y (bottom edge) ≤ this
+FREEWAY_TOP_BORDER = 15     # env's actual top_border (jax_freeway.FreewayConstants):
+                            # player scores when chicken_y (bottom edge) ≤ this.
 FREEWAY_BOTTOM_BORDER = 180
 FREEWAY_NUM_LANES = 10
 
-# Fixed COLLECT goal: one pixel below the scoring/teleport line (y increases downward).
-FREEWAY_COLLECT_GOAL_Y = FREEWAY_TOP_BORDER + 1
+# Fixed COLLECT goal: at the very top of the screen.
+#
+# The waypoint position only affects the *shaping gradient* (+1 score reward is
+# decoupled from bbox overlap — see `collect_success = teleported` below).
+# Placing the waypoint above the scoring line (y=0) makes the dense shaping
+# signal monotone in chicken.y all the way up to the scoring threshold, so the
+# chicken always benefits from pushing further upward — no "edge at the goal
+# centre, never quite score" trap.
+FREEWAY_COLLECT_GOAL_Y = 0
 
 # Fixed collect object sits at the last slot after meta NOOP + 10 cars.
 COLLECT_GOAL_IDX = FREEWAY_NUM_LANES + 1  # slot 11 in stacked objects
@@ -38,6 +46,14 @@ _CAR_ZONE_RIGHT = _PLAYER_X_RIGHT                                 # 50
 # Scoring teleport: chicken reaches y ≤ top_border then resets to bottom (~188).
 _SCORING_MAX_PREV_Y = FREEWAY_TOP_BORDER + FREEWAY_CHICKEN_H + 2  # = 25
 _SCORING_MIN_NEXT_Y = 100
+
+# AVOID threat-weighted shaping defaults (override via config keys below).
+_FREEWAY_AVOID_COLLISION_PENALTY = -2.0
+_DEFAULT_FREEWAY_AVOID_PROXIMITY_SIGMA = 30.0   # ~chicken height × 3
+_DEFAULT_FREEWAY_AVOID_ALPHA_APPROACH = 0.3
+_DEFAULT_FREEWAY_AVOID_BETA_CLEARANCE = 0.05
+_DEFAULT_FREEWAY_AVOID_LANE_HALF_HEIGHT = 10.0  # ~car height
+_DEFAULT_FREEWAY_AVOID_LATERAL_SCALE = 8.0      # ~car width
 
 # World direction angle table (RIGHT=0°, DOWNRIGHT=45°, …, UPRIGHT=-45°)
 _WORLD_DIR_ANGLES = jnp.array(
@@ -135,7 +151,9 @@ def _chicken_object_overlap(chicken, obj):
     return jnp.logical_and(horiz, vert)
 
 
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
+def extract_all_skills_rewards(
+    prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, config=None,
+):
     """
     Skill reward signals for Freeway.
 
@@ -147,10 +165,14 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     COLLECT: dense object-relative shaping (prev_dist - next_dist) / scale —
              positive when the chicken closes vertical distance to the selected
              object; +1 sparse bonus when the chicken first reaches it.
-    AVOID:   penalty-only — negative reward on collision with the selected
-             object, 0 otherwise. A car clearing the column is not a rewardable
-             event (cars sweep across regardless of the chicken), so there is
-             no +1 for the meta to farm.
+    AVOID:   threat-weighted dense shaping plus collision penalty. Three pieces:
+             (1) hard −2 on bbox overlap; (2) approach shaping
+             ``−α * (d_prev − d_next) * exp(−d_next / σ)`` so far targets
+             contribute near-zero and close approaching targets drive strong
+             gradients; (3) optional lateral-clearance bonus when y-aligned
+             with the target. Tune via ``FREEWAY_AVOID_*`` config keys. A car
+             clearing the chicken's x-column ends the AVOID encounter but is not
+             rewarded — cars sweep across regardless of the chicken.
     DESTROY: Freeway has no shoot targets; stays zero.
     """
     def last_frame(tree):
@@ -183,16 +205,17 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
         (prev_dist - next_dist) / jnp.float32(_COLLECT_DIST_SCALE),
     )
 
-    # Reached: chicken just entered vertical bounding-box overlap with the object.
-    reach_eps = (
-        next_chicken.height.astype(jnp.float32)
-        + next_tgt.height.astype(jnp.float32)
-    ) / 2.0
-    collect_success = jnp.logical_and(prev_dist > reach_eps, next_dist <= reach_eps)
+    # Reached: tie to the Freeway scoring trigger so the +1 hindsight reward
+    # matches the real env score 1-to-1. The env teleports the chicken from
+    # near the top (y <= _SCORING_MAX_PREV_Y) to the bottom (y >= _SCORING_MIN_NEXT_Y)
+    # on a successful crossing — exactly the `teleported` flag above. This
+    # closes a farm where the chicken could enter/exit the goal's bounding
+    # box repeatedly to collect +1 without actually crossing the road.
+    collect_success = teleported
     collect_reward  = collect_shaping + jnp.where(collect_success, 1.0, 0.0)
     collect_done    = collect_success
 
-    # ---- AVOID (object-relative, penalty-only) ----
+    # ---- AVOID (object-relative, threat-weighted shaping) ----
     # Freeway is not lives-based, so collisions cannot be read from life_lost;
     # detect them directly as bounding-box overlap with the selected object.
     collided = jnp.logical_or(
@@ -206,7 +229,45 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     next_in_zone = jnp.logical_and(next_tgt.x >= _CAR_ZONE_LEFT, next_tgt.x <= _CAR_ZONE_RIGHT)
     object_just_cleared = jnp.logical_and(prev_in_zone, jnp.logical_not(next_in_zone))
 
-    avoid_reward = jnp.where(collided, -2.0, 0.0)
+    def _cfg(key, default):
+        return float(config.get(key, default)) if config is not None else default
+
+    proximity_sigma = _cfg("FREEWAY_AVOID_PROXIMITY_SIGMA", _DEFAULT_FREEWAY_AVOID_PROXIMITY_SIGMA)
+    alpha_approach = _cfg("FREEWAY_AVOID_ALPHA_APPROACH", _DEFAULT_FREEWAY_AVOID_ALPHA_APPROACH)
+    beta_clearance = _cfg("FREEWAY_AVOID_BETA_CLEARANCE", _DEFAULT_FREEWAY_AVOID_BETA_CLEARANCE)
+    lane_half_height = _cfg("FREEWAY_AVOID_LANE_HALF_HEIGHT", _DEFAULT_FREEWAY_AVOID_LANE_HALF_HEIGHT)
+    lateral_scale = _cfg("FREEWAY_AVOID_LATERAL_SCALE", _DEFAULT_FREEWAY_AVOID_LATERAL_SCALE)
+
+    prev_cx = prev_chicken.x.astype(jnp.float32) + prev_chicken.width.astype(jnp.float32) / 2.0
+    next_cx = next_chicken.x.astype(jnp.float32) + next_chicken.width.astype(jnp.float32) / 2.0
+    prev_tgt_cx = prev_tgt.x.astype(jnp.float32) + prev_tgt.width.astype(jnp.float32) / 2.0
+    next_tgt_cx = next_tgt.x.astype(jnp.float32) + next_tgt.width.astype(jnp.float32) / 2.0
+
+    dx_prev = prev_cx - prev_tgt_cx
+    dy_prev = prev_cy - prev_tgt_cy
+    dx_next = next_cx - next_tgt_cx
+    dy_next = next_cy - next_tgt_cy
+
+    d_prev = jnp.sqrt(dx_prev ** 2 + dy_prev ** 2)
+    d_next = jnp.sqrt(dx_next ** 2 + dy_next ** 2)
+    approach = d_prev - d_next  # positive = closing gap
+
+    proximity_weight = jnp.exp(-d_next / jnp.float32(proximity_sigma))
+    reward_shaping = -jnp.float32(alpha_approach) * approach * proximity_weight
+
+    in_lane = jnp.abs(dy_next) < jnp.float32(lane_half_height)
+    lateral_clearance_norm = jnp.minimum(
+        jnp.abs(dx_next) / jnp.float32(lateral_scale), 1.0,
+    )
+    reward_clearance = (
+        jnp.float32(beta_clearance) * in_lane.astype(jnp.float32) * lateral_clearance_norm
+    )
+
+    avoid_reward = jnp.where(
+        collided,
+        jnp.float32(_FREEWAY_AVOID_COLLISION_PENALTY),
+        jnp.where(teleported, jnp.float32(0.0), reward_shaping + reward_clearance),
+    )
     avoid_done   = jnp.logical_or(object_just_cleared, collided)
 
     # ---- DESTROY ---- (no destroy targets in Freeway)

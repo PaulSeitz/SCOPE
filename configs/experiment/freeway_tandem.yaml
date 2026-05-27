@@ -30,12 +30,12 @@ alg:
   META_FLAT_NUM_LAYERS: 3
   META_LR: 0.0001
   META_SWITCH_PENALTY: 0
-  META_DEATH_PENALTY: -1.0
+  META_DEATH_PENALTY: 0.0
   META_USE_NOOP_TARGET: false
   META_NOOP_TARGET_IDX: 0
 
   # Use full environment reward for meta training
-  META_REWARD_LAMBDA: 0.5
+  META_REWARD_LAMBDA: 1.0
 
   # Skill optimizer
   SKILL_LR: 0.0001
@@ -43,11 +43,11 @@ alg:
   # --- Environment Wrappers ---
   FIRST_FIRE: false            # Freeway has no FIRE start
   STICKY_ACTIONS: false
-  EPISODIC_LIFE: false         # Freeway is time-limited, not lives-based
+  EPISODIC_LIFE: true         # Freeway is time-limited, not lives-based
   FRAME_STACK_SIZE: 4
 
   # --- PQN Rollout Hyperparameters ---
-  TOTAL_TIMESTEPS: 50_000_000
+  TOTAL_TIMESTEPS: 25_000_000
   NUM_ENVS: 1024
   NUM_STEPS: 64
 
@@ -62,7 +62,7 @@ alg:
   # --- Policy Style for Skill Updates ---
   # Off-policy: let all skills learn from every transition so the (rare) collect
   # skill still gets updates even when the meta mostly picks AVOID targets.
-  OFF_POLICY: true
+  OFF_POLICY: false
 
   # --- Exploration (Epsilon-Greedy) ---
   EPS_START: 1.0
@@ -78,5 +78,44 @@ alg:
 
   # --- Warmup (tandem only) ---
   HEURISTIC_MODE: "env_specific"
-  SKILL_WARMUP_UPDATES: 200
-  META_LEARN_DURING_WARMUP: true
+  SKILL_WARMUP_UPDATES: 0
+  META_LEARN_DURING_WARMUP: false
+
+  # --- Q-decomposition composition (K>1) ---
+  # K=3 in per_label mode means one slot per affordance (DESTROY/COLLECT/AVOID);
+  # with NUM_SKILLS=3 each slot binds to its own skill. On Freeway slot 0
+  # (DESTROY) will usually stay inactive (no destroyable objects), so the
+  # action emerges from the COLLECT+AVOID composition — exactly the case the
+  # refactor was designed for.
+  COMPOSITION_K: 3
+  COMPOSITION_SLOT_MODE: "per_label"
+  # Softmax temperature on per-slot meta-Q logits. τ=1 → weights track meta-Q
+  # spread; lower τ peaks; higher τ flattens toward uniform.
+  COMPOSITION_TAU: 1.0
+  # Per-skill Q-scale normalization at compose time. AVOID is now dense
+  # threat-weighted shaping plus a −2 collision penalty; COLLECT is dense
+  # shaping plus a +1 bonus. z-score brings them to a common preference scale.
+  COMPOSITION_NORMALIZE_SKILL_Q: "none"
+  # v1: train meta with the standard argmax Bellman target, apply softmax
+  # weights only at action selection. Flip to "soft_q" later if the hybrid
+  # update visibly mismatches the composed action.
+  COMPOSITION_META_LOSS: "hybrid"
+
+  # Drop slots whose softmax weight falls below this threshold (then renormalize
+  # the surviving weights). Gives the meta a hard "ignore" mechanism — it can
+  # push a slot's meta-Q low enough that its weight collapses, dropping that
+  # slot out of the composition entirely. Effective-K (logged as
+  # composition/avg_effective_slots_per_step) is the actual attended-object
+  # count after thresholding. Set to 0.0 to disable. Higher values (≥0.1)
+  # encourage sparser attention; 0.05 is a sane starting point with K~5.
+  COMPOSITION_SLOT_WEIGHT_THRESHOLD: 0.05
+
+  # --- AVOID reward shaping (threat-weighted) ---
+  # Proximity falloff: near-1 at contact, near-0 when target is ~half a screen away.
+  FREEWAY_AVOID_PROXIMITY_SIGMA: 30.0
+  # Approach shaping scale; worst-case close approach ≈ −0.3, well below collision −2.
+  FREEWAY_AVOID_ALPHA_APPROACH: 0.3
+  # Lateral-clearance tie-breaker when y-aligned with the target (step sideways).
+  FREEWAY_AVOID_BETA_CLEARANCE: 0.05
+  FREEWAY_AVOID_LANE_HALF_HEIGHT: 10.0
+  FREEWAY_AVOID_LATERAL_SCALE: 8.0

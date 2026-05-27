@@ -8,11 +8,11 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 # Screen diagonal — used to normalise distance so it stays in [0, 1]
 MAX_DIST      = 263.0   # sqrt(160² + 210²)
-MAX_SPEED     = 32.0    # pixels/frame, for velocity normalisation
+MAX_SPEED     = 32.0    # pixels/frame, legacy format velocity normalisation
 SCREEN_WIDTH  = 160.0
 SCREEN_HEIGHT = 210.0
 
-TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME = 7
+TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME = 5
 LEGACY_EGO_OBS_CHANNELS_PER_FRAME = 10
 
 # Backward-compatible constant used by old imports.
@@ -22,7 +22,7 @@ _USE_LEGACY_EGO_OBS = False
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
-    """Select legacy (10ch) or target-aligned (7ch) ego observation format."""
+    """Select legacy (10ch) or target-aligned (5ch) ego observation format."""
     global _USE_LEGACY_EGO_OBS
     _USE_LEGACY_EGO_OBS = bool(use_legacy)
 
@@ -73,12 +73,9 @@ def _frame_geometry_target_aligned(p_x, p_y, p_w, p_h, p_ori_deg, t_x, t_y, t_w,
 
     Returns
     -------
-    distance      : Euclidean distance player centre → target centre
-    theta_target  : angle of player→target vector, screen-Y-down radians
-    psi           : player facing minus theta_target, wrapped to [-π, π]
-    t_cx, t_cy    : target centre coords (used for cross-frame velocity)
-    p_cx, p_cy    : player centre coords (used for cross-frame velocity)
-    t_w, t_h      : target bounding-box sizes (passed through)
+    distance : Euclidean distance player centre → target centre
+    psi      : player facing minus θ_target, wrapped to [-π, π]
+    t_w, t_h : target bounding-box sizes (passed through)
     """
     p_cx = p_x + p_w / 2.0
     p_cy = p_y + p_h / 2.0
@@ -100,7 +97,7 @@ def _frame_geometry_target_aligned(p_x, p_y, p_w, p_h, p_ori_deg, t_x, t_y, t_w,
     psi = p_ori_rad - theta_target
     psi = jnp.arctan2(jnp.sin(psi), jnp.cos(psi))
 
-    return distance, theta_target, psi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+    return distance, psi, t_w, t_h
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +173,7 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     t_h_hist = objects.height[:, target_idx]
 
     player = _get_player(raw_observation)
-    (
-        distances,
-        thetas,
-        psis,
-        t_cxs, t_cys,
-        p_cxs, p_cys,
-        t_ws,  t_hs,
-    ) = jax.vmap(_frame_geometry_target_aligned)(
+    distances, psis, t_ws, t_hs = jax.vmap(_frame_geometry_target_aligned)(
         player.x,
         player.y,
         player.width,
@@ -192,6 +182,7 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
         t_x_hist, t_y_hist, t_w_hist, t_h_hist,
     )
 
+    '''
     # -------------------------------------------------------------------
     # Radial and tangential velocities
     # -------------------------------------------------------------------
@@ -214,22 +205,20 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     sin_t = jnp.sin(thetas)
     v_r =  d_rel_x * cos_t + d_rel_y * sin_t
     v_t = -d_rel_x * sin_t + d_rel_y * cos_t
-
+    '''
     # -------------------------------------------------------------------
     # Stack and normalise
     # -------------------------------------------------------------------
     stacked = jnp.stack(
         [
             distances / MAX_DIST,
-            v_r       / MAX_SPEED,
-            v_t       / MAX_SPEED,
             t_ws      / SCREEN_WIDTH,
             t_hs      / SCREEN_HEIGHT,
             jnp.sin(psis),
             jnp.cos(psis),
         ],
         axis=-1,
-    ).astype(jnp.float32)  # shape: [stack_size, 7]
+    ).astype(jnp.float32)  # shape: [stack_size, 5]
 
     return stacked.flatten()
 
