@@ -58,7 +58,7 @@ FIRE_EGO_ACTION_INDICES = jnp.array(
     [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
 )
 
-# Backward-compat aliases used by the old ego_action_space.py shim.
+# Backward-compat aliases for configs that use the legacy constant names.
 FIRE_EGO_ACTION_INDICES_18 = FIRE_EGO_ACTION_INDICES
 FIRE_EGO_ACTION_INDICES_6  = jnp.array([1], dtype=jnp.int32)
 
@@ -99,6 +99,10 @@ _WORLD_DIR_ANGLES_DEG = jnp.array(
     [0.0, 45.0, 90.0, 135.0, 180.0, -135.0, -90.0, -45.0],
     dtype=jnp.float32,
 )
+
+
+def _default_get_player(raw_obs):
+    return raw_obs.player
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +176,65 @@ def make_ego_action_mapper(
         return game_action
 
     return mapper
+
+
+def make_inverse_ego_action_mapper(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+    *,
+    player_getter=_default_get_player,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Build a JAX-compatible inverse action mapper for a specific environment.
+
+    The returned function has the signature:
+        inverse_mapper(game_action, raw_obs, target_idx, objects) -> int32 ego action
+    """
+    _noop = jnp.int32(noop_action)
+    _fire = jnp.int32(fire_action)
+    _move = jnp.array(move_table, dtype=jnp.int32)
+    _mfir = jnp.array(move_fire_table, dtype=jnp.int32)
+    _move_deltas = EGO_MOVE_DELTAS_DEG[2:10]
+
+    def _center_y(y, height):
+        if y_is_bottom_edge:
+            return y - height / 2.0
+        return y + height / 2.0
+
+    def inverse_mapper(game_action, raw_obs, target_idx, objects):
+        is_move = _move == game_action
+        is_mfir = _mfir == game_action
+        matched_move = jnp.any(is_move)
+        matched_fire_move = jnp.any(is_mfir)
+        has_fire = matched_fire_move
+        dir_idx = jnp.where(has_fire, jnp.argmax(is_mfir), jnp.argmax(is_move))
+        world_angle = _WORLD_DIR_ANGLES_DEG[dir_idx]
+
+        player = player_getter(raw_obs)
+        p_cx = player.x[-1] + player.width[-1] / 2.0
+        p_cy = _center_y(player.y[-1], player.height[-1])
+        t_cx = objects.x[-1, target_idx] + objects.width[-1, target_idx] / 2.0
+        t_cy = _center_y(objects.y[-1, target_idx], objects.height[-1, target_idx])
+        theta_deg = jnp.arctan2(t_cy - p_cy, t_cx - p_cx) * (180.0 / jnp.pi)
+
+        desired_delta = (world_angle - theta_deg + 180.0) % 360.0 - 180.0
+        diff = (desired_delta - _move_deltas + 180.0) % 360.0 - 180.0
+        ego_move = (2 + jnp.argmin(jnp.abs(diff))).astype(jnp.int32)
+        ego_action = jnp.where(has_fire, ego_move + 8, ego_move)
+
+        matched = jnp.logical_or(matched_move, matched_fire_move)
+        ego_action = jnp.where(game_action == _fire, 1, ego_action)
+        ego_action = jnp.where(
+            jnp.logical_or(game_action == _noop, jnp.logical_not(matched)),
+            0,
+            ego_action,
+        )
+        return ego_action.astype(jnp.int32)
+
+    return inverse_mapper
 
 
 # ---------------------------------------------------------------------------

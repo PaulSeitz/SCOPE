@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-Interactive Reward Dashboard for Atari environments with semantic wrappers.
+Interactive Reward Dashboard — manual play with live skill reward overlay.
 
-By default this is wired to Seaquest via EnvManager, but you can also import
-this module and construct a `RewardDashboard` manually by passing your own
-environment, renderer, and env-specific hooks.
+Run with:
+    python scripts/reward_dashboard.py                        # defaults to seaquest
+    python scripts/reward_dashboard.py --experiment seaquest_tandem
+    python scripts/reward_dashboard.py --env-name freeway
+
+Controls:
+    Arrow keys + Space : move / fire
+    R                  : reset episode
+    F                  : freeze / unfreeze
+    N                  : single-step while frozen
+    Q / ESC            : quit
 """
 import sys
 import os
 import argparse
-from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -25,93 +32,73 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
 )
 from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.skill_rewards import object_reward_eligible
 
-# Color constants
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-GREEN = (0, 255, 0)
-RED = (255, 0, 0)
-BLUE = (0, 0, 255)
-YELLOW = (255, 255, 0)
-CYAN = (0, 255, 255)
-MAGENTA = (255, 0, 255)
-GRAY = (128, 128, 128)
-DARK_GRAY = (64, 64, 64)
+# ── colours ──────────────────────────────────────────────────────────────────
+BLACK     = (0,   0,   0)
+WHITE     = (255, 255, 255)
+GREEN     = (0,   220, 0)
+RED       = (220, 50,  50)
+BLUE      = (80,  140, 255)
+YELLOW    = (255, 220, 0)
+CYAN      = (0,   220, 220)
+MAGENTA   = (220, 0,   220)
+GRAY      = (140, 140, 140)
+DARK_GRAY = (50,  50,  50)
+ORANGE    = (255, 160, 30)
 
-TARGET_OUTLINE_COLOR = (255, 50, 50)
-TARGET_OUTLINE_WIDTH = 3
+TARGET_COLOR = (255, 60, 60)
 
-# Label names (Player Tool removed, concepts renumbered)
+SKILL_NAMES  = ["Destroy", "Collect", "Avoid"]
+# Colour per skill for reward display
+SKILL_COLORS = [ORANGE, CYAN, MAGENTA]
+
 LABEL_NAMES = {
-    LABEL_NOOP: "Noop",
+    LABEL_NOOP:    "Noop",
     LABEL_DESTROY: "Destroy",
     LABEL_COLLECT: "Collect",
-    LABEL_AVOID: "Avoid",
+    LABEL_AVOID:   "Avoid",
 }
 
-# Object type names for display.
-# For non-Seaquest environments this will gracefully fall back to "Obj <idx>".
-OBJECT_NAMES = [
-    "Obj 0",
-    "Obj 1",
-    "Obj 2",
-    "Obj 3",
-    "Obj 4",
-    "Obj 5",
-    "Obj 6",
-    "Obj 7",
-    "Obj 8",
-    "Obj 9",
-    "Obj 10",
-    "Obj 11",
-    "Obj 12",
-    "Obj 13",
-    "Obj 14",
-    "Obj 15",
-    "Obj 16",
-    "Obj 17",
-    "Obj 18",
-    "Obj 19",
-    "Obj 20",
-    "Obj 21",
-    "Obj 22",
-    "Obj 23",
-    "Obj 24",
-    "Obj 25",
-    "Obj 26",
-    "Obj 27",
-    "Obj 28",
-    "Obj 29",
-    "Obj 30",
-    "Obj 31",
-    "Obj 32",
-]
+# Seaquest slot names — index 0 is the meta-NOOP dummy added by the wrapper.
+SEAQUEST_OBJECT_NAMES = (
+    ["[NOOP]"]
+    + [f"Diver {i}"   for i in range(4)]        # slots 1-4
+    + [f"Shark {i}"   for i in range(12)]        # slots 5-16
+    + [f"Sub {i}"     for i in range(12)]        # slots 17-28
+    + ["Surface Sub"]                             # slot 29
+    + [f"Missile {i}" for i in range(4)]         # slots 30-33
+    + ["Surface WP"]                              # slot 34
+)
 
-@dataclass
-class MultiReward:
-    """Simple container for concept-wise rewards and global reward."""
+FREEWAY_OBJECT_NAMES = (
+    ["[NOOP]"]
+    + [f"Car {i}" for i in range(10)]            # slots 1-10
+    + ["Goal"]                                    # slot 11
+)
 
-    concept_rewards: np.ndarray  # shape: [num_concepts, max_objects]
-    global_reward: float
+# Fallback for unknown envs
+def _default_names(n):
+    return [f"Obj {i}" for i in range(n)]
 
 
-# Action mapping (Atari actions)
-ACTION_NOOP = 0
-ACTION_FIRE = 1
-ACTION_UP = 2
-ACTION_RIGHT = 3
-ACTION_LEFT = 4
-ACTION_DOWN = 5
-ACTION_UPRIGHT = 6
-ACTION_UPLEFT = 7
-ACTION_DOWNRIGHT = 8
-ACTION_DOWNLEFT = 9
-ACTION_UPFIRE = 10
-ACTION_RIGHTFIRE = 11
-ACTION_LEFTFIRE = 12
-ACTION_DOWNFIRE = 13
-ACTION_UPRIGHTFIRE = 14
-ACTION_UPLEFTFIRE = 15
+# ── Atari action constants ────────────────────────────────────────────────────
+ACTION_NOOP         = 0
+ACTION_FIRE         = 1
+ACTION_UP           = 2
+ACTION_RIGHT        = 3
+ACTION_LEFT         = 4
+ACTION_DOWN         = 5
+ACTION_UPRIGHT      = 6
+ACTION_UPLEFT       = 7
+ACTION_DOWNRIGHT    = 8
+ACTION_DOWNLEFT     = 9
+ACTION_UPFIRE       = 10
+ACTION_RIGHTFIRE    = 11
+ACTION_LEFTFIRE     = 12
+ACTION_DOWNFIRE     = 13
+ACTION_UPRIGHTFIRE  = 14
+ACTION_UPLEFTFIRE   = 15
 ACTION_DOWNRIGHTFIRE = 16
 ACTION_DOWNLEFTFIRE = 17
 
@@ -127,821 +114,469 @@ class RewardDashboard:
         no_target_idx,
         reward_extractor,
         extract_life_lost,
-        action_mapper=None,
-        no_target_global_action=0,
-        fixed_target_idx=None,
-        env_config=None,
-        screen_width=800,
-        screen_height=600,
+        screen_width=1280,
+        screen_height=630,
     ):
         self.env = env
         self.renderer = renderer
-        self.env_name = env_name
+        self.env_name = env_name.lower()
         self.get_heuristic_target = get_heuristic_target
         self.no_target_idx = no_target_idx
         self.reward_extractor = reward_extractor
         self.extract_life_lost = extract_life_lost
-        self.action_mapper = action_mapper
-        self.no_target_global_action = int(no_target_global_action)
-        self.fixed_target_idx = fixed_target_idx
-        self.env_config = dict(env_config or {})
-        self.compute_rewards_for_all_objects = (
-            str(self.env_name).lower() == "skillbootcamp"
-        )
 
-        # Initialize pygame
+        # Object name table
+        if "seaquest" in self.env_name:
+            self._obj_names = SEAQUEST_OBJECT_NAMES
+        elif "freeway" in self.env_name:
+            self._obj_names = FREEWAY_OBJECT_NAMES
+        else:
+            self._obj_names = _default_names(128)
+
         pygame.init()
         self.screen = pygame.display.set_mode((screen_width, screen_height))
-        pygame.display.set_caption(f"{self.env_name.title()} Reward Dashboard")
-        self.font = pygame.font.Font(None, 20)
-        self.small_font = pygame.font.Font(None, 16)
-        self.bold_font = pygame.font.Font(None, 24)
+        pygame.display.set_caption(f"{env_name.title()} — Skill Reward Dashboard")
+        self.font       = pygame.font.SysFont("monospace", 13)
+        self.bold_font  = pygame.font.SysFont("monospace", 15, bold=True)
 
-        # Game state
-        self.obs = None
-        self.state = None
-        self.prev_obs = None
-        self.prev_state = None
-        self.multi_reward = None
+        self.game_scale  = 2
+        self.game_w      = 160 * self.game_scale   # 320
+        self.game_h      = 210 * self.game_scale   # 420
+        self.panel_x     = self.game_w + 20
+        self.panel_w     = screen_width - self.panel_x - 10
+
+        # State
+        self.obs = self.state = self.prev_obs = self.prev_state = None
         self.step_count = 0
-        self.total_global_reward = 0.0
+        self.total_reward = 0.0
         self.rng_key = jax.random.key(42)
-        self.last_object_events = None  # Boolean mask of objects that produced reward last step
         self.prev_target_idx = self.no_target_idx
         self.current_target_idx = self.no_target_idx
+        # concept_rewards[skill, obj] for the last step (all objects, all skills)
+        self.concept_rewards: np.ndarray = np.zeros((3, 1), dtype=np.float32)
+        # Recent event log: list of dicts
+        self.event_log: list = []
+        self.log_max_steps = 180  # keep entries for ~6 s at 30 fps
 
-        # Freeze/step controls
         self.frozen = False
-        self.step_mode = False
         self.target_fps = 30
+        self.fps_history: list = []
         self.actual_fps = 0.0
-        self.fps_history = []
 
-        # Reward history buffer (to show rewards for objects that just disappeared)
-        self.reward_history = []  # List of (step_count, obj_idx, label_name, reward_val, event_triggered)
-        self.history_duration = 120  # Show rewards for 5 steps after event
+    # ── lifecycle ─────────────────────────────────────────────────────────────
 
-        # Display settings
-        self.game_scale = 2  # Scale factor for game rendering
-        self.game_width = 160 * self.game_scale
-        self.game_height = 210 * self.game_scale
-        self.panel_width = screen_width - self.game_width - 20
-        self.panel_start_x = self.game_width + 20
-
-        # Column layout for horizontal display
-        self.num_columns = 3
-        self.column_width = self.panel_width // self.num_columns
-        self.column_spacing = 10
-        
     def reset(self):
-        """Reset the environment"""
-        self.rng_key, subkey = jax.random.split(self.rng_key)
-        self.obs, self.state = self.env.reset(subkey)
-        self.prev_obs = None
-        self.prev_state = None
-        self.multi_reward = None
+        self.rng_key, sub = jax.random.split(self.rng_key)
+        self.obs, self.state = self.env.reset(sub)
+        self.prev_obs = self.prev_state = None
         self.step_count = 0
-        self.total_global_reward = 0.0
-        self.reward_history = []  # Clear history on reset
-        self.last_object_events = None
+        self.total_reward = 0.0
         self.prev_target_idx = self.no_target_idx
         self.current_target_idx = self.no_target_idx
-        
-    def step(self, action):
-        """Step the environment and compute rewards"""
-        self.prev_obs = self.obs
+        self.concept_rewards = np.zeros((3, 1), dtype=np.float32)
+        self.event_log = []
+
+    def step(self, action) -> bool:
+        self.prev_obs   = self.obs
         self.prev_state = self.state
 
-        # Determine tracked target from the pre-step observation, matching training semantics.
-        tracked_target_idx = self.no_target_idx
+        # Pick heuristic target from the pre-step observation.
+        target_idx = self.no_target_idx
         if self.prev_obs is not None:
             try:
-                if self.fixed_target_idx is not None:
-                    tracked_target_idx = int(self.fixed_target_idx)
-                else:
-                    self.rng_key, key_policy = jax.random.split(self.rng_key)
-                    prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
-                    target_idx = self.get_heuristic_target(
-                        self.prev_obs.raw_observation,
-                        self.prev_obs.objects,
-                        prev_idx,
-                        key_policy,
-                    )
-                    tracked_target_idx = int(jnp.ravel(target_idx)[0])
+                self.rng_key, key_pol = jax.random.split(self.rng_key)
+                raw = self.prev_obs.raw_observation
+                objs = self.prev_obs.objects
+                prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
+                target_idx = int(jnp.ravel(
+                    self.get_heuristic_target(raw, objs, prev_idx, key_pol)
+                )[0])
             except Exception:
-                tracked_target_idx = self.no_target_idx
+                pass
 
-        self.prev_target_idx = tracked_target_idx
-        self.current_target_idx = tracked_target_idx
+        self.prev_target_idx = target_idx
+        self.current_target_idx = target_idx
 
-        self.obs, self.state, reward, done, info = self.env.step(self.state, action)
+        self.obs, self.state, env_reward, done, info = self.env.step(self.state, action)
+        self.total_reward += float(env_reward)
 
-        # Compute rewards if we have previous state
         if self.prev_obs is not None:
-            target_idx_int = tracked_target_idx
+            self._compute_rewards(target_idx, env_reward, info)
 
-            # Compute concept rewards only for the currently selected target.
-            objects = self.obs.objects
-            prev_objects = self.prev_obs.objects
-
-            # objects.x has shape [stack_size, max_objects]
-            num_objects = int(objects.x.shape[1])
-            concept_rewards = np.zeros((3, num_objects), dtype=np.float32)
-
-            def slice_target(obj_obs, obj_idx: int):
-                """
-                Extract one object's trajectory across the frame stack as a PyTree
-                matching the semantic wrapper's object structure.
-
-                Handles both stacked arrays (shape [T, N]) and per-frame arrays
-                (shape [N]), while leaving scalars / non-array leaves untouched.
-                """
-
-                def _slice_leaf(x):
-                    # Non-array leaves (e.g., ints) are returned unchanged.
-                    if not hasattr(x, "ndim"):
-                        return x
-                    # Scalars have no object axis.
-                    if x.ndim == 0:
-                        return x
-                    # Per-frame object arrays: [N] -> scalar for this object.
-                    if x.ndim == 1:
-                        if 0 <= obj_idx < x.shape[0]:
-                            return x[obj_idx]
-                        return x
-                    # Stacked arrays: [T, N] (or [..., N]) -> slice along last axis.
-                    if 0 <= obj_idx < x.shape[-1]:
-                        return x[..., obj_idx]
-                    return x
-
-                return jax.tree_util.tree_map(_slice_leaf, obj_obs)
-
-            life_lost = self.extract_life_lost(self.prev_state, self.state)
-
-            def _info_get(info_obj, key: str, default=0):
-                if isinstance(info_obj, dict):
-                    return info_obj.get(key, default)
-                if info_obj is not None and hasattr(info_obj, key):
-                    return getattr(info_obj, key)
-                return default
-
-            def _as_int01(x: Any) -> int:
-                arr = np.asarray(jax.device_get(x))
-                if arr.size == 0:
-                    return 0
-                return int(arr.reshape(-1)[0] != 0)
-
-            swd = _as_int01(_info_get(info, "step_win_destroy", 0))
-            swc = _as_int01(_info_get(info, "step_win_collect", 0))
-            sfa = _as_int01(_info_get(info, "step_fail_avoid", 0))
-            sfd = _as_int01(_info_get(info, "step_fail_destroy_touch", 0))
-            swa = _as_int01(_info_get(info, "step_win_avoid", 0))
-
-            if self.compute_rewards_for_all_objects:
-                # Bootcamp debugging: compute rewards for all object slots so we don't miss
-                # events just because the heuristic tracked another object this step.
-                for obj_idx in range(num_objects):
-                    prev_target = slice_target(prev_objects, obj_idx)
-                    next_target = slice_target(objects, obj_idx)
-                    reward_out = self.reward_extractor(
-                        self.prev_obs.raw_observation,
-                        self.obs.raw_observation,
-                        prev_target,
-                        next_target,
-                        life_lost,
-                        info,
-                        self.env_config,
-                    )
-                    rewards_vec = reward_out[0] if isinstance(reward_out, tuple) else reward_out
-                    rewards_np = np.asarray(jax.device_get(rewards_vec), dtype=np.float32)
-                    concept_rewards[:, obj_idx] = rewards_np
-                    if np.any(np.abs(rewards_np) > 1e-6):
-                        obj_labels = np.array(self.obs.objects.semantic_label[-1])
-                        label_id = int(obj_labels[obj_idx]) if obj_idx < len(obj_labels) else -1
-                        label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
-                        obj_name = (
-                            OBJECT_NAMES[obj_idx]
-                            if obj_idx < len(OBJECT_NAMES)
-                            else f"Obj {obj_idx}"
-                        )
-                        print(
-                            "[reward_any_object] "
-                            f"step={self.step_count} obj_idx={obj_idx} obj={obj_name} "
-                            f"label={label_name} rewards={rewards_np.tolist()} "
-                            f"global_reward={float(reward):+.3f} done={bool(done)} "
-                            f"info={{win_destroy:{swd}, win_collect:{swc}, fail_avoid:{sfa}, "
-                            f"fail_destroy_touch:{sfd}, win_avoid:{swa}}}"
-                        )
-            else:
-                if 0 <= target_idx_int < num_objects:
-                    prev_target = slice_target(prev_objects, target_idx_int)
-                    next_target = slice_target(objects, target_idx_int)
-                    reward_out = self.reward_extractor(
-                        self.prev_obs.raw_observation,
-                        self.obs.raw_observation,
-                        prev_target,
-                        next_target,
-                        life_lost,
-                        info,
-                        self.env_config,
-                    )
-                    rewards_vec = reward_out[0] if isinstance(reward_out, tuple) else reward_out
-                    concept_rewards[:, target_idx_int] = np.asarray(jax.device_get(rewards_vec))
-                    tracked_vec = np.asarray(jax.device_get(rewards_vec), dtype=np.float32)
-                    if np.any(np.abs(tracked_vec) > 1e-6):
-                        print(
-                            "[tracked_reward] "
-                            f"step={self.step_count} "
-                            f"target_idx={target_idx_int} "
-                            f"reward_vec={tracked_vec.tolist()} "
-                            f"global_reward={float(reward):+.3f} "
-                            f"done={bool(done)} "
-                            f"info={{win_destroy:{swd}, win_collect:{swc}, fail_avoid:{sfa}, "
-                            f"fail_destroy_touch:{sfd}, win_avoid:{swa}}}"
-                        )
-            
-            # Global reward: use the raw environment reward (game score delta)
-            self.multi_reward = MultiReward(
-                concept_rewards=concept_rewards,
-                global_reward=float(reward),
-            )
-            self.total_global_reward += float(self.multi_reward.global_reward)
-            
-            # Mark which objects produced any non-zero concept reward this step
-            self.last_object_events = np.any(np.abs(concept_rewards) > 1e-6, axis=0)
-            
-            # Update reward history - add events that just occurred
-            if self.multi_reward is not None:
-                object_labels = np.array(self.obs.objects.semantic_label[-1])
-                concept_rewards_np = np.array(self.multi_reward.concept_rewards)
-                
-                newly_triggered = np.where(self.last_object_events)[0]
-                for obj_idx in newly_triggered:
-                    label_id = int(object_labels[obj_idx])
-                    # Map label_id (1=DESTROY,2=COLLECT,3=AVOID) to skill index (0..2)
-                    skill_idx = max(0, label_id - 1)
-                    reward_val = float(concept_rewards_np[skill_idx, obj_idx])
-                    if abs(reward_val) <= 1e-6:
-                        continue
-                    obj_name = OBJECT_NAMES[obj_idx] if obj_idx < len(OBJECT_NAMES) else f"Obj {obj_idx}"
-                    label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
-                    
-                    # Check if this event is already in history (avoid duplicates)
-                    is_new = True
-                    for hist_entry in self.reward_history:
-                        if (
-                            hist_entry['obj_idx'] == obj_idx
-                            and hist_entry['step'] == self.step_count
-                        ):
-                            is_new = False
-                            break
-                    
-                    if is_new:
-                        self.reward_history.append({
-                            'step': self.step_count,
-                            'obj_idx': obj_idx,
-                            'obj_name': obj_name,
-                            'label_name': label_name,
-                            'reward': reward_val,
-                            'event': True
-                        })
-                        # Runtime debug log: reward events for the currently tracked object.
-                        if obj_idx == int(self.current_target_idx):
-                            reward_vec = concept_rewards_np[:, obj_idx].tolist()
-                            print(
-                                "[reward_event] "
-                                f"step={self.step_count} "
-                                f"target_idx={obj_idx} "
-                                f"target={obj_name} "
-                                f"label={label_name} "
-                                f"reward={reward_val:+.3f} "
-                                f"reward_vec={reward_vec} "
-                                f"global_reward={float(self.multi_reward.global_reward):+.3f}"
-                            )
-
-        # Clean up old history entries
-        self.reward_history = [
-            h for h in self.reward_history 
-            if (self.step_count - h['step']) <= self.history_duration
-        ]
-        
         self.step_count += 1
-        return done
-        
-    def render_game(self, state):
-        """Render the game screen using jaxatari rendering approach"""
+        # Purge stale log entries
+        self.event_log = [e for e in self.event_log
+                          if self.step_count - e["step"] <= self.log_max_steps]
+        return bool(done)
+
+    # ── reward computation ────────────────────────────────────────────────────
+
+    def _slice_obj(self, obj_obs, idx: int):
+        """Extract a single object's data across the frame stack."""
+        def _leaf(x):
+            if not hasattr(x, "ndim") or x.ndim == 0:
+                return x
+            if x.ndim == 1:
+                return x[idx] if idx < x.shape[0] else x
+            return x[..., idx] if idx < x.shape[-1] else x
+        return jax.tree_util.tree_map(_leaf, obj_obs)
+
+    def _compute_rewards(self, tracked_idx: int, env_reward: float, info):
+        """Compute skill rewards for ALL active objects and log non-zero events."""
+        objects      = self.obs.objects
+        prev_objects = self.prev_obs.objects
+        num_objects  = int(objects.x.shape[1])
+
+        life_lost = self.extract_life_lost(self.prev_state, self.state)
+        concept_rewards = np.zeros((3, num_objects), dtype=np.float32)
+
+        active_flags = np.array(objects.active[-1])
+        was_killed_flags = np.array(objects.was_killed[-1])
+
+        for obj_idx in range(num_objects):
+            prev_t = self._slice_obj(prev_objects, obj_idx)
+            next_t = self._slice_obj(objects,      obj_idx)
+            if not bool(
+                np.asarray(
+                    jax.device_get(object_reward_eligible(prev_t, next_t))
+                )
+            ):
+                continue
+            try:
+                out = self.reward_extractor(
+                    self.prev_obs.raw_observation,
+                    self.obs.raw_observation,
+                    prev_t, next_t, life_lost, info, {},
+                )
+                rvec = np.asarray(jax.device_get(
+                    out[0] if isinstance(out, tuple) else out
+                ), dtype=np.float32)
+                concept_rewards[:, obj_idx] = rvec
+            except Exception:
+                pass
+
+        self.concept_rewards = concept_rewards
+
+        # Log and print any non-zero reward events
+        labels = np.array(objects.semantic_label[-1])
+        for obj_idx in range(num_objects):
+            rvec = concept_rewards[:, obj_idx]
+            if not np.any(np.abs(rvec) > 1e-6):
+                continue
+            obj_name  = self._obj_name(obj_idx)
+            label_str = LABEL_NAMES.get(int(labels[obj_idx]), "?")
+            is_tracked = (obj_idx == tracked_idx)
+            entry = {
+                "step":       self.step_count,
+                "obj_idx":    obj_idx,
+                "obj_name":   obj_name,
+                "label":      label_str,
+                "rvec":       rvec.tolist(),
+                "env_reward": env_reward,
+                "tracked":    is_tracked,
+            }
+            self.event_log.append(entry)
+            tag = "[TRACKED]" if is_tracked else "[other  ]"
+            print(
+                f"step={self.step_count:5d} {tag} "
+                f"{obj_name:<16s} [{label_str:<7s}] "
+                f"D={rvec[0]:+.1f} C={rvec[1]:+.1f} A={rvec[2]:+.1f}  "
+                f"env={env_reward:+.0f}"
+            )
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _obj_name(self, idx: int) -> str:
+        if idx < len(self._obj_names):
+            return self._obj_names[idx]
+        return f"Obj {idx}"
+
+    # ── rendering ─────────────────────────────────────────────────────────────
+
+    def _render_game(self):
         frame = None
-        
-        # Use the dedicated Seaquest renderer on the underlying Atari state
         try:
-            if state is not None and self.renderer is not None:
-                # Unwrap to the base Atari game state if needed
-                atari_state = getattr(state, "atari_state", state)
-                game_state = getattr(atari_state, "env_state", atari_state)
-                frame = self.renderer.render(game_state)
+            if self.state is not None and self.renderer is not None:
+                gs = getattr(
+                    getattr(self.state, "atari_state", self.state),
+                    "env_state", self.state
+                )
+                frame = np.asarray(jax.device_get(self.renderer.render(gs)))
+                if frame.dtype != np.uint8:
+                    frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8) \
+                        if frame.max() <= 1.0 else np.clip(frame, 0, 255).astype(np.uint8)
+                if frame.ndim == 2:
+                    frame = np.stack([frame] * 3, axis=-1)
+                elif frame.shape[2] == 4:
+                    frame = frame[:, :, :3]
         except Exception:
             frame = None
-        
-        # Convert JAX array to NumPy array properly
-        if frame is not None:
-            try:
-                # Use jax.device_get() to properly convert JAX arrays to NumPy
-                # This handles device arrays (CPU/GPU/TPU) correctly
-                frame = jax.device_get(frame)
-                
-                # Ensure it's a numpy array
-                frame = np.asarray(frame)
-                
-                # Handle different dtypes and shapes
-                if frame.dtype != np.uint8:
-                    if np.issubdtype(frame.dtype, np.floating):
-                        if frame.max() <= 1.0:
-                            frame = (frame * 255).astype(np.uint8)
-                        else:
-                            frame = np.clip(frame, 0, 255).astype(np.uint8)
-                    else:
-                        frame = frame.astype(np.uint8)
-                
-                # Handle shape: expect (H, W, 3) or (H, W)
-                if len(frame.shape) == 2:
-                    # Grayscale, convert to RGB
-                    frame = np.stack([frame] * 3, axis=-1)
-                elif len(frame.shape) == 3:
-                    if frame.shape[2] == 4:
-                        # RGBA, convert to RGB
-                        frame = frame[:, :, :3]
-                    elif frame.shape[2] != 3:
-                        # Unexpected channel count
-                        frame = None
-                
-                # Create pygame surface
-                if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # Transpose (H, W, C) to (W, H, C) for pygame
-                    frame_surface = pygame.surfarray.make_surface(
-                        np.transpose(frame, (1, 0, 2))
-                    )
-                    # Scale up
-                    frame_surface = pygame.transform.scale(
-                        frame_surface, (self.game_width, self.game_height)
-                    )
-                    self.screen.blit(frame_surface, (10, 10))
-                    # After drawing the game frame, overlay current target outline if any
-                    self._draw_target_outline_on_screen()
-                    return
-            except Exception as e:
-                # If anything fails, fall through to placeholder
-                pass
-        
-        # Fallback: Draw placeholder with game info
-        pygame.draw.rect(self.screen, DARK_GRAY, (10, 10, self.game_width, self.game_height))
-        pygame.draw.rect(self.screen, GRAY, (10, 10, self.game_width, self.game_height), 2)
-        
-        # Show game state info
-        if self.obs is not None:
-            info_lines = [f"{self.env_name.title()} Game", ""]
 
-            raw = getattr(self.obs, "raw_observation", None)
-            if raw is not None:
-                if hasattr(raw, "oxygen_level"):
-                    info_lines.append(
-                        f"Oxygen: {float(raw.oxygen_level[-1]) * 64:.0f}/64"
-                    )
-                if hasattr(raw, "collected_divers"):
-                    info_lines.append(
-                        f"Divers: {float(raw.collected_divers[-1]):.0f}/6"
-                    )
+        if frame is not None and frame.ndim == 3 and frame.shape[2] == 3:
+            surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
+            surf = pygame.transform.scale(surf, (self.game_w, self.game_h))
+            self.screen.blit(surf, (10, 10))
+        else:
+            pygame.draw.rect(self.screen, DARK_GRAY, (10, 10, self.game_w, self.game_h))
 
-            if self.state is not None and hasattr(self.state, "atari_state"):
-                try:
-                    lives = int(self.state.atari_state.env_state.lives)
-                    info_lines.append(f"Lives: {lives}")
-                except Exception:
-                    pass
+        self._draw_target_outline()
 
-            info_lines.extend(
-                [
-                    "",
-                    "Rendering not available",
-                    "Check game state in panel",
-                ]
-            )
-            y_offset = 20
-            for line in info_lines:
-                text = self.small_font.render(line, True, WHITE)
-                self.screen.blit(text, (20, y_offset))
-                y_offset += 20
-
-        # Also overlay target outline relative to placeholder bounds
-        self._draw_target_outline_on_screen()
-
-    def _draw_target_outline_on_screen(self):
-        """Draw a red outline around the current heuristic target object."""
-        if (
-            self.obs is None
-            or self.current_target_idx is None
-            or self.current_target_idx == self.no_target_idx
-        ):
+    def _draw_target_outline(self):
+        if self.obs is None or self.current_target_idx == self.no_target_idx:
             return
-
         idx = int(self.current_target_idx)
-        # Use latest frame in the stack for geometry
         try:
-            x_arr = np.array(self.obs.objects.x[-1])
-            y_arr = np.array(self.obs.objects.y[-1])
-            w_arr = np.array(self.obs.objects.width[-1])
-            h_arr = np.array(self.obs.objects.height[-1])
-            active_arr = np.array(self.obs.objects.active[-1])
+            xa = np.array(self.obs.objects.x[-1])
+            ya = np.array(self.obs.objects.y[-1])
+            wa = np.array(self.obs.objects.width[-1])
+            ha = np.array(self.obs.objects.height[-1])
+            act = np.array(self.obs.objects.active[-1])
         except Exception:
             return
-
-        if idx < 0 or idx >= len(active_arr) or active_arr[idx] <= 0:
+        if idx >= len(act) or act[idx] <= 0:
             return
-
-        x = int(x_arr[idx])
-        y = int(y_arr[idx])
-        w = int(w_arr[idx])
-        h = int(h_arr[idx])
-        # Skip degenerate or 1-pixel bounding boxes which are often invisible anyway.
-        if w <= 1 or h <= 1:
+        x, y, w, h = int(xa[idx]), int(ya[idx]), int(wa[idx]), int(ha[idx])
+        if w < 2 or h < 2:
             return
-
-        # Game frame is drawn at (10, 10) scaled by game_scale
         sx = 10 + int(x * self.game_scale)
         sy = 10 + int(y * self.game_scale)
-        sw = int(w * self.game_scale)
-        sh = int(h * self.game_scale)
+        pygame.draw.rect(self.screen, TARGET_COLOR,
+                         (sx, sy, w * self.game_scale, h * self.game_scale), 2)
 
-        pygame.draw.rect(
-            self.screen,
-            TARGET_OUTLINE_COLOR,
-            (sx, sy, sw, sh),
-            TARGET_OUTLINE_WIDTH,
-        )
-    
-    def draw_reward_panel(self):
-        """Draw the reward information panel in horizontal columns"""
-        panel_y = 10
-        
-        # Column 1: Stats and Recent Events
-        col1_x = self.panel_start_x
-        col1_y = self._draw_column1(col1_x, panel_y)
-        
-        # Column 2: Active Objects & Rewards
-        col2_x = self.panel_start_x + self.column_width + self.column_spacing
-        col2_y = self._draw_column2(col2_x, panel_y)
-        
-        # Column 3: Controls (at bottom)
-        col3_x = self.panel_start_x + 2 * (self.column_width + self.column_spacing)
-        self._draw_column3(col3_x, panel_y)
-    
-    def _draw_column1(self, x, y):
-        """Draw column 1: Stats and Recent Events"""
-        current_y = y
-        
-        # Title
-        title = self.bold_font.render("Stats & Events", True, WHITE)
-        self.screen.blit(title, (x, current_y))
-        current_y += 30
-        
-        # Global stats
-        stats_text = [
-            f"Step: {self.step_count}",
-            f"Global: {self.total_global_reward:.3f}",
-            f"FPS: {self.actual_fps:.1f}/{self.target_fps}",
-        ]
-        if self.multi_reward is not None:
-            stats_text.append(f"Last: {float(self.multi_reward.global_reward):.3f}")
-        
-        # Event detection (objects that produced any reward last step)
-        if self.last_object_events is not None:
-            num_events = int(np.sum(self.last_object_events))
-            if num_events > 0:
-                stats_text.append(f"Events: {num_events}")
-        
-        for text in stats_text:
-            surface = self.small_font.render(text, True, WHITE)
-            self.screen.blit(surface, (x, current_y))
-            current_y += 18
-        
-        current_y += 10
-        
-        # Recent Events
-        if len(self.reward_history) > 0:
-            header = self.small_font.render("Recent Events:", True, YELLOW)
-            self.screen.blit(header, (x, current_y))
-            current_y += 20
-            
-            # Show most recent events (up to 8)
-            for hist_entry in self.reward_history[-8:]:
-                age = self.step_count - hist_entry['step']
-                obj_text = f"{hist_entry['obj_name']}"
-                reward_text = f"{hist_entry['reward']:+.2f} ({age}s ago)"
-                
-                # Fade color based on age
-                if age <= 2:
-                    color = GREEN
-                elif age <= 5:
-                    color = YELLOW
-                else:
-                    color = GRAY
-                
-                surface = self.small_font.render(obj_text, True, color)
-                self.screen.blit(surface, (x + 5, current_y))
-                current_y += 14
-                
-                surface = self.small_font.render(reward_text, True, color)
-                self.screen.blit(surface, (x + 5, current_y))
-                current_y += 14
-        
-        return current_y
-    
-    def _draw_column2(self, x, y):
-        """Draw column 2: Active Objects & Rewards"""
-        current_y = y
-        
-        # Header
-        header = self.bold_font.render("Active Objects", True, YELLOW)
-        self.screen.blit(header, (x, current_y))
-        current_y += 30
-        
-        # Reward matrix display
-        if self.multi_reward is not None:
-            # Show rewards for active objects only
-            concept_rewards = np.array(self.multi_reward.concept_rewards)
-            active_flags = np.array(self.obs.objects.active[-1])
-            labels = np.array(self.obs.objects.semantic_label[-1])
-            events = (
-                np.array(self.last_object_events)
-                if self.last_object_events is not None
-                else np.zeros_like(active_flags, dtype=bool)
-            )
-            
-            # Show each active object (compact horizontal format)
-            active_count = 0
-            max_display = 25  # Can show more in horizontal layout
-            
-            for obj_idx in range(len(active_flags)):
-                if active_flags[obj_idx] > 0.5 and active_count < max_display:
-                    obj_name = OBJECT_NAMES[obj_idx] if obj_idx < len(OBJECT_NAMES) else f"Obj {obj_idx}"
-                    
-                    label_id = int(labels[obj_idx])
-                    label_name = LABEL_NAMES.get(label_id, f"Label {label_id}")
-                    # Map label to skill index (0..2) for reward lookup
-                    skill_idx = max(0, label_id - 1)
-                    reward_val = float(concept_rewards[skill_idx, obj_idx])
-                    
-                    # Compact format: Name | Label | Reward
-                    obj_text = f"{obj_name}"
-                    label_text = f"[{label_name}]"
-                    event_triggered = bool(events[obj_idx]) and abs(reward_val) > 1e-6
-                    if event_triggered:
-                        label_text += " [E]"
-                    
-                    color = GREEN if event_triggered else WHITE
-                    
-                    # Render in compact format
-                    surface = self.small_font.render(obj_text, True, color)
-                    self.screen.blit(surface, (x, current_y))
-                    
-                    surface = self.small_font.render(label_text, True, color)
-                    self.screen.blit(surface, (x + 70, current_y))
-                    
-                    # Show reward
-                    if abs(reward_val) > 1e-6:
-                        reward_color = GREEN if event_triggered and reward_val > 0 else CYAN
-                        reward_str = f"{reward_val:+.2f}"
-                    else:
-                        reward_color = GRAY
-                        reward_str = "0.00"
-                    
-                    surface = self.small_font.render(reward_str, True, reward_color)
-                    self.screen.blit(surface, (x + 140, current_y))
-                    
-                    current_y += 14
-                    active_count += 1
-            
-            if active_count >= max_display:
-                more_text = self.small_font.render(
-                    f"... +{np.sum(active_flags > 0.5) - max_display} more",
-                    True,
-                    GRAY,
-                )
-                self.screen.blit(more_text, (x, current_y))
-        
-        return current_y
-    
-    def _draw_column3(self, x, y):
-        """Draw column 3: Controls and Info"""
-        current_y = y
-        
-        # Title
-        title = self.bold_font.render("Controls", True, WHITE)
-        self.screen.blit(title, (x, current_y))
-        current_y += 30
-        
-        # Controls help
-        help_text = [
-            "Arrow Keys: Move",
-            "Space: Fire",
-            "R: Reset",
-            "F: Freeze/Unfreeze",
-            "N: Step Forward",
-            "Q/ESC: Quit"
-        ]
-        if self.frozen:
-            help_text.append("")
-            help_text.append("*** FROZEN ***")
-        
-        for text in help_text:
-            color = YELLOW if "***" in text else GRAY
-            surface = self.small_font.render(text, True, color)
-            self.screen.blit(surface, (x, current_y))
-            current_y += 18
-        
-        current_y += 20
-        
-        # Game info
+    def _draw_panel(self):
+        x0 = self.panel_x
+        y  = 10
+        lh = 16  # line height
+
+        def text(s, px, py, color=WHITE, bold=False):
+            f = self.bold_font if bold else self.font
+            self.screen.blit(f.render(s, True, color), (px, py))
+            return py + lh
+
+        # ── header ────────────────────────────────────────────────────────────
+        y = text(f"{self.env_name.upper()}  step={self.step_count}  "
+                 f"env_total={self.total_reward:.0f}  fps={self.actual_fps:.0f}",
+                 x0, y, YELLOW, bold=True)
+        y += 4
+
+        tgt_name = self._obj_name(int(self.current_target_idx))
+        tgt_label = ""
         if self.obs is not None:
-            info_title = self.small_font.render("Game State:", True, WHITE)
-            self.screen.blit(info_title, (x, current_y))
-            current_y += 20
+            try:
+                lab = int(np.array(self.obs.objects.semantic_label[-1])[int(self.current_target_idx)])
+                tgt_label = LABEL_NAMES.get(lab, "?")
+            except Exception:
+                pass
+        y = text(f"Target: [{self.current_target_idx}] {tgt_name}  ({tgt_label})",
+                 x0, y, TARGET_COLOR, bold=True)
+        y += 6
 
-            info_lines = []
-            raw = getattr(self.obs, "raw_observation", None)
-            if raw is not None:
-                if hasattr(raw, "oxygen_level"):
-                    info_lines.append(
-                        f"Oxygen: {float(raw.oxygen_level[-1]) * 64:.0f}/64"
-                    )
-                if hasattr(raw, "collected_divers"):
-                    info_lines.append(
-                        f"Divers: {float(raw.collected_divers[-1]):.0f}/6"
-                    )
+        # ── skill reward legend ───────────────────────────────────────────────
+        legend = "Skills: "
+        for i, (name, col) in enumerate(zip(SKILL_NAMES, SKILL_COLORS)):
+            lx = x0 + len(legend) * 8 if i == 0 else None  # approximate; drawn separately
+        # Draw inline
+        lx = x0
+        self.screen.blit(self.font.render("Skills: ", True, GRAY), (lx, y))
+        lx += self.font.size("Skills: ")[0]
+        for name, col in zip(SKILL_NAMES, SKILL_COLORS):
+            s = f"[{name}]  "
+            self.screen.blit(self.font.render(s, True, col), (lx, y))
+            lx += self.font.size(s)[0]
+        y += lh + 4
 
-            if self.state is not None and hasattr(self.state, "atari_state"):
-                try:
-                    lives = int(self.state.atari_state.env_state.lives)
-                    info_lines.append(f"Lives: {lives}")
-                except Exception:
-                    pass
+        # ── active objects table ──────────────────────────────────────────────
+        y = text("─── Active Objects ───────────────────────────────────────────",
+                 x0, y, DARK_GRAY)
 
-            for line in info_lines:
-                surface = self.small_font.render(line, True, WHITE)
-                self.screen.blit(surface, (x, current_y))
-                current_y += 18
-    
-    def handle_keyboard(self) -> Tuple[int, bool, bool, bool, bool]:
-        """Handle keyboard input and return (action, quit_flag, reset_flag, freeze_toggle, step_forward)"""
+        if self.obs is not None:
+            labels      = np.array(self.obs.objects.semantic_label[-1])
+            active_flags= np.array(self.obs.objects.active[-1])
+            was_killed_flags = np.array(self.obs.objects.was_killed[-1])
+            num_objects = int(active_flags.shape[0])
+            col_right   = x0 + self.panel_w - 5
+
+            for obj_idx in range(num_objects):
+                if active_flags[obj_idx] <= 0 and was_killed_flags[obj_idx] <= 0:
+                    continue
+                if y > self.game_h + 10:
+                    text("  … more objects …", x0, y, GRAY)
+                    y += lh
+                    break
+
+                is_tracked = (obj_idx == int(self.current_target_idx))
+                label_id   = int(labels[obj_idx])
+                label_str  = LABEL_NAMES.get(label_id, "?")
+                obj_name   = self._obj_name(obj_idx)
+
+                rvec = self.concept_rewards[:, obj_idx] \
+                    if obj_idx < self.concept_rewards.shape[1] \
+                    else np.zeros(3, dtype=np.float32)
+                has_reward = np.any(np.abs(rvec) > 1e-6)
+
+                # Row colour
+                if is_tracked:
+                    row_color = WHITE
+                elif has_reward:
+                    row_color = GREEN
+                else:
+                    row_color = GRAY
+
+                # Object name + label
+                row = f"{'▶ ' if is_tracked else '  '}[{obj_idx:2d}] {obj_name:<16s} {label_str:<7s}"
+                text(row, x0, y, row_color, bold=is_tracked)
+
+                # Skill reward values, right-aligned
+                rx = col_right
+                for skill_i in range(2, -1, -1):
+                    rv = float(rvec[skill_i])
+                    if abs(rv) > 1e-6:
+                        s = f"{SKILL_NAMES[skill_i][0]}:{rv:+.1f} "
+                        col = GREEN if rv > 0 else RED
+                    else:
+                        s = f"{SKILL_NAMES[skill_i][0]}:  0  "
+                        col = DARK_GRAY
+                    sw = self.font.size(s)[0]
+                    rx -= sw
+                    self.screen.blit(self.font.render(s, True, col), (rx, y))
+
+                y += lh
+
+        y += 8
+
+        # ── recent events log ─────────────────────────────────────────────────
+        y = text("─── Recent Reward Events ──────────────────────────────────────",
+                 x0, y, DARK_GRAY)
+
+        recent = [e for e in reversed(self.event_log)][:12]
+        for e in recent:
+            age   = self.step_count - e["step"]
+            rvec  = e["rvec"]
+            age_c = GREEN if age <= 5 else (YELLOW if age <= 15 else GRAY)
+            tag   = "▶" if e["tracked"] else " "
+            rv_str = "  ".join(
+                f"{SKILL_NAMES[i][0]}:{rvec[i]:+.1f}"
+                for i in range(3)
+                if abs(rvec[i]) > 1e-6
+            )
+            line = f"{tag}[{e['obj_idx']:2d}] {e['obj_name']:<16s} {rv_str}  ({age}f ago)"
+            y = text(line, x0, y, age_c)
+
+        # ── controls ──────────────────────────────────────────────────────────
+        cy = self.game_h + 20
+        text("Arrows+Space: move/fire   R: reset   F: freeze   N: step   Q: quit",
+             x0, cy, DARK_GRAY)
+        if self.frozen:
+            text("*** FROZEN — press N to step ***", x0, cy + lh, YELLOW, bold=True)
+
+    # ── input ─────────────────────────────────────────────────────────────────
+
+    def handle_input(self) -> Tuple[int, bool, bool, bool, bool]:
         keys = pygame.key.get_pressed()
         action = ACTION_NOOP
-        quit_flag = False
-        reset_flag = False
-        freeze_toggle = False
-        step_forward = False
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                quit_flag = True
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
-                    quit_flag = True
-                elif event.key == pygame.K_r:
-                    reset_flag = True
-                elif event.key == pygame.K_f:
-                    freeze_toggle = True
-                elif event.key == pygame.K_n:
-                    step_forward = True
-        
-        # Movement and firing
-        if keys[pygame.K_UP] and keys[pygame.K_RIGHT]:
-            action = ACTION_UPRIGHTFIRE if keys[pygame.K_SPACE] else ACTION_UPRIGHT
-        elif keys[pygame.K_UP] and keys[pygame.K_LEFT]:
-            action = ACTION_UPLEFTFIRE if keys[pygame.K_SPACE] else ACTION_UPLEFT
-        elif keys[pygame.K_DOWN] and keys[pygame.K_RIGHT]:
-            action = ACTION_DOWNRIGHTFIRE if keys[pygame.K_SPACE] else ACTION_DOWNRIGHT
-        elif keys[pygame.K_DOWN] and keys[pygame.K_LEFT]:
-            action = ACTION_DOWNLEFTFIRE if keys[pygame.K_SPACE] else ACTION_DOWNLEFT
-        elif keys[pygame.K_UP]:
-            action = ACTION_UPFIRE if keys[pygame.K_SPACE] else ACTION_UP
-        elif keys[pygame.K_DOWN]:
-            action = ACTION_DOWNFIRE if keys[pygame.K_SPACE] else ACTION_DOWN
-        elif keys[pygame.K_RIGHT]:
-            action = ACTION_RIGHTFIRE if keys[pygame.K_SPACE] else ACTION_RIGHT
-        elif keys[pygame.K_LEFT]:
-            action = ACTION_LEFTFIRE if keys[pygame.K_SPACE] else ACTION_LEFT
-        elif keys[pygame.K_SPACE]:
-            action = ACTION_FIRE
-        
-        return action, quit_flag, reset_flag, freeze_toggle, step_forward
-    
+        quit_, reset_, freeze_, step_ = False, False, False, False
+
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                quit_ = True
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key in (pygame.K_q, pygame.K_ESCAPE):
+                    quit_ = True
+                elif ev.key == pygame.K_r:
+                    reset_ = True
+                elif ev.key == pygame.K_f:
+                    freeze_ = True
+                elif ev.key == pygame.K_n:
+                    step_ = True
+
+        u, d, l, r, sp = (keys[k] for k in (
+            pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_SPACE
+        ))
+        if u and r:   action = ACTION_UPRIGHTFIRE   if sp else ACTION_UPRIGHT
+        elif u and l: action = ACTION_UPLEFTFIRE    if sp else ACTION_UPLEFT
+        elif d and r: action = ACTION_DOWNRIGHTFIRE if sp else ACTION_DOWNRIGHT
+        elif d and l: action = ACTION_DOWNLEFTFIRE  if sp else ACTION_DOWNLEFT
+        elif u:       action = ACTION_UPFIRE        if sp else ACTION_UP
+        elif d:       action = ACTION_DOWNFIRE      if sp else ACTION_DOWN
+        elif r:       action = ACTION_RIGHTFIRE     if sp else ACTION_RIGHT
+        elif l:       action = ACTION_LEFTFIRE      if sp else ACTION_LEFT
+        elif sp:      action = ACTION_FIRE
+
+        return action, quit_, reset_, freeze_, step_
+
+    # ── main loop ─────────────────────────────────────────────────────────────
+
     def run(self):
-        """Main game loop"""
         self.reset()
         clock = pygame.time.Clock()
         running = True
-        
+
         while running:
-            # Handle input
-            action, quit_flag, reset_flag, freeze_toggle, step_forward = self.handle_keyboard()
-            if quit_flag:
-                running = False
+            action, quit_, reset_, freeze_, step_ = self.handle_input()
+            if quit_:
                 break
-            if reset_flag:
+            if reset_:
                 self.reset()
                 self.frozen = False
-                self.step_mode = False
                 continue
-            
-            # Handle freeze toggle
-            if freeze_toggle:
+            if freeze_:
                 self.frozen = not self.frozen
-                self.step_mode = False
-            
-            # Step environment (only if not frozen, or if step forward requested)
-            should_step = not self.frozen or step_forward
-            if should_step:
-                done = self.step(action)
-                if done:
+
+            if not self.frozen or step_:
+                if self.step(action):
                     self.reset()
                     self.frozen = False
-                    self.step_mode = False
-            
-            # Render
+
             self.screen.fill(BLACK)
-            self.render_game(self.state)
-            self.draw_reward_panel()
+            self._render_game()
+            self._draw_panel()
             pygame.display.flip()
-            
-            # Cap FPS (lower when frozen for easier inspection)
-            target_fps = 5 if self.frozen else self.target_fps
-            elapsed_ms = clock.tick(target_fps)
-            # Calculate actual FPS
-            if elapsed_ms > 0:
-                current_fps = 1000.0 / elapsed_ms
-                self.fps_history.append(current_fps)
-                # Keep only last 10 frames for smoothing
+
+            fps = 5 if self.frozen else self.target_fps
+            ms = clock.tick(fps)
+            if ms > 0:
+                self.fps_history.append(1000.0 / ms)
                 if len(self.fps_history) > 10:
                     self.fps_history.pop(0)
                 self.actual_fps = sum(self.fps_history) / len(self.fps_history)
-        
+
         pygame.quit()
 
 
 def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(description="Interactive reward dashboard")
-    parser.add_argument(
-        "--experiment",
-        default="skillbootcamp_skills",
-        help="Experiment config name from configs/experiment (without .yaml).",
-    )
-    parser.add_argument(
-        "--env-name",
-        default=None,
-        help="Override ENV_NAME from experiment config.",
-    )
-    parser.add_argument(
-        "--train-env",
-        action="store_true",
-        help="Use training wrapper settings (defaults to eval wrapper).",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--experiment", default="seaquest_tandem",
+                        help="Experiment config name (without .yaml)")
+    parser.add_argument("--env-name", default=None,
+                        help="Override ENV_NAME from the experiment config")
     args = parser.parse_args()
 
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    base_cfg_path = os.path.join(repo_root, "configs", "config.yaml")
-    exp_cfg_path = os.path.join(repo_root, "configs", "experiment", f"{args.experiment}.yaml")
-    if not os.path.exists(exp_cfg_path):
-        raise FileNotFoundError(f"Experiment config not found: {exp_cfg_path}")
+    repo_root   = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    base_path   = os.path.join(repo_root, "configs", "config.yaml")
+    exp_path    = os.path.join(repo_root, "configs", "experiment", f"{args.experiment}.yaml")
+    if not os.path.exists(exp_path):
+        raise FileNotFoundError(f"Experiment config not found: {exp_path}")
 
-    base_cfg = OmegaConf.to_container(OmegaConf.load(base_cfg_path), resolve=True)
-    exp_cfg = OmegaConf.to_container(OmegaConf.load(exp_cfg_path), resolve=True)
-    merged_cfg = {**base_cfg, **exp_cfg, **exp_cfg.get("alg", {})}
-    env_name = str(args.env_name or merged_cfg.get("ENV_NAME", "seaquest"))
+    base_cfg = OmegaConf.to_container(OmegaConf.load(base_path), resolve=True)
+    exp_cfg  = OmegaConf.to_container(OmegaConf.load(exp_path),  resolve=True)
+    cfg      = {**base_cfg, **exp_cfg, **exp_cfg.get("alg", {})}
+    env_name = str(args.env_name or cfg.get("ENV_NAME", "seaquest"))
 
-    # Use EnvManager to construct the environment and renderer in the same way
-    # as the training / visualization pipelines.
-    manager = EnvManager()
-    env, renderer = manager.make_env(env_name, merged_cfg, train=bool(args.train_env))
+    manager    = EnvManager()
+    env, renderer = manager.make_env(env_name, cfg, train=False)
     components = manager.get_components(env_name)
-    fixed_target_idx = components.fixed_target_idx_from_config(merged_cfg)
 
-    # Create dashboard
     dashboard = RewardDashboard(
-        env,
-        renderer,
+        env, renderer,
         env_name=env_name,
         get_heuristic_target=components.get_heuristic_target,
         no_target_idx=components.no_target_idx,
         reward_extractor=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
-        action_mapper=components.action_mapper,
-        fixed_target_idx=fixed_target_idx,
-        env_config=merged_cfg,
-        screen_width=1200,
-        screen_height=600,
+        screen_width=1280,
+        screen_height=630,
     )
-    
-    # Run
+
     try:
         dashboard.run()
     except KeyboardInterrupt:

@@ -42,6 +42,12 @@ class Transition:
     q_val: chex.Array       # all skills' Q-values [num_skills, num_envs, ego_action_dim]
     rewards: chex.Array     # rewards for ALL skills [num_envs, num_skills]
     skill_done: chex.Array  # [num_envs, num_skills]
+    ego_obs_all: chex.Array
+    next_ego_obs_all: chex.Array
+    ego_action_all: chex.Array
+    rewards_all: chex.Array
+    skill_done_all: chex.Array
+    relabel_mask: chex.Array
     done: chex.Array
     env_reward: chex.Array
 

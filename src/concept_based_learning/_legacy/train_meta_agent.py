@@ -16,12 +16,12 @@ import chex
 import optax
 from flax.training.train_state import TrainState
 
-from concept_based_learning.egocentric_transformation import (
+from concept_based_learning.observations.egocentric import (
     ego_obs_channels_per_frame,
     get_ego_obs,
 )
-from concept_based_learning.ego_action_space import fire_ego_action_indices
-from concept_based_learning.train_agent import QNetwork as SkillQNetwork
+from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork
 from concept_based_learning.training.schedules import eps_decay_transition_steps
 from concept_based_learning.environments.datatypes import MetaTransition
 from concept_based_learning.networks.meta_factory import create_meta_network
@@ -296,7 +296,9 @@ def make_meta_train(
                         )
 
                     ego_action = jnp.argmax(skill_qs)
-                    global_action = action_mapper(ego_action, obs.raw_observation, safe_target)
+                    global_action = action_mapper(
+                        ego_action, obs.raw_observation, safe_target, obs.objects
+                    )
 
                     # Optional selectable NOOP target and empty-screen fallback.
                     return jnp.where(force_noop, 0, global_action)
@@ -647,7 +649,9 @@ def make_meta_train(
                     skill_qs = skill_qs.at[NON_NOOP_FIRE_EGO_ACTION_INDICES].set(-jnp.inf)
 
                 chosen_ego = jnp.argmax(skill_qs)
-                global_action = action_mapper(chosen_ego, obs.raw_observation, target_obj_idxs)
+                global_action = action_mapper(
+                    chosen_ego, obs.raw_observation, target_obj_idxs, obs.objects
+                )
                 # Keep video sidebar shape consistent with skill trainer:
                 # one value per skill (here we only evaluate active skill, so we
                 # place its max-Q into that slot and keep others at 0).

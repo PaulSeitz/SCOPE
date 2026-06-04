@@ -27,6 +27,7 @@ def make_tandem_train(
     no_target_idx,
     get_heuristic_target,
     action_mapper,
+    inverse_action_mapper,
     extract_all_skills_rewards,
     extract_life_lost,
     meta_mask_hook,
@@ -50,6 +51,25 @@ def make_tandem_train(
     skill_freeze_after_updates = int(config.get("SKILL_FREEZE_AFTER_UPDATES", 0))
     meta_noop_enabled = meta_noop_target_enabled(config)
     meta_noop_idx = meta_noop_target_idx(config)
+    relabel_all_objects = bool(config.get("RELABEL_ALL_OBJECTS", False))
+    relabel_k_objects = config.get("RELABEL_K_OBJECTS", None)
+    skill_bootstrap = str(config.get("SKILL_BOOTSTRAP", "q_lambda")).lower()
+    relabel_k_objects = (
+        None
+        if relabel_k_objects is None
+        else int(max(1, min(max_objects, int(relabel_k_objects))))
+    )
+    skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
+    symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
+    symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
+    symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
+    skill_qlambda_watkins_cut = bool(
+        config.get("SKILL_QLAMBDA_WATKINS_CUT", False)
+    )
+    skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
+
+    log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
+    freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
 
     def label_to_skill_idx(label):
         return jnp.clip(label - 1, 0, num_skills - 1)
@@ -176,6 +196,7 @@ def make_tandem_train(
                     completed_returns_sum,
                     num_completed,
                     last_targets,
+                    car_hits_sum,
                 ) = carry
                 rng, rng_meta, rng_skill = jax.random.split(rng, 3)
 
@@ -300,6 +321,22 @@ def make_tandem_train(
                 chosen_ego_actions = all_ego_actions[
                     active_skills, jnp.arange(config["NUM_ENVS"])
                 ]
+                if symbolic_collect_enabled:
+                    symbolic_collect_ego_action = jax.vmap(inverse_action_mapper)(
+                        jnp.full(
+                            (config["NUM_ENVS"],),
+                            symbolic_collect_up_action,
+                            dtype=jnp.int32,
+                        ),
+                        last_obs.raw_observation,
+                        safe_target_idxs,
+                        last_obs.objects,
+                    )
+                    chosen_ego_actions = jnp.where(
+                        active_skills == symbolic_collect_skill_idx,
+                        symbolic_collect_ego_action,
+                        chosen_ego_actions,
+                    )
                 meta_noop = is_meta_noop_target(
                     target_obj_idxs,
                     config,
@@ -312,12 +349,19 @@ def make_tandem_train(
                 global_actions = jax.vmap(action_mapper)(
                     chosen_ego_actions, last_obs.raw_observation, target_obj_idxs, last_obs.objects
                 )
+                if symbolic_collect_enabled:
+                    global_actions = jnp.where(
+                        active_skills == symbolic_collect_skill_idx,
+                        jnp.full_like(global_actions, symbolic_collect_up_action),
+                        global_actions,
+                    )
                 global_actions = jnp.where(force_noop, 0, global_actions)
 
                 new_obs, new_env_state, env_reward, new_done, info = vmap_step(
                     env_state, global_actions
                 )
                 life_lost = extract_life_lost(env_state, new_env_state)
+                car_hits_sum = car_hits_sum + jnp.sum(life_lost > 0)
                 done_due_to_life_lost = jnp.logical_and(new_done, life_lost > 0)
 
                 episode_return = running_returns + env_reward
@@ -404,6 +448,98 @@ def make_tandem_train(
                     safe_target_idxs,
                 )
 
+                if relabel_all_objects:
+                    obj_ids = jnp.arange(max_objects, dtype=jnp.int32)
+                    ego_obs_all_full = jax.vmap(
+                        lambda raw, objs: jax.vmap(
+                            lambda obj_idx: get_ego_obs(raw, objs, obj_idx)
+                        )(obj_ids)
+                    )(last_obs.raw_observation, last_obs.objects)
+                    next_ego_obs_all_full = jax.vmap(
+                        lambda raw, objs: jax.vmap(
+                            lambda obj_idx: get_ego_obs(raw, objs, obj_idx)
+                        )(obj_ids)
+                    )(next_obs_for_rollout.raw_observation, next_obs_for_rollout.objects)
+                    ego_action_all_full = jax.vmap(
+                        lambda game_action, raw, objs: jax.vmap(
+                            lambda obj_idx: inverse_action_mapper(
+                                game_action, raw, obj_idx, objs
+                            )
+                        )(obj_ids)
+                    )(global_actions, last_obs.raw_observation, last_obs.objects)
+
+                    def _all_object_rewards(pr, nr, prev_objs, next_objs, ll, inf):
+                        def _single_object(obj_idx):
+                            prev_obj = jax.tree_util.tree_map(
+                                lambda x: jnp.take(x, obj_idx, axis=-1), prev_objs
+                            )
+                            next_obj = jax.tree_util.tree_map(
+                                lambda x: jnp.take(x, obj_idx, axis=-1), next_objs
+                            )
+                            return extract_all_skills_rewards(
+                                pr, nr, prev_obj, next_obj, ll, inf, config
+                            )
+
+                        return jax.vmap(_single_object)(obj_ids)
+
+                    skill_rewards_all_full, skill_done_all_full = jax.vmap(
+                        _all_object_rewards
+                    )(
+                        last_obs.raw_observation,
+                        new_obs.raw_observation,
+                        last_obs.objects,
+                        new_obs.objects,
+                        life_lost,
+                        info,
+                    )
+                    relabel_mask_full = active_masks
+                    if meta_noop_enabled:
+                        relabel_mask_full = relabel_mask_full.at[:, meta_noop_idx].set(
+                            False
+                        )
+                    if relabel_k_objects is not None:
+                        rng, rng_relabel = jax.random.split(rng)
+                        relabel_scores = jnp.where(
+                            relabel_mask_full,
+                            jax.random.uniform(
+                                rng_relabel, shape=relabel_mask_full.shape
+                            ),
+                            -1.0,
+                        )
+                        gather_idx = jnp.flip(
+                            jnp.argsort(relabel_scores, axis=-1), axis=-1
+                        )[:, :relabel_k_objects]
+
+                        def _gather_objects(arr):
+                            idx = gather_idx
+                            while idx.ndim < arr.ndim:
+                                idx = idx[..., None]
+                            return jnp.take_along_axis(arr, idx, axis=1)
+
+                        ego_obs_all = _gather_objects(ego_obs_all_full)
+                        next_ego_obs_all = _gather_objects(next_ego_obs_all_full)
+                        ego_action_all = _gather_objects(ego_action_all_full)
+                        skill_rewards_all = _gather_objects(skill_rewards_all_full)
+                        skill_done_all = _gather_objects(skill_done_all_full)
+                        relabel_mask = _gather_objects(relabel_mask_full)
+                    else:
+                        ego_obs_all = ego_obs_all_full
+                        next_ego_obs_all = next_ego_obs_all_full
+                        ego_action_all = ego_action_all_full
+                        skill_rewards_all = skill_rewards_all_full
+                        skill_done_all = skill_done_all_full
+                        relabel_mask = relabel_mask_full
+                else:
+                    base_valid = target_obj_idxs != no_target_idx
+                    if meta_noop_enabled:
+                        base_valid = jnp.logical_and(base_valid, jnp.logical_not(meta_noop))
+                    ego_obs_all = ego_obses[:, jnp.newaxis, :]
+                    next_ego_obs_all = next_ego_obses[:, jnp.newaxis, :]
+                    ego_action_all = chosen_ego_actions[:, jnp.newaxis]
+                    skill_rewards_all = skill_rewards[:, jnp.newaxis, :]
+                    skill_done_all = skill_done[:, jnp.newaxis, :]
+                    relabel_mask = base_valid[:, jnp.newaxis]
+
                 transition = TandemTransition(
                     done=new_done,
                     obs=last_obs.raw_observation,
@@ -422,6 +558,12 @@ def make_tandem_train(
                     skill_q_val=all_skill_q_vals,
                     skill_rewards=skill_rewards,
                     skill_done=skill_done,
+                    ego_obs_all=ego_obs_all,
+                    next_ego_obs_all=next_ego_obs_all,
+                    ego_action_all=ego_action_all,
+                    skill_rewards_all=skill_rewards_all,
+                    skill_done_all=skill_done_all,
+                    relabel_mask=relabel_mask,
                     env_reward=base_env_reward,
                 )
                 return (
@@ -432,12 +574,14 @@ def make_tandem_train(
                     completed_returns_sum,
                     num_completed,
                     target_obj_idxs,
+                    car_hits_sum,
                 ), transition
 
             rng, _rng = jax.random.split(rng)
             init_targets = jnp.full(
                 (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
             )
+            init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
             carry_final, transitions = jax.lax.scan(
                 _step_env,
                 (
@@ -447,6 +591,7 @@ def make_tandem_train(
                     jnp.array(0.0, dtype=jnp.float32),
                     jnp.array(0.0, dtype=jnp.float32),
                     init_targets,
+                    init_car_hits_sum,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -459,6 +604,7 @@ def make_tandem_train(
                 completed_returns_sum,
                 num_completed,
                 _last_targets,
+                car_hits_sum,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -592,58 +738,80 @@ def make_tandem_train(
                 s_state = s_state.replace(
                     timesteps=s_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
-
-                last_q = skill_network.apply(
+                next_q_all = skill_network.apply(
                     {"params": s_state.params, "batch_stats": s_state.batch_stats},
-                    transitions.next_ego_obs[-1],
+                    transitions.next_ego_obs_all,
                     train=False,
-                )
-                last_q_max = jnp.max(last_q, axis=-1)
-                last_step_done = transitions.skill_done[-1, :, skill_idx]
-                last_q_max = last_q_max * (1 - last_step_done)
-                last_step_reward = transitions.skill_rewards[-1, :, skill_idx]
-                lambda_returns = last_step_reward + config["GAMMA"] * last_q_max
+                )  # [T, E, O, A]
+                next_q_max = jnp.max(next_q_all, axis=-1)  # [T, E, O]
 
-                def _skill_get_target(lambda_returns_and_next_q, transition):
-                    lambda_ret, next_q = lambda_returns_and_next_q
-                    step_reward = transition.skill_rewards[..., skill_idx]
-                    step_done = transition.skill_done[..., skill_idx]
-                    target_bootstrap = (
-                        step_reward + config["GAMMA"] * (1 - step_done) * next_q
-                    )
-                    delta = lambda_ret - next_q
-                    lambda_ret = (
-                        target_bootstrap + config["GAMMA"] * config["LAMBDA"] * delta
-                    )
-                    lambda_ret = (1 - step_done) * lambda_ret + step_done * step_reward
-                    next_q_val = jnp.max(transition.skill_q_val[skill_idx], axis=-1)
-                    return (lambda_ret, next_q_val), lambda_ret
+                step_reward = transitions.skill_rewards_all[..., skill_idx]  # [T, E, O]
+                step_done = jnp.logical_or(
+                    transitions.skill_done_all[..., skill_idx],
+                    transitions.done[..., jnp.newaxis],
+                ).astype(jnp.float32)  # [T, E, O]
 
-                _, targets = jax.lax.scan(
-                    _skill_get_target,
-                    (lambda_returns, last_q_max),
-                    jax.tree.map(lambda x: x[:-1], transitions),
-                    reverse=True,
-                )
-                skill_lambda_targets = jnp.concatenate(
-                    (targets, lambda_returns[jnp.newaxis])
-                )
+                if skill_bootstrap == "one_step":
+                    skill_targets = step_reward + (
+                        skill_gamma * (1.0 - step_done) * next_q_max
+                    )  # [T, E, O]
+                else:
+                    if skill_qlambda_watkins_cut:
+                        q_all_t = skill_network.apply(
+                            {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                            transitions.ego_obs_all,
+                            train=False,
+                        )  # [T, E, O, A]
+                        greedy_t = jnp.argmax(q_all_t, axis=-1)  # [T, E, O]
+                        cut = (
+                            greedy_t == transitions.ego_action_all
+                        ).astype(jnp.float32)
+                    else:
+                        cut = jnp.ones_like(step_reward)  # [T, E, O]
+
+                    last_target = (
+                        step_reward[-1]
+                        + skill_gamma * (1.0 - step_done[-1]) * next_q_max[-1]
+                    )  # [E, O]
+
+                    def _skill_get_target(g_future, xs):
+                        r_t, d_t, nq_t, cut_t = xs  # each [E, O]
+                        boot_t = r_t + skill_gamma * (1.0 - d_t) * nq_t
+                        g_t = boot_t + skill_gamma * skill_lambda * (1.0 - d_t) * cut_t * (
+                            g_future - nq_t
+                        )
+                        g_t = (1.0 - d_t) * g_t + d_t * r_t
+                        return g_t, g_t
+
+                    xs = (
+                        step_reward[:-1],
+                        step_done[:-1],
+                        next_q_max[:-1],
+                        cut[:-1],
+                    )
+                    _, targets_body = jax.lax.scan(
+                        _skill_get_target, last_target, xs, reverse=True
+                    )
+                    skill_targets = jnp.concatenate(
+                        [targets_body, last_target[jnp.newaxis]], axis=0
+                    )  # [T, E, O]
 
                 def _learn_epoch(carry, _):
                     s_state_epoch, rng_epoch = carry
                     rng_epoch, rng_perm = jax.random.split(rng_epoch)
 
                     train_batch = {
-                        "target_idx": transitions.target_idx,
-                        "ego_obs": transitions.ego_obs,
-                        "ego_action": transitions.ego_action,
+                        "relabel_mask": transitions.relabel_mask,
+                        "ego_obs_all": transitions.ego_obs_all,
+                        "ego_action_all": transitions.ego_action_all,
                         "active_skill": transitions.active_skill,
+                        "target_idx": transitions.target_idx,
                     }
                     minibatches = jax.tree.map(
                         lambda x: preprocess_transition(x, rng_perm),
                         train_batch,
                     )
-                    targets_batch = preprocess_transition(skill_lambda_targets, rng_perm)
+                    targets_batch = preprocess_transition(skill_targets, rng_perm)
 
                     def _learn_phase(carry_phase, minibatch_and_target):
                         s_state_phase, rng_phase = carry_phase
@@ -655,25 +823,29 @@ def make_tandem_train(
                                     "params": params,
                                     "batch_stats": s_state_phase.batch_stats,
                                 },
-                                minibatch["ego_obs"],
+                                minibatch["ego_obs_all"],
                                 train=True,
                                 mutable=["batch_stats"],
                             )
                             chosen_q = jnp.take_along_axis(
                                 q_vals,
-                                jnp.expand_dims(minibatch["ego_action"], axis=-1),
+                                jnp.expand_dims(minibatch["ego_action_all"], axis=-1),
                                 axis=-1,
                             ).squeeze(axis=-1)
                             if config.get("OFF_POLICY", True):
-                                valid = minibatch["target_idx"] != no_target_idx
+                                valid = minibatch["relabel_mask"]
                             else:
-                                valid = jnp.logical_and(
-                                    minibatch["target_idx"] != no_target_idx,
-                                    minibatch["active_skill"] == skill_idx,
+                                n_objects = minibatch["ego_obs_all"].shape[1]
+                                chosen_obj_mask = (
+                                    jnp.arange(n_objects)[jnp.newaxis, :]
+                                    == minibatch["target_idx"][:, jnp.newaxis]
                                 )
-                            if meta_noop_enabled:
                                 valid = jnp.logical_and(
-                                    valid, minibatch["target_idx"] != meta_noop_idx
+                                    minibatch["relabel_mask"],
+                                    jnp.logical_and(
+                                        chosen_obj_mask,
+                                        minibatch["active_skill"][:, jnp.newaxis] == skill_idx,
+                                    ),
                                 )
                             loss = (jnp.square(chosen_q - target) * valid).sum() / (
                                 valid.sum() + 1e-8
@@ -728,20 +900,30 @@ def make_tandem_train(
                 jnp.float32
             )
             reward_nonzero = (transitions.env_reward != 0).astype(jnp.float32)
-            skill_reward_nonzero = (jnp.abs(transitions.skill_rewards) > 0).astype(
-                jnp.float32
-            )
+            skill_reward_nonzero = (
+                jnp.abs(transitions.skill_rewards_all) > 0
+            ).astype(jnp.float32)
             if config.get("OFF_POLICY", True):
                 skill_valid_mask = jnp.broadcast_to(
-                    valid_target_mask[..., None], transitions.skill_rewards.shape
+                    transitions.relabel_mask[..., None], transitions.skill_rewards_all.shape
                 )
             else:
                 skill_valid_mask = jnp.logical_and(
-                    valid_target_mask[..., None] > 0,
-                    transitions.active_skill[..., None]
-                    == jnp.arange(num_skills, dtype=jnp.int32),
+                    transitions.relabel_mask[..., None] > 0,
+                    transitions.active_skill[:, :, None, None]
+                    == jnp.arange(num_skills, dtype=jnp.int32)[None, None, None, :],
                 )
                 skill_valid_mask = skill_valid_mask.astype(jnp.float32)
+
+            _vid = transitions.objects.visual_id[:, :, -1, :]  # [T, E, O]
+            _act = transitions.relabel_mask  # [T, E, O]
+            _both_active = jnp.logical_and(_act[1:], _act[:-1])
+            _no_reset = jnp.logical_not(
+                transitions.done[:-1].astype(bool)[..., jnp.newaxis]
+            )
+            _valid_pair = jnp.logical_and(_both_active, _no_reset)
+            _same_id = jnp.logical_and(_valid_pair, _vid[1:] == _vid[:-1])
+            slot_stability = _same_id.sum() / (_valid_pair.sum() + 1e-8)
 
             metrics = {
                 "meta_policy/td_loss": meta_loss[-1].mean(),
@@ -763,6 +945,10 @@ def make_tandem_train(
                 "skill/qvals_mean": jnp.mean(skill_metrics[1]),
                 "skill/valid_transition_frac": jnp.mean(skill_valid_mask),
                 "skill/reward_nonzero_frac": jnp.mean(skill_reward_nonzero),
+                "skill/relabel_objects_mean": jnp.mean(
+                    jnp.sum(transitions.relabel_mask.astype(jnp.float32), axis=-1)
+                ),
+                "skill/slot_stability": slot_stability,
                 "warmup/heuristic_active": (
                     meta_state.n_updates < skill_warmup_updates
                 ).astype(jnp.float32),
@@ -772,6 +958,12 @@ def make_tandem_train(
                 "global/update_steps": meta_state.n_updates,
                 "env/step": meta_state.timesteps,
             }
+
+            if log_freeway_car_hits:
+                metrics["freeway/car_hit_rate"] = (
+                    car_hits_sum / freeway_env_steps_per_update
+                )
+                metrics["freeway/car_hits_per_update"] = car_hits_sum
 
             if config.get("WANDB_MODE", "disabled") != "disabled":
                 def _wandb_log_cb(m):

@@ -1,6 +1,4 @@
-import jax
 import jax.numpy as jnp
-from typing import Any
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.observations.action_space import make_ego_action_mapper
 from concept_based_learning.environments.datatypes import (
@@ -11,50 +9,13 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 
-from concept_based_learning.environments.skill_rewards import (
-    pack_skill_rewards,
-    reward_transition_context,
-    standard_avoid_outcomes,
-    standard_destroy_outcomes,
-)
+from concept_based_learning.environments.skill_rewards import extract_skill_rewards
 
-
+# SpaceInvaders screen boundaries — enemies and bullets scroll off the side edges.
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
-    """
-    Returns (rewards, skill_done). skill_done[k] is True only when the transition
-    is terminal for skill k because the assigned target caused it (golden rule).
-    """
     del next_raw_obs
-
-    (
-        _prev_player,
-        prev_target,
-        _next_target,
-        disappeared,
-        hit_by_assigned,
-        _near_player,
-        at_screen_edge,
-    ) = reward_transition_context(prev_raw_obs, prev_target, next_target)
-
-    destroy_success, destroy_failure = standard_destroy_outcomes(
-        prev_target,
-        disappeared=disappeared,
-        hit_by_assigned=hit_by_assigned,
-        at_screen_edge=at_screen_edge,
-        life_lost=life_lost,
-    )
-    avoid_success, avoid_failure = standard_avoid_outcomes(
-        prev_target,
-        disappeared=disappeared,
-        hit_by_assigned=hit_by_assigned,
-        life_lost=life_lost,
-    )
-    return pack_skill_rewards(
-        destroy_success=destroy_success,
-        destroy_failure=destroy_failure,
-        collect_success=jnp.array(False),
-        avoid_success=avoid_success,
-        avoid_failure=avoid_failure,
+    return extract_skill_rewards(
+        prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
     )
 
 
@@ -105,6 +66,7 @@ class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_h = jnp.concatenate([enemies.height, enemy_bullets.height, ufo_h])
         all_active = jnp.concatenate([enemies.active, enemy_bullets.active, ufo_active])
         all_labels = jnp.concatenate([enemy_labels, enemy_bullet_labels, ufo_label])
+        all_offscreen = jnp.ones(all_x.shape[0], dtype=jnp.int32)  # all objects scroll off edges
 
         return LabeledObjectObservation(
             x=all_x,
@@ -112,5 +74,7 @@ class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
             width=all_w,
             height=all_h,
             active=all_active,
-            semantic_label=all_labels
+            semantic_label=all_labels,
+            can_go_offscreen=all_offscreen,
+            was_killed=jnp.zeros_like(all_offscreen),
         )

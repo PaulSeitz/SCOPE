@@ -11,18 +11,25 @@ from safetensors.flax import save_file
 import hydra
 from omegaconf import OmegaConf
 
-from src.concept_based_learning.environments.env_manager import EnvManager
-from src.concept_based_learning.environments.heuristics import get_nearest_object_target
-from src.concept_based_learning.curriculum import build_skill_phases
-from src.concept_based_learning.training.train_skills import make_train
-from src.concept_based_learning._legacy.train_meta_agent import make_meta_train
-from src.concept_based_learning.training.train_tandem import make_tandem_train
-from src.concept_based_learning.observations.egocentric import set_ego_obs_format
-from src.concept_based_learning.video_recorder import video_callback, wait_for_video_finish
-from src.concept_based_learning.pqn_visualizer import (
+from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.heuristics import get_nearest_object_target
+from concept_based_learning.curriculum import build_skill_phases
+from concept_based_learning.training.train_skills import make_train
+from concept_based_learning._legacy.train_meta_agent import make_meta_train
+from concept_based_learning.training.train_tandem import make_tandem_train
+from concept_based_learning.observations.egocentric import (
+    set_ego_obs_format,
+    set_ego_size_features,
+    set_ego_velocity_features,
+    set_ego_distance_clip_max_pixels,
+    ego_obs_channels_per_frame,
+)
+from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
+from concept_based_learning.pqn_visualizer import (
     load_params_from_file,
     resolve_config_path,
     run_eval_rollout,
+    infer_skill_hparams_from_params,
 )
 
 
@@ -48,8 +55,28 @@ def _safe_checkpoint_path(base_path, init_model_path=None):
 
 
 def _configure_ego_obs_format(config: dict) -> None:
-    """Select legacy vs target-aligned ego observations for this run."""
+    """Select ego observation format and feature toggles for this run."""
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
+    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    set_ego_distance_clip_max_pixels(
+        None if clip_px is None else float(clip_px)
+    )
+    stack = int(config.get("FRAME_STACK_SIZE", 4))
+    ch = ego_obs_channels_per_frame()
+    clip_note = (
+        f"distance_clip={clip_px}px"
+        if clip_px is not None
+        else "distance_clip=off"
+    )
+    print(
+        f"Ego observations: {ch} channels/frame × {stack} stack = {ch * stack} "
+        f"(legacy={config.get('USE_LEGACY_EGO_OBS', False)}, "
+        f"size={config.get('USE_EGO_SIZE_FEATURES', True)}, "
+        f"velocity={config.get('USE_EGO_VELOCITY_FEATURES', True)}, "
+        f"{clip_note})"
+    )
 
 
 def outer_make_train(config, frozen_meta_params=None):
@@ -108,6 +135,7 @@ def outer_make_train(config, frozen_meta_params=None):
         get_heuristic_target=heuristic_fn,
         no_target_idx=components.no_target_idx,
         action_mapper=components.action_mapper,
+        inverse_action_mapper=components.inverse_action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
@@ -181,6 +209,7 @@ def outer_make_tandem_train(config):
         no_target_idx=components.no_target_idx,
         get_heuristic_target=heuristic_fn,
         action_mapper=components.action_mapper,
+        inverse_action_mapper=components.inverse_action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         meta_mask_hook=components.meta_mask_hook,
@@ -204,6 +233,7 @@ def single_run(config):
 
     alg_name = base_config.get("ALG_NAME", "hierarchical_pqn")
     env_name = str(base_config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(base_config)
 
     if base_config.get("WANDB_MODE", "disabled") != "disabled":
         wandb.init(
@@ -228,8 +258,26 @@ def single_run(config):
     init_model_path = base_config.get("INIT_MODEL_PATH", None)
     prev_params = None
     if init_model_path is not None:
+        _configure_ego_obs_format(base_config)
         print(f"Initializing skills from pre-trained model: {init_model_path}")
         prev_params = load_params_from_file(init_model_path)
+        inferred = infer_skill_hparams_from_params(prev_params)
+        ckpt_ego_in = int(inferred.get("_ckpt_ego_in", -1))
+        expected_ego_in = int(ego_obs_channels_per_frame()) * int(
+            base_config.get("FRAME_STACK_SIZE", 4)
+        )
+        if ckpt_ego_in != expected_ego_in:
+            warnings.warn(
+                "Checkpoint ego feature length mismatch: "
+                f"checkpoint expects {ckpt_ego_in}, current config expects "
+                f"{expected_ego_in} (channels/frame={ego_obs_channels_per_frame()}, "
+                f"FRAME_STACK_SIZE={base_config.get('FRAME_STACK_SIZE', 4)}). "
+                "This commonly happens when USE_EGO_SIZE_FEATURES / "
+                "USE_EGO_VELOCITY_FEATURES / USE_LEGACY_EGO_OBS differ between "
+                "checkpoint training and current run.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def run_skill_curriculum(params_to_start_with, steps_to_run):
         """Runs System 1 training with optional curriculum phases."""

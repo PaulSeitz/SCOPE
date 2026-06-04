@@ -97,6 +97,9 @@ class BootcampSemanticWrapper(JaxatariSemanticBaseWrapper):
         pad_active = jnp.zeros(pad, dtype=jnp.int32)
         pad_labels = jnp.full(pad, LABEL_NOOP, dtype=jnp.int32)
 
+        all_offscreen = jnp.zeros(n, dtype=jnp.int32)  # bootcamp objects don't scroll off edges
+        pad_offscreen = jnp.zeros(pad, dtype=jnp.int32)
+
         return LabeledObjectObservation(
             x=jnp.concatenate([all_x, z]),
             y=jnp.concatenate([all_y, z]),
@@ -104,6 +107,8 @@ class BootcampSemanticWrapper(JaxatariSemanticBaseWrapper):
             height=jnp.concatenate([all_h, z]),
             active=jnp.concatenate([all_active, pad_active]),
             semantic_label=jnp.concatenate([labels, pad_labels]),
+            can_go_offscreen=jnp.concatenate([all_offscreen, pad_offscreen]),
+            was_killed=jnp.zeros(n + pad, dtype=jnp.int32),
         )
 
     @functools.partial(jax.jit, static_argnums=(0,))

@@ -55,6 +55,7 @@ alg:
   NUM_EPOCHS: 3
   NUM_MINIBATCHES: 32
   GAMMA: 0.99
+  SKILL_GAMMA: 0.9
   LAMBDA: 0.65
   LR: 0.0001
   MAX_GRAD_NORM: 0.8
@@ -63,6 +64,29 @@ alg:
   # Off-policy: let all skills learn from every transition so the (rare) collect
   # skill still gets updates even when the meta mostly picks AVOID targets.
   OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: true
+  RELABEL_K_OBJECTS: null
+  SKILL_BOOTSTRAP: "q_lambda"
+  SKILL_QLAMBDA_WATKINS_CUT: false
+  SKILL_LAMBDA: 0.9
+
+  # Freeway heuristic: default collect, override on imminent lane threat.
+  FREEWAY_THREAT_X_WEIGHT: 2.0
+  FREEWAY_THREAT_Y_WEIGHT: 1.0
+  FREEWAY_THREAT_WEIGHTED_DIST_THRESH: 12.0
+
+  # AVOID reward knobs (object-relative relabeling).
+  AVOID_HIT_PENALTY: -1.0
+  AVOID_SURVIVAL_BONUS: 0.0
+  AVOID_SUCCESS_REWARD: 0.0
+  AVOID_PROXIMITY_GATED: true
+  AVOID_NEAR_TOLERANCE: 6.0
+
+  COLLECT_GOAL_DENSE_SHAPING_ENABLED: true
+  COLLECT_GOAL_DENSE_WEIGHT: 1.0
+  COLLECT_GOAL_UPWARD_BONUS_PER_PIXEL: 0.02
+  COLLECT_GOAL_ONLY_RELABEL: true
+  COLLECT_GOAL_OBJECT_IDX: 11
 
   # --- Exploration (Epsilon-Greedy) ---
   EPS_START: 1.0

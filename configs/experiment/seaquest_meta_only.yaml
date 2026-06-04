@@ -1,17 +1,32 @@
+# experiment/seaquest_meta_only.yaml
+#
+# Stage 2: train a learned meta policy on frozen Seaquest skills (no heuristic).
+# Run experiment=seaquest_skills_pretrain first, then point INIT_MODEL_PATH at its output.
+
 ALG_NAME: "hierarchical_pqn"
 ENV_NAME: "seaquest"
 TRAIN_MODE: "meta_only"
+META_ARCHITECTURE: "flat_mlp"
 
-# Training/eval env modifications (meta training is still forced to base env in main.py).
+# Must match seaquest_skills_pretrain / the skill checkpoint (seed 44 by default).
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+EGO_DISTANCE_CLIP_MAX_PX: 15
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+
 GAME_MODS: null
 EVAL_GAME_MODS: null
 
-alg:
-  # Required for meta_only: path to pre-trained skill parameters.
-  # Must match the filename written by main.py: {ALG_NAME}_{ENV_NAME}_seed{SEED}.safetensors
-  INIT_MODEL_PATH: "./outputs/models/seaquest/hierarchical_pqn_seaquest_seed42.safetensors"
+SAVE_PATH: "./outputs/models/seaquest_meta_only"
 
-  # Shared dimensions
+alg:
+  # Skills from seaquest_skills_pretrain (same ego layout as that run).
+  # Filename: {SAVE_PATH}/{ENV_NAME}/{ALG_NAME}_{ENV_NAME}_seed{SEED}.safetensors
+  INIT_MODEL_PATH: "./outputs/models/seaquest_skills_pretrain/seaquest/hierarchical_pqn_seaquest_seed44.safetensors"
+
   NUM_SKILLS: 3
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
   MAX_OBJECTS: 35
@@ -19,49 +34,36 @@ alg:
   HIDDEN_SIZE: 128
   NUM_LAYERS: 3
 
-  # Meta-network settings (System 2)
+  # Meta head — aligned with experiment/seaquest_tandem.yaml
   META_HIDDEN_SIZE: 256
-  META_LR: 0.00025
-  # Additive sticky-target bonus (applied before argmax in meta target selection).
-  META_HYSTERESIS_BONUS: 0.0
-  # Keep surface waypoint selectable at all times; meta policy learns when to use it.
-  ALWAYS_ACTIVE_SURFACE_TARGET: true
-  # Make a dedicated NOOP target selectable (index 0 by convention).
+  META_PER_OBJECT_NUM_LAYERS: 3
+  META_FLAT_NUM_LAYERS: 3
+  META_LR: 0.0001
+  META_SWITCH_PENALTY: 0.0
+  META_DEATH_PENALTY: 0.0
   META_USE_NOOP_TARGET: true
   META_NOOP_TARGET_IDX: 0
-  META_SWITCH_PENALTY: -0.005
+  META_REWARD_LAMBDA: 1.0
 
-  # Environment wrappers
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
   FIRST_FIRE: true
   STICKY_ACTIONS: false
-  EPISODIC_LIFE: True
-  RESTRICT_FIRE_FOR_NON_DESTROY: false
-  # JAXAtari `AtariWrapper` stack depth. Skill MLP input length =
-  # EGO_OBS_CHANNELS_PER_FRAME * FRAME_STACK_SIZE (10 * stack by default).
-  # Must match the INIT_MODEL_PATH checkpoint (Dense_0 input size).
+  EPISODIC_LIFE: true
   FRAME_STACK_SIZE: 4
 
-  # Training horizon / PPO-style update settings reused by meta trainer
+  # PQN rollout / update — same scale as seaquest_tandem
   TOTAL_TIMESTEPS: 20_000_000
-  NUM_ENVS: 1024
+  NUM_ENVS: 512
   NUM_STEPS: 64
   NUM_EPOCHS: 3
-  NUM_MINIBATCHES: 64
+  NUM_MINIBATCHES: 32
   GAMMA: 0.99
   LAMBDA: 0.65
   LR: 0.0005
   MAX_GRAD_NORM: 0.8
 
-  # Exploration
-  # Meta-only with frozen skills is very sensitive to fully random target choice.
-  # Start with lower exploration so System 2 can leverage pre-trained System 1.
-  EPS_START: 0.2
-  EPS_FINISH: 0.001
-  EPS_DECAY: 0.3
-  # When oxygen is low or divers are full, occasionally force selecting
-  # the synthetic surface waypoint during training to ensure adequate
-  # positive surfacing examples while still keeping System 2 learned.
-  SURFACE_PICK_PROB: 0.0
-  # Temporary experiment: hard override to always select surface waypoint
-  # whenever surfacing is required.
-  FORCE_SURFACE_OVERRIDE: false
+  # Meta target exploration (train_meta_agent uses EPS_* for the meta head).
+  # Mirrors tandem META_EPS_START with skill EPS_FINISH / EPS_DECAY.
+  EPS_START: 0.1
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.95

@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
@@ -7,37 +6,32 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_COLLECT,
 )
-from concept_based_learning.observations.action_space import EGO_MOVE_DELTAS_DEG
+from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.observations.action_space import (
+    EGO_MOVE_DELTAS_DEG,
+    make_inverse_ego_action_mapper,
+)
 
 # ---- Freeway game constants (mirror FreewayConstants defaults) ----
 FREEWAY_CHICKEN_X = 44
-FREEWAY_CHICKEN_W = 6
-FREEWAY_CHICKEN_H = 8
-FREEWAY_CAR_W = 8
-FREEWAY_CAR_H = 10
-FREEWAY_TOP_BORDER = 8      # player scores when chicken_y (bottom edge) ≤ this
-FREEWAY_BOTTOM_BORDER = 180
 FREEWAY_NUM_LANES = 10
+FREEWAY_TOP_BORDER = 8      # player scores when chicken_y (bottom edge) ≤ this
+# Nudge the fixed COLLECT goal toward the top (smaller y in Freeway coords).
+FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 14
 
-# Fixed COLLECT goal: one pixel below the scoring/teleport line (y increases downward).
-FREEWAY_COLLECT_GOAL_Y = FREEWAY_TOP_BORDER + 1
+# Effective hitbox sizes derived from JAXAtari insets (jax_freeway.FreewayConstants):
+#   chicken: sprite 6×8, inset x=1 each side → effective width=4
+#            inset y_top=-2 (expands upward), y_bottom=0 → effective height=10
+#   car:     sprite 8×10, inset x=0, y_top=2, y_bottom=0 → effective width=8, height=8
+# These are what we store in LabeledObjectObservation so the global AABB check
+# fires at exactly the same frame JAXAtari's own collision check fires.
+FREEWAY_CHICKEN_HIT_W = 4
+FREEWAY_CHICKEN_HIT_H = 10
+FREEWAY_CAR_HIT_W = 8
+FREEWAY_CAR_HIT_H = 8
 
-# Fixed collect object sits at the last slot after meta NOOP + 10 cars.
+# Fixed collect goal sits at the last slot after meta NOOP + 10 cars.
 COLLECT_GOAL_IDX = FREEWAY_NUM_LANES + 1  # slot 11 in stacked objects
-
-# Normalize distance shaping so a full bottom→top ascent yields ~O(1) dense signal.
-_COLLECT_DIST_SCALE = float(FREEWAY_BOTTOM_BORDER - FREEWAY_TOP_BORDER)
-
-# X-zone where a car overlaps the (fixed) chicken column.
-# chicken x ∈ [44, 50] (width 6); car width = 8 → overlap when car_x ∈ [36, 50]
-_PLAYER_X_LEFT  = float(FREEWAY_CHICKEN_X)                       # 44
-_PLAYER_X_RIGHT = float(FREEWAY_CHICKEN_X + FREEWAY_CHICKEN_W)   # 50
-_CAR_ZONE_LEFT  = _PLAYER_X_LEFT - FREEWAY_CAR_W                 # 36
-_CAR_ZONE_RIGHT = _PLAYER_X_RIGHT                                 # 50
-
-# Scoring teleport: chicken reaches y ≤ top_border then resets to bottom (~188).
-_SCORING_MAX_PREV_Y = FREEWAY_TOP_BORDER + FREEWAY_CHICKEN_H + 2  # = 25
-_SCORING_MIN_NEXT_Y = 100
 
 # World direction angle table (RIGHT=0°, DOWNRIGHT=45°, …, UPRIGHT=-45°)
 _WORLD_DIR_ANGLES = jnp.array(
@@ -48,10 +42,6 @@ _WORLD_DIR_ANGLES = jnp.array(
 _FREEWAY_NOOP = jnp.int32(0)
 
 # move_table[dir_idx] — Freeway only has vertical movement.
-#   DIR 0 RIGHT     → NOOP   DIR 1 DOWNRIGHT → DOWN
-#   DIR 2 DOWN      → DOWN   DIR 3 DOWNLEFT  → DOWN
-#   DIR 4 LEFT      → NOOP   DIR 5 UPLEFT    → UP
-#   DIR 6 UP        → UP     DIR 7 UPRIGHT   → UP
 _MOVE_TABLE      = jnp.array([0, 2, 2, 2, 0, 1, 1, 1], dtype=jnp.int32)
 _MOVE_FIRE_TABLE = jnp.array([0, 2, 2, 2, 0, 1, 1, 1], dtype=jnp.int32)  # no FIRE in Freeway
 
@@ -82,6 +72,20 @@ def freeway_action_mapper(ego_action, raw_obs, target_idx, objects):
     return game_action
 
 
+def _freeway_get_player(raw_obs):
+    return raw_obs.chicken
+
+
+freeway_inverse_action_mapper = make_inverse_ego_action_mapper(
+    noop_action=int(_FREEWAY_NOOP),
+    fire_action=int(_FREEWAY_NOOP),
+    move_table=_MOVE_TABLE,
+    move_fire_table=_MOVE_FIRE_TABLE,
+    player_getter=_freeway_get_player,
+    y_is_bottom_edge=True,
+)
+
+
 class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         # 1 meta NOOP + 10 cars + 1 fixed top collect goal = 12 total slots
@@ -91,26 +95,52 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
         """
         Map a single-frame FreewayObservation to a LabeledObjectObservation.
 
-        Fixed collect goal at the top scoring line (y=15): always the same object
-        at the screen top, aligned with the chicken column.
+        Object dimensions are effective hitbox sizes (not raw sprite sizes) so the
+        global AABB check fires at the same frame as JAXAtari's own collision.
+
+        Cars use bottom-edge y convention from JAXAtari; the effective hitbox
+        shrinks the car top by 2px (car_hit_inset_y_top=2), so we shift y up by 2
+        and reduce height by 2 to match.
+
+        The chicken's effective hitbox expands 2px upward (chicken_hit_inset_y_top=-2),
+        so the collect goal is placed to match that extended reach.
         """
         car_labels = jnp.full(FREEWAY_NUM_LANES, LABEL_AVOID, dtype=jnp.int32)
+        car_offscreen = jnp.zeros(FREEWAY_NUM_LANES, dtype=jnp.int32)  # cars wrap, never scroll off
 
-        # ---- Fixed top collect goal ------------------------------------------
-        # Bottom-edge convention: bbox bottom at goal line + chicken height.
-        goal_x      = jnp.array([FREEWAY_CHICKEN_X], dtype=jnp.int32)
-        goal_y      = jnp.array([FREEWAY_COLLECT_GOAL_Y + FREEWAY_CHICKEN_H], dtype=jnp.int32)
-        goal_w      = jnp.array([FREEWAY_CHICKEN_W], dtype=jnp.int32)
-        goal_h      = jnp.array([FREEWAY_CHICKEN_H], dtype=jnp.int32)
+        # Effective car hitbox: shift bottom-edge y up by 2 to account for
+        # car_hit_inset_y_top=2, and use effective height.
+        car_x = obs.car.x + 0                           # x inset is 0
+        car_y = obs.car.y - 2                            # top is inset 2px from sprite top
+        car_w = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_W, dtype=jnp.int32)
+        car_h = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_H, dtype=jnp.int32)
+
+        # Fixed collect goal: placed so the chicken's effective hitbox (which extends
+        # 2px above sprite top due to chicken_hit_inset_y_top=-2) overlaps it exactly
+        # when the chicken reaches the scoring line.
+        # Bottom-edge y convention: goal bottom aligned with scoring-line overlap, shifted up.
+        goal_x      = jnp.array([FREEWAY_CHICKEN_X + 1], dtype=jnp.int32)   # match chicken x-inset
+        goal_y      = jnp.array(
+            [FREEWAY_TOP_BORDER + FREEWAY_CHICKEN_HIT_H - FREEWAY_COLLECT_GOAL_UP_OFFSET_PX],
+            dtype=jnp.int32,
+        )
+        goal_w      = jnp.array([FREEWAY_CHICKEN_HIT_W], dtype=jnp.int32)
+        goal_h      = jnp.array([FREEWAY_CHICKEN_HIT_H], dtype=jnp.int32)
         goal_active = jnp.array([1], dtype=jnp.int32)
         goal_label  = jnp.array([LABEL_COLLECT], dtype=jnp.int32)
+        goal_visual_id = jnp.array([-1], dtype=jnp.int32)
+        goal_offscreen = jnp.array([0], dtype=jnp.int32)  # fixed goal never scrolls
 
-        all_x      = jnp.concatenate([obs.car.x,                           goal_x])
-        all_y      = jnp.concatenate([obs.car.y,                           goal_y])
-        all_w      = jnp.concatenate([obs.car.width,                       goal_w])
-        all_h      = jnp.concatenate([obs.car.height,                      goal_h])
-        all_active = jnp.concatenate([obs.car.active.astype(jnp.int32),    goal_active])
-        all_labels = jnp.concatenate([car_labels,                          goal_label])
+        all_x          = jnp.concatenate([car_x,                           goal_x])
+        all_y          = jnp.concatenate([car_y,                           goal_y])
+        all_w          = jnp.concatenate([car_w,                           goal_w])
+        all_h          = jnp.concatenate([car_h,                           goal_h])
+        all_active     = jnp.concatenate([obs.car.active.astype(jnp.int32), goal_active])
+        all_labels     = jnp.concatenate([car_labels,                      goal_label])
+        all_visual_id  = jnp.concatenate(
+            [jnp.arange(FREEWAY_NUM_LANES, dtype=jnp.int32), goal_visual_id]
+        )
+        all_offscreen  = jnp.concatenate([car_offscreen,                   goal_offscreen])
 
         return LabeledObjectObservation(
             x=all_x,
@@ -119,100 +149,24 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
             height=all_h,
             active=all_active,
             semantic_label=all_labels,
+            visual_id=all_visual_id,
+            can_go_offscreen=all_offscreen,
+            was_killed=jnp.zeros_like(all_offscreen),
         )
 
 
-def _chicken_object_overlap(chicken, obj):
-    """Bounding-box overlap between the chicken and an object (y is bottom edge)."""
-    horiz = jnp.logical_and(
-        chicken.x <= obj.x + obj.width,
-        chicken.x + chicken.width >= obj.x,
-    )
-    vert = jnp.logical_and(
-        chicken.y - chicken.height <= obj.y,
-        chicken.y >= obj.y - obj.height,
-    )
-    return jnp.logical_and(horiz, vert)
-
-
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
     """
-    Skill reward signals for Freeway.
+    Freeway skill rewards — delegates entirely to the global reward contract.
 
-    All three skills are scored against the *selected object* via hindsight
-    relabeling: each skill reward treats the meta-selected object as if it
-    carried that skill's label. Every skill can therefore learn off-policy from
-    every transition, regardless of the object's true semantic label.
-
-    COLLECT: dense object-relative shaping (prev_dist - next_dist) / scale —
-             positive when the chicken closes vertical distance to the selected
-             object; +1 sparse bonus when the chicken first reaches it.
-    AVOID:   penalty-only — negative reward on collision with the selected
-             object, 0 otherwise. A car clearing the column is not a rewardable
-             event (cars sweep across regardless of the chicken), so there is
-             no +1 for the meta to farm.
-    DESTROY: Freeway has no shoot targets; stays zero.
+    Freeway cars wrap horizontally and never scroll off-screen, so no screen-edge
+    bounds are needed (can_go_offscreen=0 for all objects).
     """
-    def last_frame(tree):
-        return jax.tree_util.tree_map(lambda x: x[-1] if jnp.ndim(x) > 0 else x, tree)
-
-    prev_chicken = last_frame(prev_raw_obs.chicken)
-    next_chicken = last_frame(next_raw_obs.chicken)
-    prev_tgt = last_frame(prev_target)
-    next_tgt = last_frame(next_target)
-
-    # ---- COLLECT (object-relative) ----
-    # Vertical centre-to-centre distance between chicken and the selected object.
-    prev_cy     = prev_chicken.y.astype(jnp.float32) - prev_chicken.height.astype(jnp.float32) / 2.0
-    next_cy     = next_chicken.y.astype(jnp.float32) - next_chicken.height.astype(jnp.float32) / 2.0
-    prev_tgt_cy = prev_tgt.y.astype(jnp.float32) - prev_tgt.height.astype(jnp.float32) / 2.0
-    next_tgt_cy = next_tgt.y.astype(jnp.float32) - next_tgt.height.astype(jnp.float32) / 2.0
-
-    prev_dist = jnp.abs(prev_cy - prev_tgt_cy)
-    next_dist = jnp.abs(next_cy - next_tgt_cy)
-
-    # After scoring the chicken teleports to the bottom; suppress the shaping
-    # discontinuity (large spurious distance jump) on that step.
-    teleported = jnp.logical_and(
-        prev_chicken.y <= _SCORING_MAX_PREV_Y,
-        next_chicken.y >= _SCORING_MIN_NEXT_Y,
+    del info, config
+    return extract_skill_rewards(
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
     )
-    collect_shaping = jnp.where(
-        teleported,
-        0.0,
-        (prev_dist - next_dist) / jnp.float32(_COLLECT_DIST_SCALE),
-    )
-
-    # Reached: chicken just entered vertical bounding-box overlap with the object.
-    reach_eps = (
-        next_chicken.height.astype(jnp.float32)
-        + next_tgt.height.astype(jnp.float32)
-    ) / 2.0
-    collect_success = jnp.logical_and(prev_dist > reach_eps, next_dist <= reach_eps)
-    collect_reward  = collect_shaping + jnp.where(collect_success, 1.0, 0.0)
-    collect_done    = collect_success
-
-    # ---- AVOID (object-relative, penalty-only) ----
-    # Freeway is not lives-based, so collisions cannot be read from life_lost;
-    # detect them directly as bounding-box overlap with the selected object.
-    collided = jnp.logical_or(
-        _chicken_object_overlap(prev_chicken, prev_tgt),
-        _chicken_object_overlap(next_chicken, next_tgt),
-    )
-    # The object clearing the chicken's x-column ends the AVOID encounter but is
-    # not itself rewarded: cars sweep across regardless of the chicken, so a +1
-    # here would let the meta farm AVOID instead of crossing the road.
-    prev_in_zone = jnp.logical_and(prev_tgt.x >= _CAR_ZONE_LEFT, prev_tgt.x <= _CAR_ZONE_RIGHT)
-    next_in_zone = jnp.logical_and(next_tgt.x >= _CAR_ZONE_LEFT, next_tgt.x <= _CAR_ZONE_RIGHT)
-    object_just_cleared = jnp.logical_and(prev_in_zone, jnp.logical_not(next_in_zone))
-
-    avoid_reward = jnp.where(collided, -2.0, 0.0)
-    avoid_done   = jnp.logical_or(object_just_cleared, collided)
-
-    # ---- DESTROY ---- (no destroy targets in Freeway)
-    destroy_reward = jnp.float32(0.0)
-    destroy_done   = jnp.array(False, dtype=jnp.bool_)
-
-    rewards    = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done, collect_done, avoid_done],       dtype=jnp.bool_)
-    return rewards, skill_done

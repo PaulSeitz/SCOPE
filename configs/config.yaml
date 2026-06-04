@@ -10,7 +10,7 @@ PROJECT: "concept_based_learning"
 WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during debugging
 
 # --- Global Run Settings ---
-SEED: 42
+SEED: 44
 NUM_SEEDS: 1                  # Number of concurrent seeds to run via vmap
 EVAL_SEED: 43                 # Separate RNG seed used for evaluation rollouts
 # If true, use the pre-refactor 10-channel egocentric observation format.
@@ -21,6 +21,9 @@ USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: true
 # Seaquest only: if true, neutralize near-surface deaths with oxygen>0 and <6 divers.
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+# Target-aligned ego only: clip Euclidean distance (pixels) before normalizing to [0, 1].
+# Distances >= cap map to 1.0 (one \"far\" bucket). null = full-screen MAX_DIST norm.
+EGO_DISTANCE_CLIP_MAX_PX: null
 
 # Meta-policy architecture (tandem / meta_only / skill finetune with frozen meta):
 #   per_object_mlp — global raw obs + per-slot object features (default)

@@ -7,7 +7,7 @@ TRAIN_MODE: "tandem"
 META_ARCHITECTURE: "flat_mlp"
 USE_LEGACY_EGO_OBS: false
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
-USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: true
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
 
 # --- Environment modification hooks ---
@@ -45,7 +45,9 @@ alg:
   # Learnable NOOP: meta selects slot 0 (reserved; not a game entity).
   META_USE_NOOP_TARGET: true
   META_NOOP_TARGET_IDX: 0
-  META_REWARD_LAMBDA: 0.7
+  
+  
+  META_REWARD_LAMBDA: 1.0
 
   # Skill optimizer (if omitted, LR is used)
   SKILL_LR: 0.0005
@@ -78,9 +80,9 @@ alg:
 
   # --- Exploration (Epsilon-Greedy) ---
   EPS_START: 1.0              # Start 100% random
-  EPS_FINISH: 0.1            # End at 5% random
+  EPS_FINISH: 0.05            # End at 5% random
   EPS_DECAY: 0.95              # Reach EPS_FINISH halfway through training (50%)
-  META_EPS_START: 0.2
+  META_EPS_START: 0.1
 
   # --- Epochs (tandem only) ---
   # META_NUM_EPOCHS overrides NUM_EPOCHS for the meta update loop only.

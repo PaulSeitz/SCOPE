@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
@@ -9,57 +8,14 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_NOOP,
 )
-from concept_based_learning.environments.skill_rewards import (
-    pack_skill_rewards,
-    reward_transition_context,
-    standard_avoid_outcomes,
-    standard_collect_success,
-    standard_destroy_outcomes,
-)
+from concept_based_learning.environments.skill_rewards import extract_skill_rewards
 from concept_based_learning.observations.action_space import make_ego_action_mapper
 
-
+# ChopperCommand screen boundaries — all objects scroll off left/right edges.
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
-    """
-    Returns (rewards, skill_done). skill_done[k] is True only when the transition
-    is terminal for skill k because the assigned target caused it (golden rule).
-    """
     del next_raw_obs
-
-    (
-        _prev_player,
-        prev_target,
-        _next_target,
-        disappeared,
-        hit_by_assigned,
-        near_player,
-        at_screen_edge,
-    ) = reward_transition_context(prev_raw_obs, prev_target, next_target)
-
-    destroy_success, destroy_failure = standard_destroy_outcomes(
-        prev_target,
-        disappeared=disappeared,
-        hit_by_assigned=hit_by_assigned,
-        at_screen_edge=at_screen_edge,
-        life_lost=life_lost,
-    )
-    collect_success = standard_collect_success(
-        prev_target,
-        disappeared=disappeared,
-        near_player=near_player,
-    )
-    avoid_success, avoid_failure = standard_avoid_outcomes(
-        prev_target,
-        disappeared=disappeared,
-        hit_by_assigned=hit_by_assigned,
-        life_lost=life_lost,
-    )
-    return pack_skill_rewards(
-        destroy_success=destroy_success,
-        destroy_failure=destroy_failure,
-        collect_success=collect_success,
-        avoid_success=avoid_success,
-        avoid_failure=avoid_failure,
+    return extract_skill_rewards(
+        prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
     )
 
 
@@ -153,14 +109,21 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         pad_active = jnp.zeros(pad_size, dtype=jnp.int32)
         pad_labels = jnp.full(pad_size, LABEL_NOOP, dtype=jnp.int32)
 
+        # All game objects scroll off the left/right edges.
+        all_offscreen = jnp.ones(final_x_unpadded.shape[0], dtype=jnp.int32)
+        pad_offscreen = jnp.zeros(pad_size, dtype=jnp.int32)
+
         final_x = jnp.concatenate([final_x_unpadded, pad_x])
         final_y = jnp.concatenate([final_y_unpadded, pad_y])
         final_w = jnp.concatenate([final_w_unpadded, pad_w])
         final_h = jnp.concatenate([final_h_unpadded, pad_h])
         final_active = jnp.concatenate([final_active_unpadded, pad_active])
         final_labels = jnp.concatenate([final_labels_unpadded, pad_labels])
+        final_offscreen = jnp.concatenate([all_offscreen, pad_offscreen])
 
         return LabeledObjectObservation(
             x=final_x, y=final_y, width=final_w, height=final_h,
-            active=final_active, semantic_label=final_labels
+            active=final_active, semantic_label=final_labels,
+            can_go_offscreen=final_offscreen,
+            was_killed=jnp.zeros_like(final_offscreen),
         )

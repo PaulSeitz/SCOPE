@@ -215,8 +215,15 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
         target_idx
     )
 
-    # 3. Absolute override for immediate, valid danger
-    target_idx = jnp.where(have_valid_danger, best_danger_idx, target_idx)
+    # 3. Immediate danger override — but never interrupt an active surfacing commit.
+    # (Low O2 / full diver rescue must reach y==46; dodging nearby threats in the
+    # breathing zone leaves the sub stuck at y=47–52 with no refill.)
+    suppress_danger = force_surface
+    target_idx = jnp.where(
+        jnp.logical_and(have_valid_danger, jnp.logical_not(suppress_danger)),
+        best_danger_idx,
+        target_idx,
+    )
 
     # 4. Fallback if the screen is empty
     any_active = jnp.any(normal_active_mask)

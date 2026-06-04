@@ -41,7 +41,7 @@ def build_ego_grid_inputs(
     Construct a batch of ego feature vectors for a 2D sweep over (dx_ego, dy_ego).
 
     The underlying training features come from `get_ego_obs`, which produces
-    a flattened stack of `EGO_OBS_CHANNELS_PER_FRAME` features per frame (see `egocentric_transformation`).
+    a flattened stack of `EGO_OBS_CHANNELS_PER_FRAME` features per frame (see `observations.egocentric`).
 
     We approximate the network's inputs by:
     - Filling all features with zeros

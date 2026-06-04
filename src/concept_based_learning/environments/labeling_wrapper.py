@@ -126,6 +126,20 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             objects=objects_stack,
         )
 
+    def _substep_env_state_events(self, prev_env_state, next_env_state):
+        """
+        Optional per-substep transition events (OR-accumulated across frame_skip).
+
+        Subclasses return an env-specific mask (e.g. confirmed kills); default None.
+        """
+        del prev_env_state, next_env_state
+        return None
+
+    def _stamp_events_on_observation(self, semantic_obs, accumulated_events):
+        """Apply accumulated substep events onto the stacked semantic observation."""
+        del accumulated_events
+        return semantic_obs
+
     def _step_env_compat(self, state: Any, action: int):
         """
         Normalize jaxatari step output across API versions.
@@ -158,6 +172,7 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
     def step(
         self, state: SemanticState, action: int
     ) -> Tuple[SemanticObservation, SemanticState, float, bool, Dict]:
+        accumulated_events = None
         if self._single_frame_api:
             obs_stack = state.obs_stack
             atari_state = state.atari_state
@@ -165,9 +180,19 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             done = jnp.array(False, dtype=jnp.bool_)
             info = {}
             for _ in range(self.frame_skip):
+                prev_env_state = atari_state.env_state
                 obs_single, atari_state, step_reward, step_done, step_info = self._step_env_compat(
                     atari_state, action
                 )
+                sub_events = self._substep_env_state_events(
+                    prev_env_state, atari_state.env_state
+                )
+                if sub_events is not None:
+                    accumulated_events = (
+                        sub_events
+                        if accumulated_events is None
+                        else jnp.logical_or(accumulated_events, sub_events)
+                    )
                 obs_stack = self._push_obs_stack(obs_stack, obs_single)
                 total_reward = total_reward + step_reward
                 done = jnp.logical_or(done, step_done)
@@ -176,12 +201,17 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             new_atari_state = atari_state
             new_state = SemanticState(atari_state=new_atari_state, obs_stack=obs_stack)
         else:
+            prev_env_state = state.atari_state.env_state
             obs_stack, new_atari_state, reward, done, info = self._step_env_compat(
                 state.atari_state, action
+            )
+            accumulated_events = self._substep_env_state_events(
+                prev_env_state, new_atari_state.env_state
             )
             new_state = SemanticState(atari_state=new_atari_state)
 
         semantic_obs = self._process_stack(obs_stack)
+        semantic_obs = self._stamp_events_on_observation(semantic_obs, accumulated_events)
 
         return semantic_obs, new_state, reward, done, info
 

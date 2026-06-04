@@ -23,6 +23,7 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.environments.seaquest.label import (
     SeaquestSemanticWrapper,
     seaquest_action_mapper,
+    seaquest_inverse_action_mapper,
     extract_all_skills_rewards,
     set_seaquest_action_mapper,
     set_seaquest_ascent_block,
@@ -71,15 +72,14 @@ from concept_based_learning.environments.meta_target_mask import phoenix_meta_ma
 from concept_based_learning.environments.freeway.freeway_label import (
     FreewaySemanticWrapper,
     freeway_action_mapper,
+    freeway_inverse_action_mapper,
     extract_all_skills_rewards as freeway_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.freeway.freeway_policy import (
+    get_heuristic_target as freeway_get_heuristic_target,
     NO_TARGET_IDX as freeway_NO_TARGET_IDX,
+    set_freeway_heuristic_params,
 )
-from concept_based_learning.environments.generic_heuristic import (
-    get_heuristic_target as generic_get_heuristic_target,
-)
-
 from concept_based_learning.environments.bootcamp.bootcamp_label import (
     BootcampSemanticWrapper,
 )
@@ -287,6 +287,7 @@ class EnvComponents:
     get_heuristic_target: Callable[..., Any]
     no_target_idx: int
     action_mapper: Callable[..., Any]
+    inverse_action_mapper: Callable[..., Any]
     # Uniform trainer hook:
     # reward_extractor(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info, config)
     reward_extractor: Callable[..., Any]
@@ -321,6 +322,7 @@ class EnvManager:
             get_heuristic_target=get_heuristic_target,
             no_target_idx=NO_TARGET_IDX,
             action_mapper=seaquest_action_mapper,
+            inverse_action_mapper=seaquest_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
@@ -338,6 +340,7 @@ class EnvManager:
             get_heuristic_target=choppercommand_get_heuristic_target,
             no_target_idx=choppercommand_NO_TARGET_IDX,
             action_mapper=choppercommand_action_mapper,
+            inverse_action_mapper=choppercommand_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(
                 choppercommand_extract_all_skills_rewards
             ),
@@ -356,6 +359,7 @@ class EnvManager:
             get_heuristic_target=spaceinvaders_get_heuristic_target,
             no_target_idx=spaceinvaders_NO_TARGET_IDX,
             action_mapper=spaceinvaders_action_mapper,
+            inverse_action_mapper=spaceinvaders_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(
                 spaceinvaders_extract_all_skills_rewards
             ),
@@ -374,6 +378,7 @@ class EnvManager:
             get_heuristic_target=phoenix_get_heuristic_target,
             no_target_idx=phoenix_NO_TARGET_IDX,
             action_mapper=phoenix_action_mapper,
+            inverse_action_mapper=phoenix_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(phoenix_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
@@ -387,9 +392,10 @@ class EnvManager:
             jax_game_id="freeway",
             semantic_wrapper_cls=FreewaySemanticWrapper,
             renderer_cls=FreewayRenderer,
-            get_heuristic_target=generic_get_heuristic_target,
+            get_heuristic_target=freeway_get_heuristic_target,
             no_target_idx=freeway_NO_TARGET_IDX,
             action_mapper=freeway_action_mapper,
+            inverse_action_mapper=freeway_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(freeway_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_freeway_extract_life_lost,
@@ -432,6 +438,14 @@ class EnvManager:
             )
             set_seaquest_surfacing_death_guard(
                 bool(config.get("USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD", False))
+            )
+        if components.jax_game_id == "freeway":
+            set_freeway_heuristic_params(
+                threat_x_weight=config.get("FREEWAY_THREAT_X_WEIGHT", None),
+                threat_y_weight=config.get("FREEWAY_THREAT_Y_WEIGHT", None),
+                threat_weighted_dist_thresh=config.get(
+                    "FREEWAY_THREAT_WEIGHTED_DIST_THRESH", None
+                ),
             )
 
         game_mods = _normalize_game_mods(config.get("GAME_MODS", None))

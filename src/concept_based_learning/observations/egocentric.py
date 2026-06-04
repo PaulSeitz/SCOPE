@@ -19,6 +19,11 @@ LEGACY_EGO_OBS_CHANNELS_PER_FRAME = 10
 EGO_OBS_CHANNELS_PER_FRAME = TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME
 
 _USE_LEGACY_EGO_OBS = False
+_USE_EGO_SIZE_FEATURES = True
+_USE_EGO_VELOCITY_FEATURES = True
+# None = normalize by MAX_DIST (full screen diagonal). Otherwise clip Euclidean
+# distance in pixels to this cap, then divide by the cap so feature ∈ [0, 1].
+_EGO_DISTANCE_CLIP_MAX_PX: float | None = None
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -27,16 +32,88 @@ def set_ego_obs_format(use_legacy: bool) -> None:
     _USE_LEGACY_EGO_OBS = bool(use_legacy)
 
 
+def set_ego_size_features(enabled: bool) -> None:
+    """Enable/disable size channels while keeping ego feature dimensions unchanged."""
+    global _USE_EGO_SIZE_FEATURES
+    _USE_EGO_SIZE_FEATURES = bool(enabled)
+
+
+def set_ego_velocity_features(enabled: bool) -> None:
+    """Enable/disable velocity channels while keeping ego feature dimensions unchanged."""
+    global _USE_EGO_VELOCITY_FEATURES
+    _USE_EGO_VELOCITY_FEATURES = bool(enabled)
+
+
+def using_ego_size_features() -> bool:
+    """Return True when target/player size channels are included in ego features."""
+    return _USE_EGO_SIZE_FEATURES
+
+
+def using_ego_velocity_features() -> bool:
+    """Return True when radial/tangential velocity channels are included."""
+    return _USE_EGO_VELOCITY_FEATURES
+
+
 def using_legacy_ego_obs() -> bool:
     """Return True when the legacy ego observation format is active."""
     return _USE_LEGACY_EGO_OBS
 
 
+def set_ego_distance_clip_max_pixels(max_px: float | None) -> None:
+    """
+    Clip target-aligned Euclidean distance before normalization.
+
+    When set (e.g. 15), distances >= max_px are treated as max_px so the network
+    sees a single \"far\" bucket instead of sparse large values. Normalization uses
+    max_px, not MAX_DIST. Pass None to disable clipping.
+    """
+    global _EGO_DISTANCE_CLIP_MAX_PX
+    if max_px is None:
+        _EGO_DISTANCE_CLIP_MAX_PX = None
+        return
+    cap = float(max_px)
+    if cap <= 0:
+        raise ValueError(f"EGO_DISTANCE_CLIP_MAX_PX must be positive, got {max_px}")
+    _EGO_DISTANCE_CLIP_MAX_PX = cap
+
+
+def ego_distance_clip_max_pixels() -> float | None:
+    """Return the active distance clip cap in pixels, or None if disabled."""
+    return _EGO_DISTANCE_CLIP_MAX_PX
+
+
+def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
+    """Map raw pixel distances to the normalized distance channel fed to skills."""
+    if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
+        return jnp.minimum(distances_px, cap) / cap
+    return distances_px / MAX_DIST
+
+
+def distance_pixels_from_feature(feature: jnp.ndarray | float) -> float:
+    """Invert the distance channel for logging / overlays (clipped view)."""
+    if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        return float(feature) * _EGO_DISTANCE_CLIP_MAX_PX
+    return float(feature) * MAX_DIST
+
+
 def ego_obs_channels_per_frame() -> int:
     """Return active per-frame ego feature channel count."""
     if _USE_LEGACY_EGO_OBS:
-        return LEGACY_EGO_OBS_CHANNELS_PER_FRAME
-    return TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME
+        # Legacy channel groups:
+        #   always: dx, dy, sin(o), cos(o)             -> 4
+        #   velocity (optional): dvx, dvy              -> +2
+        #   size (optional): t_w, t_h, p_w, p_h        -> +4
+        return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+            4 if _USE_EGO_SIZE_FEATURES else 0
+        )
+    # Target-aligned channel groups:
+    #   always: distance, sin(psi), cos(psi)          -> 3
+    #   velocity (optional): radial, tangential       -> +2
+    #   size (optional): target_w, target_h           -> +2
+    return 3 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+        2 if _USE_EGO_SIZE_FEATURES else 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -60,11 +137,45 @@ def _get_player(raw_observation):
     )
 
 
+def _uses_bottom_edge_y(raw_observation) -> bool:
+    """
+    Return True when this environment stores bbox y as a bottom edge.
+
+    Freeway (``raw_observation.chicken``) is the main case today. Most other games
+    expose ``raw_observation.player`` with top-left y semantics.
+    """
+    return hasattr(raw_observation, "chicken")
+
+
+def _center_y(y: jnp.ndarray, height: jnp.ndarray, *, y_is_bottom_edge: bool) -> jnp.ndarray:
+    """
+    Compute bbox centre y under an explicit coordinate convention.
+
+    - top-left convention:    center_y = y + h / 2
+    - bottom-edge convention: center_y = y - h / 2
+    """
+    if y_is_bottom_edge:
+        return y - height / 2.0
+    return y + height / 2.0
+
+
 # ---------------------------------------------------------------------------
 # Per-frame geometry (vmapped over the frame stack)
 # ---------------------------------------------------------------------------
 
-def _frame_geometry_target_aligned(p_x, p_y, p_w, p_h, p_ori_deg, t_x, t_y, t_w, t_h):
+def _frame_geometry_target_aligned(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    p_ori_deg,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+):
     """
     Compute target-aligned geometry for a single frame in the observation stack.
 
@@ -80,10 +191,12 @@ def _frame_geometry_target_aligned(p_x, p_y, p_w, p_h, p_ori_deg, t_x, t_y, t_w,
     p_cx, p_cy    : player centre coords (used for cross-frame velocity)
     t_w, t_h      : target bounding-box sizes (passed through)
     """
+    # IMPORTANT: centre computation must match the environment's y convention.
+    # If this drifts from action mapping/reward geometry, transfer can silently fail.
     p_cx = p_x + p_w / 2.0
-    p_cy = p_y + p_h / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
-    t_cy = t_y + t_h / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
 
     dx = t_cx - p_cx
     dy = t_cy - p_cy
@@ -120,12 +233,24 @@ def _velocity_world_to_ego_legacy(vx: jnp.ndarray, vy: jnp.ndarray, p_ori_deg: j
     return dvx_ego, dvy_ego
 
 
-def _single_frame_geom_legacy(p_x, p_y, p_w, p_h, p_ori, t_x, t_y, t_w, t_h):
+def _single_frame_geom_legacy(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    p_ori,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+):
     """Legacy per-frame geometry used by pre-refactor checkpoints."""
     p_cx = p_x + (p_w / 2.0)
-    p_cy = p_y + (p_h / 2.0)
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + (t_w / 2.0)
-    t_cy = t_y + (t_h / 2.0)
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
 
     dx = t_cx - p_cx
     dy = t_cy - p_cy
@@ -176,6 +301,7 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     t_h_hist = objects.height[:, target_idx]
 
     player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
     (
         distances,
         thetas,
@@ -183,7 +309,20 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
         t_cxs, t_cys,
         p_cxs, p_cys,
         t_ws,  t_hs,
-    ) = jax.vmap(_frame_geometry_target_aligned)(
+    ) = jax.vmap(
+        lambda px, py, pw, ph, po, tx, ty, tw, th: _frame_geometry_target_aligned(
+            px,
+            py,
+            pw,
+            ph,
+            po,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
         player.x,
         player.y,
         player.width,
@@ -218,18 +357,27 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     # -------------------------------------------------------------------
     # Stack and normalise
     # -------------------------------------------------------------------
-    stacked = jnp.stack(
-        [
-            distances / MAX_DIST,
-            v_r       / MAX_SPEED,
-            v_t       / MAX_SPEED,
-            t_ws      / SCREEN_WIDTH,
-            t_hs      / SCREEN_HEIGHT,
-            jnp.sin(psis),
-            jnp.cos(psis),
-        ],
-        axis=-1,
-    ).astype(jnp.float32)  # shape: [stack_size, 7]
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    if _USE_EGO_VELOCITY_FEATURES:
+        v_r_norm = v_r / MAX_SPEED
+        v_t_norm = v_t / MAX_SPEED
+    else:
+        v_r_norm = jnp.zeros_like(v_r, dtype=jnp.float32)
+        v_t_norm = jnp.zeros_like(v_t, dtype=jnp.float32)
+
+    channels = [distance_feature_from_pixels(distances)]
+    if _USE_EGO_VELOCITY_FEATURES:
+        channels.extend([v_r_norm, v_t_norm])
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    channels.extend([jnp.sin(psis), jnp.cos(psis)])
+    stacked = jnp.stack(channels, axis=-1).astype(jnp.float32)
 
     return stacked.flatten()
 
@@ -242,6 +390,7 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     t_h_history = objects.height[:, target_idx]
 
     player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
     (
         dx_ego,
         dy_ego,
@@ -254,7 +403,20 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
         p_cy,
         t_cx,
         t_cy,
-    ) = jax.vmap(_single_frame_geom_legacy)(
+    ) = jax.vmap(
+        lambda px, py, pw, ph, po, tx, ty, tw, th: _single_frame_geom_legacy(
+            px,
+            py,
+            pw,
+            ph,
+            po,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
         player.x,
         player.y,
         player.width,
@@ -279,21 +441,34 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     sin_o = jnp.sin(p_ori_rad)
     cos_o = jnp.cos(p_ori_rad)
 
-    stacked_ego = jnp.stack(
-        [
-            dx_ego / SCREEN_WIDTH,
-            dy_ego / SCREEN_HEIGHT,
-            dvx_ego / MAX_SPEED,
-            dvy_ego / MAX_SPEED,
-            t_w / SCREEN_WIDTH,
-            t_h / SCREEN_HEIGHT,
-            p_w / SCREEN_WIDTH,
-            p_h / SCREEN_HEIGHT,
-            sin_o,
-            cos_o,
-        ],
-        axis=-1,
-    ).astype(jnp.float32)
+    if _USE_EGO_SIZE_FEATURES:
+        t_w_norm = t_w / SCREEN_WIDTH
+        t_h_norm = t_h / SCREEN_HEIGHT
+        p_w_norm = p_w / SCREEN_WIDTH
+        p_h_norm = p_h / SCREEN_HEIGHT
+    else:
+        t_w_norm = jnp.zeros_like(t_w, dtype=jnp.float32)
+        t_h_norm = jnp.zeros_like(t_h, dtype=jnp.float32)
+        p_w_norm = jnp.zeros_like(p_w, dtype=jnp.float32)
+        p_h_norm = jnp.zeros_like(p_h, dtype=jnp.float32)
+
+    if _USE_EGO_VELOCITY_FEATURES:
+        dvx_norm = dvx_ego / MAX_SPEED
+        dvy_norm = dvy_ego / MAX_SPEED
+    else:
+        dvx_norm = jnp.zeros_like(dvx_ego, dtype=jnp.float32)
+        dvy_norm = jnp.zeros_like(dvy_ego, dtype=jnp.float32)
+
+    channels = [
+        dx_ego / SCREEN_WIDTH,
+        dy_ego / SCREEN_HEIGHT,
+    ]
+    if _USE_EGO_VELOCITY_FEATURES:
+        channels.extend([dvx_norm, dvy_norm])
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([t_w_norm, t_h_norm, p_w_norm, p_h_norm])
+    channels.extend([sin_o, cos_o])
+    stacked_ego = jnp.stack(channels, axis=-1).astype(jnp.float32)
 
     return stacked_ego.flatten()
 

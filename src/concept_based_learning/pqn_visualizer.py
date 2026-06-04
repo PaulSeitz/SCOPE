@@ -18,8 +18,14 @@ from concept_based_learning.observations.egocentric import (
     SCREEN_HEIGHT,
     ego_obs_channels_per_frame,
     _get_player,
+    _center_y,
+    _uses_bottom_edge_y,
     get_ego_obs,
     set_ego_obs_format,
+    set_ego_size_features,
+    set_ego_velocity_features,
+    set_ego_distance_clip_max_pixels,
+    distance_pixels_from_feature,
     using_legacy_ego_obs,
 )
 from concept_based_learning.environments.datatypes import ConceptObservation
@@ -302,7 +308,9 @@ def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
         f"egocentric observation length is {ego_feat_dim}. "
         f"Ego length is {channels_per_frame} × frame stack. Set FRAME_STACK_SIZE to "
         f"{need_stack} (and ENV_NAME to the game the checkpoint was trained on), or pass "
-        f"the matching *_config.yaml via a checkpoint saved by main.py."
+        f"the matching *_config.yaml via a checkpoint saved by main.py. Also ensure "
+        "USE_LEGACY_EGO_OBS / USE_EGO_SIZE_FEATURES / USE_EGO_VELOCITY_FEATURES "
+        "match the checkpoint's training configuration."
     )
 
 
@@ -375,6 +383,12 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     Returns the same tensors that `video_recorder.video_callback` expects.
     """
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
+    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    set_ego_distance_clip_max_pixels(
+        None if clip_px is None else float(clip_px)
+    )
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -520,22 +534,30 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
                 angle = float(jnp.arctan2(dy_pix, dx_pix))
             else:
-                distance = float(last_frame_ego[0] * MAX_DIST)
+                distance = distance_pixels_from_feature(float(last_frame_ego[0]))
+                player = _get_player(obs.raw_observation)
+                y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
                 p_cx = float(
-                    _get_player(obs.raw_observation).x[-1]
-                    + _get_player(obs.raw_observation).width[-1] / 2.0
+                    player.x[-1]
+                    + player.width[-1] / 2.0
                 )
                 p_cy = float(
-                    _get_player(obs.raw_observation).y[-1]
-                    + _get_player(obs.raw_observation).height[-1] / 2.0
+                    _center_y(
+                        player.y[-1],
+                        player.height[-1],
+                        y_is_bottom_edge=y_is_bottom_edge,
+                    )
                 )
                 t_cx = float(
                     obs.objects.x[-1, target_obj_idx]
                     + obs.objects.width[-1, target_obj_idx] / 2.0
                 )
                 t_cy = float(
-                    obs.objects.y[-1, target_obj_idx]
-                    + obs.objects.height[-1, target_obj_idx] / 2.0
+                    _center_y(
+                        obs.objects.y[-1, target_obj_idx],
+                        obs.objects.height[-1, target_obj_idx],
+                        y_is_bottom_edge=y_is_bottom_edge,
+                    )
                 )
                 angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
@@ -566,7 +588,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                     obs.objects,
                 )
             )
-
         # Step the environment
         obs, state, _reward, done, _info = env.step(state, global_action)
 
@@ -636,6 +657,12 @@ def run_live_visualization(
     rendered to a window, with the skill input (distance, angle) shown at the bottom.
     """
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
+    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    set_ego_distance_clip_max_pixels(
+        None if clip_px is None else float(clip_px)
+    )
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -801,22 +828,30 @@ def run_live_visualization(
                 distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
                 angle = float(jnp.arctan2(dy_pix, dx_pix))
             else:
-                distance = float(last_frame_ego[0] * MAX_DIST)
+                distance = distance_pixels_from_feature(float(last_frame_ego[0]))
+                player = _get_player(obs.raw_observation)
+                y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
                 p_cx = float(
-                    _get_player(obs.raw_observation).x[-1]
-                    + _get_player(obs.raw_observation).width[-1] / 2.0
+                    player.x[-1]
+                    + player.width[-1] / 2.0
                 )
                 p_cy = float(
-                    _get_player(obs.raw_observation).y[-1]
-                    + _get_player(obs.raw_observation).height[-1] / 2.0
+                    _center_y(
+                        player.y[-1],
+                        player.height[-1],
+                        y_is_bottom_edge=y_is_bottom_edge,
+                    )
                 )
                 t_cx = float(
                     obs.objects.x[-1, target_obj_idx]
                     + obs.objects.width[-1, target_obj_idx] / 2.0
                 )
                 t_cy = float(
-                    obs.objects.y[-1, target_obj_idx]
-                    + obs.objects.height[-1, target_obj_idx] / 2.0
+                    _center_y(
+                        obs.objects.y[-1, target_obj_idx],
+                        obs.objects.height[-1, target_obj_idx],
+                        y_is_bottom_edge=y_is_bottom_edge,
+                    )
                 )
                 angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
@@ -844,7 +879,6 @@ def run_live_visualization(
                     obs.objects,
                 )
             )
-
         # Step env
         obs, state, _reward, done, _info = env.step(state, global_action)
 
@@ -1022,6 +1056,11 @@ def main():
         if meta_params is None:
             base_config, _ = load_config_for_checkpoint(meta_path, base_config)
         meta_params = load_params_from_file(meta_path)
+
+    # Keep explicit CLI env override authoritative for cross-env transfer runs,
+    # even when checkpoint-side *_config.yaml is present.
+    if args.env_name is not None:
+        base_config["ENV_NAME"] = args.env_name
 
     # If requested, run live interactive visualization and exit.
     if not args.record:

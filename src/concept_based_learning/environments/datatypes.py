@@ -45,10 +45,25 @@ class EgocentricAction(enum.Enum):
 class LabeledObjectObservation(ObjectObservation):
     """
     Extends Jaxatari's native ObjectObservation to include universal semantic labels.
+
+    `can_go_offscreen`: per-object flag (int32 0/1). When 1, the global reward logic
+    uses the object's screen-edge position to distinguish "scrolled off screen" from
+    "destroyed on screen" for DESTROY reward gating. Set to 1 for objects that scroll
+    (e.g. Seaquest enemies), 0 for objects that are simply removed when gone
+    (e.g. fixed goals, virtual waypoints).
     """
 
     semantic_label: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.array(LABEL_NOOP, dtype=jnp.int32)
+    )
+    can_go_offscreen: jnp.ndarray = struct.field(
+        default_factory=lambda: jnp.array(0, dtype=jnp.int32)
+    )
+    # Set to 1 by env wrappers when an object was confirmed destroyed this step
+    # (not scrolled off screen). Used by DESTROY reward to bypass position-based
+    # ambiguity when the env zeros out position for both kills and scroll-offs.
+    was_killed: jnp.ndarray = struct.field(
+        default_factory=lambda: jnp.array(0, dtype=jnp.int32)
     )
 
 
@@ -119,6 +134,12 @@ class TandemTransition:
     skill_q_val: chex.Array
     skill_rewards: chex.Array
     skill_done: chex.Array
+    ego_obs_all: chex.Array
+    next_ego_obs_all: chex.Array
+    ego_action_all: chex.Array
+    skill_rewards_all: chex.Array
+    skill_done_all: chex.Array
+    relabel_mask: chex.Array
 
     # Raw environment reward (sign-clipped, before blending/penalties) — logged to wandb
     # so episodic env performance is always visible regardless of META_REWARD_LAMBDA.
