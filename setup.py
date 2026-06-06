@@ -19,6 +19,7 @@ setup(
         "pygame",
         "wandb",
         "pyyaml",
+        "rtpt",
     ],
     extras_require={
         "test": [

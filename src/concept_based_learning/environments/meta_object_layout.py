@@ -26,9 +26,11 @@ def prepend_meta_noop_slot(objects: LabeledObjectObservation) -> LabeledObjectOb
             [jnp.full((1,), LABEL_NOOP, dtype=jnp.int32), objects.semantic_label]
         ),
     }
-    for name in ("state", "visual_id", "orientation", "can_go_offscreen", "was_killed"):
+    for name in ("state", "orientation", "can_go_offscreen", "was_killed"):
         if hasattr(objects, name):
             leaf = getattr(objects, name)
             if leaf.ndim > 0 and int(leaf.shape[0]) == n:
                 updates[name] = jnp.concatenate([zi.astype(leaf.dtype), leaf])
+    # Slot index doubles as visual_id — we never track cross-frame entity identity.
+    updates["visual_id"] = jnp.arange(n + 1, dtype=jnp.int32)
     return objects.replace(**updates)

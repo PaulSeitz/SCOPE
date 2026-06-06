@@ -16,6 +16,7 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_idx,
 )
 from concept_based_learning.training.schedules import eps_decay_transition_steps
+from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 
 
 def make_tandem_train(
@@ -915,15 +916,13 @@ def make_tandem_train(
                 )
                 skill_valid_mask = skill_valid_mask.astype(jnp.float32)
 
-            _vid = transitions.objects.visual_id[:, :, -1, :]  # [T, E, O]
-            _act = transitions.relabel_mask  # [T, E, O]
+            _act = transitions.relabel_mask
             _both_active = jnp.logical_and(_act[1:], _act[:-1])
             _no_reset = jnp.logical_not(
                 transitions.done[:-1].astype(bool)[..., jnp.newaxis]
             )
             _valid_pair = jnp.logical_and(_both_active, _no_reset)
-            _same_id = jnp.logical_and(_valid_pair, _vid[1:] == _vid[:-1])
-            slot_stability = _same_id.sum() / (_valid_pair.sum() + 1e-8)
+            slot_stability = _valid_pair.sum() / (_no_reset.sum() + 1e-8)
 
             metrics = {
                 "meta_policy/td_loss": meta_loss[-1].mean(),
@@ -977,6 +976,9 @@ def make_tandem_train(
                         pass
 
                 jax.debug.callback(_wandb_log_cb, metrics)
+
+            if is_rtpt_enabled(config):
+                jax.debug.callback(rtpt_step_callback)
 
             return (meta_state, skill_states, expl_state, running_returns, rng), metrics
 

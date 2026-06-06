@@ -39,7 +39,7 @@ alg:
   FRAME_STACK_SIZE: 4
 
   # Shorter finetune horizon; lower LR than scratch.
-  TOTAL_TIMESTEPS: 10_000_000
+  TOTAL_TIMESTEPS: 15_000_000
   NUM_ENVS: 512
   NUM_STEPS: 64
 

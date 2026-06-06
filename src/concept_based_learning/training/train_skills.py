@@ -19,6 +19,7 @@ from concept_based_learning.networks.skill_network import QNetwork, CustomTrainS
 from concept_based_learning.networks.meta_network import MetaQNetwork
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.training.schedules import eps_decay_transition_steps
+from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 
 
 def make_train(
@@ -835,6 +836,9 @@ def make_train(
                     wandb.log(log_dict, step=step)
 
                 jax.debug.callback(_wandb_log_cb, metrics)
+
+            if is_rtpt_enabled(config):
+                jax.debug.callback(rtpt_step_callback)
 
             runner_state = (train_states, tuple(expl_state), running_returns, rng)
             return runner_state, metrics

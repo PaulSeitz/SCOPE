@@ -9,6 +9,13 @@ ENTITY: "paul-seitz-tu-darmstadt"                  # Set to your wandb username 
 PROJECT: "concept_based_learning"
 WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during debugging
 
+# --- RTPT cluster progress (nvidia-smi / ETA; like tqdm) ---
+RTPT_ENABLED: true
+RTPT_NAME_INITIALS: "PS"
+RTPT_EXPERIMENT_NAME: "jaxtari_HRL"    # null -> ALG_NAME_ENV_NAME_TRAIN_MODE
+# Host sync every N training updates (rollout+grad), not env frames. 1 = PPO-style every update.
+RTPT_STEP_EVERY: 10
+
 # --- Global Run Settings ---
 SEED: 44
 NUM_SEEDS: 1                  # Number of concurrent seeds to run via vmap

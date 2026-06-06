@@ -17,6 +17,7 @@ from concept_based_learning.curriculum import build_skill_phases
 from concept_based_learning.training.train_skills import make_train
 from concept_based_learning._legacy.train_meta_agent import make_meta_train
 from concept_based_learning.training.train_tandem import make_tandem_train
+from concept_based_learning.training.rtpt_progress import start_rtpt
 from concept_based_learning.observations.egocentric import (
     set_ego_obs_format,
     set_ego_size_features,
@@ -252,6 +253,9 @@ def single_run(config):
     global_t0 = time.time()
     train_mode = str(base_config.get("TRAIN_MODE", "skills_only"))
     print(f"\n=== Starting Training Run in Mode: {train_mode.upper()} ===")
+
+    if start_rtpt(base_config):
+        print("RTPT progress tracking enabled.")
 
     # Optional: initialize skill network weights from a pre-trained model
     # to enable few-shot / transfer learning across environments.

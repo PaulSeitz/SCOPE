@@ -23,6 +23,7 @@ from concept_based_learning.observations.egocentric import (
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork
 from concept_based_learning.training.schedules import eps_decay_transition_steps
+from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 from concept_based_learning.environments.datatypes import MetaTransition
 from concept_based_learning.networks.meta_factory import create_meta_network
 
@@ -565,6 +566,9 @@ def make_meta_train(
                     except ImportError:
                         pass
                 jax.debug.callback(_wandb_log_cb, metrics)
+
+            if is_rtpt_enabled(config):
+                jax.debug.callback(rtpt_step_callback)
 
             runner_state = (train_state, tuple(expl_state), running_returns, rng)
             return runner_state, metrics
