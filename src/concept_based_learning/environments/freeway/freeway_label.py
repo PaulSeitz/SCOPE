@@ -15,8 +15,11 @@ from concept_based_learning.observations.action_space import (
 # ---- Freeway game constants (mirror FreewayConstants defaults) ----
 FREEWAY_CHICKEN_X = 44
 FREEWAY_NUM_LANES = 10
-FREEWAY_TOP_BORDER = 8      # player scores when chicken_y (bottom edge) ≤ this
+FREEWAY_TOP_BORDER = 15     # player scores when chicken_y (bottom edge) ≤ this (JAXAtari FreewayConstants.top_border)
 # Nudge the fixed COLLECT goal toward the top (smaller y in Freeway coords).
+# Must ensure goal band bottom > top_border so the rising-edge fires before the game resets
+# the chicken (scoring at chicken_y=top_border immediately spawns chicken at y≈187).
+# With top_border=15, goal_y=11, goal_h=10: after 1px inset, band=[12,20]. Rising edge at y=20 → 5px before scoring.
 FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 14
 
 # Effective hitbox sizes derived from JAXAtari insets (jax_freeway.FreewayConstants):

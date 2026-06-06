@@ -93,12 +93,18 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
     """
     Reduce stacked observations to last-frame scalars and compute AABB overlaps.
 
+    next_overlap uses prev_target's position when next_target just went inactive
+    (active 1→0).  Some envs (e.g. JAXAtari Seaquest) zero the object position
+    at the same step it is collected, making next_target.x/y = 0 and causing the
+    overlap check to fail even though the player genuinely entered the hitbox.
+    Falling back to prev_target position for the overlap test recovers that signal.
+
     Returns:
         prev_player  — last-frame player struct at t
         prev_target  — last-frame target struct at t
         next_target  — last-frame target struct at t+1
         prev_overlap — bool: AABB overlap at t
-        next_overlap — bool: AABB overlap at t+1
+        next_overlap — bool: AABB overlap at t+1 (using prev_target pos if target just vanished)
     """
     prev_player = last_frame(_agent_bbox(prev_raw_obs))
     next_player = last_frame(_agent_bbox(next_raw_obs))
@@ -106,7 +112,22 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
     next_target = last_frame(next_target)
 
     prev_overlap = _bbox_overlap(prev_player, prev_target, inset_px=OVERLAP_INSET_PX)
-    next_overlap = _bbox_overlap(next_player, next_target, inset_px=OVERLAP_INSET_PX)
+
+    # Standard check: player at t+1 vs target at t+1.
+    next_overlap_live = _bbox_overlap(next_player, next_target, inset_px=OVERLAP_INSET_PX)
+
+    # Vanish check: target went active→inactive this step.
+    # Some envs (e.g. JAXAtari Seaquest) zero the position at the same step the
+    # collision is registered, so next_target.x/y = 0 and the overlap check
+    # against next_target always fails.
+    #
+    # When can_go_offscreen=0 the only reason a target deactivates is that it was
+    # collected/triggered — treat this as an unconditional overlap (rising-edge
+    # fires regardless of which entity moved into which).  Scroll-off objects have
+    # can_go_offscreen=1 and are excluded so we don't misfire on scroll-offs.
+    just_deactivated = jnp.logical_and(prev_target.active > 0, next_target.active == 0)
+    collected_in_place = jnp.logical_and(just_deactivated, prev_target.can_go_offscreen == 0)
+    next_overlap = jnp.where(collected_in_place, jnp.array(True), next_overlap_live)
 
     return prev_player, prev_target, next_target, prev_overlap, next_overlap
 
