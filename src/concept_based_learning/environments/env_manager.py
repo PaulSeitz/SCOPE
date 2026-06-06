@@ -441,11 +441,7 @@ class EnvManager:
             )
         if components.jax_game_id == "freeway":
             set_freeway_heuristic_params(
-                threat_x_weight=config.get("FREEWAY_THREAT_X_WEIGHT", None),
-                threat_y_weight=config.get("FREEWAY_THREAT_Y_WEIGHT", None),
-                threat_weighted_dist_thresh=config.get(
-                    "FREEWAY_THREAT_WEIGHTED_DIST_THRESH", None
-                ),
+                threat_dist_thresh=config.get("FREEWAY_THREAT_DIST_THRESH", None),
             )
 
         game_mods = _normalize_game_mods(config.get("GAME_MODS", None))

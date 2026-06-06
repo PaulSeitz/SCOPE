@@ -163,6 +163,23 @@ def _center_y(y: jnp.ndarray, height: jnp.ndarray, *, y_is_bottom_edge: bool) ->
 # Per-frame geometry (vmapped over the frame stack)
 # ---------------------------------------------------------------------------
 
+def _box_surface_extent(half_w: jnp.ndarray, half_h: jnp.ndarray, cos_t: jnp.ndarray, sin_t: jnp.ndarray) -> jnp.ndarray:
+    """
+    Distance from box centre to the surface point hit by ray (cos_t, sin_t).
+
+    Clips the unit ray to the axis-aligned box [−hw, hw] × [−hh, hh], giving the
+    exact nearest surface point — a corner when both axes are simultaneously hit,
+    an edge midpoint when only one axis is hit.  Fully differentiable; no branches.
+    """
+    # How far along the ray until each axis boundary is hit.
+    # jnp.where guards against division by zero on axis-aligned rays.
+    t_x = jnp.where(jnp.abs(cos_t) > 1e-8, half_w / jnp.abs(cos_t), jnp.inf)
+    t_y = jnp.where(jnp.abs(sin_t) > 1e-8, half_h / jnp.abs(sin_t), jnp.inf)
+    t_exit = jnp.minimum(t_x, t_y)
+    # Euclidean length of the clipped ray segment
+    return jnp.sqrt((t_exit * cos_t) ** 2 + (t_exit * sin_t) ** 2)
+
+
 def _frame_geometry_target_aligned(
     p_x,
     p_y,
@@ -184,8 +201,8 @@ def _frame_geometry_target_aligned(
 
     Returns
     -------
-    distance      : Euclidean distance player centre → target centre
-    theta_target  : angle of player→target vector, screen-Y-down radians
+    distance      : nearest-surface gap between player and target bounding boxes
+    theta_target  : angle of player→target vector (centre–centre), screen-Y-down radians
     psi           : player facing minus theta_target, wrapped to [-π, π]
     t_cx, t_cy    : target centre coords (used for cross-frame velocity)
     p_cx, p_cy    : player centre coords (used for cross-frame velocity)
@@ -200,12 +217,20 @@ def _frame_geometry_target_aligned(
 
     dx = t_cx - p_cx
     dy = t_cy - p_cy
-    # Small epsilon prevents zero-gradient at exactly zero distance
-    distance = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
+    center_dist = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
 
-    # θ_target: the angle from the player to the target in screen-Y-down coordinates.
-    # (atan2 with Y-down: positive angles are clockwise, e.g. target below → +90°)
+    # θ_target: angle of the centre→centre vector in screen-Y-down coordinates.
+    # Kept centre-based so "which direction is the target?" is stable and continuous.
     theta_target = jnp.arctan2(dy, dx)
+    cos_t = jnp.cos(theta_target)
+    sin_t = jnp.sin(theta_target)
+
+    # Subtract the surface extent of each box along the line of sight so that
+    # distance reflects the actual gap between the nearest surfaces / corners.
+    p_extent = _box_surface_extent(p_w / 2.0, p_h / 2.0, cos_t, sin_t)
+    t_extent = _box_surface_extent(t_w / 2.0, t_h / 2.0, cos_t, sin_t)
+    # Clamp to zero: overlapping / touching boxes should report distance = 0.
+    distance = jnp.maximum(center_dist - p_extent - t_extent, 0.0)
 
     # ψ: player physical facing relative to θ_target.
     # Wrap to [-π, π] so sin/cos encoding is smooth and unambiguous.
@@ -303,8 +328,8 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     player = _get_player(raw_observation)
     y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
     (
-        distances,
-        thetas,
+        distances,     # nearest surface gap (edge/corner to edge/corner)
+        thetas,        # centre→centre angle
         psis,
         t_cxs, t_cys,
         p_cxs, p_cys,
