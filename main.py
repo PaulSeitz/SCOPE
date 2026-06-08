@@ -743,6 +743,9 @@ def single_run(config):
             save_file(flat_meta_params, meta_model_path)
             print(f"Meta-policy parameters saved to {meta_model_path}")
 
+    if wandb.run is not None:
+        wandb.finish()
+
 
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
 def main(config):
