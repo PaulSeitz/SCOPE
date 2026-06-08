@@ -11,6 +11,12 @@ from jaxatari.games.jax_choppercommand import ChopperCommandRenderer
 from jaxatari.games.jax_spaceinvaders import SpaceInvadersRenderer
 from jaxatari.games.jax_phoenix import PhoenixRenderer
 from jaxatari.games.jax_freeway import FreewayRenderer
+from jaxatari.games.jax_pong import PongRenderer
+from jaxatari.games.jax_breakout import BreakoutRenderer
+from jaxatari.games.jax_beamrider import BeamriderRenderer
+from jaxatari.games.jax_kangaroo import KangarooRenderer
+from jaxatari.games.jax_skiing import SkiingRenderer
+from jaxatari.games.jax_tennis import TennisRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -92,6 +98,41 @@ from concept_based_learning.environments.bootcamp.bootcamp_policy import (
     bootcamp_fixed_target_index_from_game_mods,
 )
 
+from concept_based_learning.environments.pong.pong_label import (
+    PongSemanticWrapper,
+    pong_action_mapper,
+    extract_all_skills_rewards as pong_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.breakout.breakout_label import (
+    BreakoutSemanticWrapper,
+    breakout_action_mapper,
+    extract_all_skills_rewards as breakout_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.beamrider.beamrider_label import (
+    BeamriderSemanticWrapper,
+    beamrider_action_mapper,
+    extract_all_skills_rewards as beamrider_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.kangaroo.kangaroo_label import (
+    KangarooSemanticWrapper,
+    kangaroo_action_mapper,
+    extract_all_skills_rewards as kangaroo_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.skiing.skiing_label import (
+    SkiingSemanticWrapper,
+    skiing_action_mapper,
+    extract_all_skills_rewards as skiing_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.tennis.tennis_label import (
+    TennisSemanticWrapper,
+    tennis_action_mapper,
+    extract_all_skills_rewards as tennis_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.generic_heuristic import (
+    get_heuristic_target as generic_get_heuristic_target,
+    NO_TARGET_IDX as generic_NO_TARGET_IDX,
+)
+
 
 def _normalize_game_mods(raw: Union[None, str, List[Any]]) -> Optional[List[str]]:
     """
@@ -162,6 +203,30 @@ def _freeway_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.
     prev_es = prev_env_state.atari_state.env_state
     next_es = next_env_state.atari_state.env_state
     collision = jnp.logical_and(prev_es.cooldown == 0, next_es.cooldown > 0)
+    return collision.astype(jnp.int32)
+
+
+def _pong_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
+    """Pong has no lives; enemy scoring a point is the 'life lost' signal."""
+    prev_es = prev_env_state.atari_state.env_state
+    next_es = next_env_state.atari_state.env_state
+    return (next_es.enemy_score - prev_es.enemy_score).astype(jnp.int32)
+
+
+def _tennis_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
+    """Tennis has no lives; enemy scoring a point is the 'life lost' signal."""
+    prev_es = prev_env_state.atari_state.env_state
+    next_es = next_env_state.atari_state.env_state
+    prev_pts = prev_es.game_state.enemy_score
+    next_pts = next_es.game_state.enemy_score
+    return (next_pts - prev_pts).astype(jnp.int32)
+
+
+def _skiing_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
+    """Skiing has no lives; treat start of collision cooldown as a 'life lost' event."""
+    prev_es = prev_env_state.atari_state.env_state
+    next_es = next_env_state.atari_state.env_state
+    collision = jnp.logical_and(prev_es.collision_cooldown == 0, next_es.collision_cooldown > 0)
     return collision.astype(jnp.int32)
 
 
@@ -399,6 +464,108 @@ class EnvManager:
             reward_extractor=_wrap_reward_extractor_5arg(freeway_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_freeway_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["pong"] = EnvComponents(
+            name="Pong",
+            jax_game_id="pong",
+            semantic_wrapper_cls=PongSemanticWrapper,
+            renderer_cls=PongRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=generic_NO_TARGET_IDX,
+            action_mapper=pong_action_mapper,
+            inverse_action_mapper=pong_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(pong_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_pong_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["breakout"] = EnvComponents(
+            name="Breakout",
+            jax_game_id="breakout",
+            semantic_wrapper_cls=BreakoutSemanticWrapper,
+            renderer_cls=BreakoutRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=generic_NO_TARGET_IDX,
+            action_mapper=breakout_action_mapper,
+            inverse_action_mapper=breakout_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(breakout_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["beamrider"] = EnvComponents(
+            name="Beamrider",
+            jax_game_id="beamrider",
+            semantic_wrapper_cls=BeamriderSemanticWrapper,
+            renderer_cls=BeamriderRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=generic_NO_TARGET_IDX,
+            action_mapper=beamrider_action_mapper,
+            inverse_action_mapper=beamrider_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(beamrider_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["kangaroo"] = EnvComponents(
+            name="Kangaroo",
+            jax_game_id="kangaroo",
+            semantic_wrapper_cls=KangarooSemanticWrapper,
+            renderer_cls=KangarooRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=generic_NO_TARGET_IDX,
+            action_mapper=kangaroo_action_mapper,
+            inverse_action_mapper=kangaroo_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(kangaroo_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["skiing"] = EnvComponents(
+            name="Skiing",
+            jax_game_id="skiing",
+            semantic_wrapper_cls=SkiingSemanticWrapper,
+            renderer_cls=SkiingRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=generic_NO_TARGET_IDX,
+            action_mapper=skiing_action_mapper,
+            inverse_action_mapper=skiing_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(skiing_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_skiing_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["tennis"] = EnvComponents(
+            name="Tennis",
+            jax_game_id="tennis",
+            semantic_wrapper_cls=TennisSemanticWrapper,
+            renderer_cls=TennisRenderer,
+            get_heuristic_target=generic_get_heuristic_target,
+            no_target_idx=generic_NO_TARGET_IDX,
+            action_mapper=tennis_action_mapper,
+            inverse_action_mapper=tennis_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(tennis_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_tennis_extract_life_lost,
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,

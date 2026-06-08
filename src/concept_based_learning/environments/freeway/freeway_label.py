@@ -20,7 +20,7 @@ FREEWAY_TOP_BORDER = 15     # player scores when chicken_y (bottom edge) ≤ thi
 # Must ensure goal band bottom > top_border so the rising-edge fires before the game resets
 # the chicken (scoring at chicken_y=top_border immediately spawns chicken at y≈187).
 # With top_border=15, goal_y=11, goal_h=10: after 1px inset, band=[12,20]. Rising edge at y=20 → 5px before scoring.
-FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 14
+FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 16
 
 # Effective hitbox sizes derived from JAXAtari insets (jax_freeway.FreewayConstants):
 #   chicken: sprite 6×8, inset x=1 each side → effective width=4

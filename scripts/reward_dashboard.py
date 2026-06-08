@@ -159,7 +159,7 @@ class RewardDashboard:
         self.log_max_steps = 180  # keep entries for ~6 s at 30 fps
 
         self.frozen = False
-        self.target_fps = 30
+        self.target_fps = 60
         self.fps_history: list = []
         self.actual_fps = 0.0
 

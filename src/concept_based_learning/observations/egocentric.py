@@ -127,13 +127,12 @@ def _get_player(raw_observation):
     ``raw_observation.chicken``.  Additional aliases can be added here
     without touching the rest of the module.
     """
-    if hasattr(raw_observation, "player"):
-        return raw_observation.player
-    if hasattr(raw_observation, "chicken"):
-        return raw_observation.chicken
+    for name in ("player", "chicken", "agent", "skier"):
+        if hasattr(raw_observation, name):
+            return getattr(raw_observation, name)
     raise AttributeError(
         f"Cannot find a player entity in {type(raw_observation).__name__}. "
-        "Expected 'player' or 'chicken' attribute."
+        "Expected one of: player, chicken, agent, skier."
     )
 
 

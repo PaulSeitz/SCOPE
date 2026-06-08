@@ -43,6 +43,40 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         # 8 enemies + 8 bullets + 1 boss (+ padding to PHOENIX_MAX_OBJECTS)
         super().__init__(env, max_objects=PHOENIX_MAX_OBJECTS)
 
+    def _substep_env_state_events(self, prev_env_state, next_env_state):
+        """
+        Detect enemy kills this substep.
+
+        Kill signal: an enemy newly enters dying state (phoenix_dying or bat_dying
+        goes False → True). Boss kill: boss.active goes True → False.
+        Returns a 17-element mask: [enemies(8) | bullets(8) | boss(1)].
+        """
+        prev_dying = prev_env_state.phoenix_dying | prev_env_state.bat_dying
+        next_dying = next_env_state.phoenix_dying | next_env_state.bat_dying
+        enemy_killed = jnp.logical_and(~prev_dying, next_dying).astype(jnp.int32)
+
+        bullet_killed = jnp.zeros(8, dtype=jnp.int32)
+
+        boss_killed = jnp.logical_and(
+            prev_env_state.boss.active, ~next_env_state.boss.active
+        ).astype(jnp.int32)
+        boss_killed = jnp.expand_dims(boss_killed, axis=0)
+
+        return jnp.concatenate([enemy_killed, bullet_killed, boss_killed])  # (17,)
+
+    def _stamp_events_on_observation(self, semantic_obs, kill_mask):
+        if kill_mask is None:
+            return semantic_obs
+        # Game layout: [enemies(8) | bullets(8) | boss(1)] = 17 slots, padded to
+        # game_max_objects=20, then +1 meta NOOP → was_killed shape [stack, 21].
+        pad = jnp.zeros(self.game_max_objects - kill_mask.shape[0], dtype=jnp.int32)
+        was_killed_with_noop = jnp.concatenate(
+            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32), pad]
+        )
+        objects = semantic_obs.objects
+        new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
+        return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
+
     def step(self, state, action):
         """Override step to trick the network's orientation distribution."""
         obs, env_state, reward, done, info = super().step(state, action)

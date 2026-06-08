@@ -102,7 +102,13 @@ _WORLD_DIR_ANGLES_DEG = jnp.array(
 
 
 def _default_get_player(raw_obs):
-    return raw_obs.player
+    for name in ("player", "chicken", "agent", "skier"):
+        if hasattr(raw_obs, name):
+            return getattr(raw_obs, name)
+    raise AttributeError(
+        f"Cannot find player entity in {type(raw_obs).__name__}. "
+        "Expected one of: player, chicken, agent, skier."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +160,9 @@ def make_ego_action_mapper(
 
     def mapper(ego_action, raw_obs, target_idx, objects):
         # 1. Compute θ_target from the most recent frame in the stack.
-        p_cx = raw_obs.player.x[-1] + raw_obs.player.width[-1] / 2.0
-        p_cy = raw_obs.player.y[-1] + raw_obs.player.height[-1] / 2.0
+        _player = _default_get_player(raw_obs)
+        p_cx = _player.x[-1] + _player.width[-1] / 2.0
+        p_cy = _player.y[-1] + _player.height[-1] / 2.0
         t_cx = objects.x[-1, target_idx] + objects.width[-1, target_idx] / 2.0
         t_cy = objects.y[-1, target_idx] + objects.height[-1, target_idx] / 2.0
 

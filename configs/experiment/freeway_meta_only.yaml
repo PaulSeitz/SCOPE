@@ -21,7 +21,7 @@ SAVE_PATH: "./outputs/models/freeway_meta_only"
 alg:
   # Skills from freeway_fewshot (same ego layout as that run).
   # Filename: {SAVE_PATH}/{ENV_NAME}/{ALG_NAME}_{ENV_NAME}_seed{SEED}.safetensors
-  INIT_MODEL_PATH: "./outputs/models/seaquest_skills_pretrain/seaquest/hierarchical_pqn_seaquest_seed44.safetensors"
+  INIT_MODEL_PATH: "./outputs/models/cluster/hierarchical_pqn_seaquest_seed44.safetensors"
 
   NUM_SKILLS: 3
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
@@ -36,7 +36,7 @@ alg:
   META_FLAT_NUM_LAYERS: 3
   META_LR: 0.0005
   META_SWITCH_PENALTY: 0
-  META_DEATH_PENALTY: -1.0
+  META_DEATH_PENALTY: 0.0
   # Freeway tandem disables NOOP target; meta picks cars or the top COLLECT goal.
   META_USE_NOOP_TARGET: true
   META_NOOP_TARGET_IDX: 0
@@ -48,7 +48,7 @@ alg:
   EPISODIC_LIFE: false
   FRAME_STACK_SIZE: 4
 
-  TOTAL_TIMESTEPS: 20_000_000
+  TOTAL_TIMESTEPS: 30_000_000
   NUM_ENVS: 1024
   NUM_STEPS: 64
   NUM_EPOCHS: 3
@@ -60,6 +60,6 @@ alg:
 
   # Meta target exploration (train_meta_agent uses EPS_* for the meta head).
   # Mirrors tandem META_EPS_START with skill EPS_FINISH / EPS_DECAY.
-  EPS_START: 0.2
+  EPS_START: 1.0
   EPS_FINISH: 0.05
   EPS_DECAY: 0.8

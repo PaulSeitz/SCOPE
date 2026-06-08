@@ -240,8 +240,9 @@ def single_run(config):
         wandb.init(
             entity=base_config.get("ENTITY", None),
             project=base_config.get("PROJECT", "concept_based_learning"),
-            tags=[alg_name.upper(), env_name.upper(), f"jax_{jax.__version__}"],
-            name=f'{alg_name}_{env_name}',
+            tags=[alg_name.upper(), env_name.upper(), f"jax_{jax.__version__}"]
+                 + list(base_config.get("WANDB_TAGS", [])),
+            name=base_config.get("WANDB_RUN_NAME", f'{alg_name}_{env_name}'),
             config=base_config,
             mode=base_config["WANDB_MODE"],
         )

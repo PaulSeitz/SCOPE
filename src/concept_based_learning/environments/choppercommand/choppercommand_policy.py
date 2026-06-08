@@ -188,7 +188,7 @@ def debug_heuristic_snapshot(raw_observation, objects, prev_target_idx):
 
     weights = jnp.where(
         labels == LABEL_AVOID,
-        1000.0,
+        0.0,
         jnp.where(
             labels == LABEL_DESTROY,
             500.0,

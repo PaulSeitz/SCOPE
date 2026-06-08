@@ -59,12 +59,12 @@ def _agent_bbox(raw_obs):
     TODO: Move this resolution into env-specific hooks/components and pass a
     normalized agent bbox into the reward extractor.
     """
-    for name in ("player", "chicken", "agent"):
+    for name in ("player", "chicken", "agent", "skier"):
         if hasattr(raw_obs, name):
             return getattr(raw_obs, name)
     raise AttributeError(
         "Raw observation does not expose a known controllable agent field "
-        "(expected one of: player, chicken, agent)."
+        "(expected one of: player, chicken, agent, skier)."
     )
 
 
@@ -168,7 +168,9 @@ def extract_skill_rewards(
     collect_done    = collect_success
 
     # ---- AVOID ----
-    avoid_failure = overlap_rising_edge
+    # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
+    # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
+    avoid_failure = jnp.logical_or(overlap_rising_edge, next_target.was_killed == 1)
     avoid_reward  = jnp.where(avoid_failure, AVOID_FAILURE_REWARD, 0.0)
     avoid_done    = avoid_failure
 
