@@ -3,9 +3,18 @@ import threading
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pygame
-from jaxatari.renderers import JAXGameRenderer
 import wandb
+from jaxatari.renderers import JAXGameRenderer
+
+# Force pygame into headless mode before the first pygame.init() call so the
+# video renderer works on cluster nodes that have no display server.
+# SDL_VIDEODRIVER=dummy uses a null video driver; SDL_AUDIODRIVER=dummy
+# suppresses the matching audio warning. Both are no-ops if a real display
+# is already available.
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+import pygame  # noqa: E402  (must come after the env vars are set)
 
 CURRENT_VIDEO_THREAD = None
 
@@ -155,9 +164,6 @@ def add_distance_angle_text(frame, distance, angle):
     """
     if distance is None or np.isnan(distance):
         return frame
-
-    pygame.init()
-    pygame.font.init()
 
     _, H, W = frame.shape
     surf = pygame.surfarray.make_surface(frame.transpose(2, 1, 0))
