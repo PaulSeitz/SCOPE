@@ -34,7 +34,16 @@ from concept_based_learning.environments.choppercommand.choppercommand_policy im
     debug_heuristic_snapshot,
 )
 from concept_based_learning.networks.meta_factory import create_meta_network
-from concept_based_learning.environments.meta_target_mask import build_meta_target_mask
+from concept_based_learning.environments.meta_target_mask import (
+    build_meta_target_mask,
+    is_meta_fire_target,
+    is_meta_noop_target,
+    meta_fire_game_action,
+    meta_fire_target_enabled,
+    meta_fire_target_idx,
+    meta_noop_target_enabled,
+    meta_noop_target_idx,
+)
 from concept_based_learning.networks.skill_network import QNetwork
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -370,7 +379,164 @@ def _select_target_with_meta(
         config,
     )[0]
     target_idx = jnp.where(any_active, target_idx, no_target_idx)
-    return int(target_idx)
+    return target_idx.astype(jnp.int32)
+
+
+def _jax_select_target_with_meta(
+    obs,
+    config,
+    meta_network,
+    meta_params,
+    meta_mask_hook,
+    forced_target_hook,
+    no_target_idx,
+):
+    """JAX-traced target selection (no host sync)."""
+    meta_q_vals = meta_network.apply(
+        {"params": meta_params},
+        obs.raw_observation,
+        obs.objects,
+        train=False,
+    )
+    active_mask = build_meta_target_mask(
+        obs.objects,
+        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+        config,
+        hook=meta_mask_hook,
+    )
+    if active_mask.ndim > 1:
+        active_mask = active_mask[0]
+    any_active = jnp.any(active_mask)
+    valid_qs = jnp.where(active_mask, meta_q_vals, -jnp.inf)
+    target_idx = jnp.argmax(valid_qs)
+    target_idx = forced_target_hook(
+        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+        jnp.expand_dims(target_idx, 0),
+        config,
+    )[0]
+    return jnp.where(any_active, target_idx, no_target_idx).astype(jnp.int32)
+
+
+def _make_jitted_greedy_episode_runner(
+    env,
+    skill_network,
+    skill_params,
+    config,
+    components,
+    *,
+    meta_network,
+    meta_params,
+    max_frames: int,
+    num_skills: int,
+    ego_action_dim: int,
+    restrict_fire_for_non_destroy: bool,
+):
+    """Compile one full greedy episode (env + meta + skills) into a single JIT call."""
+    heuristic_target = components.get_heuristic_target
+    no_target_idx = int(components.no_target_idx)
+    action_mapper = components.action_mapper
+    forced_target_hook = components.forced_target_hook
+    meta_mask_hook = components.meta_mask_hook
+
+    noop_enabled = meta_noop_target_enabled(config)
+    fire_enabled = meta_fire_target_enabled(config)
+    noop_idx = jnp.int32(meta_noop_target_idx(config))
+    fire_idx = jnp.int32(meta_fire_target_idx(config))
+    fire_action = jnp.int32(meta_fire_game_action(config))
+    no_target = jnp.int32(no_target_idx)
+    fire_indices = fire_ego_action_indices(ego_action_dim)
+    use_meta = meta_network is not None
+
+    def _skill_game_action(obs, target):
+        is_noop = is_meta_noop_target(
+            target, config, noop_idx=int(noop_idx), enabled=noop_enabled
+        )
+        is_fire = is_meta_fire_target(
+            target, config, fire_idx=int(fire_idx), enabled=fire_enabled
+        )
+        force_noop = jnp.logical_or(target == no_target, is_noop)
+        safe_target = jnp.where(target == no_target, 0, target)
+        raw_label = obs.objects.semantic_label[-1, safe_target]
+        sk_idx = label_to_skill_idx(raw_label, num_skills)
+        ego_obs = get_ego_obs(obs.raw_observation, obs.objects, safe_target)
+
+        def apply_one(params_for_skill):
+            return skill_network.apply(
+                {"params": params_for_skill}, ego_obs, train=False
+            )
+
+        q_all = jax.vmap(apply_one)(skill_params)
+        q_skill = q_all[sk_idx]
+        if restrict_fire_for_non_destroy:
+            q_skill = jax.lax.cond(
+                sk_idx == 0,
+                lambda q: q,
+                lambda q: q.at[fire_indices].set(-jnp.inf),
+                q_skill,
+            )
+        ego_a = jnp.argmax(q_skill)
+        game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
+        game_a = jnp.where(is_fire, fire_action, game_a)
+        return jnp.where(force_noop, 0, game_a).astype(jnp.int32)
+
+    def run_episode(rng):
+        rng, reset_key = jax.random.split(rng)
+        obs, state = env.reset(reset_key)
+        prev_target = no_target
+
+        def cond(carry):
+            _state, _obs, _rng, _ret, done, _prev, step = carry
+            return jnp.logical_and(step < max_frames, jnp.logical_not(done))
+
+        def body(carry):
+            state, obs, rng, ret, done, prev_target, step = carry
+            rng, step_key = jax.random.split(rng)
+
+            if use_meta:
+                target = _jax_select_target_with_meta(
+                    obs,
+                    config,
+                    meta_network,
+                    meta_params,
+                    meta_mask_hook,
+                    forced_target_hook,
+                    no_target,
+                )
+            else:
+                target = jnp.ravel(
+                    heuristic_target(
+                        obs.raw_observation,
+                        obs.objects,
+                        prev_target,
+                        step_key,
+                    )
+                )[0].astype(jnp.int32)
+                target = forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.expand_dims(target, 0),
+                    config,
+                )[0].astype(jnp.int32)
+
+            game_a = _skill_game_action(obs, target)
+            new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
+            new_done = jnp.logical_or(done, step_done)
+            return (
+                new_state,
+                new_obs,
+                rng,
+                ret + reward,
+                new_done,
+                target,
+                step + 1,
+            )
+
+        init = (state, obs, rng, jnp.array(0.0), False, prev_target, 0)
+        final = jax.lax.while_loop(cond, body, init)
+        return final[3]
+
+    return jax.jit(run_episode)
 
 
 def run_greedy_eval_episodes(
@@ -382,12 +548,15 @@ def run_greedy_eval_episodes(
     num_seeds: int = 3,
     base_seed: int | None = None,
     max_frames: int | None = None,
+    progress: bool = True,
 ) -> dict:
     """
     Greedy hierarchical eval on the fair eval wrapper (no sticky actions, no episodic life).
 
     Runs ``num_seeds * num_episodes`` full episodes and returns aggregate score stats.
     Meta is greedy argmax when ``meta_params`` is set; otherwise the env heuristic is used.
+
+    Each episode is one JIT-compiled ``while_loop`` (not a slow Python step loop).
     """
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
@@ -405,22 +574,13 @@ def run_greedy_eval_episodes(
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
-    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
-    meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
-    meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
-    meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
-    max_frames = int(max_frames or config.get("EVAL_MAX_FRAMES", 27000))
+    # Match video rollout cap; 27000 Python steps × NN forward ≈ hours per env.
+    max_frames = int(max_frames or config.get("EVAL_MAX_FRAMES", 2000))
 
     env, _renderer = create_eval_env(config)
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
     components = manager.get_components(env_name)
-    heuristic_target = components.get_heuristic_target
-    no_target_idx = components.no_target_idx
-    action_mapper = components.action_mapper
-    forced_target_hook = components.forced_target_hook
-    meta_mask_hook = components.meta_mask_hook
 
     skill_network = QNetwork(
         action_dim=ego_action_dim,
@@ -439,101 +599,52 @@ def run_greedy_eval_episodes(
     validate_skill_checkpoint_ego_dim(config, int(dummy_ego.shape[-1]))
     if params_tree is not None:
         params_tree = ensure_skill_params_stack(params_tree, num_skills)
+    else:
+        skill_vars = skill_network.init(
+            jax.random.PRNGKey(base_seed + 1), dummy_ego, train=False
+        )
+        params_tree = jax.tree_util.tree_map(
+            lambda p: jnp.stack([p] * num_skills, axis=0),
+            skill_vars["params"],
+        )
 
+    run_episode = _make_jitted_greedy_episode_runner(
+        env,
+        skill_network,
+        params_tree,
+        config,
+        components,
+        meta_network=meta_network,
+        meta_params=meta_params,
+        max_frames=max_frames,
+        num_skills=num_skills,
+        ego_action_dim=ego_action_dim,
+        restrict_fire_for_non_destroy=restrict_fire_for_non_destroy,
+    )
+
+    if progress:
+        print(f"  Compiling greedy eval (max {max_frames} steps/episode)...", flush=True)
+    _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999)))
+
+    total_runs = num_seeds * num_episodes
     episode_returns: list[float] = []
+    run_idx = 0
     for seed_idx in range(num_seeds):
         for ep_idx in range(num_episodes):
+            run_idx += 1
+            if progress:
+                print(
+                    f"  Greedy eval episode {run_idx}/{total_runs} "
+                    f"(seed {seed_idx + 1}/{num_seeds}, ep {ep_idx + 1}/{num_episodes})...",
+                    flush=True,
+                )
             ep_seed = base_seed + seed_idx * 10_000 + ep_idx * 997
-            rng = jax.random.PRNGKey(ep_seed)
-            rng, rng_reset = jax.random.split(rng)
-            obs, state = env.reset(rng_reset)
-            prev_target_idx = no_target_idx
-            episode_return = 0.0
-
-            for _ in range(max_frames):
-                rng, step_key = jax.random.split(rng)
-
-                if meta_network is None:
-                    target_obj_idx = int(
-                        jnp.ravel(
-                            heuristic_target(
-                                obs.raw_observation,
-                                obs.objects,
-                                prev_target_idx,
-                                step_key,
-                            )
-                        )[0]
-                    )
-                    target_obj_idx = int(
-                        forced_target_hook(
-                            jax.tree_util.tree_map(
-                                lambda x: jnp.expand_dims(x, 0), obs.raw_observation
-                            ),
-                            jnp.asarray([target_obj_idx], dtype=jnp.int32),
-                            config,
-                        )[0]
-                    )
-                else:
-                    target_obj_idx = _select_target_with_meta(
-                        obs,
-                        config,
-                        meta_network,
-                        meta_params,
-                        meta_mask_hook,
-                        forced_target_hook,
-                        no_target_idx,
-                    )
-                prev_target_idx = target_obj_idx
-
-                is_meta_noop = (
-                    meta_use_noop_target and target_obj_idx == meta_noop_target_idx
-                )
-                is_meta_fire = (
-                    meta_use_fire_target and target_obj_idx == meta_fire_target_idx
-                )
-                if target_obj_idx == no_target_idx or is_meta_noop:
-                    global_action = 0
-                elif is_meta_fire:
-                    global_action = meta_fire_game_action
-                else:
-                    raw_label = obs.objects.semantic_label[-1, target_obj_idx]
-                    active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
-                    ego_obs = get_ego_obs(
-                        obs.raw_observation,
-                        obs.objects,
-                        jnp.array(target_obj_idx, dtype=jnp.int32),
-                    )
-                    ego_obs_batch = ego_obs[jnp.newaxis, ...]
-
-                    def apply_one(params_for_skill):
-                        return skill_network.apply(
-                            {"params": params_for_skill},
-                            ego_obs_batch,
-                            train=False,
-                        )
-
-                    q_vals = jax.vmap(apply_one)(params_tree)
-                    q_vals = jnp.squeeze(q_vals, axis=1)
-                    q_active = q_vals[active_skill_idx]
-                    if restrict_fire_for_non_destroy and active_skill_idx != 0:
-                        fire_indices = fire_ego_action_indices(ego_action_dim)
-                        q_active = q_active.at[fire_indices].set(-jnp.inf)
-                    chosen_ego = int(jnp.argmax(q_active))
-                    global_action = int(
-                        action_mapper(
-                            chosen_ego,
-                            obs.raw_observation,
-                            jnp.array(target_obj_idx, dtype=jnp.int32),
-                            obs.objects,
-                        )
-                    )
-
-                obs, state, reward, done, _info = env.step(state, global_action)
-                episode_return += float(reward)
-                if done:
-                    break
-
-            episode_returns.append(episode_return)
+            ep_return = float(
+                jax.device_get(run_episode(jax.random.PRNGKey(ep_seed)))
+            )
+            episode_returns.append(ep_return)
+            if progress:
+                print(f"    return={ep_return:.2f}", flush=True)
 
     arr = np.asarray(episode_returns, dtype=np.float64)
     return {
@@ -545,6 +656,7 @@ def run_greedy_eval_episodes(
         "num_episodes": int(arr.size),
         "num_seeds": int(num_seeds),
         "episodes_per_seed": int(num_episodes),
+        "max_frames_per_episode": max_frames,
     }
 
 
