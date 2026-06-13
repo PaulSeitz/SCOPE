@@ -16,6 +16,9 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 import pygame  # noqa: E402  (must come after the env vars are set)
 
+pygame.init()
+pygame.font.init()
+
 CURRENT_VIDEO_THREAD = None
 
 # Skill index 0 = DESTROY, 1 = COLLECT, 2 = AVOID (matches label_to_skill_idx in train_agent)

@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
@@ -19,7 +19,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 
 # SpaceInvaders: purely horizontal movement, 6 actions (0=NOOP,1=FIRE,2=RIGHT,3=LEFT,4=RIGHTFIRE,5=LEFTFIRE).
 # Direction table maps the 8 world directions to horizontal actions; UP/DOWN collapse to NOOP/FIRE.
-spaceinvaders_action_mapper = make_ego_action_mapper(
+spaceinvaders_action_mapper, spaceinvaders_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [2, 2, 0, 3, 3, 3, 0, 2],   # R DR D DL L UL U UR

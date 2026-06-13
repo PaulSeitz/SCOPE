@@ -11,7 +11,11 @@ from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.environments.datatypes import TandemTransition
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
+    is_meta_fire_target,
     is_meta_noop_target,
+    meta_fire_game_action,
+    meta_fire_target_enabled,
+    meta_fire_target_idx,
     meta_noop_target_enabled,
     meta_noop_target_idx,
 )
@@ -52,6 +56,9 @@ def make_tandem_train(
     skill_freeze_after_updates = int(config.get("SKILL_FREEZE_AFTER_UPDATES", 0))
     meta_noop_enabled = meta_noop_target_enabled(config)
     meta_noop_idx = meta_noop_target_idx(config)
+    meta_fire_enabled = meta_fire_target_enabled(config)
+    meta_fire_idx = meta_fire_target_idx(config)
+    meta_fire_action = int(meta_fire_game_action(config))
     relabel_all_objects = bool(config.get("RELABEL_ALL_OBJECTS", False))
     relabel_k_objects = config.get("RELABEL_K_OBJECTS", None)
     skill_bootstrap = str(config.get("SKILL_BOOTSTRAP", "q_lambda")).lower()
@@ -81,9 +88,9 @@ def make_tandem_train(
         )
 
     skill_eps_schedule = make_linear_schedule(
-        config["EPS_START"],
-        config["EPS_FINISH"],
-        config["EPS_DECAY"],
+        config.get("SKILL_EPS_START", config["EPS_START"]),
+        config.get("SKILL_EPS_FINISH", config["EPS_FINISH"]),
+        config.get("SKILL_EPS_DECAY", config["EPS_DECAY"]),
     )
     meta_eps_schedule = make_linear_schedule(
         config.get("META_EPS_START", config["EPS_START"]),
@@ -344,11 +351,22 @@ def make_tandem_train(
                     noop_idx=meta_noop_idx,
                     enabled=meta_noop_enabled,
                 )
+                meta_fire = is_meta_fire_target(
+                    target_obj_idxs,
+                    config,
+                    fire_idx=meta_fire_idx,
+                    enabled=meta_fire_enabled,
+                )
                 force_noop = jnp.logical_or(target_obj_idxs == no_target_idx, meta_noop)
                 chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
                 global_actions = jax.vmap(action_mapper)(
                     chosen_ego_actions, last_obs.raw_observation, target_obj_idxs, last_obs.objects
+                )
+                global_actions = jnp.where(
+                    meta_fire,
+                    jnp.full_like(global_actions, meta_fire_action),
+                    global_actions,
                 )
                 if symbolic_collect_enabled:
                     global_actions = jnp.where(
@@ -398,6 +416,10 @@ def make_tandem_train(
                 if meta_noop_enabled:
                     skill_rewards = jnp.where(
                         meta_noop[:, jnp.newaxis], 0.0, skill_rewards
+                    )
+                if meta_fire_enabled:
+                    skill_rewards = jnp.where(
+                        meta_fire[:, jnp.newaxis], 0.0, skill_rewards
                     )
 
                 changed_target = target_obj_idxs != last_targets
@@ -498,6 +520,10 @@ def make_tandem_train(
                         relabel_mask_full = relabel_mask_full.at[:, meta_noop_idx].set(
                             False
                         )
+                    if meta_fire_enabled:
+                        relabel_mask_full = relabel_mask_full.at[:, meta_fire_idx].set(
+                            False
+                        )
                     if relabel_k_objects is not None:
                         rng, rng_relabel = jax.random.split(rng)
                         relabel_scores = jnp.where(
@@ -534,6 +560,8 @@ def make_tandem_train(
                     base_valid = target_obj_idxs != no_target_idx
                     if meta_noop_enabled:
                         base_valid = jnp.logical_and(base_valid, jnp.logical_not(meta_noop))
+                    if meta_fire_enabled:
+                        base_valid = jnp.logical_and(base_valid, jnp.logical_not(meta_fire))
                     ego_obs_all = ego_obses[:, jnp.newaxis, :]
                     next_ego_obs_all = next_ego_obses[:, jnp.newaxis, :]
                     ego_action_all = chosen_ego_actions[:, jnp.newaxis]

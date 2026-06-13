@@ -8,7 +8,7 @@ Typical usage:
     from concept_based_learning.environments import labeling_wrapper
 """
 
-from .config import (
+from concept_based_learning.config import (
     Config,
     ModelConfig,
     TrainingConfig,

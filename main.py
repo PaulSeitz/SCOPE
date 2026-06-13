@@ -691,9 +691,14 @@ def single_run(config):
             final_skill_params, total_timesteps, step_offset=0
         )
     elif train_mode == "tandem":
+        init_meta_params = None
+        init_meta_path = base_config.get("INIT_META_MODEL_PATH")
+        if init_meta_path is not None:
+            print(f"Initializing meta-policy from checkpoint: {init_meta_path}")
+            init_meta_params = load_params_from_file(init_meta_path)
         final_skill_params, final_meta_params = run_tandem_training(
             total_timesteps,
-            init_meta_params=None,
+            init_meta_params=init_meta_params,
             init_skill_params=prev_params,
         )
     else:

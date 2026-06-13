@@ -21,6 +21,7 @@ from jaxatari.games.jax_tennis import TennisRenderer
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
 )
+from concept_based_learning.environments.skill_rewards import AVOID_SURVIVAL_REWARD
 from concept_based_learning.environments.datatypes import (
     LABEL_DESTROY,
     LABEL_COLLECT,
@@ -45,6 +46,7 @@ from concept_based_learning.environments.seaquest.heuristic_policy import (
 from concept_based_learning.environments.choppercommand.choppercommand_label import (
     ChopperCommandSemanticWrapper,
     choppercommand_action_mapper,
+    choppercommand_inverse_action_mapper,
     extract_all_skills_rewards as choppercommand_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
@@ -57,6 +59,7 @@ from concept_based_learning.environments.choppercommand.choppercommand_policy im
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_label import (
     SpaceInvadersSemanticWrapper,
     spaceinvaders_action_mapper,
+    spaceinvaders_inverse_action_mapper,
     extract_all_skills_rewards as spaceinvaders_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_policy import (
@@ -67,6 +70,7 @@ from concept_based_learning.environments.spaceinvaders.spaceinvaders_policy impo
 from concept_based_learning.environments.phoenix.phoenix_label import (
     PhoenixSemanticWrapper,
     phoenix_action_mapper,
+    phoenix_inverse_action_mapper,
     extract_all_skills_rewards as phoenix_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.phoenix.phoenix_policy import (
@@ -101,31 +105,37 @@ from concept_based_learning.environments.bootcamp.bootcamp_policy import (
 from concept_based_learning.environments.pong.pong_label import (
     PongSemanticWrapper,
     pong_action_mapper,
+    pong_inverse_action_mapper,
     extract_all_skills_rewards as pong_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.breakout.breakout_label import (
     BreakoutSemanticWrapper,
     breakout_action_mapper,
+    breakout_inverse_action_mapper,
     extract_all_skills_rewards as breakout_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.beamrider.beamrider_label import (
     BeamriderSemanticWrapper,
     beamrider_action_mapper,
+    beamrider_inverse_action_mapper,
     extract_all_skills_rewards as beamrider_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.kangaroo.kangaroo_label import (
     KangarooSemanticWrapper,
     kangaroo_action_mapper,
+    kangaroo_inverse_action_mapper,
     extract_all_skills_rewards as kangaroo_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.skiing.skiing_label import (
     SkiingSemanticWrapper,
     skiing_action_mapper,
+    skiing_inverse_action_mapper,
     extract_all_skills_rewards as skiing_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.tennis.tennis_label import (
     TennisSemanticWrapper,
     tennis_action_mapper,
+    tennis_inverse_action_mapper,
     extract_all_skills_rewards as tennis_extract_all_skills_rewards,
 )
 from concept_based_learning.environments.generic_heuristic import (
@@ -316,7 +326,11 @@ def _bootcamp_reward_extractor(
 
     avoid_reward = jnp.where(
         is_avoid,
-        jnp.where(swa, 1.0, jnp.where(sfa, -10.0, 0.0)),
+        jnp.where(
+            swa,
+            1.0,
+            jnp.where(sfa, -10.0, AVOID_SURVIVAL_REWARD),
+        ),
         0.0,
     )
     avoid_done = jnp.logical_and(is_avoid, jnp.logical_or(swa, sfa))
@@ -405,7 +419,7 @@ class EnvManager:
             get_heuristic_target=choppercommand_get_heuristic_target,
             no_target_idx=choppercommand_NO_TARGET_IDX,
             action_mapper=choppercommand_action_mapper,
-            inverse_action_mapper=choppercommand_action_mapper,
+            inverse_action_mapper=choppercommand_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(
                 choppercommand_extract_all_skills_rewards
             ),
@@ -424,7 +438,7 @@ class EnvManager:
             get_heuristic_target=spaceinvaders_get_heuristic_target,
             no_target_idx=spaceinvaders_NO_TARGET_IDX,
             action_mapper=spaceinvaders_action_mapper,
-            inverse_action_mapper=spaceinvaders_action_mapper,
+            inverse_action_mapper=spaceinvaders_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(
                 spaceinvaders_extract_all_skills_rewards
             ),
@@ -443,7 +457,7 @@ class EnvManager:
             get_heuristic_target=phoenix_get_heuristic_target,
             no_target_idx=phoenix_NO_TARGET_IDX,
             action_mapper=phoenix_action_mapper,
-            inverse_action_mapper=phoenix_action_mapper,
+            inverse_action_mapper=phoenix_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(phoenix_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
@@ -477,7 +491,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=generic_NO_TARGET_IDX,
             action_mapper=pong_action_mapper,
-            inverse_action_mapper=pong_action_mapper,
+            inverse_action_mapper=pong_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(pong_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_pong_extract_life_lost,
@@ -494,7 +508,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=generic_NO_TARGET_IDX,
             action_mapper=breakout_action_mapper,
-            inverse_action_mapper=breakout_action_mapper,
+            inverse_action_mapper=breakout_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(breakout_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
@@ -511,7 +525,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=generic_NO_TARGET_IDX,
             action_mapper=beamrider_action_mapper,
-            inverse_action_mapper=beamrider_action_mapper,
+            inverse_action_mapper=beamrider_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(beamrider_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
@@ -528,7 +542,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=generic_NO_TARGET_IDX,
             action_mapper=kangaroo_action_mapper,
-            inverse_action_mapper=kangaroo_action_mapper,
+            inverse_action_mapper=kangaroo_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(kangaroo_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
@@ -545,7 +559,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=generic_NO_TARGET_IDX,
             action_mapper=skiing_action_mapper,
-            inverse_action_mapper=skiing_action_mapper,
+            inverse_action_mapper=skiing_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(skiing_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_skiing_extract_life_lost,
@@ -562,7 +576,7 @@ class EnvManager:
             get_heuristic_target=generic_get_heuristic_target,
             no_target_idx=generic_NO_TARGET_IDX,
             action_mapper=tennis_action_mapper,
-            inverse_action_mapper=tennis_action_mapper,
+            inverse_action_mapper=tennis_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(tennis_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_tennis_extract_life_lost,

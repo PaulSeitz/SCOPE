@@ -81,6 +81,10 @@ def make_meta_train(
     META_USE_NOOP_TARGET = bool(config.get("META_USE_NOOP_TARGET", False))
     META_NOOP_TARGET_IDX = int(config.get("META_NOOP_TARGET_IDX", 0))
     meta_noop_target_enabled = META_USE_NOOP_TARGET and (0 <= META_NOOP_TARGET_IDX < MAX_OBJECTS)
+    META_USE_FIRE_TARGET = bool(config.get("META_USE_FIRE_TARGET", False))
+    META_FIRE_TARGET_IDX = int(config.get("META_FIRE_TARGET_IDX", 1))
+    meta_fire_target_enabled = META_USE_FIRE_TARGET and (0 <= META_FIRE_TARGET_IDX < MAX_OBJECTS)
+    META_FIRE_GAME_ACTION = int(config.get("META_FIRE_GAME_ACTION", 1))
     # Switching-cost / action-switch penalty for System 2.
     # Penalizes changing the selected target from the previous step to reduce
     # target jittering while still allowing deliberate switches.
@@ -90,6 +94,8 @@ def make_meta_train(
     def _apply_meta_target_mask_overrides(mask):
         if meta_noop_target_enabled:
             mask = mask.at[:, META_NOOP_TARGET_IDX].set(True)
+        if meta_fire_target_enabled:
+            mask = mask.at[:, META_FIRE_TARGET_IDX].set(True)
         return mask
 
     # ---------------------------------------------------------------
@@ -272,6 +278,10 @@ def make_meta_train(
                         meta_noop_target_enabled
                         and (target_idx == jnp.asarray(META_NOOP_TARGET_IDX, dtype=target_idx.dtype))
                     )
+                    is_fire_target = (
+                        meta_fire_target_enabled
+                        and (target_idx == jnp.asarray(META_FIRE_TARGET_IDX, dtype=target_idx.dtype))
+                    )
                     force_noop = jnp.logical_or(jnp.logical_not(any_active), is_noop_target)
 
                     ego_obs = get_ego_obs(obs.raw_observation, obs.objects, safe_target)
@@ -301,7 +311,8 @@ def make_meta_train(
                         ego_action, obs.raw_observation, safe_target, obs.objects
                     )
 
-                    # Optional selectable NOOP target and empty-screen fallback.
+                    # Optional selectable NOOP/FIRE targets and empty-screen fallback.
+                    global_action = jnp.where(is_fire_target, META_FIRE_GAME_ACTION, global_action)
                     return jnp.where(force_noop, 0, global_action)
 
                 # Map action retrieval over the batch
@@ -618,6 +629,8 @@ def make_meta_train(
             )[0]
             if meta_noop_target_enabled:
                 active_mask = active_mask.at[META_NOOP_TARGET_IDX].set(True)
+            if meta_fire_target_enabled:
+                active_mask = active_mask.at[META_FIRE_TARGET_IDX].set(True)
 
             any_active = jnp.any(active_mask)
 
@@ -637,7 +650,11 @@ def make_meta_train(
             ):
                 global_action = 0
                 active_skills = 0
-                combined_q = np.array([0.0, 0.0, 0.0])
+                combined_q = np.zeros((NUM_SKILLS,), dtype=np.float32)
+            elif meta_fire_target_enabled and target_obj_idxs == META_FIRE_TARGET_IDX:
+                global_action = META_FIRE_GAME_ACTION
+                active_skills = 0
+                combined_q = np.zeros((NUM_SKILLS,), dtype=np.float32)
             else:
                 # 2. System 1 (Skills) Execution
                 raw_label = obs.objects.semantic_label[-1, target_obj_idxs]

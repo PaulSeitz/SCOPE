@@ -9,7 +9,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -20,7 +20,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 
 # Beamrider: full 18-action set. Player moves on a fixed horizontal lane,
 # shooting upward (FIRE). Target-aligned ego obs works with 8-directional movement.
-beamrider_action_mapper = make_ego_action_mapper(
+beamrider_action_mapper, beamrider_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [3,  8, 5,  9, 4, 7, 2, 6],   # R DR D DL L UL U UR
@@ -31,9 +31,9 @@ beamrider_action_mapper = make_ego_action_mapper(
 #   white_ufo=3, enemy_shots=9, chasing_meteoroids=6, falling_rocks=3,
 #   lane_blockers=1, coins=3, kamikaze=1, rejuvenator=1, bouncer=1, mothership=1
 # Total = 29 objects
-_BEAMRIDER_MAX_OBJECTS = 30  # 29 + 1 padding
+_BEAMRIDER_MAX_OBJECTS = 31  # 29 game + 1 NOOP + 1 FIRE
 
-# Observation slot layout (game_max_objects=29, +1 NOOP prepended by wrapper):
+# Observation slot layout (game_max_objects=29, +2 meta slots prepended by wrapper):
 #   DESTROY: [0-2] white_ufo(3), [3-8] chasing_meteoroids(6), [9] kamikaze, [10] mothership
 #   AVOID:   [11-19] enemy_shots(9), [20-22] falling_rocks(3), [23] lane_blockers, [24] bouncer
 #   COLLECT: [25-27] coins(3), [28] rejuvenator
@@ -57,7 +57,7 @@ def _explosion_rising_edge(prev_frame, next_frame):
 
 class BeamriderSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
-        super().__init__(env, max_objects=_BEAMRIDER_MAX_OBJECTS)
+        super().__init__(env, max_objects=_BEAMRIDER_MAX_OBJECTS, meta_reserved_slots=2)
 
     def _substep_env_state_events(self, prev_env_state, next_env_state):
         """
@@ -83,8 +83,8 @@ class BeamriderSemanticWrapper(JaxatariSemanticBaseWrapper):
         if kill_mask is None:
             return semantic_obs
         was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32)]
-        )  # (30,)
+            [jnp.zeros(self.meta_reserved_slots, dtype=jnp.int32), kill_mask.astype(jnp.int32)]
+        )
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))

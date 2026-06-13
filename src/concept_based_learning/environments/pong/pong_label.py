@@ -7,7 +7,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -22,7 +22,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 # Horizontal ego directions are NOOP (player cannot move horizontally).
 # R DR D DL L  UL U  UR
 # RIGHT is "up" (negative y), LEFT is "down" (positive y)
-pong_action_mapper = make_ego_action_mapper(
+pong_action_mapper, pong_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [0, 3, 3, 3, 0, 2, 2, 2],  # R DR D DL L UL U UR

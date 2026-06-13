@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
@@ -11,13 +11,13 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
 
 # jax_phoenix observation encoding: base state 0..3, +4 while death animation plays.
-# We set active=0 the moment state >= DYING_STATE_THRESHOLD so the global DESTROY
-# trigger fires at the kill frame rather than ~30 frames later when the sprite is
-# actually removed.
+# We set active=0 the moment state >= DYING_STATE_THRESHOLD so meta-policy
+# deprioritises dying enemies immediately.  DESTROY rewards use was_killed from
+# phoenix_dying/bat_dying rising edges in _substep_env_state_events.
 DYING_STATE_THRESHOLD = 4
-BOSS_WIDTH = 32
-BOSS_HEIGHT = 16
-# Playfield is 160x210; treat spawns/despawns at the border as non-rewards.
+# Playfield is 160px wide; ignore kills whose previous x was at the scroll edge.
+_SCROLL_X_MIN = 5
+_SCROLL_X_MAX = 155
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
     return extract_skill_rewards(
         prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
@@ -26,7 +26,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 
 # Phoenix: horizontal movement + shield (DOWN); ship fires upward so all *_FIRE collapses to FIRE.
 # Direction table (R DR D DL L UL U UR) → (RIGHT, RIGHT, DOWN/shield, LEFT, LEFT, LEFT, NOOP, RIGHT)
-phoenix_action_mapper = make_ego_action_mapper(
+phoenix_action_mapper, phoenix_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [2, 2, 4, 3, 3, 3, 0, 2],
@@ -53,7 +53,10 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         """
         prev_dying = prev_env_state.phoenix_dying | prev_env_state.bat_dying
         next_dying = next_env_state.phoenix_dying | next_env_state.bat_dying
-        enemy_killed = jnp.logical_and(~prev_dying, next_dying).astype(jnp.int32)
+        enemy_killed = jnp.logical_and(~prev_dying, next_dying)
+        prev_x = prev_env_state.enemies_x
+        on_screen = jnp.logical_and(prev_x > _SCROLL_X_MIN, prev_x < _SCROLL_X_MAX)
+        enemy_killed = jnp.logical_and(enemy_killed, on_screen).astype(jnp.int32)
 
         bullet_killed = jnp.zeros(8, dtype=jnp.int32)
 
@@ -123,9 +126,8 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         boss_h = extract_single_field(boss.height)
         boss_active = extract_single_field(boss.active)
 
-        # Mark enemy active=0 the moment the death animation starts (state >= 4).
-        # This aligns the global DESTROY disappearance trigger with the kill frame
-        # rather than ~30 frames later when the sprite is actually removed.
+        # Mark enemy active=0 the moment the death animation starts (state >= 4)
+        # so the meta-policy stops selecting dying enemies before sprite removal.
         enemy_alive = (enemies.state < DYING_STATE_THRESHOLD).astype(enemies.active.dtype)
         enemy_active = jnp.logical_and(enemies.active, enemy_alive).astype(enemies.active.dtype)
 

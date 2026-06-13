@@ -9,7 +9,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
     return extract_skill_rewards(
@@ -17,7 +17,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     )
 
 
-choppercommand_action_mapper = make_ego_action_mapper(
+choppercommand_action_mapper, choppercommand_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [3, 8, 5, 9, 4, 7, 2, 6],
@@ -105,8 +105,8 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
 
         is_on_screen = (final_x_unpadded + final_w_unpadded > 0) & (final_x_unpadded < 160)
 
-        # Inject a single virtual waypoint from an off-screen enemy so the
-        # meta-policy can navigate toward incoming threats without any trainer logic.
+        # Snap one off-screen DESTROY target to the screen edge so the meta-policy
+        # can navigate toward incoming threats (label stays DESTROY — no COLLECT reward).
         is_enemy = final_labels_unpadded == LABEL_DESTROY
         is_offscreen_enemy = jnp.logical_and(
             is_enemy,
@@ -136,8 +136,9 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         final_y_unpadded = final_y_unpadded.at[virtual_idx].set(
             jnp.where(has_virtual_waypoint, virtual_y, final_y_unpadded[virtual_idx])
         )
+        # Keep DESTROY label so COLLECT rewards cannot fire at the screen-edge waypoint.
         final_labels_unpadded = final_labels_unpadded.at[virtual_idx].set(
-            jnp.where(has_virtual_waypoint, LABEL_COLLECT, final_labels_unpadded[virtual_idx])
+            jnp.where(has_virtual_waypoint, LABEL_DESTROY, final_labels_unpadded[virtual_idx])
         )
         final_active_unpadded = final_active_unpadded.at[virtual_idx].set(
             jnp.where(has_virtual_waypoint, 1, final_active_unpadded[virtual_idx])
@@ -151,10 +152,10 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         # --- Array Padding to game_max_objects (32) ---
         pad_size = self.game_max_objects - final_x_unpadded.shape[0]
         
-        pad_x = jnp.zeros(pad_size, dtype=jnp.float32)
-        pad_y = jnp.zeros(pad_size, dtype=jnp.float32)
-        pad_w = jnp.zeros(pad_size, dtype=jnp.float32)
-        pad_h = jnp.zeros(pad_size, dtype=jnp.float32)
+        pad_x = jnp.zeros(pad_size, dtype=jnp.int32)
+        pad_y = jnp.zeros(pad_size, dtype=jnp.int32)
+        pad_w = jnp.zeros(pad_size, dtype=jnp.int32)
+        pad_h = jnp.zeros(pad_size, dtype=jnp.int32)
         pad_active = jnp.zeros(pad_size, dtype=jnp.int32)
         pad_labels = jnp.full(pad_size, LABEL_NOOP, dtype=jnp.int32)
 

@@ -2,8 +2,9 @@
 Global skill reward contract — env-independent.
 
 Reward magnitudes and trigger conditions:
-  AVOID   : -1  on rising edge of AABB overlap (player enters object hitbox)
-  COLLECT : +1  on rising edge of AABB overlap (player enters object hitbox)
+  AVOID   : +0.01 per frame while tracking an active AVOID target without collision
+            -1  on rising edge of AABB overlap (player enters object hitbox)
+  COLLECT : +1  on rising edge of AABB overlap, or next_target.was_collected == 1
   DESTROY : +1  when next_target.was_killed == 1 (set by env wrapper from raw state)
             -1  when the player dies while in contact with this specific object
 
@@ -19,7 +20,10 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 
+from concept_based_learning.environments.datatypes import LABEL_AVOID, LABEL_COLLECT, LABEL_DESTROY
+
 # Unified reward magnitudes — single source of truth.
+AVOID_SURVIVAL_REWARD  =  0.01
 AVOID_FAILURE_REWARD   = -1.0
 COLLECT_SUCCESS_REWARD =  1.0
 DESTROY_SUCCESS_REWARD =  1.0
@@ -46,7 +50,11 @@ def object_reward_eligible(prev_target, next_target) -> jnp.ndarray:
     prev_active = prev.active > 0
     next_active = next_.active > 0
     killed = next_.was_killed > 0
-    return jnp.logical_or(prev_active, jnp.logical_or(next_active, killed))
+    collected = next_.was_collected > 0
+    return jnp.logical_or(
+        prev_active,
+        jnp.logical_or(next_active, jnp.logical_or(killed, collected)),
+    )
 
 
 def _agent_bbox(raw_obs):
@@ -121,12 +129,17 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
     # collision is registered, so next_target.x/y = 0 and the overlap check
     # against next_target always fails.
     #
-    # When can_go_offscreen=0 the only reason a target deactivates is that it was
-    # collected/triggered — treat this as an unconditional overlap (rising-edge
-    # fires regardless of which entity moved into which).  Scroll-off objects have
-    # can_go_offscreen=1 and are excluded so we don't misfire on scroll-offs.
+    # When can_go_offscreen=0 and the label is COLLECT, deactivation means the
+    # player collected/triggered the object in place.  Scroll-off objects and
+    # non-COLLECT labels are excluded (e.g. DESTROY kills must use was_killed).
     just_deactivated = jnp.logical_and(prev_target.active > 0, next_target.active == 0)
-    collected_in_place = jnp.logical_and(just_deactivated, prev_target.can_go_offscreen == 0)
+    collected_in_place = jnp.logical_and(
+        just_deactivated,
+        jnp.logical_and(
+            prev_target.can_go_offscreen == 0,
+            prev_target.semantic_label == LABEL_COLLECT,
+        ),
+    )
     next_overlap = jnp.where(collected_in_place, jnp.array(True), next_overlap_live)
 
     return prev_player, prev_target, next_target, prev_overlap, next_overlap
@@ -162,29 +175,50 @@ def extract_skill_rewards(
     # Rising edge: not overlapping at t, overlapping at t+1.
     overlap_rising_edge = jnp.logical_and(jnp.logical_not(prev_overlap), next_overlap)
 
+    is_destroy = prev_target.semantic_label == LABEL_DESTROY
+    is_collect = prev_target.semantic_label == LABEL_COLLECT
+    is_avoid = prev_target.semantic_label == LABEL_AVOID
+
     # ---- COLLECT ----
-    collect_success = overlap_rising_edge
+    collect_success = jnp.logical_and(
+        is_collect,
+        jnp.logical_or(overlap_rising_edge, next_target.was_collected == 1),
+    )
     collect_reward  = jnp.where(collect_success, COLLECT_SUCCESS_REWARD, 0.0)
     collect_done    = collect_success
 
     # ---- AVOID ----
     # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
     # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
-    avoid_failure = jnp.logical_or(overlap_rising_edge, next_target.was_killed == 1)
-    avoid_reward  = jnp.where(avoid_failure, AVOID_FAILURE_REWARD, 0.0)
+    avoid_failure = jnp.logical_and(
+        is_avoid,
+        jnp.logical_or(overlap_rising_edge, next_target.was_killed == 1),
+    )
+    avoid_survival = jnp.logical_and(
+        is_avoid,
+        jnp.logical_and(prev_target.active > 0, jnp.logical_not(avoid_failure)),
+    )
+    avoid_reward = jnp.where(
+        avoid_failure,
+        AVOID_FAILURE_REWARD,
+        jnp.where(avoid_survival, AVOID_SURVIVAL_REWARD, 0.0),
+    )
     avoid_done    = avoid_failure
 
     # ---- DESTROY ----
     # was_killed is stamped on next_target by the env wrapper from raw game state —
     # the only reliable kill signal when the env zeros position for both kills and
     # scroll-offs (e.g. JAX-Atari Seaquest).
-    destroy_success = next_target.was_killed == 1
+    destroy_success = jnp.logical_and(is_destroy, next_target.was_killed == 1)
     # Failure: player died while in contact with this specific object.
     # Guard: not if this step was a collect/avoid rising-edge (surfacing into the
     # surface waypoint while simultaneously losing oxygen would otherwise misfire).
     destroy_failure = jnp.logical_and(
-        life_lost > 0,
-        jnp.logical_and(prev_overlap, jnp.logical_not(overlap_rising_edge)),
+        is_destroy,
+        jnp.logical_and(
+            life_lost > 0,
+            jnp.logical_and(prev_overlap, jnp.logical_not(overlap_rising_edge)),
+        ),
     )
     destroy_reward = jnp.where(
         destroy_success,

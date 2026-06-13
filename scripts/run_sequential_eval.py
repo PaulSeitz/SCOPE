@@ -3,9 +3,11 @@ Sequential multi-environment evaluation runner.
 
 Runs three phases across 11 Atari environments in a single Python process:
   Phase 1: Skill pretrain on Seaquest (from scratch)
-  Phase 2: Meta-only training per env (frozen Phase-1 skills)
-  Phase 3: Tandem finetune per env (low SKILL_LR, skills re-init from Phase-1,
-           meta randomly initialized — fresh start per env)
+  Phase 2: Tandem meta training per env (frozen Phase-1 skills, SKILL_LR=0)
+  Phase 3: Tandem finetune per env (low SKILL_LR, skills from Phase-1 Seaquest,
+           meta initialized from Phase-2 checkpoint)
+
+After each phase, a greedy eval pass runs (no ε, no episodic life) unless --skip-eval.
 
 RTPT is initialized once before Phase 1 with the total update count across all
 phases, so nvidia-smi shows a single continuous ETA for the entire run.
@@ -26,6 +28,7 @@ Usage (from the project root):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -40,6 +43,10 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import main as train_main  # noqa: E402  (after sys.path setup)
+from concept_based_learning.pqn_visualizer import (  # noqa: E402
+    load_params_from_file,
+    run_greedy_eval_episodes,
+)
 from concept_based_learning.training.rtpt_progress import (  # noqa: E402
     num_updates_from_timesteps,
     start_rtpt,
@@ -96,6 +103,17 @@ def _skills_ckpt(save_path: str, env: str, seed: int = SEED) -> Path:
     return _ckpt_dir(save_path, env) / f"hierarchical_pqn_{env}_seed{seed}.safetensors"
 
 
+def _meta_ckpt(save_path: str, env: str, seed: int = SEED) -> Path:
+    """meta_only / tandem meta head."""
+    return _ckpt_dir(save_path, env) / f"hierarchical_pqn_{env}_seed{seed}_meta.safetensors"
+
+
+def _tandem_skills_ckpt(save_path: str, env: str, seed: int = SEED) -> Path:
+    """Tandem skill head (phase 2/3)."""
+    return _ckpt_dir(save_path, env) / f"hierarchical_pqn_{env}_seed{seed}_skills.safetensors"
+
+
+EVAL_SCORES_PATH = PROJECT_ROOT / "outputs" / "models" / "sequential_eval" / "eval_scores.json"
 
 # ---------------------------------------------------------------------------
 # Config loading — flattens the nested alg: block just like main.single_run
@@ -115,6 +133,77 @@ def _load_config(env: str, phase_suffix: str) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
     return _load_yaml(path)
+
+
+def _eval_config_from_training(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Eval uses the same env/obs settings; training-only keys are dropped."""
+    eval_cfg = dict(cfg)
+    for key in (
+        "TOTAL_TIMESTEPS",
+        "INIT_MODEL_PATH",
+        "INIT_META_MODEL_PATH",
+        "WANDB_MODE",
+        "WANDB_TAGS",
+        "WANDB_RUN_NAME",
+        "RECORD_VIDEO",
+        "VIDEO_AT_END",
+    ):
+        eval_cfg.pop(key, None)
+    eval_cfg["WANDB_MODE"] = "disabled"
+    return eval_cfg
+
+
+def _load_eval_scores() -> dict[str, Any]:
+    if not EVAL_SCORES_PATH.exists():
+        return {}
+    with open(EVAL_SCORES_PATH) as f:
+        return json.load(f)
+
+
+def _save_eval_scores(scores: dict[str, Any]) -> None:
+    EVAL_SCORES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(EVAL_SCORES_PATH, "w") as f:
+        json.dump(scores, f, indent=2)
+
+
+def _run_inter_phase_eval(
+    *,
+    phase: int,
+    env: str,
+    cfg: dict[str, Any],
+    skills_path: Path,
+    meta_path: Path | None,
+    num_episodes: int,
+    num_seeds: int,
+) -> dict[str, Any]:
+    if not skills_path.exists():
+        raise FileNotFoundError(f"Eval skills checkpoint not found: {skills_path}")
+
+    eval_cfg = _eval_config_from_training(cfg)
+    skill_params = load_params_from_file(str(skills_path))
+    meta_params = (
+        load_params_from_file(str(meta_path))
+        if meta_path is not None and meta_path.exists()
+        else None
+    )
+    meta_label = "learned_meta" if meta_params is not None else "heuristic_meta"
+    print(
+        f"\n  Greedy eval — phase {phase} / {env} ({meta_label}, "
+        f"{num_seeds} seeds × {num_episodes} episodes)..."
+    )
+    stats = run_greedy_eval_episodes(
+        eval_cfg,
+        params_tree=skill_params,
+        meta_params=meta_params,
+        num_episodes=num_episodes,
+        num_seeds=num_seeds,
+        base_seed=int(eval_cfg.get("EVAL_SEED", SEED + 1000)),
+    )
+    print(
+        f"  Eval score: mean={stats['mean']:.2f} ± {stats['std']:.2f} "
+        f"(n={stats['num_episodes']}, min={stats['min']:.1f}, max={stats['max']:.1f})"
+    )
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +269,12 @@ def run_sequential_eval(
     abort_on_failure: bool,
     trial_steps: int | None,
     wandb_mode: str = "online",
+    skip_eval: bool = False,
+    eval_episodes: int = 5,
+    eval_seeds: int = 3,
 ) -> None:
     results: list[tuple[str, bool]] = []
+    eval_scores = _load_eval_scores()
 
     # Initialize RTPT once for the entire run so nvidia-smi ETA is global.
     total_updates = _compute_total_updates(phases, envs, trial_steps)
@@ -202,6 +295,26 @@ def run_sequential_eval(
     # Both Phase 2 and Phase 3 need it (frozen skills init and finetune init).
     _p1_cfg = _load_config("seaquest", "phase1_skills")
     phase1_save: str = _p1_cfg["SAVE_PATH"]
+    _p2_cfg = _load_config("seaquest", "phase2_meta")
+    phase2_save: str = _p2_cfg["SAVE_PATH"]
+    _p3_cfg = _load_config("seaquest", "phase3_tandem")
+    phase3_save: str = _p3_cfg["SAVE_PATH"]
+
+    if trial_steps:
+        eval_episodes = min(eval_episodes, 2)
+        eval_seeds = min(eval_seeds, 1)
+
+    def _record_eval(phase: int, env: str, stats: dict[str, Any]) -> None:
+        phase_key = f"phase{phase}"
+        eval_scores.setdefault(phase_key, {})[env] = {
+            "mean": stats["mean"],
+            "std": stats["std"],
+            "min": stats["min"],
+            "max": stats["max"],
+            "num_episodes": stats["num_episodes"],
+            "returns": stats["returns"],
+        }
+        _save_eval_scores(eval_scores)
 
     def _apply_common(cfg: dict, phase: int, run_name: str, trial_steps: int | None) -> dict:
         """Inject wandb settings and optional trial step override into a config."""
@@ -219,11 +332,20 @@ def run_sequential_eval(
 
     def _wire_phase1_ckpt(cfg: dict) -> dict:
         ckpt = _skills_ckpt(phase1_save, "seaquest")
-        if ckpt.exists():
-            cfg["INIT_MODEL_PATH"] = str(ckpt)
-        else:
-            print(f"  [warn] Phase-1 checkpoint not found at {ckpt}; "
-                  f"using config default: {cfg.get('INIT_MODEL_PATH')}")
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"Phase-1 Seaquest skill checkpoint required but not found: {ckpt}"
+            )
+        cfg["INIT_MODEL_PATH"] = str(ckpt)
+        return cfg
+
+    def _wire_phase2_meta_ckpt(cfg: dict, env: str) -> dict:
+        ckpt = _meta_ckpt(phase2_save, env)
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"Phase-2 meta checkpoint required for Phase 3 not found: {ckpt}"
+            )
+        cfg["INIT_META_MODEL_PATH"] = str(ckpt)
         return cfg
 
     # -----------------------------------------------------------------------
@@ -233,28 +355,62 @@ def run_sequential_eval(
         cfg = _apply_common(_p1_cfg, 1, "seaquest_skill_train", trial_steps)
         ok = _run(cfg, "Phase 1 — Seaquest skill pretrain", abort_on_failure)
         results.append(("Phase1/seaquest/skill_train", ok))
+        if ok and not skip_eval:
+            stats = _run_inter_phase_eval(
+                phase=1,
+                env="seaquest",
+                cfg=cfg,
+                skills_path=_skills_ckpt(phase1_save, "seaquest"),
+                meta_path=None,
+                num_episodes=eval_episodes,
+                num_seeds=eval_seeds,
+            )
+            _record_eval(1, "seaquest", stats)
 
     # -----------------------------------------------------------------------
-    # Phase 2: Frozen-skill meta training per env
+    # Phase 2: Tandem trainer with frozen skills (SKILL_LR=0), meta learns
     # -----------------------------------------------------------------------
     if 2 in phases:
         for env in envs:
             cfg = _load_config(env, "phase2_meta")
             _wire_phase1_ckpt(cfg)
             _apply_common(cfg, 2, f"{env}_frozen_meta", trial_steps)
-            ok = _run(cfg, f"Phase 2 — {env} frozen_meta", abort_on_failure)
+            ok = _run(cfg, f"Phase 2 — {env} frozen_meta (tandem)", abort_on_failure)
             results.append((f"Phase2/{env}/frozen_meta", ok))
+            if ok and not skip_eval:
+                stats = _run_inter_phase_eval(
+                    phase=2,
+                    env=env,
+                    cfg=cfg,
+                    skills_path=_skills_ckpt(phase1_save, "seaquest"),
+                    meta_path=_meta_ckpt(phase2_save, env),
+                    num_episodes=eval_episodes,
+                    num_seeds=eval_seeds,
+                )
+                _record_eval(2, env, stats)
 
     # -----------------------------------------------------------------------
-    # Phase 3: Joint finetune — skills from Phase-1 Seaquest, meta fresh.
+    # Phase 3: Joint finetune — skills from Phase-1 Seaquest, meta from Phase 2.
     # -----------------------------------------------------------------------
     if 3 in phases:
         for env in envs:
             cfg = _load_config(env, "phase3_tandem")
             _wire_phase1_ckpt(cfg)
+            _wire_phase2_meta_ckpt(cfg, env)
             _apply_common(cfg, 3, f"{env}_finetune", trial_steps)
             ok = _run(cfg, f"Phase 3 — {env} finetune (low SKILL_LR)", abort_on_failure)
             results.append((f"Phase3/{env}/finetune", ok))
+            if ok and not skip_eval:
+                stats = _run_inter_phase_eval(
+                    phase=3,
+                    env=env,
+                    cfg=cfg,
+                    skills_path=_tandem_skills_ckpt(phase3_save, env),
+                    meta_path=_meta_ckpt(phase3_save, env),
+                    num_episodes=eval_episodes,
+                    num_seeds=eval_seeds,
+                )
+                _record_eval(3, env, stats)
 
     # -----------------------------------------------------------------------
     # Summary
@@ -267,6 +423,8 @@ def run_sequential_eval(
     for label, ok in results:
         status = "OK " if ok else "FAIL"
         print(f"  [{status}] {label}")
+    if eval_scores and not skip_eval:
+        print(f"\n  Greedy eval scores saved to {EVAL_SCORES_PATH}")
     print()
 
 
@@ -308,6 +466,20 @@ def _parse_args() -> argparse.Namespace:
         dest="wandb_mode",
         help="wandb logging mode (default: online)",
     )
+    parser.add_argument(
+        "--skip-eval", action="store_true",
+        help="Skip greedy inter-phase evaluation after each training phase",
+    )
+    parser.add_argument(
+        "--eval-episodes", type=int, default=5,
+        dest="eval_episodes",
+        help="Greedy eval episodes per seed (default: 5; reduced in --trial mode)",
+    )
+    parser.add_argument(
+        "--eval-seeds", type=int, default=3,
+        dest="eval_seeds",
+        help="Number of eval RNG seeds (default: 3; reduced in --trial mode)",
+    )
     return parser.parse_args()
 
 
@@ -320,4 +492,7 @@ if __name__ == "__main__":
         abort_on_failure=args.abort_on_failure,
         trial_steps=args.trial_steps if args.trial else None,
         wandb_mode=args.wandb_mode,
+        skip_eval=args.skip_eval,
+        eval_episodes=args.eval_episodes,
+        eval_seeds=args.eval_seeds,
     )

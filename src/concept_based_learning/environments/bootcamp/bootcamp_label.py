@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from typing import Any
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
+from concept_based_learning.environments.skill_rewards import AVOID_SURVIVAL_REWARD
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
@@ -26,9 +27,11 @@ def extract_all_skills_rewards(
     next_raw_obs: Any,
     prev_target: Any,
     next_target: Any,
-    info: Any,
+    life_lost: Any,
+    info: Any = None,
+    config: Any = None,
 ):
-    del prev_raw_obs, next_raw_obs, next_target
+    del prev_raw_obs, next_raw_obs, next_target, life_lost, config
 
     def last_frame(e):
         return jax.tree_util.tree_map(lambda x: x[-1] if jnp.ndim(x) > 0 else x, e)
@@ -39,32 +42,42 @@ def extract_all_skills_rewards(
     is_collect = prev_target.semantic_label == LABEL_COLLECT
     is_avoid = prev_target.semantic_label == LABEL_AVOID
 
-    z_step = jnp.zeros_like(is_destroy, dtype=jnp.int32)
-    win_destroy = info.get("step_win_destroy", z_step) > 0
-    win_collect = info.get("step_win_collect", z_step) > 0
-    win_avoid = info.get("step_win_avoid", z_step) > 0
-    fail_destroy = info.get("step_fail_destroy_touch", z_step) > 0
-    fail_avoid = info.get("step_fail_avoid", z_step) > 0
+    def _info_get(key: str):
+        z = jnp.zeros((), dtype=jnp.int32)
+        if info is None:
+            return z
+        if isinstance(info, dict):
+            return info.get(key, z)
+        if hasattr(info, key):
+            return getattr(info, key)
+        return z
 
-    # Bootstrapping fix: only terminate skill episodes on failure.
-    failed = jnp.logical_or(fail_destroy, fail_avoid)
+    win_destroy = _info_get("step_win_destroy") != 0
+    win_collect = _info_get("step_win_collect") != 0
+    win_avoid = _info_get("step_win_avoid") != 0
+    fail_destroy = _info_get("step_fail_destroy_touch") != 0
+    fail_avoid = _info_get("step_fail_avoid") != 0
 
     destroy_reward = jnp.where(
-        jnp.logical_and(is_destroy, win_destroy),
-        1.0,
-        jnp.where(jnp.logical_and(is_destroy, fail_destroy), -1.0, 0.0),
+        is_destroy,
+        jnp.where(win_destroy, 1.0, jnp.where(fail_destroy, -1.0, 0.0)),
+        0.0,
     )
-    destroy_done = jnp.logical_and(is_destroy, failed)
+    destroy_done = jnp.logical_and(is_destroy, jnp.logical_or(win_destroy, fail_destroy))
 
-    collect_reward = jnp.where(jnp.logical_and(is_collect, win_collect), 1.0, 0.0)
-    collect_done = jnp.logical_and(is_collect, failed)
+    collect_reward = jnp.where(is_collect, jnp.where(win_collect, 1.0, 0.0), 0.0)
+    collect_done = jnp.logical_and(is_collect, win_collect)
 
     avoid_reward = jnp.where(
-        jnp.logical_and(is_avoid, win_avoid),
-        1.0,
-        jnp.where(jnp.logical_and(is_avoid, fail_avoid), -10.0, 0.0),
+        is_avoid,
+        jnp.where(
+            win_avoid,
+            1.0,
+            jnp.where(fail_avoid, -10.0, AVOID_SURVIVAL_REWARD),
+        ),
+        0.0,
     )
-    avoid_done = jnp.logical_and(is_avoid, failed)
+    avoid_done = jnp.logical_and(is_avoid, jnp.logical_or(win_avoid, fail_avoid))
 
     rewards = jnp.stack([destroy_reward, collect_reward, avoid_reward]).astype(jnp.float32)
     skill_done = jnp.stack([destroy_done, collect_done, avoid_done]).astype(jnp.bool_)
@@ -109,6 +122,7 @@ class BootcampSemanticWrapper(JaxatariSemanticBaseWrapper):
             semantic_label=jnp.concatenate([labels, pad_labels]),
             can_go_offscreen=jnp.concatenate([all_offscreen, pad_offscreen]),
             was_killed=jnp.zeros(n + pad, dtype=jnp.int32),
+            was_collected=jnp.zeros(n + pad, dtype=jnp.int32),
         )
 
     @functools.partial(jax.jit, static_argnums=(0,))

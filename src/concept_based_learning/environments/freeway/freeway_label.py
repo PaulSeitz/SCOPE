@@ -1,6 +1,9 @@
 import jax.numpy as jnp
 
-from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
+from concept_based_learning.environments.labeling_wrapper import (
+    JaxatariSemanticBaseWrapper,
+    SemanticState,
+)
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_AVOID,
@@ -19,8 +22,9 @@ FREEWAY_TOP_BORDER = 15     # player scores when chicken_y (bottom edge) ≤ thi
 # Nudge the fixed COLLECT goal toward the top (smaller y in Freeway coords).
 # Must ensure goal band bottom > top_border so the rising-edge fires before the game resets
 # the chicken (scoring at chicken_y=top_border immediately spawns chicken at y≈187).
-# With top_border=15, goal_y=11, goal_h=10: after 1px inset, band=[12,20]. Rising edge at y=20 → 5px before scoring.
-FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 16
+# goal_y = top_border + chicken_hit_h - offset → 15 + 10 - 14 = 11 (top-left y).
+# With goal_h=10 and 1px reward inset, effective band y∈[12,20]; chicken scores at bottom y≤15.
+FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 14
 
 # Effective hitbox sizes derived from JAXAtari insets (jax_freeway.FreewayConstants):
 #   chicken: sprite 6×8, inset x=1 each side → effective width=4
@@ -43,6 +47,23 @@ _WORLD_DIR_ANGLES = jnp.array(
 
 # Freeway action indices: 0=NOOP, 1=UP, 2=DOWN
 _FREEWAY_NOOP = jnp.int32(0)
+
+# JAXAtari FreewayConstants collision insets (mirror jax_freeway.FreewayConstants).
+_CHICKEN_HIT_INSET_X = jnp.int32(1)
+_CHICKEN_HIT_INSET_Y_TOP = jnp.int32(-2)
+_CHICKEN_HIT_INSET_Y_BOTTOM = jnp.int32(0)
+
+
+def _apply_chicken_hitbox(raw_obs):
+    """Expose the same effective chicken AABB JAXAtari uses for car collisions."""
+    chicken = raw_obs.chicken
+    eff_x = chicken.x + _CHICKEN_HIT_INSET_X
+    eff_y = chicken.y - chicken.height + _CHICKEN_HIT_INSET_Y_TOP
+    eff_w = chicken.width - 2 * _CHICKEN_HIT_INSET_X
+    eff_h = chicken.height - _CHICKEN_HIT_INSET_Y_TOP - _CHICKEN_HIT_INSET_Y_BOTTOM
+    return raw_obs.replace(
+        chicken=chicken.replace(x=eff_x, y=eff_y, width=eff_w, height=eff_h)
+    )
 
 # move_table[dir_idx] — Freeway only has vertical movement.
 _MOVE_TABLE      = jnp.array([0, 2, 2, 2, 0, 1, 1, 1], dtype=jnp.int32)
@@ -93,6 +114,17 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         # 1 meta NOOP + 10 cars + 1 fixed top collect goal = 12 total slots
         super().__init__(env, max_objects=12)
+
+    def _patch_raw_observation(self, obs):
+        return obs.replace(raw_observation=_apply_chicken_hitbox(obs.raw_observation))
+
+    def reset(self, key=None):
+        obs, env_state = super().reset(key)
+        return self._patch_raw_observation(obs), env_state
+
+    def step(self, state: SemanticState, action: int):
+        obs, env_state, reward, done, info = super().step(state, action)
+        return self._patch_raw_observation(obs), env_state, reward, done, info
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         """
@@ -155,6 +187,7 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
             visual_id=all_visual_id,
             can_go_offscreen=all_offscreen,
             was_killed=jnp.zeros_like(all_offscreen),
+            was_collected=jnp.zeros_like(all_offscreen),
         )
 
 

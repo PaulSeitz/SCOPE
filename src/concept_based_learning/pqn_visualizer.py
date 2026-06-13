@@ -373,6 +373,181 @@ def _select_target_with_meta(
     return int(target_idx)
 
 
+def run_greedy_eval_episodes(
+    config,
+    params_tree=None,
+    meta_params=None,
+    *,
+    num_episodes: int = 5,
+    num_seeds: int = 3,
+    base_seed: int | None = None,
+    max_frames: int | None = None,
+) -> dict:
+    """
+    Greedy hierarchical eval on the fair eval wrapper (no sticky actions, no episodic life).
+
+    Runs ``num_seeds * num_episodes`` full episodes and returns aggregate score stats.
+    Meta is greedy argmax when ``meta_params`` is set; otherwise the env heuristic is used.
+    """
+    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
+    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    set_ego_distance_clip_max_pixels(
+        None if clip_px is None else float(clip_px)
+    )
+
+    num_skills = int(config["NUM_SKILLS"])
+    ego_action_dim = int(config["EGO_ACTION_DIM"])
+    hidden_size = int(config["HIDDEN_SIZE"])
+    num_layers = int(config["NUM_LAYERS"])
+    base_seed = int(config["SEED"] if base_seed is None else base_seed)
+    restrict_fire_for_non_destroy = bool(
+        config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
+    )
+    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
+    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
+    meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
+    meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
+    max_frames = int(max_frames or config.get("EVAL_MAX_FRAMES", 27000))
+
+    env, _renderer = create_eval_env(config)
+    env_name = config.get("ENV_NAME", "Seaquest")
+    manager = EnvManager()
+    components = manager.get_components(env_name)
+    heuristic_target = components.get_heuristic_target
+    no_target_idx = components.no_target_idx
+    action_mapper = components.action_mapper
+    forced_target_hook = components.forced_target_hook
+    meta_mask_hook = components.meta_mask_hook
+
+    skill_network = QNetwork(
+        action_dim=ego_action_dim,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+    )
+    meta_network = create_meta_network(config) if meta_params is not None else None
+
+    rng = jax.random.PRNGKey(base_seed)
+    obs, _state = env.reset(rng)
+    dummy_ego = get_ego_obs(
+        obs.raw_observation,
+        obs.objects,
+        jnp.array(0, dtype=jnp.int32),
+    )
+    validate_skill_checkpoint_ego_dim(config, int(dummy_ego.shape[-1]))
+    if params_tree is not None:
+        params_tree = ensure_skill_params_stack(params_tree, num_skills)
+
+    episode_returns: list[float] = []
+    for seed_idx in range(num_seeds):
+        for ep_idx in range(num_episodes):
+            ep_seed = base_seed + seed_idx * 10_000 + ep_idx * 997
+            rng = jax.random.PRNGKey(ep_seed)
+            rng, rng_reset = jax.random.split(rng)
+            obs, state = env.reset(rng_reset)
+            prev_target_idx = no_target_idx
+            episode_return = 0.0
+
+            for _ in range(max_frames):
+                rng, step_key = jax.random.split(rng)
+
+                if meta_network is None:
+                    target_obj_idx = int(
+                        jnp.ravel(
+                            heuristic_target(
+                                obs.raw_observation,
+                                obs.objects,
+                                prev_target_idx,
+                                step_key,
+                            )
+                        )[0]
+                    )
+                    target_obj_idx = int(
+                        forced_target_hook(
+                            jax.tree_util.tree_map(
+                                lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                            ),
+                            jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                            config,
+                        )[0]
+                    )
+                else:
+                    target_obj_idx = _select_target_with_meta(
+                        obs,
+                        config,
+                        meta_network,
+                        meta_params,
+                        meta_mask_hook,
+                        forced_target_hook,
+                        no_target_idx,
+                    )
+                prev_target_idx = target_obj_idx
+
+                is_meta_noop = (
+                    meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+                )
+                is_meta_fire = (
+                    meta_use_fire_target and target_obj_idx == meta_fire_target_idx
+                )
+                if target_obj_idx == no_target_idx or is_meta_noop:
+                    global_action = 0
+                elif is_meta_fire:
+                    global_action = meta_fire_game_action
+                else:
+                    raw_label = obs.objects.semantic_label[-1, target_obj_idx]
+                    active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
+                    ego_obs = get_ego_obs(
+                        obs.raw_observation,
+                        obs.objects,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                    )
+                    ego_obs_batch = ego_obs[jnp.newaxis, ...]
+
+                    def apply_one(params_for_skill):
+                        return skill_network.apply(
+                            {"params": params_for_skill},
+                            ego_obs_batch,
+                            train=False,
+                        )
+
+                    q_vals = jax.vmap(apply_one)(params_tree)
+                    q_vals = jnp.squeeze(q_vals, axis=1)
+                    q_active = q_vals[active_skill_idx]
+                    if restrict_fire_for_non_destroy and active_skill_idx != 0:
+                        fire_indices = fire_ego_action_indices(ego_action_dim)
+                        q_active = q_active.at[fire_indices].set(-jnp.inf)
+                    chosen_ego = int(jnp.argmax(q_active))
+                    global_action = int(
+                        action_mapper(
+                            chosen_ego,
+                            obs.raw_observation,
+                            jnp.array(target_obj_idx, dtype=jnp.int32),
+                            obs.objects,
+                        )
+                    )
+
+                obs, state, reward, done, _info = env.step(state, global_action)
+                episode_return += float(reward)
+                if done:
+                    break
+
+            episode_returns.append(episode_return)
+
+    arr = np.asarray(episode_returns, dtype=np.float64)
+    return {
+        "mean": float(arr.mean()) if arr.size else float("nan"),
+        "std": float(arr.std()) if arr.size > 1 else 0.0,
+        "min": float(arr.min()) if arr.size else float("nan"),
+        "max": float(arr.max()) if arr.size else float("nan"),
+        "returns": episode_returns,
+        "num_episodes": int(arr.size),
+        "num_seeds": int(num_seeds),
+        "episodes_per_seed": int(num_episodes),
+    }
+
+
 def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None):
     """
     Run a single evaluation rollout with the hierarchical PQN-style agent:
@@ -399,6 +574,9 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
     meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
+    meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
+    meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
@@ -505,8 +683,15 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         prev_target_idx = target_obj_idx
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+        is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
             global_action = 0
+            active_skill_idx = 0
+            combined_q = np.zeros(num_skills, dtype=np.float32)
+            distance = np.nan
+            angle = np.nan
+        elif is_meta_fire:
+            global_action = meta_fire_game_action
             active_skill_idx = 0
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan
@@ -673,6 +858,9 @@ def run_live_visualization(
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
     meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
+    meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
+    meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
     # VIDEO_MAX_FRAMES is for recorded rollouts; live pygame runs until quit unless capped.
     frame_limit = max_frames
     display_fps = int(fps if fps is not None else config.get("VISUALIZER_FPS", 15))
@@ -804,8 +992,14 @@ def run_live_visualization(
         prev_target_idx = target_obj_idx
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+        is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
             global_action = 0
+            active_skill_idx = 0
+            distance = np.nan
+            angle = np.nan
+        elif is_meta_fire:
+            global_action = meta_fire_game_action
             active_skill_idx = 0
             distance = np.nan
             angle = np.nan

@@ -7,7 +7,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -18,7 +18,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 
 # Tennis: full 18-action set. Player can move in all directions and swing with FIRE.
 # Target-aligned ego obs works naturally with 8-directional movement.
-tennis_action_mapper = make_ego_action_mapper(
+tennis_action_mapper, tennis_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [3,  8, 5,  9, 4, 7, 2, 6],   # R DR D DL L UL U UR

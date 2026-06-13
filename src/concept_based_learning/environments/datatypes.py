@@ -16,7 +16,9 @@ LABEL_NOOP = 0
 LABEL_DESTROY = 1
 LABEL_COLLECT = 2
 LABEL_AVOID = 3
-NUM_LABELS = 4
+# Reserved meta-policy slot: selecting this index executes FIRE (not a skill).
+LABEL_META_FIRE = 4
+NUM_LABELS = 5
 
 
 class EgocentricAction(enum.Enum):
@@ -63,6 +65,11 @@ class LabeledObjectObservation(ObjectObservation):
     # (not scrolled off screen). Used by DESTROY reward to bypass position-based
     # ambiguity when the env zeros out position for both kills and scroll-offs.
     was_killed: jnp.ndarray = struct.field(
+        default_factory=lambda: jnp.array(0, dtype=jnp.int32)
+    )
+    # Set to 1 when an env-specific success event fires (e.g. Skiing gate_pass).
+    # Used by COLLECT reward when AABB overlap alone is insufficient.
+    was_collected: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.array(0, dtype=jnp.int32)
     )
 

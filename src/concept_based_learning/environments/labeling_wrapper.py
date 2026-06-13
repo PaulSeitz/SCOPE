@@ -8,13 +8,13 @@ import jaxatari.spaces as spaces
 from jaxatari.environment import ObjectObservation
 from jaxatari.wrappers import JaxatariWrapper
 
-from .datatypes import (
+from concept_based_learning.environments.datatypes import (
     SemanticObservation,
     SemanticState,
     LabeledObjectObservation,
     NUM_LABELS,
 )
-from .meta_object_layout import prepend_meta_noop_slot
+from concept_based_learning.environments.meta_object_layout import prepend_meta_reserved_slots
 
 
 class JaxatariSemanticBaseWrapper(JaxatariWrapper):
@@ -22,15 +22,16 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
     Base wrapper that standardizes game-specific observations into SemanticObservations.
     """
 
-    def __init__(self, env, max_objects: int):
+    def __init__(self, env, max_objects: int, meta_reserved_slots: int = 1):
         super().__init__(env)
         self.stack_size = self._infer_stack_size()
         self.frame_skip = int(getattr(self._env, "_cbl_frame_skip", 1))
         self.clip_reward = bool(getattr(self._env, "_cbl_clip_reward", False))
         self._single_frame_api = not hasattr(self._env, "frame_stack_size")
-        # Total slots in observations: index 0 = meta NOOP, indices 1.. = game objects.
+        # Total slots: indices 0..meta_reserved_slots-1 are synthetic meta actions.
+        self.meta_reserved_slots = int(meta_reserved_slots)
         self.max_objects = max_objects
-        self.game_max_objects = max_objects - 1
+        self.game_max_objects = max_objects - self.meta_reserved_slots
 
         # Note: We wrap the original observation space inside a Dict space
         self._observation_space = self._make_observation_space()
@@ -119,7 +120,10 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         """
         # We vmap over the first axis (the frame stack)
         objects_stack = jax.vmap(self._extract_frame_objects)(obs_stack)
-        objects_stack = jax.vmap(prepend_meta_noop_slot)(objects_stack)
+        prepend = lambda objs: prepend_meta_reserved_slots(
+            objs, num_reserved=self.meta_reserved_slots
+        )
+        objects_stack = jax.vmap(prepend)(objects_stack)
 
         return SemanticObservation(
             raw_observation=obs_stack,  # Pass through the raw stacked observation
@@ -135,8 +139,22 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         del prev_env_state, next_env_state
         return None
 
+    def _substep_collect_events(self, prev_env_state, next_env_state):
+        """
+        Optional per-substep COLLECT success events (OR-accumulated across frame_skip).
+
+        Subclasses return a game-layout mask for ``was_collected``; default None.
+        """
+        del prev_env_state, next_env_state
+        return None
+
     def _stamp_events_on_observation(self, semantic_obs, accumulated_events):
-        """Apply accumulated substep events onto the stacked semantic observation."""
+        """Apply accumulated substep kill events onto the stacked semantic observation."""
+        del accumulated_events
+        return semantic_obs
+
+    def _stamp_collect_events_on_observation(self, semantic_obs, accumulated_events):
+        """Apply accumulated substep collect events onto the stacked semantic observation."""
         del accumulated_events
         return semantic_obs
 
@@ -173,6 +191,7 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         self, state: SemanticState, action: int
     ) -> Tuple[SemanticObservation, SemanticState, float, bool, Dict]:
         accumulated_events = None
+        accumulated_collect_events = None
         if self._single_frame_api:
             obs_stack = state.obs_stack
             atari_state = state.atari_state
@@ -193,6 +212,15 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
                         if accumulated_events is None
                         else jnp.logical_or(accumulated_events, sub_events)
                     )
+                sub_collect = self._substep_collect_events(
+                    prev_env_state, atari_state.env_state
+                )
+                if sub_collect is not None:
+                    accumulated_collect_events = (
+                        sub_collect
+                        if accumulated_collect_events is None
+                        else jnp.logical_or(accumulated_collect_events, sub_collect)
+                    )
                 obs_stack = self._push_obs_stack(obs_stack, obs_single)
                 total_reward = total_reward + step_reward
                 done = jnp.logical_or(done, step_done)
@@ -208,10 +236,16 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             accumulated_events = self._substep_env_state_events(
                 prev_env_state, new_atari_state.env_state
             )
+            accumulated_collect_events = self._substep_collect_events(
+                prev_env_state, new_atari_state.env_state
+            )
             new_state = SemanticState(atari_state=new_atari_state)
 
         semantic_obs = self._process_stack(obs_stack)
         semantic_obs = self._stamp_events_on_observation(semantic_obs, accumulated_events)
+        semantic_obs = self._stamp_collect_events_on_observation(
+            semantic_obs, accumulated_collect_events
+        )
 
         return semantic_obs, new_state, reward, done, info
 

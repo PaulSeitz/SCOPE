@@ -9,7 +9,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -19,7 +19,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 
 
 # Kangaroo: full 18-action set. Player moves in all 8 directions + jump/punch (FIRE).
-kangaroo_action_mapper = make_ego_action_mapper(
+kangaroo_action_mapper, kangaroo_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [3,  8, 5,  9, 4, 7, 2, 6],   # R DR D DL L UL U UR
@@ -34,15 +34,75 @@ kangaroo_action_mapper = make_ego_action_mapper(
 # Total objects: 20 bottom + 20 top + 3 fruits + 1 bell + 1 child
 #              + 1 falling_coconut + 4 monkeys + 4 thrown_coconuts = 54
 _KANGAROO_MAX_OBJECTS = 55  # 54 + 1 padding
+_N_COLLECT = 45
+_N_DESTROY = 5
+_N_AVOID = 4
+_MONKEY_SPAWN_X = 152
+_MONKEY_SPAWN_Y = 5
+_COCO_OFFSCREEN_X = 13
+_COCO_OFFSCREEN_Y = -1
+_COCO_PUNCH_SCORE = 200
 
 
 def _scalar_to_1d(x):
     return jnp.expand_dims(x, axis=0) if x.ndim == 0 else x
 
 
+def _falling_coco_active(pos):
+    return jnp.logical_or(pos[0] != _COCO_OFFSCREEN_X, pos[1] != _COCO_OFFSCREEN_Y)
+
+
 class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         super().__init__(env, max_objects=_KANGAROO_MAX_OBJECTS)
+
+    def _substep_env_state_events(self, prev_env_state, next_env_state):
+        """
+        Detect monkey punches and falling-coconut punches from raw level state.
+
+        Returns a 54-element was_killed mask:
+          [collect(45) | destroy(5) | avoid(4)]
+        """
+        prev_level = prev_env_state.level
+        next_level = next_env_state.level
+
+        punched_spawn = jnp.logical_and(
+            next_level.monkey_positions[:, 0] == _MONKEY_SPAWN_X,
+            next_level.monkey_positions[:, 1] == _MONKEY_SPAWN_Y,
+        )
+        monkey_killed = jnp.logical_and(
+            prev_level.monkey_states != 0,
+            jnp.logical_and(next_level.monkey_states == 0, punched_spawn),
+        ).astype(jnp.int32)
+
+        prev_fc = prev_level.falling_coco_position
+        next_fc = next_level.falling_coco_position
+        fc_prev_active = _falling_coco_active(prev_fc)
+        fc_next_active = _falling_coco_active(next_fc)
+        score_delta = next_env_state.score - prev_env_state.score
+        monkey_score = jnp.sum(monkey_killed) * _COCO_PUNCH_SCORE
+        coco_killed = jnp.logical_and(
+            jnp.logical_and(fc_prev_active, jnp.logical_not(fc_next_active)),
+            score_delta - monkey_score >= _COCO_PUNCH_SCORE,
+        ).astype(jnp.int32)
+
+        destroy_mask = jnp.concatenate(
+            [jnp.reshape(coco_killed, (1,)), monkey_killed]
+        )
+        collect_zeros = jnp.zeros(_N_COLLECT, dtype=jnp.int32)
+        avoid_zeros = jnp.zeros(_N_AVOID, dtype=jnp.int32)
+        return jnp.concatenate([collect_zeros, destroy_mask, avoid_zeros])
+
+    def _stamp_events_on_observation(self, semantic_obs, kill_mask):
+        if kill_mask is None:
+            return semantic_obs
+        pad = jnp.zeros(self.game_max_objects - kill_mask.shape[0], dtype=jnp.int32)
+        was_killed_with_noop = jnp.concatenate(
+            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32), pad]
+        )
+        objects = semantic_obs.objects
+        new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
+        return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         ladders = obs.ladders               # n=20 (padded)
@@ -141,4 +201,5 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
             state=jnp.zeros(n_objects + pad_size, dtype=jnp.int32),
             can_go_offscreen=jnp.concatenate([all_offscreen, pad_offscreen]),
             was_killed=jnp.zeros(n_objects + pad_size, dtype=jnp.int32),
+            was_collected=jnp.zeros(n_objects + pad_size, dtype=jnp.int32),
         )

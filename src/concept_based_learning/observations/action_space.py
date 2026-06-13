@@ -185,6 +185,26 @@ def make_ego_action_mapper(
     return mapper
 
 
+def make_target_aligned_action_mappers(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+    **inverse_kwargs,
+):
+    """Return (forward_mapper, inverse_mapper) sharing the same env action tables."""
+    shared = dict(
+        noop_action=noop_action,
+        fire_action=fire_action,
+        move_table=move_table,
+        move_fire_table=move_fire_table,
+    )
+    return (
+        make_ego_action_mapper(**shared),
+        make_inverse_ego_action_mapper(**shared, **inverse_kwargs),
+    )
+
+
 def make_inverse_ego_action_mapper(
     noop_action: int,
     fire_action: int,

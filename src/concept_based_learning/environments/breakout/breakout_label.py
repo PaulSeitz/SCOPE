@@ -7,7 +7,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
-from concept_based_learning.observations.action_space import make_ego_action_mapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
@@ -18,7 +18,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
 
 # Breakout: player at fixed y=189. Actions: NOOP=0, FIRE=1, RIGHT=2, LEFT=3.
 # Player moves only horizontally, so vertical ego directions collapse to NOOP.
-breakout_action_mapper = make_ego_action_mapper(
+breakout_action_mapper, breakout_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
     move_table=     [2, 2, 0, 3, 3, 3, 0, 2],  # R DR D DL L UL U UR
@@ -28,8 +28,8 @@ breakout_action_mapper = make_ego_action_mapper(
 
 class BreakoutSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
-        # 1 ball = 1 object + padding to 2
-        super().__init__(env, max_objects=2)
+        # 1 NOOP + 1 FIRE + 1 ball
+        super().__init__(env, max_objects=3, meta_reserved_slots=2)
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         ball = obs.ball
