@@ -19,6 +19,10 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_enabled,
     meta_noop_target_idx,
 )
+from concept_based_learning.environments.meta_target_persistence import (
+    apply_meta_target_persistence,
+    meta_target_persist_enabled,
+)
 from concept_based_learning.training.schedules import eps_decay_transition_steps
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 
@@ -75,6 +79,8 @@ def make_tandem_train(
         config.get("SKILL_QLAMBDA_WATKINS_CUT", False)
     )
     skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
+    skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
+    use_target_persistence = meta_target_persist_enabled(config)
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -205,6 +211,7 @@ def make_tandem_train(
                     num_completed,
                     last_targets,
                     car_hits_sum,
+                    persist_steps_remaining,
                 ) = carry
                 rng, rng_meta, rng_skill = jax.random.split(rng, 3)
 
@@ -255,6 +262,18 @@ def make_tandem_train(
                     lambda x: forced_target_hook(last_obs.raw_observation, x, config, rng_meta),
                     target_obj_idxs,
                 )
+                if use_target_persistence:
+                    target_obj_idxs, persist_steps_remaining = apply_meta_target_persistence(
+                        target_obj_idxs,
+                        last_targets,
+                        last_obs.objects,
+                        meta_q_vals,
+                        active_masks,
+                        config,
+                        no_target_idx=no_target_idx,
+                        max_objects=max_objects,
+                        persist_steps_remaining=persist_steps_remaining,
+                    )
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
                 )
@@ -422,6 +441,12 @@ def make_tandem_train(
                         meta_fire[:, jnp.newaxis], 0.0, skill_rewards
                     )
 
+                base_env_reward = jnp.sign(env_reward)
+                skill_rewards_for_training = (
+                    skill_reward_lambda * base_env_reward[:, jnp.newaxis]
+                    + (1.0 - skill_reward_lambda) * skill_rewards
+                )
+
                 changed_target = target_obj_idxs != last_targets
                 was_valid_target = jnp.logical_and(
                     last_targets >= 0, last_targets < max_objects
@@ -432,7 +457,6 @@ def make_tandem_train(
                 # λ=1.0 → full env reward (default); λ=0.0 → full skill reward.
                 # skill_rewards is already noop-zeroed above; no extra masking needed.
                 meta_reward_lambda = float(config.get("META_REWARD_LAMBDA", 1.0))
-                base_env_reward = jnp.sign(env_reward)
                 active_skill_reward = skill_rewards[
                     jnp.arange(config["NUM_ENVS"]), active_skills
                 ]
@@ -459,6 +483,14 @@ def make_tandem_train(
                 )
                 next_state_for_rollout = merge_reset_where_done(
                     new_env_state, reset_state, new_done
+                )
+                target_obj_idxs = jnp.where(
+                    new_done,
+                    jnp.full_like(target_obj_idxs, no_target_idx),
+                    target_obj_idxs,
+                )
+                persist_steps_remaining = jnp.where(
+                    new_done, jnp.zeros_like(persist_steps_remaining), persist_steps_remaining
                 )
                 next_active_masks = jax.vmap(
                     lambda objs, raw: build_meta_target_mask(
@@ -515,6 +547,10 @@ def make_tandem_train(
                         life_lost,
                         info,
                     )
+                    skill_rewards_all_full = (
+                        skill_reward_lambda * base_env_reward[:, jnp.newaxis, jnp.newaxis]
+                        + (1.0 - skill_reward_lambda) * skill_rewards_all_full
+                    )
                     relabel_mask_full = active_masks
                     if meta_noop_enabled:
                         relabel_mask_full = relabel_mask_full.at[:, meta_noop_idx].set(
@@ -565,7 +601,7 @@ def make_tandem_train(
                     ego_obs_all = ego_obses[:, jnp.newaxis, :]
                     next_ego_obs_all = next_ego_obses[:, jnp.newaxis, :]
                     ego_action_all = chosen_ego_actions[:, jnp.newaxis]
-                    skill_rewards_all = skill_rewards[:, jnp.newaxis, :]
+                    skill_rewards_all = skill_rewards_for_training[:, jnp.newaxis, :]
                     skill_done_all = skill_done[:, jnp.newaxis, :]
                     relabel_mask = base_valid[:, jnp.newaxis]
 
@@ -585,7 +621,7 @@ def make_tandem_train(
                     ego_action=chosen_ego_actions,
                     active_skill=active_skills,
                     skill_q_val=all_skill_q_vals,
-                    skill_rewards=skill_rewards,
+                    skill_rewards=skill_rewards_for_training,
                     skill_done=skill_done,
                     ego_obs_all=ego_obs_all,
                     next_ego_obs_all=next_ego_obs_all,
@@ -604,12 +640,14 @@ def make_tandem_train(
                     num_completed,
                     target_obj_idxs,
                     car_hits_sum,
+                    persist_steps_remaining,
                 ), transition
 
             rng, _rng = jax.random.split(rng)
             init_targets = jnp.full(
                 (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
             )
+            init_persist_steps = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.int32)
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
             carry_final, transitions = jax.lax.scan(
                 _step_env,
@@ -621,6 +659,7 @@ def make_tandem_train(
                     jnp.array(0.0, dtype=jnp.float32),
                     init_targets,
                     init_car_hits_sum,
+                    init_persist_steps,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -634,6 +673,7 @@ def make_tandem_train(
                 num_completed,
                 _last_targets,
                 car_hits_sum,
+                _persist_steps_remaining,
             ) = carry_final
             expl_state = (last_obs, env_state)
 

@@ -53,6 +53,13 @@ alg:
   
   META_REWARD_LAMBDA: 1.0
 
+  # --- Skill reward blending ---
+  # Controls what signal skill policies train on (independent of META_REWARD_LAMBDA):
+  #   0.0 → full skill reward (default; sparse concept rewards only)
+  #   1.0 → full environment reward (sign-clipped) on every skill training step
+  #   0.0–1.0 → linear blend of both
+  # SKILL_REWARD_LAMBDA: 0.0
+
   # Skill optimizer (if omitted, LR is used) — match seaquest_skills_pretrain
   SKILL_LR: 0.0005
 

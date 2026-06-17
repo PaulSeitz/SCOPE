@@ -33,6 +33,11 @@ alg:
   # Only the DESTROY skill (index 0) is allowed to fire.s
   RESTRICT_FIRE_FOR_NON_DESTROY: false
 
+  # --- Skill reward blending ---
+  #   0.0 → sparse concept rewards only (default)
+  #   1.0 → sign-clipped env reward blended into skill training signal
+  # SKILL_REWARD_LAMBDA: 0.0
+
   # --- Environment Wrappers ---
   # FIRST_FIRE: jaxatari AtariWrapper sends one FIRE immediately after each reset (ALE “start”).
   FIRST_FIRE: true

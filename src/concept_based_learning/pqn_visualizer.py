@@ -44,6 +44,10 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_enabled,
     meta_noop_target_idx,
 )
+from concept_based_learning.environments.meta_target_persistence import (
+    apply_meta_target_persistence,
+    meta_target_persist_enabled,
+)
 from concept_based_learning.networks.skill_network import QNetwork
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -345,7 +349,7 @@ def label_to_skill_idx(label, num_skills: int):
     return jnp.clip(label - 1, 0, num_skills - 1)
 
 
-def _select_target_with_meta(
+def _propose_meta_target(
     obs,
     config,
     meta_network,
@@ -354,7 +358,7 @@ def _select_target_with_meta(
     forced_target_hook,
     no_target_idx,
 ):
-    """Select a target index using a learned meta-policy checkpoint."""
+    """Greedy meta proposal before optional persistence override."""
     meta_q_vals = meta_network.apply(
         {"params": meta_params},
         obs.raw_observation,
@@ -378,8 +382,63 @@ def _select_target_with_meta(
         jnp.expand_dims(target_idx, 0),
         config,
     )[0]
-    target_idx = jnp.where(any_active, target_idx, no_target_idx)
-    return target_idx.astype(jnp.int32)
+    proposed = jnp.where(any_active, target_idx, no_target_idx).astype(jnp.int32)
+    return proposed, meta_q_vals, active_mask
+
+
+def _select_target_with_meta(
+    obs,
+    config,
+    meta_network,
+    meta_params,
+    meta_mask_hook,
+    forced_target_hook,
+    no_target_idx,
+    *,
+    last_target_idx=None,
+    persist_steps_remaining=None,
+):
+    """Select a target index using a learned meta-policy checkpoint."""
+    proposed, meta_q_vals, active_mask = _propose_meta_target(
+        obs,
+        config,
+        meta_network,
+        meta_params,
+        meta_mask_hook,
+        forced_target_hook,
+        no_target_idx,
+    )
+    if not meta_target_persist_enabled(config):
+        steps = (
+            jnp.array(0, dtype=jnp.int32)
+            if persist_steps_remaining is None
+            else persist_steps_remaining
+        )
+        return proposed, steps
+
+    if last_target_idx is None:
+        last_target_idx = no_target_idx
+    if persist_steps_remaining is None:
+        persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+
+    last_b = jnp.asarray([last_target_idx], dtype=jnp.int32)
+    proposed_b = jnp.asarray([proposed], dtype=jnp.int32)
+    q_b = meta_q_vals[jnp.newaxis, ...] if meta_q_vals.ndim == 1 else meta_q_vals
+    mask_b = active_mask[jnp.newaxis, ...] if active_mask.ndim == 1 else active_mask
+    steps_b = jnp.asarray([persist_steps_remaining], dtype=jnp.int32)
+
+    committed, new_steps = apply_meta_target_persistence(
+        proposed_b,
+        last_b,
+        obs.objects,
+        q_b,
+        mask_b,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=int(config["MAX_OBJECTS"]),
+        persist_steps_remaining=steps_b,
+    )
+    return committed[0], new_steps[0]
 
 
 def _jax_select_target_with_meta(
@@ -390,31 +449,40 @@ def _jax_select_target_with_meta(
     meta_mask_hook,
     forced_target_hook,
     no_target_idx,
+    *,
+    last_target_idx,
+    persist_steps_remaining,
 ):
-    """JAX-traced target selection (no host sync)."""
-    meta_q_vals = meta_network.apply(
-        {"params": meta_params},
-        obs.raw_observation,
-        obs.objects,
-        train=False,
-    )
-    active_mask = build_meta_target_mask(
-        obs.objects,
-        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+    """JAX-traced target selection (no host sync), with optional persistence."""
+    proposed, meta_q_vals, active_mask = _propose_meta_target(
+        obs,
         config,
-        hook=meta_mask_hook,
+        meta_network,
+        meta_params,
+        meta_mask_hook,
+        forced_target_hook,
+        no_target_idx,
     )
-    if active_mask.ndim > 1:
-        active_mask = active_mask[0]
-    any_active = jnp.any(active_mask)
-    valid_qs = jnp.where(active_mask, meta_q_vals, -jnp.inf)
-    target_idx = jnp.argmax(valid_qs)
-    target_idx = forced_target_hook(
-        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
-        jnp.expand_dims(target_idx, 0),
+    if not meta_target_persist_enabled(config):
+        return proposed, persist_steps_remaining
+
+    last_b = jnp.asarray([last_target_idx], dtype=jnp.int32)
+    proposed_b = jnp.asarray([proposed], dtype=jnp.int32)
+    q_b = meta_q_vals[jnp.newaxis, ...] if meta_q_vals.ndim == 1 else meta_q_vals
+    mask_b = active_mask[jnp.newaxis, ...] if active_mask.ndim == 1 else active_mask
+    steps_b = jnp.asarray([persist_steps_remaining], dtype=jnp.int32)
+    committed, new_steps = apply_meta_target_persistence(
+        proposed_b,
+        last_b,
+        obs.objects,
+        q_b,
+        mask_b,
         config,
-    )[0]
-    return jnp.where(any_active, target_idx, no_target_idx).astype(jnp.int32)
+        no_target_idx=no_target_idx,
+        max_objects=int(config["MAX_OBJECTS"]),
+        persist_steps_remaining=steps_b,
+    )
+    return committed[0], new_steps[0]
 
 
 def _make_jitted_greedy_episode_runner(
@@ -483,17 +551,18 @@ def _make_jitted_greedy_episode_runner(
         rng, reset_key = jax.random.split(rng)
         obs, state = env.reset(reset_key)
         prev_target = no_target
+        persist_steps = jnp.array(0, dtype=jnp.int32)
 
         def cond(carry):
-            _state, _obs, _rng, _ret, done, _prev, step = carry
+            _state, _obs, _rng, _ret, done, _prev, _steps, step = carry
             return jnp.logical_and(step < max_frames, jnp.logical_not(done))
 
         def body(carry):
-            state, obs, rng, ret, done, prev_target, step = carry
+            state, obs, rng, ret, done, prev_target, persist_steps, step = carry
             rng, step_key = jax.random.split(rng)
 
             if use_meta:
-                target = _jax_select_target_with_meta(
+                target, persist_steps = _jax_select_target_with_meta(
                     obs,
                     config,
                     meta_network,
@@ -501,6 +570,8 @@ def _make_jitted_greedy_episode_runner(
                     meta_mask_hook,
                     forced_target_hook,
                     no_target,
+                    last_target_idx=prev_target,
+                    persist_steps_remaining=persist_steps,
                 )
             else:
                 target = jnp.ravel(
@@ -522,6 +593,8 @@ def _make_jitted_greedy_episode_runner(
             game_a = _skill_game_action(obs, target)
             new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
             new_done = jnp.logical_or(done, step_done)
+            target = jnp.where(new_done, no_target, target)
+            persist_steps = jnp.where(new_done, jnp.array(0, dtype=jnp.int32), persist_steps)
             return (
                 new_state,
                 new_obs,
@@ -529,10 +602,11 @@ def _make_jitted_greedy_episode_runner(
                 ret + reward,
                 new_done,
                 target,
+                persist_steps,
                 step + 1,
             )
 
-        init = (state, obs, rng, jnp.array(0.0), False, prev_target, 0)
+        init = (state, obs, rng, jnp.array(0.0), False, prev_target, persist_steps, 0)
         final = jax.lax.while_loop(cond, body, init)
         return final[3]
 
@@ -761,6 +835,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     # Persistent target index for the heuristic meta-policy
     prev_target_idx = no_target_idx
+    persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     for _ in range(max_frames):
         rng, step_key = jax.random.split(rng)
 
@@ -783,7 +858,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 )[0]
             )
         else:
-            target_obj_idx = _select_target_with_meta(
+            target_obj_idx, persist_steps_remaining = _select_target_with_meta(
                 obs,
                 config,
                 meta_network,
@@ -791,7 +866,10 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 meta_mask_hook,
                 forced_target_hook,
                 no_target_idx,
+                last_target_idx=prev_target_idx,
+                persist_steps_remaining=persist_steps_remaining,
             )
+            target_obj_idx = int(target_obj_idx)
         prev_target_idx = target_obj_idx
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
@@ -1041,16 +1119,18 @@ def run_live_visualization(
     clock = pygame.time.Clock()
     running = True
     prev_target_idx = no_target_idx
+    persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     frame_count = 0
 
     def reset_env_episode():
-        nonlocal obs, state, prev_target_idx, rng
+        nonlocal obs, state, prev_target_idx, persist_steps_remaining, rng
         rng_local, rng_reset_local = jax.random.split(rng)
         obs_local, state_local = env.reset(rng_reset_local)
         obs = obs_local
         state = state_local
         rng = rng_local
         prev_target_idx = no_target_idx
+        persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
 
     while running and (frame_limit is None or frame_count < frame_limit):
         # Handle quit events
@@ -1092,7 +1172,7 @@ def run_live_visualization(
                 )[0]
             )
         else:
-            target_obj_idx = _select_target_with_meta(
+            target_obj_idx, persist_steps_remaining = _select_target_with_meta(
                 obs,
                 config,
                 meta_network,
@@ -1100,7 +1180,10 @@ def run_live_visualization(
                 meta_mask_hook,
                 forced_target_hook,
                 no_target_idx,
+                last_target_idx=prev_target_idx,
+                persist_steps_remaining=persist_steps_remaining,
             )
+            target_obj_idx = int(target_obj_idx)
         prev_target_idx = target_obj_idx
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx

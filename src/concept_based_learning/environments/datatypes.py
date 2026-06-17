@@ -149,6 +149,7 @@ class TandemTransition:
     relabel_mask: chex.Array
 
     # Raw environment reward (sign-clipped, before blending/penalties) — logged to wandb
-    # so episodic env performance is always visible regardless of META_REWARD_LAMBDA.
+    # so episodic env performance is always visible regardless of META_REWARD_LAMBDA
+    # or SKILL_REWARD_LAMBDA.
     env_reward: chex.Array
 

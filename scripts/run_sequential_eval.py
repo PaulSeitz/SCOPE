@@ -21,7 +21,7 @@ Usage (from the project root):
   python scripts/run_sequential_eval.py
   python scripts/run_sequential_eval.py --phases 1 2      # run only phases 1 and 2
   python scripts/run_sequential_eval.py --phases 2 3 --skip-envs skiing tennis
-  python scripts/run_sequential_eval.py --trial           # 10k steps per phase (smoke test)
+  python scripts/run_sequential_eval.py --trial           # smoke test (wandb disabled)
   python scripts/run_sequential_eval.py --abort-on-failure
 """
 
@@ -462,9 +462,9 @@ def _parse_args() -> argparse.Namespace:
         help=f"Steps per phase in trial mode (default: {TRIAL_STEPS_DEFAULT})",
     )
     parser.add_argument(
-        "--wandb-mode", default="online", choices=["online", "offline", "disabled"],
+        "--wandb-mode", default=None, choices=["online", "offline", "disabled"],
         dest="wandb_mode",
-        help="wandb logging mode (default: online)",
+        help="wandb logging mode (default: disabled with --trial, online otherwise)",
     )
     parser.add_argument(
         "--skip-eval", action="store_true",
@@ -483,6 +483,12 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_wandb_mode(*, trial: bool, wandb_mode: str | None) -> str:
+    if wandb_mode is not None:
+        return wandb_mode
+    return "disabled" if trial else "online"
+
+
 if __name__ == "__main__":
     args = _parse_args()
     envs = [e for e in args.envs if e not in args.skip_envs]
@@ -491,7 +497,7 @@ if __name__ == "__main__":
         envs=envs,
         abort_on_failure=args.abort_on_failure,
         trial_steps=args.trial_steps if args.trial else None,
-        wandb_mode=args.wandb_mode,
+        wandb_mode=_resolve_wandb_mode(trial=args.trial, wandb_mode=args.wandb_mode),
         skip_eval=args.skip_eval,
         eval_episodes=args.eval_episodes,
         eval_seeds=args.eval_seeds,

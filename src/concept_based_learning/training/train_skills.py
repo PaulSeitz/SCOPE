@@ -73,6 +73,7 @@ def make_train(
         else int(max(1, min(MAX_OBJECTS, int(relabel_k_objects))))
     )
     skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
+    skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
 
     _raw_skill_names = config.get("SKILL_NAMES")
     if _raw_skill_names is None or len(_raw_skill_names) != NUM_SKILLS:
@@ -396,6 +397,11 @@ def make_train(
                     info,
                 )
                 skill_rewards, skill_done = rewards_and_masks
+                base_env_reward = jnp.sign(raw_rewards)
+                skill_rewards = (
+                    skill_reward_lambda * base_env_reward[:, jnp.newaxis]
+                    + (1.0 - skill_reward_lambda) * skill_rewards
+                )
 
                 next_ego_obses = jax.vmap(get_ego_obs)(
                     new_obs.raw_observation, new_obs.objects, safe_target_idxs
@@ -444,6 +450,10 @@ def make_train(
                         new_obs.objects,
                         life_lost,
                         info,
+                    )
+                    rewards_all_full = (
+                        skill_reward_lambda * base_env_reward[:, jnp.newaxis, jnp.newaxis]
+                        + (1.0 - skill_reward_lambda) * rewards_all_full
                     )
                     relabel_mask_full = jax.vmap(lambda obj: obj.active[-1] > 0.5)(
                         last_obs.objects
