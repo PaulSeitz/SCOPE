@@ -4,7 +4,10 @@ import flax.linen as nn
 import jax.numpy as jnp
 from typing import Any
 
-from concept_based_learning.networks.meta_network import flatten_raw_observation
+from concept_based_learning.networks.meta_network import (
+    append_target_locked_feature,
+    flatten_raw_observation,
+)
 
 
 class FlatMetaQNetwork(nn.Module):
@@ -21,11 +24,17 @@ class FlatMetaQNetwork(nn.Module):
     num_layers: int = 3
     norm_type: str = "layer_norm"
     num_skills: int = 3  # unused; kept for factory API parity
+    use_target_locked_input: bool = False
 
     @nn.compact
-    def __call__(self, raw_obs: Any, objects: Any, train: bool):
+    def __call__(self, raw_obs: Any, objects: Any, train: bool, target_locked=None):
         del objects
         x = flatten_raw_observation(raw_obs)
+        x = append_target_locked_feature(
+            x,
+            target_locked,
+            enabled=self.use_target_locked_input,
+        )
 
         if self.norm_type == "layer_norm":
             normalize = lambda v: nn.LayerNorm()(v)

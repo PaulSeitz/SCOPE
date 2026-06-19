@@ -30,6 +30,7 @@ def _meta_network_kwargs(config: Dict[str, Any], *, num_layers: int) -> Dict[str
         num_layers=num_layers,
         norm_type=str(config.get("META_NORM_TYPE", "layer_norm")),
         num_skills=int(config.get("NUM_SKILLS", 3)),
+        use_target_locked_input=bool(config.get("META_TARGET_LOCKED_INPUT", False)),
     )
 
 

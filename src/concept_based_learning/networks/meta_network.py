@@ -4,6 +4,22 @@ import flax.linen as nn
 from typing import Any
 
 
+def append_target_locked_feature(
+    global_features: jnp.ndarray,
+    target_locked,
+    *,
+    enabled: bool,
+) -> jnp.ndarray:
+    """Optionally append a scalar 0/1 persistence-lock flag to global meta features."""
+    if not enabled:
+        return global_features
+    if target_locked is None:
+        locked = jnp.array(0.0, dtype=jnp.float32)
+    else:
+        locked = jnp.asarray(target_locked, dtype=jnp.float32).reshape(())
+    return jnp.concatenate([global_features, jnp.atleast_1d(locked)])
+
+
 def flatten_raw_observation(raw_obs):
     """
     Extracts the most recent frame from a raw Jaxatari observation PyTree and
@@ -26,10 +42,16 @@ class MetaQNetwork(nn.Module):
     num_layers: int = 3
     norm_type: str = "layer_norm"
     num_skills: int = 3  # unused in MLP path, kept for API compatibility
+    use_target_locked_input: bool = False
 
     @nn.compact
-    def __call__(self, raw_obs: Any, objects: Any, train: bool):
+    def __call__(self, raw_obs: Any, objects: Any, train: bool, target_locked=None):
         global_features = flatten_raw_observation(raw_obs)
+        global_features = append_target_locked_feature(
+            global_features,
+            target_locked,
+            enabled=self.use_target_locked_input,
+        )
 
         last_frame_objs = jax.tree_util.tree_map(
             lambda x: x[-1] if jnp.ndim(x) > 0 else x, objects

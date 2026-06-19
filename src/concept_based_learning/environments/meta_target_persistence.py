@@ -41,6 +41,14 @@ def meta_target_persist_enabled(config: Optional[dict]) -> bool:
     return meta_target_persist_mode(config) is not None
 
 
+def meta_avoid_resume_mission(config: Optional[dict]) -> bool:
+    return bool(config and config.get("META_AVOID_RESUME_MISSION", False))
+
+
+def meta_target_locked_input_enabled(config: Optional[dict]) -> bool:
+    return bool(config and config.get("META_TARGET_LOCKED_INPUT", False))
+
+
 def _object_field_latest(values: jnp.ndarray) -> jnp.ndarray:
     """
     Latest object-frame field per env.
@@ -103,6 +111,119 @@ def _labels_at(objects: Any, target_idxs: jnp.ndarray) -> jnp.ndarray:
     return _gather_object_field(objects, "semantic_label", target_idxs)
 
 
+def _is_mission_target(objects: Any, target_idxs: jnp.ndarray) -> jnp.ndarray:
+    labels = _labels_at(objects, target_idxs)
+    return jnp.logical_or(labels == LABEL_COLLECT, labels == LABEL_DESTROY)
+
+
+def _on_mission(
+    last_targets: jnp.ndarray,
+    objects: Any,
+    config: Optional[dict],
+    *,
+    no_target_idx: int,
+    max_objects: int,
+) -> jnp.ndarray:
+    valid_last = is_valid_persist_target(
+        last_targets, config, no_target_idx=no_target_idx, max_objects=max_objects
+    )
+    disappeared = target_disappeared(objects, last_targets)
+    return jnp.logical_and(
+        valid_last,
+        jnp.logical_and(
+            jnp.logical_not(disappeared),
+            _is_mission_target(objects, last_targets),
+        ),
+    )
+
+
+def _suspended_mission_valid(
+    suspended_mission_idxs: jnp.ndarray,
+    objects: Any,
+    config: Optional[dict],
+    *,
+    no_target_idx: int,
+    max_objects: int,
+) -> jnp.ndarray:
+    valid = is_valid_persist_target(
+        suspended_mission_idxs,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=max_objects,
+    )
+    disappeared = target_disappeared(objects, suspended_mission_idxs)
+    return jnp.logical_and(valid, jnp.logical_not(disappeared))
+
+
+def compute_meta_target_locked(
+    last_targets: jnp.ndarray,
+    suspended_mission_idxs: jnp.ndarray,
+    objects: Any,
+    config: Optional[dict],
+    *,
+    no_target_idx: int,
+    max_objects: int,
+    persist_steps_remaining: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Per-env flag (0/1) appended to meta-policy input when ``META_TARGET_LOCKED_INPUT``.
+
+    True when persistence will override free target selection on this step.
+    """
+    if not meta_target_locked_input_enabled(config):
+        return jnp.zeros_like(last_targets, dtype=jnp.float32)
+
+    mode = meta_target_persist_mode(config)
+    if mode is None:
+        return jnp.zeros_like(last_targets, dtype=jnp.float32)
+
+    valid_last = is_valid_persist_target(
+        last_targets, config, no_target_idx=no_target_idx, max_objects=max_objects
+    )
+    disappeared = target_disappeared(objects, last_targets)
+
+    on_detour = jnp.zeros_like(last_targets, dtype=bool)
+    if mode == PERSIST_MISSION_AVOID and meta_avoid_resume_mission(config):
+        on_detour = _suspended_mission_valid(
+            suspended_mission_idxs,
+            objects,
+            config,
+            no_target_idx=no_target_idx,
+            max_objects=max_objects,
+        )
+
+    if mode == PERSIST_UNTIL_DONE:
+        locked = jnp.logical_and(valid_last, jnp.logical_not(disappeared))
+    elif mode == PERSIST_MISSION_AVOID:
+        locked = jnp.logical_and(_on_mission(
+            last_targets,
+            objects,
+            config,
+            no_target_idx=no_target_idx,
+            max_objects=max_objects,
+        ), jnp.logical_not(on_detour))
+    elif mode == PERSIST_FIXED_STEPS:
+        locked = jnp.logical_and(
+            persist_steps_remaining > 0,
+            jnp.logical_and(valid_last, jnp.logical_not(disappeared)),
+        )
+    else:
+        locked = jnp.zeros_like(last_targets, dtype=bool)
+
+    return locked.astype(jnp.float32)
+
+
+def _best_avoid_q(
+    meta_q_vals: jnp.ndarray,
+    active_masks: jnp.ndarray,
+    objects: Any,
+) -> jnp.ndarray:
+    labels = _object_field_latest(objects.semantic_label)
+    avoid_mask = jnp.logical_and(active_masks, labels == LABEL_AVOID)
+    masked_q = jnp.where(avoid_mask, meta_q_vals, -jnp.inf)
+    return jnp.max(masked_q, axis=-1)
+
+
 def _best_avoid_interrupt(
     meta_q_vals: jnp.ndarray,
     active_masks: jnp.ndarray,
@@ -130,6 +251,38 @@ def _best_avoid_interrupt(
     return interrupt, best_avoid_idx
 
 
+def _should_resume_mission(
+    meta_q_vals: jnp.ndarray,
+    active_masks: jnp.ndarray,
+    objects: Any,
+    suspended_mission_idxs: jnp.ndarray,
+    *,
+    margin: float,
+    no_target_idx: int,
+    max_objects: int,
+    config: Optional[dict],
+) -> jnp.ndarray:
+    """Resume when AVOID urgency drops below the suspended mission Q + margin."""
+    suspended_valid = _suspended_mission_valid(
+        suspended_mission_idxs,
+        objects,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=max_objects,
+    )
+    best_avoid_q = _best_avoid_q(meta_q_vals, active_masks, objects)
+    safe_suspended = jnp.clip(
+        suspended_mission_idxs, 0, meta_q_vals.shape[-1] - 1
+    )
+    suspended_q = jnp.take_along_axis(
+        meta_q_vals, safe_suspended[:, None], axis=1
+    ).squeeze(1)
+    return jnp.logical_and(
+        suspended_valid,
+        best_avoid_q <= (suspended_q + jnp.asarray(margin, dtype=meta_q_vals.dtype)),
+    )
+
+
 def apply_meta_target_persistence(
     proposed_targets: jnp.ndarray,
     last_targets: jnp.ndarray,
@@ -141,40 +294,60 @@ def apply_meta_target_persistence(
     no_target_idx: int,
     max_objects: int,
     persist_steps_remaining: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    suspended_mission_idxs: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Override ``proposed_targets`` according to ``META_TARGET_PERSIST_MODE``.
 
-    Returns ``(committed_targets, updated_persist_steps_remaining)``.
+    Returns ``(committed_targets, updated_persist_steps_remaining, suspended_mission_idxs)``.
     """
     mode = meta_target_persist_mode(config)
     if mode is None:
-        return proposed_targets, persist_steps_remaining
+        return proposed_targets, persist_steps_remaining, suspended_mission_idxs
 
     valid_last = is_valid_persist_target(
         last_targets, config, no_target_idx=no_target_idx, max_objects=max_objects
     )
     disappeared = target_disappeared(objects, last_targets)
-    last_labels = _labels_at(objects, last_targets)
-    on_mission = jnp.logical_and(
-        valid_last,
-        jnp.logical_and(
-            jnp.logical_not(disappeared),
-            jnp.logical_or(
-                last_labels == LABEL_COLLECT,
-                last_labels == LABEL_DESTROY,
-            ),
-        ),
+    on_mission = _on_mission(
+        last_targets,
+        objects,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=max_objects,
     )
 
     if mode == PERSIST_UNTIL_DONE:
         keep = jnp.logical_and(valid_last, jnp.logical_not(disappeared))
         committed = jnp.where(keep, last_targets, proposed_targets).astype(jnp.int32)
         new_steps = jnp.zeros_like(persist_steps_remaining)
-        return committed, new_steps
+        cleared_suspended = jnp.full_like(suspended_mission_idxs, no_target_idx)
+        return committed, new_steps, cleared_suspended
 
     if mode == PERSIST_MISSION_AVOID:
         margin = float(config.get("META_AVOID_INTERRUPT_MARGIN", 0.0))
+        resume_enabled = meta_avoid_resume_mission(config)
+        on_detour = jnp.zeros_like(last_targets, dtype=bool)
+        should_resume = jnp.zeros_like(last_targets, dtype=bool)
+        if resume_enabled:
+            on_detour = _suspended_mission_valid(
+                suspended_mission_idxs,
+                objects,
+                config,
+                no_target_idx=no_target_idx,
+                max_objects=max_objects,
+            )
+            should_resume = _should_resume_mission(
+                meta_q_vals,
+                active_masks,
+                objects,
+                suspended_mission_idxs,
+                margin=margin,
+                no_target_idx=no_target_idx,
+                max_objects=max_objects,
+                config=config,
+            )
+
         interrupt, best_avoid_idx = _best_avoid_interrupt(
             meta_q_vals,
             active_masks,
@@ -183,12 +356,50 @@ def apply_meta_target_persistence(
             margin=margin,
         )
         keep_mission = jnp.logical_and(on_mission, jnp.logical_not(interrupt))
-        committed = jnp.where(
+
+        mission_committed = jnp.where(
             keep_mission,
             last_targets,
             jnp.where(interrupt, best_avoid_idx, proposed_targets),
         ).astype(jnp.int32)
-        return committed, jnp.zeros_like(persist_steps_remaining)
+        detour_committed = jnp.where(
+            should_resume,
+            suspended_mission_idxs,
+            proposed_targets,
+        ).astype(jnp.int32)
+        committed = jnp.where(on_detour, detour_committed, mission_committed).astype(
+            jnp.int32
+        )
+
+        new_suspended = suspended_mission_idxs
+        if resume_enabled:
+            new_suspended = jnp.where(
+                jnp.logical_and(
+                    jnp.logical_and(jnp.logical_not(on_detour), on_mission),
+                    interrupt,
+                ),
+                last_targets,
+                new_suspended,
+            )
+            new_suspended = jnp.where(
+                should_resume,
+                jnp.full_like(new_suspended, no_target_idx),
+                new_suspended,
+            )
+            adopted_new_mission = jnp.logical_and(
+                on_detour,
+                jnp.logical_and(
+                    jnp.logical_not(should_resume),
+                    _is_mission_target(objects, detour_committed),
+                ),
+            )
+            new_suspended = jnp.where(
+                adopted_new_mission,
+                jnp.full_like(new_suspended, no_target_idx),
+                new_suspended,
+            )
+
+        return committed, jnp.zeros_like(persist_steps_remaining), new_suspended
 
     if mode == PERSIST_FIXED_STEPS:
         persist_steps = int(config.get("META_TARGET_PERSIST_STEPS", 300))
@@ -209,6 +420,7 @@ def apply_meta_target_persistence(
             jnp.maximum(0, persist_steps_remaining - 1),
             jnp.where(adopted_lock, steps_init, jnp.zeros_like(persist_steps_remaining)),
         )
-        return committed, new_steps
+        cleared_suspended = jnp.full_like(suspended_mission_idxs, no_target_idx)
+        return committed, new_steps, cleared_suspended
 
-    return proposed_targets, persist_steps_remaining
+    return proposed_targets, persist_steps_remaining, suspended_mission_idxs

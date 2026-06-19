@@ -132,6 +132,7 @@ class TandemTransition:
     meta_reward: chex.Array
     active_mask: chex.Array
     next_active_mask: chex.Array
+    meta_target_locked: chex.Array
 
     # Skills (System 1)
     ego_obs: chex.Array

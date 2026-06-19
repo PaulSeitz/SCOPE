@@ -21,6 +21,7 @@ from concept_based_learning.environments.meta_target_mask import (
 )
 from concept_based_learning.environments.meta_target_persistence import (
     apply_meta_target_persistence,
+    compute_meta_target_locked,
     meta_target_persist_enabled,
 )
 from concept_based_learning.training.schedules import eps_decay_transition_steps
@@ -212,14 +213,28 @@ def make_tandem_train(
                     last_targets,
                     car_hits_sum,
                     persist_steps_remaining,
+                    suspended_mission_idxs,
                 ) = carry
                 rng, rng_meta, rng_skill = jax.random.split(rng, 3)
 
+                meta_target_locked = compute_meta_target_locked(
+                    last_targets,
+                    suspended_mission_idxs,
+                    last_obs.objects,
+                    config,
+                    no_target_idx=no_target_idx,
+                    max_objects=max_objects,
+                    persist_steps_remaining=persist_steps_remaining,
+                )
                 meta_q_vals = jax.vmap(
-                    lambda obs, objs: meta_network.apply(
-                        {"params": meta_state.params}, obs, objs, train=False
+                    lambda obs, objs, locked: meta_network.apply(
+                        {"params": meta_state.params},
+                        obs,
+                        objs,
+                        train=False,
+                        target_locked=locked,
                     )
-                )(last_obs.raw_observation, last_obs.objects)
+                )(last_obs.raw_observation, last_obs.objects, meta_target_locked)
                 active_masks = jax.vmap(
                     lambda objs, raw: build_meta_target_mask(
                         objs, raw, config, hook=meta_mask_hook
@@ -263,7 +278,11 @@ def make_tandem_train(
                     target_obj_idxs,
                 )
                 if use_target_persistence:
-                    target_obj_idxs, persist_steps_remaining = apply_meta_target_persistence(
+                    (
+                        target_obj_idxs,
+                        persist_steps_remaining,
+                        suspended_mission_idxs,
+                    ) = apply_meta_target_persistence(
                         target_obj_idxs,
                         last_targets,
                         last_obs.objects,
@@ -273,6 +292,7 @@ def make_tandem_train(
                         no_target_idx=no_target_idx,
                         max_objects=max_objects,
                         persist_steps_remaining=persist_steps_remaining,
+                        suspended_mission_idxs=suspended_mission_idxs,
                     )
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
@@ -492,6 +512,11 @@ def make_tandem_train(
                 persist_steps_remaining = jnp.where(
                     new_done, jnp.zeros_like(persist_steps_remaining), persist_steps_remaining
                 )
+                suspended_mission_idxs = jnp.where(
+                    new_done,
+                    jnp.full_like(suspended_mission_idxs, no_target_idx),
+                    suspended_mission_idxs,
+                )
                 next_active_masks = jax.vmap(
                     lambda objs, raw: build_meta_target_mask(
                         objs, raw, config, hook=meta_mask_hook
@@ -616,6 +641,7 @@ def make_tandem_train(
                     meta_reward=meta_reward,
                     active_mask=active_masks,
                     next_active_mask=next_active_masks,
+                    meta_target_locked=meta_target_locked,
                     ego_obs=ego_obses,
                     next_ego_obs=next_ego_obses,
                     ego_action=chosen_ego_actions,
@@ -641,6 +667,7 @@ def make_tandem_train(
                     target_obj_idxs,
                     car_hits_sum,
                     persist_steps_remaining,
+                    suspended_mission_idxs,
                 ), transition
 
             rng, _rng = jax.random.split(rng)
@@ -648,6 +675,9 @@ def make_tandem_train(
                 (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
             )
             init_persist_steps = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.int32)
+            init_suspended_mission = jnp.full(
+                (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
+            )
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
             carry_final, transitions = jax.lax.scan(
                 _step_env,
@@ -660,6 +690,7 @@ def make_tandem_train(
                     init_targets,
                     init_car_hits_sum,
                     init_persist_steps,
+                    init_suspended_mission,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -674,6 +705,7 @@ def make_tandem_train(
                 _last_targets,
                 car_hits_sum,
                 _persist_steps_remaining,
+                _suspended_mission_idxs,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -692,11 +724,24 @@ def make_tandem_train(
             last_next_objects = jax.tree_util.tree_map(
                 lambda x: x[-1], transitions.next_objects
             )
+            last_meta_target_locked = compute_meta_target_locked(
+                _last_targets,
+                _suspended_mission_idxs,
+                last_next_objects,
+                config,
+                no_target_idx=no_target_idx,
+                max_objects=max_objects,
+                persist_steps_remaining=_persist_steps_remaining,
+            )
             last_meta_q = jax.vmap(
-                lambda obs, objs: meta_network.apply(
-                    {"params": meta_state.params}, obs, objs, train=False
+                lambda obs, objs, locked: meta_network.apply(
+                    {"params": meta_state.params},
+                    obs,
+                    objs,
+                    train=False,
+                    target_locked=locked,
                 )
-            )(last_next_obs, last_next_objects)
+            )(last_next_obs, last_next_objects, last_meta_target_locked)
             next_active_mask = transitions.next_active_mask[-1]
             next_active_any = jnp.any(next_active_mask, axis=-1)
             masked_last_q = jnp.max(
@@ -749,6 +794,7 @@ def make_tandem_train(
                     "objects": transitions.objects,
                     "target_idx": transitions.target_idx,
                     "active_mask": transitions.active_mask,
+                    "meta_target_locked": transitions.meta_target_locked,
                 }
                 minibatches = jax.tree.map(
                     lambda x: preprocess_transition(x, rng_perm),
@@ -762,10 +808,14 @@ def make_tandem_train(
 
                     def _loss_fn(params):
                         q_vals = jax.vmap(
-                            lambda obs, objs: meta_network.apply(
-                                {"params": params}, obs, objs, train=True
+                            lambda obs, objs, locked: meta_network.apply(
+                                {"params": params},
+                                obs,
+                                objs,
+                                train=True,
+                                target_locked=locked,
                             )
-                        )(minibatch["obs"], minibatch["objects"])
+                        )(minibatch["obs"], minibatch["objects"], minibatch["meta_target_locked"])
                         chosen_q = jnp.take_along_axis(
                             q_vals,
                             jnp.expand_dims(minibatch["target_idx"], -1),
