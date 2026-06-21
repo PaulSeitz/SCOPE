@@ -18,7 +18,19 @@ from concept_based_learning.observations.action_space import fire_ego_action_ind
 from concept_based_learning.networks.skill_network import QNetwork, CustomTrainState, Transition
 from concept_based_learning.networks.meta_network import MetaQNetwork
 from concept_based_learning.environments.datatypes import ConceptObservation
-from concept_based_learning.training.schedules import eps_decay_transition_steps
+from concept_based_learning.training.schedules import (
+    DEFAULT_SKILL_EPS_DECAY,
+    DEFAULT_SKILL_EPS_FINISH,
+    DEFAULT_SKILL_EPS_START,
+    eps_decay_transition_steps,
+)
+from concept_based_learning.training.trajectory_cuts import (
+    DEFAULT_SKILL_TARGET_CUT,
+    normalize_skill_target_cut,
+    skill_target_switch_cut,
+    skill_target_switch_cut_env,
+    skill_target_switch_cut_env_padded,
+)
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 
 
@@ -46,7 +58,7 @@ def make_train(
     - TOTAL_TIMESTEPS, NUM_STEPS, NUM_ENVS, NUM_MINIBATCHES, NUM_EPOCHS
     - GAMMA, LAMBDA, LR, MAX_GRAD_NORM
     - NUM_SKILLS, MAX_OBJECTS, EGO_ACTION_DIM, HIDDEN_SIZE, NUM_LAYERS
-    - EPS_START, EPS_FINISH, EPS_DECAY
+    - EPS_START, EPS_FINISH, EPS_DECAY (skill head; defaults in schedules.py)
     """
 
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
@@ -74,6 +86,9 @@ def make_train(
     )
     skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
+    skill_target_cut = normalize_skill_target_cut(
+        config.get("SKILL_TARGET_CUT", DEFAULT_SKILL_TARGET_CUT)
+    )
 
     _raw_skill_names = config.get("SKILL_NAMES")
     if _raw_skill_names is None or len(_raw_skill_names) != NUM_SKILLS:
@@ -156,9 +171,12 @@ def make_train(
 
     def train(rng, params, batch_stats):
         eps_scheduler = optax.linear_schedule(
-            config["EPS_START"],
-            config["EPS_FINISH"],
-            eps_decay_transition_steps(config["EPS_DECAY"], config["NUM_UPDATES"]),
+            float(config.get("EPS_START", DEFAULT_SKILL_EPS_START)),
+            float(config.get("EPS_FINISH", DEFAULT_SKILL_EPS_FINISH)),
+            eps_decay_transition_steps(
+                config.get("EPS_DECAY", DEFAULT_SKILL_EPS_DECAY),
+                config["NUM_UPDATES"],
+            ),
         )
         if use_learned_meta_policy:
             meta_eps_scheduler = optax.linear_schedule(
@@ -586,6 +604,7 @@ def make_train(
                     timesteps=train_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
                 use_one_step_td = skill_bootstrap == "one_step"
+
                 if relabel_all_objects:
                     # Lambda returns over [NUM_STEPS, NUM_ENVS, MAX_OBJECTS].
                     # Bootstrap Q-values come from the online network applied to
@@ -607,13 +626,20 @@ def make_train(
                     last_reward_all = transitions.rewards_all[-1, :, :, skill_idx]
                     last_lambda = last_reward_all + skill_gamma * last_next_q
 
+                    target_switch_cut = skill_target_switch_cut(
+                        transitions.target_idx, MAX_OBJECTS, skill_target_cut
+                    )
+
                     def _get_target_all(carry, xs):
                         lambda_ret, next_q = carry
                         # xs: per-step slices, shapes [NUM_ENVS, MAX_OBJECTS]
-                        step_reward, step_done_skill, step_done_ep, q_next_step = xs
+                        step_reward, step_done_skill, step_done_ep, step_target_cut, q_next_step = xs
 
                         step_done = jnp.logical_or(
                             step_done_skill, step_done_ep[:, jnp.newaxis]
+                        )
+                        step_done = jnp.logical_or(
+                            step_done, step_target_cut.astype(jnp.bool_)
                         ).astype(jnp.float32)
 
                         target_bootstrap = step_reward + skill_gamma * (1.0 - step_done) * next_q
@@ -627,6 +653,7 @@ def make_train(
                         transitions.rewards_all[:-1, :, :, skill_idx],
                         transitions.skill_done_all[:-1, :, :, skill_idx],
                         transitions.done[:-1],
+                        target_switch_cut,
                         next_q_max_all[:-1],
                     )
                     _, targets_all = jax.lax.scan(
@@ -646,9 +673,16 @@ def make_train(
                         train=False,
                     )
                     next_q_max_single = jnp.max(next_q_single, axis=-1)
+                    target_switch_cut_padded = skill_target_switch_cut_env_padded(
+                        transitions.target_idx, skill_target_cut
+                    )
                     step_done_single = jnp.logical_or(
                         transitions.skill_done[..., skill_idx],
                         transitions.done,
+                    )
+                    step_done_single = jnp.logical_or(
+                        step_done_single,
+                        target_switch_cut_padded.astype(jnp.bool_),
                     ).astype(jnp.float32)
                     train_targets = (
                         transitions.rewards[..., skill_idx]
@@ -669,11 +703,18 @@ def make_train(
                     last_step_reward = transitions.rewards[-1, :, skill_idx]
                     lambda_returns = last_step_reward + skill_gamma * (1.0 - last_step_done) * next_q_max_single[-1]
 
+                    target_switch_cut_env = skill_target_switch_cut_env(
+                        transitions.target_idx, skill_target_cut
+                    )
+
                     def _get_target(carry, xs):
                         lambda_ret, next_q = carry
-                        step_reward, step_done_skill, step_done_ep, q_next = xs
+                        step_reward, step_done_skill, step_done_ep, step_target_cut, q_next = xs
 
-                        step_done = jnp.logical_or(step_done_skill, step_done_ep).astype(jnp.float32)
+                        step_done = jnp.logical_or(step_done_skill, step_done_ep)
+                        step_done = jnp.logical_or(
+                            step_done, step_target_cut.astype(jnp.bool_)
+                        ).astype(jnp.float32)
                         target_bootstrap = step_reward + skill_gamma * (1.0 - step_done) * next_q
                         delta = lambda_ret - next_q
                         lambda_ret = target_bootstrap + skill_gamma * config["LAMBDA"] * delta
@@ -687,6 +728,7 @@ def make_train(
                             transitions.rewards[:-1, :, skill_idx],
                             transitions.skill_done[:-1, :, skill_idx],
                             transitions.done[:-1],
+                            target_switch_cut_env,
                             next_q_max_single[:-1],
                         ),
                         reverse=True,

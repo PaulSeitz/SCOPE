@@ -117,9 +117,14 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None):
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
-    Seaquest targeting rule with local semantic priority.
+    Seaquest targeting rule with local semantic priority and sticky mission target.
+
+    Stickiness: once a DESTROY or COLLECT mission target is locked via
+    prev_target_idx it is kept until the object disappears, reducing spurious
+    target switches that would otherwise fragment skill trajectories.
+    Immediate danger (close AVOID / DESTROY threat) still overrides normally.
     """
-    del prev_target_idx, rng
+    del rng
     # Extract current frame data
     px = raw_observation.player.x[-1]
     py = raw_observation.player.y[-1]
@@ -166,12 +171,27 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
 
     any_avoid = jnp.any(avoid_mask)
     any_destroy = jnp.any(destroy_mask)
-    # Priority: AVOID > DESTROY > COLLECT
-    best_normal_idx = jnp.where(
-        any_avoid,
-        best_avoid_idx,
-        jnp.where(any_destroy, best_destroy_idx, best_collect_idx),
+    any_collect = jnp.any(collect_mask)
+
+    # Sticky mission target: keep prev_target_idx while it is still an active
+    # DESTROY or COLLECT object; only switch when it disappears.
+    prev_valid = jnp.logical_and(
+        prev_target_idx >= 0,
+        prev_target_idx < active_mask.shape[0],
     )
+    prev_active = jnp.where(prev_valid, normal_active_mask[prev_target_idx], False)
+    prev_label = jnp.where(prev_valid, labels[prev_target_idx], -1)
+    prev_is_mission = jnp.logical_or(
+        prev_label == LABEL_DESTROY, prev_label == LABEL_COLLECT
+    )
+    keep_prev = jnp.logical_and(prev_active, prev_is_mission)
+
+    # Fresh fallback when nothing is locked: nearest DESTROY, then COLLECT.
+    fresh_mission_idx = jnp.where(any_destroy, best_destroy_idx, best_collect_idx)
+    mission_idx = jnp.where(keep_prev, prev_target_idx, fresh_mission_idx)
+
+    # AVOID is always reactive — never sticky.
+    best_normal_idx = jnp.where(any_avoid, best_avoid_idx, mission_idx)
 
     # ---------------------------------------------------------------------
     # Surfacing Logic (Oxygen / Divers)

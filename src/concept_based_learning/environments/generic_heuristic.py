@@ -34,8 +34,14 @@ AVOID_RANGE = 15.0
 
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
-    """Env-agnostic target selection over the labeled-object interface."""
-    del prev_target_idx, rng
+    """Env-agnostic target selection over the labeled-object interface.
+
+    Sticky mission target: once a COLLECT or DESTROY target is locked via
+    prev_target_idx it is kept until it disappears, reducing spurious switches
+    that would fragment skill trajectories.  Reactive AVOID overrides still
+    fire normally when a threat enters AVOID_RANGE.
+    """
+    del rng
 
     # Centre convention matches observations.egocentric (x + w/2, y + h/2).
     player = _get_player(raw_observation)
@@ -63,15 +69,28 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     any_destroy = jnp.any(destroy_mask)
     any_avoid = jnp.any(avoid_mask)
 
-    # Rule 1 -- default: nearest COLLECT, falling back to DESTROY then AVOID for
-    # environments without collectibles.
-    target = jnp.where(
+    # Sticky mission target: keep prev_target_idx when it is still an active
+    # COLLECT or DESTROY object; otherwise fall back to nearest fresh target.
+    prev_valid = jnp.logical_and(
+        prev_target_idx >= 0,
+        prev_target_idx < active.shape[0],
+    )
+    prev_active = jnp.where(prev_valid, active[prev_target_idx], False)
+    prev_label = jnp.where(prev_valid, labels[prev_target_idx], -1)
+    prev_is_mission = jnp.logical_or(
+        prev_label == LABEL_COLLECT, prev_label == LABEL_DESTROY
+    )
+    keep_prev = jnp.logical_and(prev_active, prev_is_mission)
+
+    # Rule 1 -- fresh default: nearest COLLECT, falling back to DESTROY then AVOID.
+    fresh_target = jnp.where(
         any_collect,
         best_collect,
         jnp.where(any_destroy, best_destroy, best_avoid),
     )
+    target = jnp.where(keep_prev, prev_target_idx, fresh_target)
 
-    # Rule 2 -- a DESTROY object inside DESTROY_RANGE overrides the default.
+    # Rule 2 -- a DESTROY object inside DESTROY_RANGE overrides stickiness.
     destroy_in_range = jnp.any(
         jnp.logical_and(destroy_mask, distances <= DESTROY_RANGE)
     )

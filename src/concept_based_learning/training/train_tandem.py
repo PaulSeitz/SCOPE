@@ -24,7 +24,18 @@ from concept_based_learning.environments.meta_target_persistence import (
     compute_meta_target_locked,
     meta_target_persist_enabled,
 )
-from concept_based_learning.training.schedules import eps_decay_transition_steps
+from concept_based_learning.training.schedules import (
+    DEFAULT_SKILL_EPS_DECAY,
+    DEFAULT_SKILL_EPS_FINISH,
+    DEFAULT_SKILL_EPS_START,
+    eps_decay_transition_steps,
+)
+from concept_based_learning.training.trajectory_cuts import (
+    DEFAULT_SKILL_TARGET_CUT,
+    normalize_skill_target_cut,
+    skill_target_switch_cut,
+    skill_target_switch_cut_padded,
+)
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 
 
@@ -81,6 +92,9 @@ def make_tandem_train(
     )
     skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
+    skill_target_cut = normalize_skill_target_cut(
+        config.get("SKILL_TARGET_CUT", DEFAULT_SKILL_TARGET_CUT)
+    )
     use_target_persistence = meta_target_persist_enabled(config)
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
@@ -95,9 +109,9 @@ def make_tandem_train(
         )
 
     skill_eps_schedule = make_linear_schedule(
-        config.get("SKILL_EPS_START", config["EPS_START"]),
-        config.get("SKILL_EPS_FINISH", config["EPS_FINISH"]),
-        config.get("SKILL_EPS_DECAY", config["EPS_DECAY"]),
+        config.get("SKILL_EPS_START", config.get("EPS_START", DEFAULT_SKILL_EPS_START)),
+        config.get("SKILL_EPS_FINISH", config.get("EPS_FINISH", DEFAULT_SKILL_EPS_FINISH)),
+        config.get("SKILL_EPS_DECAY", config.get("EPS_DECAY", DEFAULT_SKILL_EPS_DECAY)),
     )
     meta_eps_schedule = make_linear_schedule(
         config.get("META_EPS_START", config["EPS_START"]),
@@ -865,16 +879,29 @@ def make_tandem_train(
                 next_q_max = jnp.max(next_q_all, axis=-1)  # [T, E, O]
 
                 step_reward = transitions.skill_rewards_all[..., skill_idx]  # [T, E, O]
-                step_done = jnp.logical_or(
+                target_switch_cut = skill_target_switch_cut(
+                    transitions.target_idx, max_objects, skill_target_cut
+                )
+                target_switch_cut_padded = skill_target_switch_cut_padded(
+                    transitions.target_idx, max_objects, skill_target_cut
+                )
+
+                base_step_done = jnp.logical_or(
                     transitions.skill_done_all[..., skill_idx],
                     transitions.done[..., jnp.newaxis],
                 ).astype(jnp.float32)  # [T, E, O]
 
                 if skill_bootstrap == "one_step":
+                    step_done = jnp.logical_or(
+                        base_step_done, target_switch_cut_padded.astype(jnp.bool_)
+                    ).astype(jnp.float32)
                     skill_targets = step_reward + (
                         skill_gamma * (1.0 - step_done) * next_q_max
                     )  # [T, E, O]
                 else:
+                    step_done_body = jnp.logical_or(
+                        base_step_done[:-1], target_switch_cut.astype(jnp.bool_)
+                    ).astype(jnp.float32)
                     if skill_qlambda_watkins_cut:
                         q_all_t = skill_network.apply(
                             {"params": s_state.params, "batch_stats": s_state.batch_stats},
@@ -890,7 +917,7 @@ def make_tandem_train(
 
                     last_target = (
                         step_reward[-1]
-                        + skill_gamma * (1.0 - step_done[-1]) * next_q_max[-1]
+                        + skill_gamma * (1.0 - base_step_done[-1]) * next_q_max[-1]
                     )  # [E, O]
 
                     def _skill_get_target(g_future, xs):
@@ -904,7 +931,7 @@ def make_tandem_train(
 
                     xs = (
                         step_reward[:-1],
-                        step_done[:-1],
+                        step_done_body,
                         next_q_max[:-1],
                         cut[:-1],
                     )

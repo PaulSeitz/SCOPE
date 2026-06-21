@@ -37,9 +37,9 @@ alg:
   LR: 0.00025   # fallback, same as SKILL_LR
 
   # Exploration — skills only, single schedule
-  EPS_START: 1.0
+  EPS_START: 0.3
   EPS_FINISH: 0.05
-  EPS_DECAY: 0.8   # optax transition_steps (near-instant decay; legacy semantics)
+  EPS_DECAY: 0.35   # optax transition_steps (near-instant decay; legacy semantics)
 
   # Off-policy: all skills learn from every transition regardless of which was active
   OFF_POLICY: true

@@ -1,5 +1,10 @@
 """Shared training schedule helpers."""
 
+# Default skill epsilon-greedy schedule (skills converge quickly; meta benefits early).
+DEFAULT_SKILL_EPS_START = 0.3
+DEFAULT_SKILL_EPS_FINISH = 0.05
+DEFAULT_SKILL_EPS_DECAY = 0.35
+
 
 def eps_decay_transition_steps(decay_cfg, num_updates=None) -> int:
     """

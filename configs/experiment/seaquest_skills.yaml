@@ -66,6 +66,6 @@ alg:
                               # If false, use strict on-policy updates (only active skill learns).
 
   # --- Exploration (Epsilon-Greedy) ---
-  EPS_START: 1.0              # Start 100% random
+  EPS_START: 0.3              # Low skill exploration (easy concepts)
   EPS_FINISH: 0.05            # End at 5% random
-  EPS_DECAY: 0.8              # Reach EPS_FINISH halfway through training (50%)
+  EPS_DECAY: 0.35            # Decay finishes at ~35% of training updates

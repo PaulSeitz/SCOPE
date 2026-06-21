@@ -52,9 +52,9 @@ alg:
 
   OFF_POLICY: false
 
-  EPS_START: 1.0
+  EPS_START: 0.3
   EPS_FINISH: 0.05
-  EPS_DECAY: 0.8
+  EPS_DECAY: 0.35
 
   # Staged single-task training, then joint training (main.run_skill_curriculum).
   CURRICULUM_ENABLED: true

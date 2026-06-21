@@ -93,9 +93,9 @@ alg:
   SKILL_LAMBDA: 0.65
 
   # --- Exploration (Epsilon-Greedy) ---
-  EPS_START: 1.0
+  EPS_START: 0.3
   EPS_FINISH: 0.05
-  EPS_DECAY: 0.95
+  EPS_DECAY: 0.35
   META_EPS_START: 0.1
 
   # --- Epochs (tandem only) ---

@@ -45,6 +45,6 @@ alg:
 
   OFF_POLICY: true
 
-  EPS_START: 1.0
+  EPS_START: 0.3
   EPS_FINISH: 0.05
-  EPS_DECAY: 0.8
+  EPS_DECAY: 0.35

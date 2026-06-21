@@ -66,7 +66,7 @@ alg:
   # Less random re-exploration — weights already encode Seaquest skills.
   EPS_START: 0.25
   EPS_FINISH: 0.05
-  EPS_DECAY: 0.5
+  EPS_DECAY: 0.35
 
   HEURISTIC_MODE: "env_specific"
   FREEWAY_THREAT_X_WEIGHT: 1.0
