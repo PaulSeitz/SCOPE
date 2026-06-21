@@ -49,13 +49,10 @@ from concept_based_learning.observations.egocentric import (  # noqa: E402
     _center_y,
     _get_player,
     _uses_bottom_edge_y,
+    configure_ego_obs_from_config,
     distance_pixels_from_feature,
     ego_obs_channels_per_frame,
     get_ego_obs,
-    set_ego_distance_clip_max_pixels,
-    set_ego_obs_format,
-    set_ego_size_features,
-    set_ego_velocity_features,
     using_legacy_ego_obs,
 )
 from concept_based_learning.pqn_visualizer import (  # noqa: E402
@@ -819,11 +816,7 @@ Controls:
     skill_params = load_params_from_file(args.model)
     config = align_config_with_skill_checkpoint(config, skill_params)
 
-    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
+    configure_ego_obs_from_config(config)
 
     env_name = str(config.get("ENV_NAME", "seaquest"))
     manager = EnvManager()

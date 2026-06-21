@@ -6,11 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from concept_based_learning.observations.egocentric import (
+    configure_ego_obs_from_config,
     get_ego_obs,
-    set_ego_obs_format,
-    set_ego_size_features,
-    set_ego_velocity_features,
-    set_ego_distance_clip_max_pixels,
 )
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.environments.env_manager import EnvManager
@@ -34,13 +31,7 @@ def evaluate_skills(
 
     Only logs the raw environment return per episode (no training, no videos).
     """
-    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(
-        None if clip_px is None else float(clip_px)
-    )
+    configure_ego_obs_from_config(config)
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
 
     env, _renderer = create_eval_env(config)

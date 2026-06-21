@@ -20,12 +20,9 @@ from concept_based_learning.observations.egocentric import (
     _get_player,
     _center_y,
     _uses_bottom_edge_y,
-    get_ego_obs,
-    set_ego_obs_format,
-    set_ego_size_features,
-    set_ego_velocity_features,
-    set_ego_distance_clip_max_pixels,
+    configure_ego_obs_from_config,
     distance_pixels_from_feature,
+    get_ego_obs,
     using_legacy_ego_obs,
 )
 from concept_based_learning.environments.datatypes import ConceptObservation
@@ -683,13 +680,7 @@ def run_greedy_eval_episodes(
 
     Each episode is one JIT-compiled ``while_loop`` (not a slow Python step loop).
     """
-    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(
-        None if clip_px is None else float(clip_px)
-    )
+    configure_ego_obs_from_config(config)
 
     num_skills = int(config["NUM_SKILLS"])
     ego_action_dim = int(config["EGO_ACTION_DIM"])
@@ -794,13 +785,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     Returns the same tensors that `video_recorder.video_callback` expects.
     """
-    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(
-        None if clip_px is None else float(clip_px)
-    )
+    configure_ego_obs_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -1084,13 +1069,7 @@ def run_live_visualization(
     The agent acts in the environment step-by-step and the current frame is
     rendered to a window, with the skill input (distance, angle) shown at the bottom.
     """
-    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(
-        None if clip_px is None else float(clip_px)
-    )
+    configure_ego_obs_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]

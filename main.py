@@ -19,10 +19,7 @@ from concept_based_learning._legacy.train_meta_agent import make_meta_train
 from concept_based_learning.training.train_tandem import make_tandem_train
 from concept_based_learning.training.rtpt_progress import start_rtpt
 from concept_based_learning.observations.egocentric import (
-    set_ego_obs_format,
-    set_ego_size_features,
-    set_ego_velocity_features,
-    set_ego_distance_clip_max_pixels,
+    configure_ego_obs_from_config,
     ego_obs_channels_per_frame,
 )
 from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
@@ -57,15 +54,10 @@ def _safe_checkpoint_path(base_path, init_model_path=None):
 
 def _configure_ego_obs_format(config: dict) -> None:
     """Select ego observation format and feature toggles for this run."""
-    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(
-        None if clip_px is None else float(clip_px)
-    )
+    configure_ego_obs_from_config(config)
     stack = int(config.get("FRAME_STACK_SIZE", 4))
     ch = ego_obs_channels_per_frame()
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
     clip_note = (
         f"distance_clip={clip_px}px"
         if clip_px is not None
@@ -76,6 +68,7 @@ def _configure_ego_obs_format(config: dict) -> None:
         f"(legacy={config.get('USE_LEGACY_EGO_OBS', False)}, "
         f"size={config.get('USE_EGO_SIZE_FEATURES', True)}, "
         f"velocity={config.get('USE_EGO_VELOCITY_FEATURES', True)}, "
+        f"skill_extras={config.get('USE_SKILL_EGO_FEATURES', False)}, "
         f"{clip_note})"
     )
 

@@ -37,10 +37,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from concept_based_learning.observations.egocentric import (  # noqa: E402
-    set_ego_distance_clip_max_pixels,
-    set_ego_obs_format,
-    set_ego_size_features,
-    set_ego_velocity_features,
+    configure_ego_obs_from_config,
 )
 from concept_based_learning.pqn_visualizer import (  # noqa: E402
     load_config_for_checkpoint,
@@ -178,13 +175,7 @@ def _load_persistence_config(env: str, variant_key: str) -> dict[str, Any]:
 
 
 def _configure_ego_from_config(cfg: dict[str, Any]) -> None:
-    set_ego_obs_format(bool(cfg.get("USE_LEGACY_EGO_OBS", False)))
-    set_ego_size_features(bool(cfg.get("USE_EGO_SIZE_FEATURES", True)))
-    set_ego_velocity_features(bool(cfg.get("USE_EGO_VELOCITY_FEATURES", True)))
-    clip_px = cfg.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(
-        None if clip_px is None else float(clip_px)
-    )
+    configure_ego_obs_from_config(cfg)
 
 
 def rollout_to_mp4(

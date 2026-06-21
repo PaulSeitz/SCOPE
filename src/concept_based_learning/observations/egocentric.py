@@ -3,6 +3,12 @@
 import jax
 import jax.numpy as jnp
 
+from concept_based_learning.observations.skill_ego_features import (
+    build_skill_ego_extras_stacked,
+    configure_skill_ego_features,
+    skill_ego_extra_channels_per_frame,
+)
+
 # ---------------------------------------------------------------------------
 # Normalisation constants
 # ---------------------------------------------------------------------------
@@ -82,6 +88,21 @@ def ego_distance_clip_max_pixels() -> float | None:
     return _EGO_DISTANCE_CLIP_MAX_PX
 
 
+def configure_ego_obs_from_config(config: dict) -> None:
+    """Apply all ego observation toggles from a merged experiment config dict."""
+    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
+    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
+    configure_skill_ego_features(
+        enabled=bool(config.get("USE_SKILL_EGO_FEATURES", False)),
+        num_skills=int(config.get("NUM_SKILLS", 3)),
+        extra_dim_per_skill=int(config.get("SKILL_EGO_EXTRA_DIM", 4)),
+        env_name=str(config.get("ENV_NAME", "")),
+    )
+
+
 def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
     """Map raw pixel distances to the normalized distance channel fed to skills."""
     if _EGO_DISTANCE_CLIP_MAX_PX is not None:
@@ -106,14 +127,14 @@ def ego_obs_channels_per_frame() -> int:
         #   size (optional): t_w, t_h, p_w, p_h        -> +4
         return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
             4 if _USE_EGO_SIZE_FEATURES else 0
-        )
+        ) + skill_ego_extra_channels_per_frame()
     # Target-aligned channel groups:
     #   always: distance, sin(psi), cos(psi)          -> 3
     #   velocity (optional): radial, tangential       -> +2
     #   size (optional): target_w, target_h           -> +2
     return 3 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
         2 if _USE_EGO_SIZE_FEATURES else 0
-    )
+    ) + skill_ego_extra_channels_per_frame()
 
 
 # ---------------------------------------------------------------------------
@@ -401,9 +422,12 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
     channels.extend([jnp.sin(psis), jnp.cos(psis)])
-    stacked = jnp.stack(channels, axis=-1).astype(jnp.float32)
-
-    return stacked.flatten()
+    skill_extras = build_skill_ego_extras_stacked(raw_observation)
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
 
 
 def _get_ego_obs_legacy(raw_observation, objects, target_idx):
@@ -492,9 +516,12 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([t_w_norm, t_h_norm, p_w_norm, p_h_norm])
     channels.extend([sin_o, cos_o])
-    stacked_ego = jnp.stack(channels, axis=-1).astype(jnp.float32)
-
-    return stacked_ego.flatten()
+    skill_extras = build_skill_ego_extras_stacked(raw_observation)
+    if skill_extras.shape[-1] > 0:
+        stacked_ego = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked_ego = jnp.stack(channels, axis=-1)
+    return stacked_ego.astype(jnp.float32).flatten()
 
 
 def get_ego_obs(raw_observation, objects, target_idx):
