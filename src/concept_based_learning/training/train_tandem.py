@@ -34,7 +34,8 @@ from concept_based_learning.training.trajectory_cuts import (
     DEFAULT_SKILL_TARGET_CUT,
     normalize_skill_target_cut,
     skill_target_switch_cut,
-    skill_target_switch_cut_padded,
+    skill_target_switch_cut_env,
+    skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 
@@ -87,9 +88,6 @@ def make_tandem_train(
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
-    skill_qlambda_watkins_cut = bool(
-        config.get("SKILL_QLAMBDA_WATKINS_CUT", False)
-    )
     skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
     skill_target_cut = normalize_skill_target_cut(
@@ -871,76 +869,140 @@ def make_tandem_train(
                 s_state = s_state.replace(
                     timesteps=s_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
-                next_q_all = skill_network.apply(
-                    {"params": s_state.params, "batch_stats": s_state.batch_stats},
-                    transitions.next_ego_obs_all,
-                    train=False,
-                )  # [T, E, O, A]
-                next_q_max = jnp.max(next_q_all, axis=-1)  # [T, E, O]
+                use_one_step_td = skill_bootstrap == "one_step"
 
-                step_reward = transitions.skill_rewards_all[..., skill_idx]  # [T, E, O]
-                target_switch_cut = skill_target_switch_cut(
-                    transitions.target_idx, max_objects, skill_target_cut
-                )
-                target_switch_cut_padded = skill_target_switch_cut_padded(
-                    transitions.target_idx, max_objects, skill_target_cut
-                )
-
-                base_step_done = jnp.logical_or(
-                    transitions.skill_done_all[..., skill_idx],
-                    transitions.done[..., jnp.newaxis],
-                ).astype(jnp.float32)  # [T, E, O]
-
-                if skill_bootstrap == "one_step":
-                    step_done = jnp.logical_or(
-                        base_step_done, target_switch_cut_padded.astype(jnp.bool_)
-                    ).astype(jnp.float32)
-                    skill_targets = step_reward + (
-                        skill_gamma * (1.0 - step_done) * next_q_max
-                    )  # [T, E, O]
-                else:
-                    step_done_body = jnp.logical_or(
-                        base_step_done[:-1], target_switch_cut.astype(jnp.bool_)
-                    ).astype(jnp.float32)
-                    if skill_qlambda_watkins_cut:
-                        q_all_t = skill_network.apply(
-                            {"params": s_state.params, "batch_stats": s_state.batch_stats},
-                            transitions.ego_obs_all,
-                            train=False,
-                        )  # [T, E, O, A]
-                        greedy_t = jnp.argmax(q_all_t, axis=-1)  # [T, E, O]
-                        cut = (
-                            greedy_t == transitions.ego_action_all
-                        ).astype(jnp.float32)
-                    else:
-                        cut = jnp.ones_like(step_reward)  # [T, E, O]
-
-                    last_target = (
-                        step_reward[-1]
-                        + skill_gamma * (1.0 - base_step_done[-1]) * next_q_max[-1]
-                    )  # [E, O]
-
-                    def _skill_get_target(g_future, xs):
-                        r_t, d_t, nq_t, cut_t = xs  # each [E, O]
-                        boot_t = r_t + skill_gamma * (1.0 - d_t) * nq_t
-                        g_t = boot_t + skill_gamma * skill_lambda * (1.0 - d_t) * cut_t * (
-                            g_future - nq_t
-                        )
-                        g_t = (1.0 - d_t) * g_t + d_t * r_t
-                        return g_t, g_t
-
-                    xs = (
-                        step_reward[:-1],
-                        step_done_body,
-                        next_q_max[:-1],
-                        cut[:-1],
+                if relabel_all_objects:
+                    # Match train_skills: per-object λ targets with per-slot switch cuts.
+                    next_q_all = skill_network.apply(
+                        {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                        transitions.next_ego_obs_all,
+                        train=False,
                     )
-                    _, targets_body = jax.lax.scan(
-                        _skill_get_target, last_target, xs, reverse=True
+                    next_q_max_all = jnp.max(next_q_all, axis=-1)  # [T, E, O]
+
+                    last_step_done_all = jnp.logical_or(
+                        transitions.skill_done_all[-1, :, :, skill_idx],
+                        transitions.done[-1, :, jnp.newaxis],
+                    ).astype(jnp.float32)
+                    last_next_q = next_q_max_all[-1] * (1.0 - last_step_done_all)
+                    last_reward_all = transitions.skill_rewards_all[-1, :, :, skill_idx]
+                    last_lambda = last_reward_all + skill_gamma * last_next_q
+
+                    target_switch_cut = skill_target_switch_cut(
+                        transitions.target_idx, max_objects, skill_target_cut
+                    )
+
+                    def _get_target_all(carry, xs):
+                        lambda_ret, next_q = carry
+                        (
+                            step_reward,
+                            step_done_skill,
+                            step_done_ep,
+                            step_target_cut,
+                            q_next_step,
+                        ) = xs
+                        step_done = jnp.logical_or(
+                            step_done_skill, step_done_ep[:, jnp.newaxis]
+                        )
+                        step_done = jnp.logical_or(
+                            step_done, step_target_cut.astype(jnp.bool_)
+                        ).astype(jnp.float32)
+                        target_bootstrap = (
+                            step_reward + skill_gamma * (1.0 - step_done) * next_q
+                        )
+                        delta = lambda_ret - next_q
+                        lambda_ret = target_bootstrap + skill_gamma * skill_lambda * delta
+                        lambda_ret = (1.0 - step_done) * lambda_ret + step_done * step_reward
+                        return (lambda_ret, q_next_step), lambda_ret
+
+                    xs_all = (
+                        transitions.skill_rewards_all[:-1, :, :, skill_idx],
+                        transitions.skill_done_all[:-1, :, :, skill_idx],
+                        transitions.done[:-1],
+                        target_switch_cut,
+                        next_q_max_all[:-1],
+                    )
+                    _, targets_all = jax.lax.scan(
+                        _get_target_all,
+                        (last_lambda, next_q_max_all[-1]),
+                        xs_all,
+                        reverse=True,
                     )
                     skill_targets = jnp.concatenate(
-                        [targets_body, last_target[jnp.newaxis]], axis=0
-                    )  # [T, E, O]
+                        (targets_all, last_lambda[jnp.newaxis]), axis=0
+                    )
+                elif use_one_step_td:
+                    next_q_single = skill_network.apply(
+                        {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                        transitions.next_ego_obs_all,
+                        train=False,
+                    )
+                    next_q_max_single = jnp.max(next_q_single, axis=-1)
+                    target_switch_cut_padded = skill_target_switch_cut_env_padded(
+                        transitions.target_idx, skill_target_cut
+                    )
+                    step_done_single = jnp.logical_or(
+                        transitions.skill_done[..., skill_idx],
+                        transitions.done,
+                    )
+                    step_done_single = jnp.logical_or(
+                        step_done_single,
+                        target_switch_cut_padded.astype(jnp.bool_),
+                    ).astype(jnp.float32)
+                    skill_targets = (
+                        transitions.skill_rewards[..., skill_idx]
+                        + skill_gamma * (1.0 - step_done_single) * next_q_max_single.squeeze(-1)
+                    )[..., jnp.newaxis]
+                else:
+                    next_q_single_all = skill_network.apply(
+                        {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                        transitions.next_ego_obs_all,
+                        train=False,
+                    )
+                    next_q_max_single = jnp.max(next_q_single_all, axis=-1)
+
+                    last_step_done = jnp.logical_or(
+                        transitions.skill_done[-1, :, skill_idx],
+                        transitions.done[-1],
+                    ).astype(jnp.float32)
+                    last_step_reward = transitions.skill_rewards[-1, :, skill_idx]
+                    last_next_q = next_q_max_single[-1].squeeze(-1)
+                    lambda_returns = (
+                        last_step_reward + skill_gamma * (1.0 - last_step_done) * last_next_q
+                    )
+
+                    target_switch_cut_env = skill_target_switch_cut_env(
+                        transitions.target_idx, skill_target_cut
+                    )
+
+                    def _get_target(carry, xs):
+                        lambda_ret, next_q = carry
+                        step_reward, step_done_skill, step_done_ep, step_target_cut, q_next = xs
+                        step_done = jnp.logical_or(step_done_skill, step_done_ep)
+                        step_done = jnp.logical_or(
+                            step_done, step_target_cut.astype(jnp.bool_)
+                        ).astype(jnp.float32)
+                        target_bootstrap = step_reward + skill_gamma * (1.0 - step_done) * next_q
+                        delta = lambda_ret - next_q
+                        lambda_ret = target_bootstrap + skill_gamma * skill_lambda * delta
+                        lambda_ret = (1.0 - step_done) * lambda_ret + step_done * step_reward
+                        return (lambda_ret, q_next), lambda_ret
+
+                    _, targets = jax.lax.scan(
+                        _get_target,
+                        (lambda_returns, last_next_q),
+                        (
+                            transitions.skill_rewards[:-1, :, skill_idx],
+                            transitions.skill_done[:-1, :, skill_idx],
+                            transitions.done[:-1],
+                            target_switch_cut_env,
+                            next_q_max_single[:-1].squeeze(-1),
+                        ),
+                        reverse=True,
+                    )
+                    skill_targets = jnp.concatenate(
+                        (targets, lambda_returns[jnp.newaxis]), axis=0
+                    )[..., jnp.newaxis]
 
                 def _learn_epoch(carry, _):
                     s_state_epoch, rng_epoch = carry
