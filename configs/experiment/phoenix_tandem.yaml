@@ -1,7 +1,7 @@
 # experiment/phoenix_tandem.yaml
 #
-# Clean Phoenix tandem run (scratch meta + skills).
-# - Unconstrained meta target selection (no persistence override)
+# Phoenix tandem run (scratch meta + skills).
+# - Sticky meta (mission_avoid): lock COLLECT/DESTROY until done; AVOID may interrupt
 # - No heuristic warmup, no switch penalty
 # - Reward separation: meta ← env only, skills ← sparse concept rewards only
 
@@ -23,6 +23,11 @@ GAME_MODS: null
 EVAL_GAME_MODS: null
 
 alg:
+  META_TARGET_PERSIST_MODE: mission_avoid
+  META_AVOID_INTERRUPT_MARGIN: 0.0
+  META_AVOID_RESUME_MISSION: true
+  META_TARGET_LOCKED_INPUT: true
+
   NUM_SKILLS: 3
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
   MAX_OBJECTS: 21
@@ -66,12 +71,12 @@ alg:
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
   SKILL_QLAMBDA_WATKINS_CUT: false
-  SKILL_TARGET_CUT: "lifetime"
+  SKILL_TARGET_CUT: "involved"
 
   EPS_START: 0.2
   EPS_FINISH: 0.05
   EPS_DECAY: 0.4
-  META_EPS_START: 0.5
+  META_EPS_START: 0.1
   META_EPS_FINISH: 0.05
   META_EPS_DECAY: 0.95
   META_NUM_EPOCHS: 3

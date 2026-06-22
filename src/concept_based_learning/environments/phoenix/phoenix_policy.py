@@ -20,13 +20,14 @@ MIN_BULLET_SPEED_SQ = 1.0
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
-    Heuristic Phoenix targeting rule.
+    Heuristic Phoenix targeting rule with sticky DESTROY lock.
 
-    - By default, select the closest active DESTROY target (boss / enemies).
-    - If any AVOID object comes within CLOSE_DANGER_RANGE, override and
-      select among those AVOID objects; enemy shots that are still moving
-      toward the player are prioritized over shots that are already receding
-      (e.g. past the ship but still nearby in Euclidean distance).
+    - Lock onto a DESTROY target until it disappears; only pick a new one when
+      the lock is lost.
+    - If any AVOID object comes within CLOSE_DANGER_RANGE, override and select
+      among those AVOID objects; enemy shots still moving toward the player are
+      prioritized over receding shots.  When danger clears, resume the locked
+      DESTROY target so the destroy skill sees uninterrupted trajectories.
     """
     # Player position (last frame)
     px = raw_observation.player.x[-1]
@@ -59,15 +60,6 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     # Slight x-axis weighting kept, but overall we just care about proximity.
     distances = jnp.sqrt((X_AXIS_WEIGHT * dx) ** 2 + dy ** 2)
 
-    # Artificially subtract distance from the previously tracked target to make it sticky.
-    HYSTERESIS_BONUS = 50.0
-    is_prev_target = jnp.arange(distances.shape[0]) == prev_target_idx
-    distances = jnp.where(
-        jnp.logical_and(is_prev_target, active_mask),
-        distances - HYSTERESIS_BONUS,
-        distances,
-    )
-
     # Per-frame velocity from the last two stacked frames (toward player iff dot > 0).
     ox_stack = objects.x
     oy_stack = objects.y
@@ -97,6 +89,23 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     has_any_destroy = jnp.any(valid_destroy)
     best_destroy_idx = jnp.argmin(masked_distances).astype(jnp.int32)
 
+    prev_valid = jnp.logical_and(
+        prev_target_idx >= 0,
+        prev_target_idx < active_mask.shape[0],
+    )
+    prev_active = jnp.where(prev_valid, active_mask[prev_target_idx], False)
+    prev_is_destroy = jnp.where(
+        prev_valid, labels[prev_target_idx] == LABEL_DESTROY, False
+    )
+    keep_prev_destroy = jnp.logical_and(prev_active, prev_is_destroy)
+
+    base_destroy_idx = jnp.where(keep_prev_destroy, prev_target_idx, best_destroy_idx)
+    base_destroy_idx = jnp.where(
+        has_any_destroy,
+        base_destroy_idx,
+        jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
+    )
+
     # ------------------------------------------------------------------
     # Danger override: if any AVOID object is very close, track it instead.
     # ------------------------------------------------------------------
@@ -114,10 +123,9 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     avoid_distances = jnp.where(valid_close_avoid, avoid_rank_distance, large_distance)
     best_avoid_idx = jnp.argmin(avoid_distances).astype(jnp.int32)
 
-    # Apply danger override on top of destroy targeting.
-    target_idx = jnp.where(have_valid_close_avoid, best_avoid_idx, best_destroy_idx)
+    # AVOID danger overrides the locked DESTROY target; resume lock once danger clears.
+    target_idx = jnp.where(have_valid_close_avoid, best_avoid_idx, base_destroy_idx)
 
-    # Fallback: if there is nothing to destroy and no close AVOID object, emit NO_TARGET_IDX.
     any_targetable = jnp.logical_or(has_any_destroy, have_valid_close_avoid)
     target_idx = jnp.where(any_targetable, target_idx, jnp.array(NO_TARGET_IDX, dtype=jnp.int32))
 
