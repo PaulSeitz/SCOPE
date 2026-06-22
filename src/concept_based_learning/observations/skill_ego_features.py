@@ -59,8 +59,10 @@ def _zeros_block(extra_dim: int) -> jnp.ndarray:
     return jnp.zeros((extra_dim,), dtype=jnp.float32)
 
 
-def _seaquest_extras_one_frame(can_fire: jnp.ndarray, extra_dim: int, num_skills: int) -> jnp.ndarray:
-    """Skill 0 (DESTROY): slot 0 = can_fire (1.0 when torpedo may be launched)."""
+def _destroy_can_fire_extras_one_frame(
+    can_fire: jnp.ndarray, extra_dim: int, num_skills: int
+) -> jnp.ndarray:
+    """Skill 0 (DESTROY): slot 0 = can_fire (1.0 when a new shot may be launched)."""
     blocks = []
     destroy = _zeros_block(extra_dim)
     destroy = destroy.at[0].set(can_fire)
@@ -70,19 +72,51 @@ def _seaquest_extras_one_frame(can_fire: jnp.ndarray, extra_dim: int, num_skills
     return jnp.concatenate(blocks, axis=0)
 
 
-def _seaquest_extras_stacked(raw_observation, extra_dim: int, num_skills: int) -> jnp.ndarray:
-    if not hasattr(raw_observation, "projectiles"):
-        stack_len = _stack_len(raw_observation)
-        return jnp.zeros(
-            (stack_len, num_skills * extra_dim),
-            dtype=jnp.float32,
-        )
-    # JAXAtari Seaquest: projectiles.active[0] is the player torpedo.
-    player_torpedo_active = raw_observation.projectiles.active[:, 0].astype(jnp.float32)
-    can_fire = 1.0 - player_torpedo_active
+def _player_projectile_active_per_frame(
+    active: jnp.ndarray, projectile_slot: int | None
+) -> jnp.ndarray:
+    """Reduce projectile.active to one in-flight scalar per stacked frame."""
+    active = active.astype(jnp.float32)
+    if active.ndim == 1:
+        return active
+    if projectile_slot is not None:
+        return active[:, projectile_slot]
+    return jnp.max(active, axis=-1)
+
+
+def _can_fire_extras_stacked(
+    raw_observation,
+    *,
+    extra_dim: int,
+    num_skills: int,
+    projectile_attr: str,
+    projectile_slot: int | None = None,
+) -> jnp.ndarray:
+    """Build per-frame DESTROY can_fire extras from a player projectile field."""
+    stack_len = _stack_len(raw_observation)
+    width = num_skills * extra_dim
+    if not hasattr(raw_observation, projectile_attr):
+        return jnp.zeros((stack_len, width), dtype=jnp.float32)
+
+    projectiles = getattr(raw_observation, projectile_attr)
+    player_proj_active = _player_projectile_active_per_frame(
+        projectiles.active, projectile_slot
+    )
+    can_fire = 1.0 - player_proj_active
     return jax.vmap(
-        lambda cf: _seaquest_extras_one_frame(cf, extra_dim, num_skills)
+        lambda cf: _destroy_can_fire_extras_one_frame(cf, extra_dim, num_skills)
     )(can_fire)
+
+
+def _seaquest_extras_stacked(raw_observation, extra_dim: int, num_skills: int) -> jnp.ndarray:
+    # JAXAtari Seaquest: projectiles.active[:, 0] is the player torpedo.
+    return _can_fire_extras_stacked(
+        raw_observation,
+        extra_dim=extra_dim,
+        num_skills=num_skills,
+        projectile_attr="projectiles",
+        projectile_slot=0,
+    )
 
 
 def build_skill_ego_extras_stacked(raw_observation) -> jnp.ndarray:
@@ -100,13 +134,72 @@ def build_skill_ego_extras_stacked(raw_observation) -> jnp.ndarray:
 
     if _ENV_NAME == "seaquest":
         return _seaquest_extras_stacked(raw_observation, extra_dim, num_skills)
+    if _ENV_NAME == "phoenix":
+        return _can_fire_extras_stacked(
+            raw_observation,
+            extra_dim=extra_dim,
+            num_skills=num_skills,
+            projectile_attr="player_projectile",
+        )
+    if _ENV_NAME == "spaceinvaders":
+        return _can_fire_extras_stacked(
+            raw_observation,
+            extra_dim=extra_dim,
+            num_skills=num_skills,
+            projectile_attr="player_bullet",
+        )
+    if _ENV_NAME == "choppercommand":
+        return _can_fire_extras_stacked(
+            raw_observation,
+            extra_dim=extra_dim,
+            num_skills=num_skills,
+            projectile_attr="player_missiles",
+            projectile_slot=0,
+        )
+    if _ENV_NAME == "beamrider":
+        return _can_fire_extras_stacked(
+            raw_observation,
+            extra_dim=extra_dim,
+            num_skills=num_skills,
+            projectile_attr="player_shots",
+            projectile_slot=0,
+        )
 
     return jnp.zeros((stack_len, width), dtype=jnp.float32)
 
 
-def seaquest_can_fire(raw_observation) -> jnp.ndarray:
-    """Latest-frame can_fire scalar/batch helper for action masking (Seaquest)."""
-    if not hasattr(raw_observation, "projectiles"):
+def _latest_can_fire(
+    raw_observation, projectile_attr: str, projectile_slot: int | None = None
+) -> jnp.ndarray:
+    if not hasattr(raw_observation, projectile_attr):
         return jnp.array(1.0, dtype=jnp.float32)
-    active = raw_observation.projectiles.active[-1, 0].astype(jnp.float32)
-    return 1.0 - active
+    active = getattr(raw_observation, projectile_attr).active[-1]
+    in_flight = _player_projectile_active_per_frame(
+        jnp.expand_dims(active, axis=0), projectile_slot
+    )[0]
+    return 1.0 - in_flight
+
+
+def seaquest_can_fire(raw_observation) -> jnp.ndarray:
+    """Latest-frame can_fire helper for action masking (Seaquest)."""
+    return _latest_can_fire(raw_observation, "projectiles", projectile_slot=0)
+
+
+def phoenix_can_fire(raw_observation) -> jnp.ndarray:
+    """Latest-frame can_fire helper (Phoenix player projectile)."""
+    return _latest_can_fire(raw_observation, "player_projectile")
+
+
+def spaceinvaders_can_fire(raw_observation) -> jnp.ndarray:
+    """Latest-frame can_fire helper (Space Invaders player bullet)."""
+    return _latest_can_fire(raw_observation, "player_bullet")
+
+
+def choppercommand_can_fire(raw_observation) -> jnp.ndarray:
+    """Latest-frame can_fire helper (Chopper Command player missile)."""
+    return _latest_can_fire(raw_observation, "player_missiles", projectile_slot=0)
+
+
+def beamrider_can_fire(raw_observation) -> jnp.ndarray:
+    """Latest-frame can_fire helper (Beamrider player shot)."""
+    return _latest_can_fire(raw_observation, "player_shots", projectile_slot=0)

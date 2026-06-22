@@ -1,97 +1,81 @@
 # experiment/phoenix_tandem.yaml
+#
+# Clean Phoenix tandem run (scratch meta + skills).
+# - Unconstrained meta target selection (no persistence override)
+# - No heuristic warmup, no switch penalty
+# - Reward separation: meta ← env only, skills ← sparse concept rewards only
 
-# --- Environment & Algorithm Names ---
 ALG_NAME: "hierarchical_pqn"
 ENV_NAME: "phoenix"
 TRAIN_MODE: "tandem"
-META_ARCHITECTURE: "flat_mlp"
+META_ARCHITECTURE: "per_object_mlp"
 
-# --- Environment modification hooks ---
-# Tandem currently runs directly on the configured env (no curriculum staging).
-# Training uses `GAME_MODS` (potentially phase-specific via curriculum),
-# while evaluation can be given distinct `EVAL_GAME_MODS` so we can
-# compare behavior under different env tweaks. If `EVAL_GAME_MODS` is
-# null, eval inherits `GAME_MODS`.
+SAVE_PATH: "./outputs/models/phoenix_tandem"
+
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: true
+USE_SKILL_EGO_FEATURES: true
+SKILL_EGO_EXTRA_DIM: 4
+EGO_DISTANCE_CLIP_MAX_PX: 30
+
 GAME_MODS: null
 EVAL_GAME_MODS: null
 
-# Optional: ENV_SEED_BASE (default SEED) gives each of NUM_ENVS a distinct initial seed
-# (ENV_SEED_BASE + env_id). Auto-reset on episode end uses fresh RNG for new episodes.
-
 alg:
-  # --- Custom Architecture Dimensions ---
-  NUM_SKILLS: 3               # DESTROY, COLLECT, AVOID
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]  # wandb keys: skill_DESTROY/td_loss, etc.
-  MAX_OBJECTS: 21             # slot 0 = meta NOOP; 8 enemies + 8 bullets + 1 boss (+ pad)
-  EGO_ACTION_DIM: 18          # The 18 translated egocentric actions
-  HIDDEN_SIZE: 128            # Slightly wider since it relies purely on distance/angle
+  NUM_SKILLS: 3
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
+  MAX_OBJECTS: 21
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
   NUM_LAYERS: 3
 
-  # If true, COLLECT and AVOID skills cannot choose FIRE ego actions.
-  # Only the DESTROY skill (index 0) is allowed to fire.
-  RESTRICT_FIRE_FOR_NON_DESTROY: false
-
-  # --- Meta head (tandem only) ---
   META_HIDDEN_SIZE: 256
-  META_PER_OBJECT_NUM_LAYERS: 3
-  META_FLAT_NUM_LAYERS: 3
-  META_LR: 0.00005
-  META_SWITCH_PENALTY: -0.0
-  META_DEATH_PENALTY: -5.0
-  # Learnable NOOP: meta may select index 0 to do nothing (skills are not run).
+  META_PER_OBJECT_NUM_LAYERS: 4
+  META_FLAT_NUM_LAYERS: 4
+  META_LR: 0.00025
   META_USE_NOOP_TARGET: true
   META_NOOP_TARGET_IDX: 0
+  META_SWITCH_PENALTY: 0.0
+  META_DEATH_PENALTY: -5.0
 
-  # --- Meta reward blending ---
-  # Controls what signal the meta policy trains on:
-  #   1.0 → full environment reward (sign-clipped)
-  #   0.0 → full skill reward (active skill's sparse reward for its labeled target)
-  #   0.0–1.0 → linear blend of both
-  # Raw env reward is always logged separately in wandb (env/reward_mean, env/episodic_return).
-  META_REWARD_LAMBDA: 0.5  # pure skill reward: meta can only profit if the skill earns reward
+  META_REWARD_LAMBDA: 1.0
+  SKILL_REWARD_LAMBDA: 0.0
 
-  # Skill optimizer (if omitted, LR is used)
-  SKILL_LR: 0.0001
-
-  # --- Environment Wrappers ---
-  # FIRST_FIRE: jaxatari AtariWrapper sends one FIRE immediately after each reset (ALE “start”).
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
   FIRST_FIRE: true
   STICKY_ACTIONS: false
-  EPISODIC_LIFE: True
+  EPISODIC_LIFE: true
   FRAME_STACK_SIZE: 4
 
-  # --- Inference Action Masking (Phoenix) ---
-  # Leave empty so DESTROY can use target-aligned forward/fire toward enemies above the ship.
-  # (Legacy mask [2,6,7,10,14,15] blocked the main approach axis for destroy skill training.)
-  INVALID_EGO_ACTIONS: []
+  TOTAL_TIMESTEPS: 50_000_000
+  NUM_ENVS: 1024
+  NUM_STEPS: 64
+  NUM_EPOCHS: 3
+  NUM_MINIBATCHES: 64
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 0.0001
+  SKILL_LR: 0.0005
+  MAX_GRAD_NORM: 0.8
 
-  # --- PQN Rollout Hyperparameters ---
-  # Scale: more NUM_ENVS = faster collection; keep (NUM_ENVS * NUM_STEPS) fixed so
-  # NUM_UPDATES and minibatch size stay the same → same stability, faster wall-clock.
-  TOTAL_TIMESTEPS: 50_000_000 # Total frames to train
-  NUM_ENVS: 1024              # Match seaquest_tandem rollout batch (1024*32 = 32768)
-  NUM_STEPS: 64               # Steps per env per update
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: true
+  RELABEL_K_OBJECTS: null
+  SKILL_BOOTSTRAP: "q_lambda"
+  SKILL_QLAMBDA_WATKINS_CUT: false
+  SKILL_TARGET_CUT: "lifetime"
 
-  # --- PQN Update Hyperparameters ---
-  NUM_EPOCHS: 3               # SGD epochs over rollout (2→3: more gradient steps per rollout, better sample use)
-  NUM_MINIBATCHES: 32          # Must divide NUM_ENVS*NUM_STEPS; 32768/32 = 1024 minibatch
-  GAMMA: 0.99                 # Discount factor
-  LAMBDA: 0.65                # GAE / Lambda return smoothing parameter
-  LR: 0.0001                  # Fallback LR (skills use this; meta uses META_LR)
-  MAX_GRAD_NORM: 0.8          # Gradient clipping
+  EPS_START: 0.2
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.4
+  META_EPS_START: 0.5
+  META_EPS_FINISH: 0.05
+  META_EPS_DECAY: 0.95
+  META_NUM_EPOCHS: 3
 
-  # --- Policy Style for Skill Updates ---
-  OFF_POLICY: false            # If true, all skills learn from all transitions with a target.
-                              # If false, use strict on-policy updates (only active skill learns).
-
-  # --- Exploration (Epsilon-Greedy) ---
-  EPS_START: 0.3              # Low skill exploration (easy concepts)
-  EPS_FINISH: 0.05            # End at 5% random
-  EPS_DECAY: 0.35            # Decay finishes at ~35% of training updates
-  META_EPS_START: 0.2
-
-  # --- Warmup (tandem only) ---
-  # Use env-specific Phoenix heuristic for target selection while meta is frozen.
-  HEURISTIC_MODE: "env_specific"
+  SKILL_FREEZE_AFTER_UPDATES: 0
   SKILL_WARMUP_UPDATES: 0
   META_LEARN_DURING_WARMUP: false
