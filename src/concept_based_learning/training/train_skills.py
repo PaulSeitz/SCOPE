@@ -252,7 +252,10 @@ def make_train(
                         last_obs.objects
                     )
                     active_masks = meta_mask_hook(
-                        last_obs.raw_observation, active_masks, config
+                        last_obs.raw_observation,
+                        active_masks,
+                        config,
+                        objects=last_obs.objects,
                     )
 
                     any_active = jnp.any(active_masks, axis=-1)

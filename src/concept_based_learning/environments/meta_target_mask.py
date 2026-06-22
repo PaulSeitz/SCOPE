@@ -18,6 +18,18 @@ PHOENIX_DYING_STATE_THRESHOLD = 4
 MetaMaskHook = Callable[..., jnp.ndarray]
 
 
+def _latest_object_frame(field: jnp.ndarray) -> jnp.ndarray:
+    """Select the latest stacked frame from object fields.
+
+    Supports per-env batches ``[num_envs, stack, ...]`` and single-env ``[stack, ...]``.
+    """
+    if field.ndim >= 3:
+        return field[:, -1, ...]
+    if field.ndim == 2:
+        return field[-1]
+    return field
+
+
 def meta_noop_target_enabled(config: Optional[dict]) -> bool:
     """True when a dedicated meta-policy slot is reserved for learnable NOOP."""
     if not config:
@@ -125,8 +137,8 @@ def build_meta_target_mask(
     - ``semantic_label`` is not ``LABEL_NOOP`` (padding / structural blocks), then
     - any environment-specific ``hook`` is applied.
     """
-    active = objects.active[-1] > 0.5
-    targetable_label = objects.semantic_label[-1] != LABEL_NOOP
+    active = _latest_object_frame(objects.active) > 0.5
+    targetable_label = _latest_object_frame(objects.semantic_label) != LABEL_NOOP
     mask = jnp.logical_and(active, targetable_label)
     if hook is not None:
         mask = hook(raw_obs, mask, config, objects)
@@ -139,5 +151,6 @@ def phoenix_meta_mask_hook(raw_obs, active_masks, config, objects=None):
     del raw_obs, config
     if objects is None or not hasattr(objects, "state"):
         return active_masks
-    is_dying = objects.state[-1] >= PHOENIX_DYING_STATE_THRESHOLD
+    latest_state = _latest_object_frame(objects.state)
+    is_dying = latest_state >= PHOENIX_DYING_STATE_THRESHOLD
     return jnp.logical_and(active_masks, jnp.logical_not(is_dying))
