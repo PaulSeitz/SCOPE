@@ -12,7 +12,10 @@ import hydra
 from omegaconf import OmegaConf
 
 from concept_based_learning.environments.env_manager import EnvManager
-from concept_based_learning.environments.heuristics import get_nearest_object_target
+from concept_based_learning.environments.heuristics import (
+    get_nearest_object_target,
+    resolve_heuristic_target_fn,
+)
 from concept_based_learning.curriculum import build_skill_phases
 from concept_based_learning.training.train_skills import make_train
 from concept_based_learning._legacy.train_meta_agent import make_meta_train
@@ -73,6 +76,10 @@ def _configure_ego_obs_format(config: dict) -> None:
     )
 
 
+def _resolve_heuristic_target_fn(config, env_name: str, components):
+    return resolve_heuristic_target_fn(config, env_name, components)
+
+
 def outer_make_train(config, frozen_meta_params=None):
     """
     Constructs the environments with the custom semantic wrappers defined
@@ -110,14 +117,7 @@ def outer_make_train(config, frozen_meta_params=None):
     env, _ = create_env_with_mods(train_game_mods, train=True)
     test_env, renderer = create_env_with_mods(eval_game_mods, train=False)
 
-    # Match tandem: optional env-agnostic nearest-object heuristic vs env-specific policy.
-    heuristic_mode = config.get("HEURISTIC_MODE", "env_specific")
-    if heuristic_mode == "nearest":
-        heuristic_fn = functools.partial(
-            get_nearest_object_target, no_target_idx=components.no_target_idx
-        )
-    else:
-        heuristic_fn = components.get_heuristic_target
+    heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
 
     # Call the hierarchical training loop; returns (train_fn, eval_rollout_fn)
     train_fn, eval_rollout_fn = make_train(
@@ -186,14 +186,7 @@ def outer_make_tandem_train(config):
     env, _ = manager.make_env(env_name, config, train=True)
     test_env, renderer = manager.make_env(env_name, config, train=False)
 
-    heuristic_mode = config.get("HEURISTIC_MODE", "env_specific")
-    if heuristic_mode == "nearest":
-        no_target_idx = components.no_target_idx
-        heuristic_fn = functools.partial(
-            get_nearest_object_target, no_target_idx=no_target_idx
-        )
-    else:
-        heuristic_fn = components.get_heuristic_target
+    heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
 
     train_fn = make_tandem_train(
         config,

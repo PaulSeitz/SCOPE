@@ -32,6 +32,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
 )
 from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.heuristics import resolve_heuristic_target_fn
 from concept_based_learning.environments.skill_rewards import object_reward_eligible
 
 # ── colours ──────────────────────────────────────────────────────────────────
@@ -152,7 +153,7 @@ class RewardDashboard:
         self.rng_key = jax.random.key(42)
         self.prev_target_idx = self.no_target_idx
         self.current_target_idx = self.no_target_idx
-        # concept_rewards[skill, obj] for the last step (all objects, all skills)
+        # concept_rewards[skill, obj] — only the tracked target is computed each step
         self.concept_rewards: np.ndarray = np.zeros((3, 1), dtype=np.float32)
         # Recent event log: list of dicts
         self.event_log: list = []
@@ -222,67 +223,65 @@ class RewardDashboard:
         return jax.tree_util.tree_map(_leaf, obj_obs)
 
     def _compute_rewards(self, tracked_idx: int, env_reward: float, info):
-        """Compute skill rewards for ALL active objects and log non-zero events."""
+        """Compute skill rewards for the tracked target object only."""
         objects      = self.obs.objects
         prev_objects = self.prev_obs.objects
         num_objects  = int(objects.x.shape[1])
 
         life_lost = self.extract_life_lost(self.prev_state, self.state)
-        concept_rewards = np.zeros((3, num_objects), dtype=np.float32)
+        if self.concept_rewards.shape != (3, num_objects):
+            self.concept_rewards = np.zeros((3, num_objects), dtype=np.float32)
+        else:
+            self.concept_rewards.fill(0.0)
 
-        active_flags = np.array(objects.active[-1])
-        was_killed_flags = np.array(objects.was_killed[-1])
+        if tracked_idx < 0 or tracked_idx >= num_objects:
+            return
 
-        for obj_idx in range(num_objects):
-            prev_t = self._slice_obj(prev_objects, obj_idx)
-            next_t = self._slice_obj(objects,      obj_idx)
-            if not bool(
-                np.asarray(
-                    jax.device_get(object_reward_eligible(prev_t, next_t))
-                )
-            ):
-                continue
-            try:
-                out = self.reward_extractor(
-                    self.prev_obs.raw_observation,
-                    self.obs.raw_observation,
-                    prev_t, next_t, life_lost, info, {},
-                )
-                rvec = np.asarray(jax.device_get(
-                    out[0] if isinstance(out, tuple) else out
-                ), dtype=np.float32)
-                concept_rewards[:, obj_idx] = rvec
-            except Exception:
-                pass
+        obj_idx = int(tracked_idx)
+        prev_t = self._slice_obj(prev_objects, obj_idx)
+        next_t = self._slice_obj(objects, obj_idx)
+        if not bool(
+            np.asarray(jax.device_get(object_reward_eligible(prev_t, next_t)))
+        ):
+            return
 
-        self.concept_rewards = concept_rewards
-
-        # Log and print any non-zero reward events
-        labels = np.array(objects.semantic_label[-1])
-        for obj_idx in range(num_objects):
-            rvec = concept_rewards[:, obj_idx]
-            if not np.any(np.abs(rvec) > 1e-6):
-                continue
-            obj_name  = self._obj_name(obj_idx)
-            label_str = LABEL_NAMES.get(int(labels[obj_idx]), "?")
-            is_tracked = (obj_idx == tracked_idx)
-            entry = {
-                "step":       self.step_count,
-                "obj_idx":    obj_idx,
-                "obj_name":   obj_name,
-                "label":      label_str,
-                "rvec":       rvec.tolist(),
-                "env_reward": env_reward,
-                "tracked":    is_tracked,
-            }
-            self.event_log.append(entry)
-            tag = "[TRACKED]" if is_tracked else "[other  ]"
-            print(
-                f"step={self.step_count:5d} {tag} "
-                f"{obj_name:<16s} [{label_str:<7s}] "
-                f"D={rvec[0]:+.1f} C={rvec[1]:+.1f} A={rvec[2]:+.1f}  "
-                f"env={env_reward:+.0f}"
+        try:
+            out = self.reward_extractor(
+                self.prev_obs.raw_observation,
+                self.obs.raw_observation,
+                prev_t, next_t, life_lost, info, {},
             )
+            rvec = np.asarray(
+                jax.device_get(out[0] if isinstance(out, tuple) else out),
+                dtype=np.float32,
+            )
+            self.concept_rewards[:, obj_idx] = rvec
+        except Exception:
+            return
+
+        labels = np.array(objects.semantic_label[-1])
+        rvec = self.concept_rewards[:, obj_idx]
+        if not np.any(np.abs(rvec) > 1e-6):
+            return
+
+        obj_name = self._obj_name(obj_idx)
+        label_str = LABEL_NAMES.get(int(labels[obj_idx]), "?")
+        entry = {
+            "step":       self.step_count,
+            "obj_idx":    obj_idx,
+            "obj_name":   obj_name,
+            "label":      label_str,
+            "rvec":       rvec.tolist(),
+            "env_reward": env_reward,
+            "tracked":    True,
+        }
+        self.event_log.append(entry)
+        print(
+            f"step={self.step_count:5d} [TRACKED] "
+            f"{obj_name:<16s} [{label_str:<7s}] "
+            f"D={rvec[0]:+.1f} C={rvec[1]:+.1f} A={rvec[2]:+.1f}  "
+            f"env={env_reward:+.0f}"
+        )
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -569,7 +568,7 @@ def main():
     dashboard = RewardDashboard(
         env, renderer,
         env_name=env_name,
-        get_heuristic_target=components.get_heuristic_target,
+        get_heuristic_target=resolve_heuristic_target_fn(cfg, env_name, components),
         no_target_idx=components.no_target_idx,
         reward_extractor=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,

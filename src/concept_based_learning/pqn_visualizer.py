@@ -27,6 +27,7 @@ from concept_based_learning.observations.egocentric import (
 )
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.heuristics import resolve_heuristic_target_fn
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
 )
@@ -532,7 +533,8 @@ def _make_jitted_greedy_episode_runner(
     restrict_fire_for_non_destroy: bool,
 ):
     """Compile one full greedy episode (env + meta + skills) into a single JIT call."""
-    heuristic_target = components.get_heuristic_target
+    env_name = config.get("ENV_NAME", "Seaquest")
+    heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     no_target_idx = int(components.no_target_idx)
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
@@ -810,7 +812,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
     components = manager.get_components(env_name)
-    heuristic_target = components.get_heuristic_target
+    heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
@@ -1093,7 +1095,7 @@ def run_live_visualization(
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
     components = manager.get_components(env_name)
-    heuristic_target = components.get_heuristic_target
+    heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
