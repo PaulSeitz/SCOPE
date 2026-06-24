@@ -762,19 +762,27 @@ def make_train(
                             if config.get("OFF_POLICY", True):
                                 valid = minibatch["relabel_mask"]
                             else:
-                                # Per-object mask: only the actually-chosen object slot is on-policy.
-                                # target_idx shape: [batch], ego_obs_all shape: [batch, n_objects, ...]
                                 n_objects = minibatch["ego_obs_all"].shape[1]
-                                chosen_obj_mask = (
-                                    jnp.arange(n_objects)[jnp.newaxis, :]
-                                    == minibatch["target_idx"][:, jnp.newaxis]
-                                )
+                                # Single-object batches store the chosen target at slot 0;
+                                # do not compare global target_idx to that lone slot.
+                                if n_objects == 1:
+                                    on_policy = (
+                                        minibatch["active_skill"][:, jnp.newaxis]
+                                        == skill_idx
+                                    )
+                                else:
+                                    chosen_obj_mask = (
+                                        jnp.arange(n_objects)[jnp.newaxis, :]
+                                        == minibatch["target_idx"][:, jnp.newaxis]
+                                    )
+                                    on_policy = jnp.logical_and(
+                                        chosen_obj_mask,
+                                        minibatch["active_skill"][:, jnp.newaxis]
+                                        == skill_idx,
+                                    )
                                 valid = jnp.logical_and(
                                     minibatch["relabel_mask"],
-                                    jnp.logical_and(
-                                        chosen_obj_mask,
-                                        minibatch["active_skill"][:, jnp.newaxis] == skill_idx,
-                                    ),
+                                    on_policy,
                                 )
                             sq_err = jnp.square(chosen_action_qvals - target)
                             loss = (sq_err * valid).sum() / (valid.sum() + 1e-8)

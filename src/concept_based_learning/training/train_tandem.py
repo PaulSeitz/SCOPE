@@ -1044,16 +1044,24 @@ def make_tandem_train(
                                 valid = minibatch["relabel_mask"]
                             else:
                                 n_objects = minibatch["ego_obs_all"].shape[1]
-                                chosen_obj_mask = (
-                                    jnp.arange(n_objects)[jnp.newaxis, :]
-                                    == minibatch["target_idx"][:, jnp.newaxis]
-                                )
+                                if n_objects == 1:
+                                    on_policy = (
+                                        minibatch["active_skill"][:, jnp.newaxis]
+                                        == skill_idx
+                                    )
+                                else:
+                                    chosen_obj_mask = (
+                                        jnp.arange(n_objects)[jnp.newaxis, :]
+                                        == minibatch["target_idx"][:, jnp.newaxis]
+                                    )
+                                    on_policy = jnp.logical_and(
+                                        chosen_obj_mask,
+                                        minibatch["active_skill"][:, jnp.newaxis]
+                                        == skill_idx,
+                                    )
                                 valid = jnp.logical_and(
                                     minibatch["relabel_mask"],
-                                    jnp.logical_and(
-                                        chosen_obj_mask,
-                                        minibatch["active_skill"][:, jnp.newaxis] == skill_idx,
-                                    ),
+                                    on_policy,
                                 )
                             loss = (jnp.square(chosen_q - target) * valid).sum() / (
                                 valid.sum() + 1e-8
