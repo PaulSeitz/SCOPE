@@ -19,7 +19,7 @@ from concept_based_learning.environments.datatypes import LABEL_AVOID, LABEL_DES
 NO_TARGET_IDX = -1
 
 # Only dodge when a bullet is extremely close to the player.
-CLOSE_DANGER_RANGE = 20.0
+CLOSE_DANGER_RANGE = 40.0
 
 NUM_ENEMIES = 36
 ENEMY_COLS = 6
