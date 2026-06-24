@@ -114,6 +114,16 @@ def make_train(
     NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
 
     fixed_target_idx = fixed_target_idx_from_config(config)
+    use_sweep_mission = (
+        frozen_meta_params is None
+        and fixed_target_idx is None
+        and str(config.get("HEURISTIC_MODE", "")).lower() == "sweep"
+        and str(config.get("ENV_NAME", "")).lower() == "spaceinvaders"
+    )
+    if use_sweep_mission:
+        from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
+            get_heuristic_target_with_mission,
+        )
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
@@ -239,6 +249,7 @@ def make_train(
                     completed_returns_sum,
                     num_completed,
                     last_targets,
+                    last_missions,
                     car_hits_sum,
                 ) = carry
 
@@ -292,12 +303,24 @@ def make_train(
                             dtype=jnp.int32,
                         )
                     else:
-                        target_obj_idxs = jax.vmap(get_heuristic_target)(
-                            last_obs.raw_observation,
-                            last_obs.objects,
-                            last_targets,
-                            policy_rngs,
-                        )
+                        if use_sweep_mission:
+                            target_obj_idxs, mission_obj_idxs = jax.vmap(
+                                get_heuristic_target_with_mission
+                            )(
+                                last_obs.raw_observation,
+                                last_obs.objects,
+                                last_targets,
+                                last_missions,
+                                policy_rngs,
+                            )
+                        else:
+                            target_obj_idxs = jax.vmap(get_heuristic_target)(
+                                last_obs.raw_observation,
+                                last_obs.objects,
+                                last_targets,
+                                policy_rngs,
+                            )
+                            mission_obj_idxs = last_missions
 
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
@@ -564,6 +587,7 @@ def make_train(
                     completed_returns_sum,
                     num_completed,
                     target_obj_idxs,
+                    mission_obj_idxs,
                     car_hits_sum,
                 ), (transition, info)
 
@@ -572,6 +596,11 @@ def make_train(
             init_num_completed = jnp.array(0.0, dtype=jnp.float32)
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
             init_last_targets = jnp.full(
+                (config["NUM_ENVS"],),
+                no_target_idx,
+                dtype=jnp.int32,
+            )
+            init_last_missions = jnp.full(
                 (config["NUM_ENVS"],),
                 no_target_idx,
                 dtype=jnp.int32,
@@ -585,6 +614,7 @@ def make_train(
                     init_completed_returns,
                     init_num_completed,
                     init_last_targets,
+                    init_last_missions,
                     init_car_hits_sum,
                 ),
                 None,
@@ -598,6 +628,7 @@ def make_train(
                 completed_returns_sum,
                 num_completed,
                 _last_targets,
+                _last_missions,
                 car_hits_sum,
             ) = carry_final
             expl_state = (last_obs, env_state)
@@ -949,11 +980,22 @@ def make_train(
 
         rng, _rng_policy = jax.random.split(rng)
         prev_target_idx = no_target_idx
+        mission_target_idx = no_target_idx
 
         for _ in range(max_frames):
             rng, step_key = jax.random.split(rng)
             if fixed_target_idx is not None:
                 target_obj_idxs = fixed_target_idx
+            elif use_sweep_mission:
+                target_obj_idxs, mission_target_idx = get_heuristic_target_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    jnp.array(mission_target_idx, dtype=jnp.int32),
+                    step_key,
+                )
+                target_obj_idxs = int(jnp.ravel(target_obj_idxs)[0])
+                mission_target_idx = int(jnp.ravel(mission_target_idx)[0])
             else:
                 target_obj_idxs = get_heuristic_target(
                     obs.raw_observation,

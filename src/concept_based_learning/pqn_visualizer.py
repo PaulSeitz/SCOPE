@@ -27,7 +27,10 @@ from concept_based_learning.observations.egocentric import (
 )
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.environments.env_manager import EnvManager
-from concept_based_learning.environments.heuristics import resolve_heuristic_target_fn
+from concept_based_learning.environments.heuristics import (
+    resolve_heuristic_target_fn,
+    resolve_heuristic_with_mission_fn,
+)
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
 )
@@ -535,6 +538,7 @@ def _make_jitted_greedy_episode_runner(
     """Compile one full greedy episode (env + meta + skills) into a single JIT call."""
     env_name = config.get("ENV_NAME", "Seaquest")
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
     no_target_idx = int(components.no_target_idx)
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
@@ -585,15 +589,16 @@ def _make_jitted_greedy_episode_runner(
         rng, reset_key = jax.random.split(rng)
         obs, state = env.reset(reset_key)
         prev_target = no_target
+        mission_target = no_target
         persist_steps = jnp.array(0, dtype=jnp.int32)
         suspended_mission = jnp.array(no_target, dtype=jnp.int32)
 
         def cond(carry):
-            _state, _obs, _rng, _ret, done, _prev, _steps, _suspended, step = carry
+            _state, _obs, _rng, _ret, done, _prev, _mission, _steps, _suspended, step = carry
             return jnp.logical_and(step < max_frames, jnp.logical_not(done))
 
         def body(carry):
-            state, obs, rng, ret, done, prev_target, persist_steps, suspended_mission, step = carry
+            state, obs, rng, ret, done, prev_target, mission_target, persist_steps, suspended_mission, step = carry
             rng, step_key = jax.random.split(rng)
 
             if use_meta:
@@ -609,6 +614,23 @@ def _make_jitted_greedy_episode_runner(
                     persist_steps_remaining=persist_steps,
                     suspended_mission_idx=suspended_mission,
                 )
+            elif heuristic_with_mission is not None:
+                target, mission_target = heuristic_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target,
+                    mission_target,
+                    step_key,
+                )
+                target = target.astype(jnp.int32)
+                mission_target = mission_target.astype(jnp.int32)
+                target = forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.expand_dims(target, 0),
+                    config,
+                )[0].astype(jnp.int32)
             else:
                 target = jnp.ravel(
                     heuristic_target(
@@ -630,6 +652,7 @@ def _make_jitted_greedy_episode_runner(
             new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
             new_done = jnp.logical_or(done, step_done)
             target = jnp.where(new_done, no_target, target)
+            mission_target = jnp.where(new_done, no_target, mission_target)
             persist_steps = jnp.where(new_done, jnp.array(0, dtype=jnp.int32), persist_steps)
             suspended_mission = jnp.where(
                 new_done, jnp.array(no_target, dtype=jnp.int32), suspended_mission
@@ -641,6 +664,7 @@ def _make_jitted_greedy_episode_runner(
                 ret + reward,
                 new_done,
                 target,
+                mission_target,
                 persist_steps,
                 suspended_mission,
                 step + 1,
@@ -653,6 +677,7 @@ def _make_jitted_greedy_episode_runner(
             jnp.array(0.0),
             False,
             prev_target,
+            mission_target,
             persist_steps,
             suspended_mission,
             0,
@@ -813,6 +838,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     manager = EnvManager()
     components = manager.get_components(env_name)
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
@@ -873,20 +899,31 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     # Persistent target index for the heuristic meta-policy
     prev_target_idx = no_target_idx
+    mission_target_idx = no_target_idx
     persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
     for _ in range(max_frames):
         rng, step_key = jax.random.split(rng)
 
         if meta_network is None:
-            # Heuristic meta-policy selects a target object
-            target_obj_idx = heuristic_target(
-                obs.raw_observation,
-                obs.objects,
-                prev_target_idx,
-                step_key,
-            )
-            target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            if heuristic_with_mission is not None:
+                target_obj_idx, mission_target_idx = heuristic_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    jnp.array(mission_target_idx, dtype=jnp.int32),
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+                mission_target_idx = int(jnp.ravel(mission_target_idx)[0])
+            else:
+                target_obj_idx = heuristic_target(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target_idx,
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
             target_obj_idx = int(
                 forced_target_hook(
                     jax.tree_util.tree_map(
@@ -1096,6 +1133,7 @@ def run_live_visualization(
     manager = EnvManager()
     components = manager.get_components(env_name)
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
@@ -1153,18 +1191,20 @@ def run_live_visualization(
     clock = pygame.time.Clock()
     running = True
     prev_target_idx = no_target_idx
+    mission_target_idx = no_target_idx
     persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
     frame_count = 0
 
     def reset_env_episode():
-        nonlocal obs, state, prev_target_idx, persist_steps_remaining, suspended_mission_idx, rng
+        nonlocal obs, state, prev_target_idx, mission_target_idx, persist_steps_remaining, suspended_mission_idx, rng
         rng_local, rng_reset_local = jax.random.split(rng)
         obs_local, state_local = env.reset(rng_reset_local)
         obs = obs_local
         state = state_local
         rng = rng_local
         prev_target_idx = no_target_idx
+        mission_target_idx = no_target_idx
         persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
         suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
@@ -1190,14 +1230,24 @@ def run_live_visualization(
         rng, step_key = jax.random.split(rng)
 
         if meta_network is None:
-            # Heuristic meta-policy selects a target object
-            target_obj_idx = heuristic_target(
-                obs.raw_observation,
-                obs.objects,
-                prev_target_idx,
-                step_key,
-            )
-            target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            if heuristic_with_mission is not None:
+                target_obj_idx, mission_target_idx = heuristic_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    jnp.array(mission_target_idx, dtype=jnp.int32),
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+                mission_target_idx = int(jnp.ravel(mission_target_idx)[0])
+            else:
+                target_obj_idx = heuristic_target(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target_idx,
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
             target_obj_idx = int(
                 forced_target_hook(
                     jax.tree_util.tree_map(
@@ -1355,6 +1405,7 @@ def run_live_visualization(
             rng, rng_reset = jax.random.split(rng)
             obs, state = env.reset(rng_reset)
             prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
 
     if frame_limit is not None and frame_count >= frame_limit:
         print(f"Live visualization stopped after {frame_count} frames (--max-frames={frame_limit}).")

@@ -32,7 +32,10 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
 )
 from concept_based_learning.environments.env_manager import EnvManager
-from concept_based_learning.environments.heuristics import resolve_heuristic_target_fn
+from concept_based_learning.environments.heuristics import (
+    resolve_heuristic_target_fn,
+    resolve_heuristic_with_mission_fn,
+)
 from concept_based_learning.environments.skill_rewards import object_reward_eligible
 
 # ── colours ──────────────────────────────────────────────────────────────────
@@ -112,6 +115,7 @@ class RewardDashboard:
         *,
         env_name: str,
         get_heuristic_target,
+        get_heuristic_with_mission=None,
         no_target_idx,
         reward_extractor,
         extract_life_lost,
@@ -122,6 +126,7 @@ class RewardDashboard:
         self.renderer = renderer
         self.env_name = env_name.lower()
         self.get_heuristic_target = get_heuristic_target
+        self.get_heuristic_with_mission = get_heuristic_with_mission
         self.no_target_idx = no_target_idx
         self.reward_extractor = reward_extractor
         self.extract_life_lost = extract_life_lost
@@ -152,6 +157,7 @@ class RewardDashboard:
         self.total_reward = 0.0
         self.rng_key = jax.random.key(42)
         self.prev_target_idx = self.no_target_idx
+        self.mission_target_idx = self.no_target_idx
         self.current_target_idx = self.no_target_idx
         # concept_rewards[skill, obj] — only the tracked target is computed each step
         self.concept_rewards: np.ndarray = np.zeros((3, 1), dtype=np.float32)
@@ -173,6 +179,7 @@ class RewardDashboard:
         self.step_count = 0
         self.total_reward = 0.0
         self.prev_target_idx = self.no_target_idx
+        self.mission_target_idx = self.no_target_idx
         self.current_target_idx = self.no_target_idx
         self.concept_rewards = np.zeros((3, 1), dtype=np.float32)
         self.event_log = []
@@ -183,26 +190,37 @@ class RewardDashboard:
 
         # Pick heuristic target from the pre-step observation.
         target_idx = self.no_target_idx
+        mission_idx = self.mission_target_idx
         if self.prev_obs is not None:
             try:
                 self.rng_key, key_pol = jax.random.split(self.rng_key)
                 raw = self.prev_obs.raw_observation
                 objs = self.prev_obs.objects
                 prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
-                target_idx = int(jnp.ravel(
-                    self.get_heuristic_target(raw, objs, prev_idx, key_pol)
-                )[0])
+                if self.get_heuristic_with_mission is not None:
+                    mission_arr = jnp.array(self.mission_target_idx, dtype=jnp.int32)
+                    out = self.get_heuristic_with_mission(
+                        raw, objs, prev_idx, mission_arr, key_pol
+                    )
+                    target_idx = int(jnp.ravel(out[0])[0])
+                    mission_idx = int(jnp.ravel(out[1])[0])
+                else:
+                    target_idx = int(jnp.ravel(
+                        self.get_heuristic_target(raw, objs, prev_idx, key_pol)
+                    )[0])
+                    mission_idx = target_idx
             except Exception:
                 pass
 
         self.prev_target_idx = target_idx
+        self.mission_target_idx = mission_idx
         self.current_target_idx = target_idx
 
         self.obs, self.state, env_reward, done, info = self.env.step(self.state, action)
         self.total_reward += float(env_reward)
 
         if self.prev_obs is not None:
-            self._compute_rewards(target_idx, env_reward, info)
+            self._compute_rewards(target_idx, mission_idx, env_reward, info)
 
         self.step_count += 1
         # Purge stale log entries
@@ -222,8 +240,8 @@ class RewardDashboard:
             return x[..., idx] if idx < x.shape[-1] else x
         return jax.tree_util.tree_map(_leaf, obj_obs)
 
-    def _compute_rewards(self, tracked_idx: int, env_reward: float, info):
-        """Compute skill rewards for the tracked target object only."""
+    def _compute_rewards(self, tracked_idx: int, mission_idx: int, env_reward: float, info):
+        """Compute skill rewards for tracked (and mission) target objects."""
         objects      = self.obs.objects
         prev_objects = self.prev_obs.objects
         num_objects  = int(objects.x.shape[1])
@@ -234,10 +252,24 @@ class RewardDashboard:
         else:
             self.concept_rewards.fill(0.0)
 
-        if tracked_idx < 0 or tracked_idx >= num_objects:
-            return
+        reward_idxs = [tracked_idx]
+        if mission_idx != tracked_idx and mission_idx >= 0:
+            reward_idxs.append(mission_idx)
 
-        obj_idx = int(tracked_idx)
+        for obj_idx in reward_idxs:
+            if obj_idx < 0 or obj_idx >= num_objects:
+                continue
+            self._compute_reward_for_object(
+                obj_idx, life_lost, env_reward, info, tracked=(obj_idx == tracked_idx)
+            )
+
+    def _compute_reward_for_object(
+        self, obj_idx: int, life_lost, env_reward: float, info, *, tracked: bool
+    ):
+        objects = self.obs.objects
+        prev_objects = self.prev_obs.objects
+        labels = np.array(objects.semantic_label[-1])
+
         prev_t = self._slice_obj(prev_objects, obj_idx)
         next_t = self._slice_obj(objects, obj_idx)
         if not bool(
@@ -259,11 +291,10 @@ class RewardDashboard:
         except Exception:
             return
 
-        labels = np.array(objects.semantic_label[-1])
-        rvec = self.concept_rewards[:, obj_idx]
         if not np.any(np.abs(rvec) > 1e-6):
             return
 
+        tag = "TRACKED" if tracked else "MISSION"
         obj_name = self._obj_name(obj_idx)
         label_str = LABEL_NAMES.get(int(labels[obj_idx]), "?")
         entry = {
@@ -273,11 +304,11 @@ class RewardDashboard:
             "label":      label_str,
             "rvec":       rvec.tolist(),
             "env_reward": env_reward,
-            "tracked":    True,
+            "tracked":    tracked,
         }
         self.event_log.append(entry)
         print(
-            f"step={self.step_count:5d} [TRACKED] "
+            f"step={self.step_count:5d} [{tag}] "
             f"{obj_name:<16s} [{label_str:<7s}] "
             f"D={rvec[0]:+.1f} C={rvec[1]:+.1f} A={rvec[2]:+.1f}  "
             f"env={env_reward:+.0f}"
@@ -569,6 +600,7 @@ def main():
         env, renderer,
         env_name=env_name,
         get_heuristic_target=resolve_heuristic_target_fn(cfg, env_name, components),
+        get_heuristic_with_mission=resolve_heuristic_with_mission_fn(cfg, env_name),
         no_target_idx=components.no_target_idx,
         reward_extractor=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,

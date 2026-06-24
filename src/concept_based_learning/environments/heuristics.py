@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
     get_heuristic_target as spaceinvaders_sweep_heuristic_target,
+    get_heuristic_target_with_mission as spaceinvaders_sweep_heuristic_with_mission,
 )
 
 
@@ -33,3 +34,16 @@ def resolve_heuristic_target_fn(config, env_name: str, components):
     if heuristic_mode == "sweep" and str(env_name).lower() == "spaceinvaders":
         return spaceinvaders_sweep_heuristic_target
     return components.get_heuristic_target
+
+
+def uses_sweep_mission_state(config, env_name: str) -> bool:
+    return (
+        str(config.get("HEURISTIC_MODE", "")).lower() == "sweep"
+        and str(env_name).lower() == "spaceinvaders"
+    )
+
+
+def resolve_heuristic_with_mission_fn(config, env_name: str):
+    if uses_sweep_mission_state(config, env_name):
+        return spaceinvaders_sweep_heuristic_with_mission
+    return None

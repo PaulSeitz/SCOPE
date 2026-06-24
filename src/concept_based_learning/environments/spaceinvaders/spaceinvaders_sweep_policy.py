@@ -9,7 +9,7 @@ Mission pattern:
 
 Reactive dodge:
   - Very close bullets (AVOID) within CLOSE_DANGER_RANGE temporarily override the mission.
-  - After the dodge, resume the sweep mission (closest bottom-row enemy to the player in x).
+  - After the dodge, resume the locked sweep mission target (not nearest-in-x).
 """
 
 import jax.numpy as jnp
@@ -26,12 +26,21 @@ ENEMY_COLS = 6
 FIRST_ENEMY_SLOT = 1  # slot 0 = reserved meta NOOP
 
 
+def _is_enemy_destroy_slot(idxs, labels, slot_idx):
+    return jnp.logical_and(
+        slot_idx >= FIRST_ENEMY_SLOT,
+        jnp.logical_and(
+            slot_idx < FIRST_ENEMY_SLOT + NUM_ENEMIES,
+            labels[slot_idx] == LABEL_DESTROY,
+        ),
+    )
+
+
 def _select_sweep_mission(
     ox_center,
     active_mask,
     labels,
-    prev_target_idx,
-    px_center,
+    mission_target_idx,
 ):
     """Pick the next DESTROY enemy along the current bottom row."""
     n = active_mask.shape[0]
@@ -56,49 +65,41 @@ def _select_sweep_mission(
     sweep_x = jnp.where(on_sweep_row, ox_center, jnp.inf)
     leftmost_idx = jnp.argmin(sweep_x).astype(jnp.int32)
 
-    prev_valid = jnp.logical_and(
-        prev_target_idx >= 0,
-        prev_target_idx < n,
+    mission_valid = jnp.logical_and(
+        mission_target_idx >= 0,
+        mission_target_idx < n,
     )
-    prev_label = jnp.where(prev_valid, labels[prev_target_idx], -1)
-    prev_active = jnp.where(prev_valid, active_mask[prev_target_idx], False)
-    prev_is_enemy_destroy = jnp.logical_and(
-        prev_valid,
-        jnp.logical_and(
-            prev_label == LABEL_DESTROY,
-            jnp.logical_and(
-                prev_target_idx >= FIRST_ENEMY_SLOT,
-                prev_target_idx < FIRST_ENEMY_SLOT + NUM_ENEMIES,
-            ),
-        ),
+    mission_is_enemy_destroy = jnp.where(
+        mission_valid,
+        _is_enemy_destroy_slot(idxs, labels, mission_target_idx),
+        False,
     )
-    keep_prev = jnp.logical_and(prev_is_enemy_destroy, prev_active)
+    mission_active = jnp.where(
+        mission_valid,
+        active_mask[mission_target_idx],
+        False,
+    )
+    keep_mission = jnp.logical_and(mission_is_enemy_destroy, mission_active)
 
-    prev_x = ox_center[jnp.maximum(prev_target_idx, 0)]
-    next_right_mask = jnp.logical_and(on_sweep_row, ox_center > prev_x + 0.5)
+    mission_x = ox_center[jnp.maximum(mission_target_idx, 0)]
+    next_right_mask = jnp.logical_and(on_sweep_row, ox_center > mission_x + 0.5)
     has_next_right = jnp.any(next_right_mask)
     next_right_idx = jnp.argmin(jnp.where(next_right_mask, sweep_x, jnp.inf)).astype(
         jnp.int32
     )
 
     advance_after_kill = jnp.logical_and(
-        prev_is_enemy_destroy,
-        jnp.logical_not(prev_active),
+        mission_is_enemy_destroy,
+        jnp.logical_not(mission_active),
     )
 
-    prev_is_avoid = jnp.logical_and(prev_valid, prev_label == LABEL_AVOID)
-    x_dist_to_player = jnp.abs(ox_center - px_center)
-    resume_idx = jnp.argmin(
-        jnp.where(on_sweep_row, x_dist_to_player, jnp.inf)
-    ).astype(jnp.int32)
-
     mission_idx = jnp.where(
-        keep_prev,
-        prev_target_idx,
+        keep_mission,
+        mission_target_idx,
         jnp.where(
             advance_after_kill,
             jnp.where(has_next_right, next_right_idx, leftmost_idx),
-            jnp.where(prev_is_avoid, resume_idx, leftmost_idx),
+            leftmost_idx,
         ),
     )
     mission_idx = jnp.where(
@@ -109,8 +110,20 @@ def _select_sweep_mission(
     return mission_idx.astype(jnp.int32)
 
 
-def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
-    del rng
+def get_heuristic_target_with_mission(
+    raw_observation,
+    objects,
+    prev_target_idx,
+    mission_target_idx,
+    rng,
+):
+    """
+    Return (committed_target_idx, mission_target_idx).
+
+    ``mission_target_idx`` is the sticky sweep target and survives AVOID
+    interruptions; ``prev_target_idx`` is only used by callers for logging.
+    """
+    del prev_target_idx, rng
 
     ox = objects.x[-1]
     oy = objects.y[-1]
@@ -127,7 +140,7 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     distances = jnp.sqrt(dx**2 + dy**2)
 
     mission_idx = _select_sweep_mission(
-        ox_center, active_mask, labels, prev_target_idx, px_center
+        ox_center, active_mask, labels, mission_target_idx
     )
 
     avoid_mask = jnp.logical_and(active_mask, labels == LABEL_AVOID)
@@ -138,4 +151,16 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     best_avoid_idx = jnp.argmin(avoid_distances).astype(jnp.int32)
 
     target_idx = jnp.where(have_close_avoid, best_avoid_idx, mission_idx)
-    return target_idx.astype(jnp.int32)
+    return target_idx.astype(jnp.int32), mission_idx.astype(jnp.int32)
+
+
+def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
+    """Backward-compatible wrapper without external mission state."""
+    target_idx, _mission_idx = get_heuristic_target_with_mission(
+        raw_observation,
+        objects,
+        prev_target_idx,
+        prev_target_idx,
+        rng,
+    )
+    return target_idx
