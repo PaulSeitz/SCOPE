@@ -57,6 +57,8 @@ alg:
   SKILL_QLAMBDA_WATKINS_CUT: false
   # Keep destroy relabel traces across AVOID dodge interrupts (kill while dodging).
   SKILL_TARGET_CUT: "lifetime"
+  # Sparse avoid only: no +0.01/frame survival (reduces false credit under relabel-all).
+  AVOID_SURVIVAL_BONUS: 0.0
 
   EPS_START: 0.3
   EPS_FINISH: 0.05

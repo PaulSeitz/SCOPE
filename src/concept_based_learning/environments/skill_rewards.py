@@ -151,6 +151,8 @@ def extract_skill_rewards(
     prev_target,
     next_target,
     life_lost,
+    *,
+    avoid_survival_reward: float = AVOID_SURVIVAL_REWARD,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all three skills against a single target.
@@ -201,7 +203,7 @@ def extract_skill_rewards(
     avoid_reward = jnp.where(
         avoid_failure,
         AVOID_FAILURE_REWARD,
-        jnp.where(avoid_survival, AVOID_SURVIVAL_REWARD, 0.0),
+        jnp.where(avoid_survival, avoid_survival_reward, 0.0),
     )
     avoid_done    = avoid_failure
 
@@ -230,3 +232,10 @@ def extract_skill_rewards(
     rewards    = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
     skill_done = jnp.array([destroy_done,   collect_done,   avoid_done],   dtype=jnp.bool_)
     return rewards, skill_done
+
+
+def avoid_survival_reward_from_config(config) -> float:
+    """Per-run avoid shaping; default matches ``AVOID_SURVIVAL_REWARD``."""
+    if config is None:
+        return AVOID_SURVIVAL_REWARD
+    return float(config.get("AVOID_SURVIVAL_BONUS", AVOID_SURVIVAL_REWARD))
