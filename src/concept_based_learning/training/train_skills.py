@@ -32,6 +32,11 @@ from concept_based_learning.training.trajectory_cuts import (
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
+from concept_based_learning.training.episode_stats import (
+    episodic_log_metrics,
+    init_per_env_episode_stats,
+    update_per_env_episode_stats,
+)
 
 
 def make_train(
@@ -251,6 +256,9 @@ def make_train(
                     last_targets,
                     last_missions,
                     car_hits_sum,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
                 ) = carry
 
                 rng, rng_rest = jax.random.split(rng)
@@ -558,7 +566,19 @@ def make_train(
                 )
                 num_completed = num_completed + jnp.sum(done_float)
 
-                running_returns = episode_return * (1.0 - done_float)
+                (
+                    running_returns,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
+                ) = update_per_env_episode_stats(
+                    running_returns,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
+                    raw_rewards,
+                    new_done,
+                )
 
                 transition = Transition(
                     target_idx=target_obj_idxs,
@@ -589,12 +609,18 @@ def make_train(
                     target_obj_idxs,
                     mission_obj_idxs,
                     car_hits_sum,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
                 ), (transition, info)
 
             rng, _rng = jax.random.split(rng)
             init_completed_returns = jnp.array(0.0, dtype=jnp.float32)
             init_num_completed = jnp.array(0.0, dtype=jnp.float32)
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
+            init_returned_returns, init_returned_lengths, init_episode_lengths = (
+                init_per_env_episode_stats(config["NUM_ENVS"])
+            )
             init_last_targets = jnp.full(
                 (config["NUM_ENVS"],),
                 no_target_idx,
@@ -616,6 +642,9 @@ def make_train(
                     init_last_targets,
                     init_last_missions,
                     init_car_hits_sum,
+                    init_returned_returns,
+                    init_returned_lengths,
+                    init_episode_lengths,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -630,6 +659,9 @@ def make_train(
                 _last_targets,
                 _last_missions,
                 car_hits_sum,
+                returned_episode_returns,
+                returned_episode_lengths,
+                _episode_lengths,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -894,11 +926,14 @@ def make_train(
             except AttributeError:
                 pass
 
-            mean_episodic_return = completed_returns_sum / jnp.maximum(
-                1.0, num_completed
+            metrics.update(
+                episodic_log_metrics(
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    completed_returns_sum,
+                    num_completed,
+                )
             )
-            metrics["returned_episode_returns"] = mean_episodic_return
-            metrics["env/episodic_return"] = mean_episodic_return
 
             if log_freeway_car_hits:
                 metrics["freeway/car_hit_rate"] = (
@@ -926,7 +961,13 @@ def make_train(
                         else:
                             log_dict[key] = float(value_np.mean())
                     local_step = int(log_dict.get("update_steps", 0))
-                    step = config.get("STEP_OFFSET", 0) + local_step
+                    step = int(
+                        log_dict.get(
+                            "env/step",
+                            config.get("STEP_OFFSET_TIMESTEPS", 0)
+                            + local_step * config["NUM_STEPS"] * config["NUM_ENVS"],
+                        )
+                    )
                     wandb.log(log_dict, step=step)
 
                 jax.debug.callback(_wandb_log_cb, metrics)

@@ -38,6 +38,11 @@ from concept_based_learning.training.trajectory_cuts import (
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
+from concept_based_learning.training.episode_stats import (
+    episodic_log_metrics,
+    init_per_env_episode_stats,
+    update_per_env_episode_stats,
+)
 
 
 def make_tandem_train(
@@ -226,6 +231,9 @@ def make_tandem_train(
                     car_hits_sum,
                     persist_steps_remaining,
                     suspended_mission_idxs,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
                 ) = carry
                 rng, rng_meta, rng_skill = jax.random.split(rng, 3)
 
@@ -440,7 +448,19 @@ def make_tandem_train(
                     episode_return * done_float
                 )
                 num_completed = num_completed + jnp.sum(done_float)
-                running_returns = episode_return * (1.0 - done_float)
+                (
+                    running_returns,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
+                ) = update_per_env_episode_stats(
+                    running_returns,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
+                    env_reward,
+                    new_done,
+                )
 
                 prev_targets = jax.vmap(
                     lambda objs, idx: jax.tree_util.tree_map(
@@ -680,6 +700,9 @@ def make_tandem_train(
                     car_hits_sum,
                     persist_steps_remaining,
                     suspended_mission_idxs,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
                 ), transition
 
             rng, _rng = jax.random.split(rng)
@@ -691,6 +714,9 @@ def make_tandem_train(
                 (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
             )
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
+            init_returned_returns, init_returned_lengths, init_episode_lengths = (
+                init_per_env_episode_stats(config["NUM_ENVS"])
+            )
             carry_final, transitions = jax.lax.scan(
                 _step_env,
                 (
@@ -703,6 +729,9 @@ def make_tandem_train(
                     init_car_hits_sum,
                     init_persist_steps,
                     init_suspended_mission,
+                    init_returned_returns,
+                    init_returned_lengths,
+                    init_episode_lengths,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -718,6 +747,9 @@ def make_tandem_train(
                 car_hits_sum,
                 _persist_steps_remaining,
                 _suspended_mission_idxs,
+                returned_episode_returns,
+                returned_episode_lengths,
+                _episode_lengths,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -1111,7 +1143,6 @@ def make_tandem_train(
                 in_axes=(0, 0, 0),
             )(skill_states, jnp.arange(num_skills), rngs)
 
-            mean_episodic_return = completed_returns_sum / jnp.maximum(1.0, num_completed)
             valid_target_mask = (transitions.target_idx != no_target_idx).astype(
                 jnp.float32
             )
@@ -1147,8 +1178,6 @@ def make_tandem_train(
                 "env/reward_nonzero_frac": jnp.mean(reward_nonzero),
                 "env/reward_max": jnp.max(transitions.env_reward),
                 "env/done_frac": jnp.mean(transitions.done.astype(jnp.float32)),
-                "env/episodic_return": mean_episodic_return,
-                "returned_episode_returns": mean_episodic_return,
                 "meta_policy/valid_target_frac": jnp.mean(valid_target_mask),
                 "meta_policy/targetable_objects_mean": jnp.mean(
                     jnp.sum(transitions.active_mask.astype(jnp.float32), axis=-1)
@@ -1172,6 +1201,14 @@ def make_tandem_train(
                 "global/update_steps": meta_state.n_updates,
                 "env/step": meta_state.timesteps,
             }
+            metrics.update(
+                episodic_log_metrics(
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    completed_returns_sum,
+                    num_completed,
+                )
+            )
 
             if log_freeway_car_hits:
                 metrics["freeway/car_hit_rate"] = (
@@ -1185,7 +1222,7 @@ def make_tandem_train(
                         import wandb
                         if wandb.run is not None:
                             log_dict = {k: float(np.asarray(v).mean()) for k, v in m.items()}
-                            step = int(log_dict.get("global/update_steps", 0))
+                            step = int(log_dict.get("env/step", log_dict.get("global/update_steps", 0)))
                             wandb.log(log_dict, step=step)
                     except Exception:
                         pass
