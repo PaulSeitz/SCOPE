@@ -42,6 +42,7 @@ from concept_based_learning.training.episode_stats import (
     episodic_log_metrics,
     init_full_game_episode_stats,
     init_per_env_episode_stats,
+    is_game_over,
     remaining_lives_from_semantic_state,
     update_full_game_episode_stats,
     update_per_env_episode_stats,
@@ -220,7 +221,20 @@ def make_tandem_train(
         )(rng_keys, init_skill_params)
 
         def _update_step(runner_state, _):
-            meta_state, skill_states, expl_state, running_returns, rng = runner_state
+            (
+                meta_state,
+                skill_states,
+                expl_state,
+                running_returns,
+                returned_episode_returns,
+                returned_episode_lengths,
+                episode_lengths,
+                full_game_running,
+                returned_game_returns,
+                returned_game_lengths,
+                game_lengths,
+                rng,
+            ) = runner_state
 
             def _step_env(carry, _t):
                 (
@@ -228,8 +242,6 @@ def make_tandem_train(
                     env_state,
                     running_returns,
                     rng,
-                    completed_returns_sum,
-                    num_completed,
                     last_targets,
                     car_hits_sum,
                     persist_steps_remaining,
@@ -442,22 +454,24 @@ def make_tandem_train(
                     )
                 global_actions = jnp.where(force_noop, 0, global_actions)
 
-                new_obs, new_env_state, env_reward, new_done, info = vmap_step(
+                step_obs, step_env_state, env_reward, new_done, info = vmap_step(
                     env_state, global_actions
                 )
-                life_lost = extract_life_lost(env_state, new_env_state)
+                prev_lives = jax.vmap(remaining_lives_from_semantic_state)(env_state)
+                lives_after_step = jax.vmap(remaining_lives_from_semantic_state)(
+                    step_env_state
+                )
+                life_lost = extract_life_lost(env_state, step_env_state)
+                game_over = is_game_over(new_done, life_lost, prev_lives, lives_after_step)
+                reset_mask = jnp.logical_or(
+                    game_over,
+                    jnp.logical_and(new_done, life_lost <= 0),
+                )
                 car_hits_sum = car_hits_sum + jnp.sum(life_lost > 0)
-                remaining_lives = jax.vmap(remaining_lives_from_semantic_state)(
-                    new_env_state
-                )
                 done_due_to_life_lost = jnp.logical_and(new_done, life_lost > 0)
+                new_obs = step_obs
+                new_env_state = step_env_state
 
-                episode_return = running_returns + env_reward
-                done_float = new_done.astype(jnp.float32)
-                completed_returns_sum = completed_returns_sum + jnp.sum(
-                    episode_return * done_float
-                )
-                num_completed = num_completed + jnp.sum(done_float)
                 (
                     running_returns,
                     returned_episode_returns,
@@ -482,8 +496,7 @@ def make_tandem_train(
                     returned_game_lengths,
                     game_lengths,
                     env_reward,
-                    new_done,
-                    remaining_lives,
+                    game_over,
                 )
 
                 prev_targets = jax.vmap(
@@ -555,10 +568,10 @@ def make_tandem_train(
                 rng, rng_reset = jax.random.split(rng)
                 reset_obs, reset_state = vmap_reset(config["NUM_ENVS"])(rng_reset)
                 next_obs_for_rollout = merge_reset_where_done(
-                    new_obs, reset_obs, new_done
+                    new_obs, reset_obs, reset_mask
                 )
                 next_state_for_rollout = merge_reset_where_done(
-                    new_env_state, reset_state, new_done
+                    new_env_state, reset_state, reset_mask
                 )
                 target_obj_idxs = jnp.where(
                     new_done,
@@ -718,8 +731,6 @@ def make_tandem_train(
                     next_state_for_rollout,
                     running_returns,
                     rng,
-                    completed_returns_sum,
-                    num_completed,
                     target_obj_idxs,
                     car_hits_sum,
                     persist_steps_remaining,
@@ -742,34 +753,23 @@ def make_tandem_train(
                 (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
             )
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
-            init_returned_returns, init_returned_lengths, init_episode_lengths = (
-                init_per_env_episode_stats(config["NUM_ENVS"])
-            )
-            (
-                init_full_game_running,
-                init_returned_game_returns,
-                init_returned_game_lengths,
-                init_game_lengths,
-            ) = init_full_game_episode_stats(config["NUM_ENVS"])
             carry_final, transitions = jax.lax.scan(
                 _step_env,
                 (
                     *expl_state,
                     running_returns,
                     _rng,
-                    jnp.array(0.0, dtype=jnp.float32),
-                    jnp.array(0.0, dtype=jnp.float32),
                     init_targets,
                     init_car_hits_sum,
                     init_persist_steps,
                     init_suspended_mission,
-                    init_returned_returns,
-                    init_returned_lengths,
-                    init_episode_lengths,
-                    init_full_game_running,
-                    init_returned_game_returns,
-                    init_returned_game_lengths,
-                    init_game_lengths,
+                    returned_episode_returns,
+                    returned_episode_lengths,
+                    episode_lengths,
+                    full_game_running,
+                    returned_game_returns,
+                    returned_game_lengths,
+                    game_lengths,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -779,19 +779,17 @@ def make_tandem_train(
                 env_state,
                 running_returns,
                 rng,
-                completed_returns_sum,
-                num_completed,
                 _last_targets,
                 car_hits_sum,
                 _persist_steps_remaining,
                 _suspended_mission_idxs,
                 returned_episode_returns,
                 returned_episode_lengths,
-                _episode_lengths,
-                _full_game_running,
+                episode_lengths,
+                full_game_running,
                 returned_game_returns,
                 returned_game_lengths,
-                _game_lengths,
+                game_lengths,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -1247,8 +1245,6 @@ def make_tandem_train(
                 episodic_log_metrics(
                     returned_episode_returns,
                     returned_episode_lengths,
-                    completed_returns_sum,
-                    num_completed,
                     returned_game_returns=returned_game_returns,
                     returned_game_lengths=returned_game_lengths,
                 )
@@ -1276,12 +1272,47 @@ def make_tandem_train(
             if is_rtpt_enabled(config):
                 jax.debug.callback(rtpt_step_callback)
 
-            return (meta_state, skill_states, expl_state, running_returns, rng), metrics
+            return (
+                meta_state,
+                skill_states,
+                expl_state,
+                running_returns,
+                returned_episode_returns,
+                returned_episode_lengths,
+                episode_lengths,
+                full_game_running,
+                returned_game_returns,
+                returned_game_lengths,
+                game_lengths,
+                rng,
+            ), metrics
 
         rng, _rng = jax.random.split(rng)
         init_expl = jax.vmap(env.reset)(jax.random.split(_rng, config["NUM_ENVS"]))
         init_running_returns = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.float32)
-        runner_state = (meta_state, skill_states, init_expl, init_running_returns, rng)
+        returned_episode_returns, returned_episode_lengths, episode_lengths = (
+            init_per_env_episode_stats(config["NUM_ENVS"])
+        )
+        (
+            full_game_running,
+            returned_game_returns,
+            returned_game_lengths,
+            game_lengths,
+        ) = init_full_game_episode_stats(config["NUM_ENVS"])
+        runner_state = (
+            meta_state,
+            skill_states,
+            init_expl,
+            init_running_returns,
+            returned_episode_returns,
+            returned_episode_lengths,
+            episode_lengths,
+            full_game_running,
+            returned_game_returns,
+            returned_game_lengths,
+            game_lengths,
+            rng,
+        )
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
