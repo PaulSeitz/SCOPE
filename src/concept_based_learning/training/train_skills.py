@@ -34,7 +34,10 @@ from concept_based_learning.training.trajectory_cuts import (
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 from concept_based_learning.training.episode_stats import (
     episodic_log_metrics,
+    init_full_game_episode_stats,
     init_per_env_episode_stats,
+    remaining_lives_from_semantic_state,
+    update_full_game_episode_stats,
     update_per_env_episode_stats,
 )
 
@@ -259,6 +262,10 @@ def make_train(
                     returned_episode_returns,
                     returned_episode_lengths,
                     episode_lengths,
+                    full_game_running,
+                    returned_game_returns,
+                    returned_game_lengths,
+                    game_lengths,
                 ) = carry
 
                 rng, rng_rest = jax.random.split(rng)
@@ -427,6 +434,9 @@ def make_train(
 
                 life_lost = extract_life_lost(env_state, new_env_state)
                 car_hits_sum = car_hits_sum + jnp.sum(life_lost > 0)
+                remaining_lives = jax.vmap(remaining_lives_from_semantic_state)(
+                    new_env_state
+                )
 
                 def get_target_obj(objects, idx):
                     return jax.tree_util.tree_map(
@@ -579,6 +589,20 @@ def make_train(
                     raw_rewards,
                     new_done,
                 )
+                (
+                    full_game_running,
+                    returned_game_returns,
+                    returned_game_lengths,
+                    game_lengths,
+                ) = update_full_game_episode_stats(
+                    full_game_running,
+                    returned_game_returns,
+                    returned_game_lengths,
+                    game_lengths,
+                    raw_rewards,
+                    new_done,
+                    remaining_lives,
+                )
 
                 transition = Transition(
                     target_idx=target_obj_idxs,
@@ -612,6 +636,10 @@ def make_train(
                     returned_episode_returns,
                     returned_episode_lengths,
                     episode_lengths,
+                    full_game_running,
+                    returned_game_returns,
+                    returned_game_lengths,
+                    game_lengths,
                 ), (transition, info)
 
             rng, _rng = jax.random.split(rng)
@@ -621,6 +649,12 @@ def make_train(
             init_returned_returns, init_returned_lengths, init_episode_lengths = (
                 init_per_env_episode_stats(config["NUM_ENVS"])
             )
+            (
+                init_full_game_running,
+                init_returned_game_returns,
+                init_returned_game_lengths,
+                init_game_lengths,
+            ) = init_full_game_episode_stats(config["NUM_ENVS"])
             init_last_targets = jnp.full(
                 (config["NUM_ENVS"],),
                 no_target_idx,
@@ -645,6 +679,10 @@ def make_train(
                     init_returned_returns,
                     init_returned_lengths,
                     init_episode_lengths,
+                    init_full_game_running,
+                    init_returned_game_returns,
+                    init_returned_game_lengths,
+                    init_game_lengths,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -662,6 +700,10 @@ def make_train(
                 returned_episode_returns,
                 returned_episode_lengths,
                 _episode_lengths,
+                _full_game_running,
+                returned_game_returns,
+                returned_game_lengths,
+                _game_lengths,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -932,6 +974,8 @@ def make_train(
                     returned_episode_lengths,
                     completed_returns_sum,
                     num_completed,
+                    returned_game_returns=returned_game_returns,
+                    returned_game_lengths=returned_game_lengths,
                 )
             )
 

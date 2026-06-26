@@ -80,6 +80,19 @@ def _resolve_heuristic_target_fn(config, env_name: str, components):
     return resolve_heuristic_target_fn(config, env_name, components)
 
 
+def _wandb_env_step(config: dict, timesteps: int, *, step_offset_updates: int = 0) -> int:
+    """Map local training timesteps to the global ``env/step`` used in wandb metrics."""
+    num_steps = int(config.get("NUM_STEPS", 128))
+    num_envs = int(config.get("NUM_ENVS", 512))
+    step_offset_timesteps = int(
+        config.get(
+            "STEP_OFFSET_TIMESTEPS",
+            step_offset_updates * num_steps * num_envs,
+        )
+    )
+    return step_offset_timesteps + int(timesteps)
+
+
 def outer_make_train(config, frozen_meta_params=None):
     """
     Constructs the environments with the custom semantic wrappers defined
@@ -340,7 +353,11 @@ def single_run(config):
             first_train_states = jax.tree_util.tree_map(lambda x: x[0], train_states)
             current_params = first_train_states.params
 
-            global_step_end_of_phase = int(phase.step_offset_updates) + int(num_updates_this_phase)
+            global_step_end_of_phase = _wandb_env_step(
+                phase_config,
+                int(jax.device_get(first_train_states.timesteps)),
+                step_offset_updates=int(phase.step_offset_updates),
+            )
             if (
                 phase_config.get("RECORD_VIDEO")
                 and phase_config.get("VIDEO_AT_END", True)
@@ -433,12 +450,6 @@ def single_run(config):
         meta_config.pop("GAME_MODS", None)
         meta_config.pop("EVAL_GAME_MODS", None)
 
-        num_updates = (
-            meta_config["TOTAL_TIMESTEPS"]
-            // meta_config.get("NUM_STEPS", 128)
-            // meta_config.get("NUM_ENVS", 512)
-        )
-
         rng, rng_meta = jax.random.split(rng)
         rngs = jax.random.split(rng_meta, num_seeds)
 
@@ -459,7 +470,11 @@ def single_run(config):
         first_train_state = jax.tree_util.tree_map(lambda x: x[0], train_state)
         meta_params = first_train_state.params
 
-        global_step_end = step_offset + num_updates
+        global_step_end = _wandb_env_step(
+            meta_config,
+            int(jax.device_get(first_train_state.timesteps)),
+            step_offset_updates=step_offset,
+        )
         if (
             meta_config.get("RECORD_VIDEO")
             and meta_config.get("VIDEO_AT_END", True)
@@ -571,12 +586,7 @@ def single_run(config):
         final_skill_params = first_skill_states.params
         final_meta_params = first_meta_state.params
 
-        num_updates = (
-            int(tandem_config["TOTAL_TIMESTEPS"])
-            // int(tandem_config.get("NUM_STEPS", 128))
-            // int(tandem_config.get("NUM_ENVS", 512))
-        )
-        global_step_end = num_updates
+        global_step_end = int(jax.device_get(first_meta_state.timesteps))
         if tandem_config.get("RECORD_VIDEO") and tandem_config.get("VIDEO_AT_END", True):
             video_output_path = None
             if (
