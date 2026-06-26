@@ -250,7 +250,6 @@ def _wrap_reward_extractor_5arg(reward_extractor_5arg: Callable[..., Any]):
         info: Optional[Dict[str, Any]],
         config: Dict[str, Any],
     ):
-        del info
         try:
             return reward_extractor_5arg(
                 prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost,
