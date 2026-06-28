@@ -210,7 +210,22 @@ def load_flat_pqn_training_config(model_path: str) -> dict[str, Any]:
     """Load ``*_config.yaml`` saved next to a pqn_agent checkpoint."""
     resolved = resolve_config_path(model_path)
     model_dir = Path(resolved).parent
-    for candidate in sorted(model_dir.glob("*_config.yaml")):
+    model_stem = Path(resolved).stem.lower()
+
+    def _matches_checkpoint(candidate: Path) -> bool:
+        name = candidate.name.lower()
+        if "_pixel_" in model_stem:
+            return "_pixel_" in name
+        if "_oc_" in model_stem:
+            return "_oc_" in name
+        return True
+
+    candidates = sorted(model_dir.glob("*_config.yaml"))
+    matched = [c for c in candidates if _matches_checkpoint(c)]
+    if not matched:
+        matched = candidates
+
+    for candidate in matched:
         try:
             raw = OmegaConf.to_container(OmegaConf.load(candidate), resolve=True)
         except Exception:
@@ -229,6 +244,17 @@ def infer_flat_pqn_object_centric(model_path: str, config: dict[str, Any]) -> bo
     if "_oc_" in name:
         return True
     return True
+
+
+def _prepare_pixel_policy_obs(obs: jnp.ndarray) -> jnp.ndarray:
+    """
+    Match ``pqn_agent`` video eval: if the env returns RGB stacks but the policy
+    was trained with ``PIXEL_GRAYSCALE=true``, reduce the channel axis.
+    """
+    if obs.ndim >= 3 and int(obs.shape[-1]) == 3:
+        weights = jnp.array([0.2989, 0.5870, 0.1140], dtype=jnp.float32)
+        return jnp.tensordot(obs, weights, axes=([-1], [0]))[..., None]
+    return obs
 
 
 def make_flat_pqn_eval_env(
@@ -269,7 +295,8 @@ def make_flat_pqn_eval_env(
             max_pooling=True,
             clip_reward=False,
         )
-        env = NormalizeObservationWrapper(env)
+        # Pixel PQN trains on raw uint8 stacks inside PixelObsWrapper; the CNN
+        # applies ``x / 255.0`` internally. Do NOT add NormalizeObservationWrapper.
     return LogWrapper(env)
 
 
@@ -288,9 +315,12 @@ def _make_jitted_flat_pqn_episode_runner(
 
         def body(carry, _):
             obs_c, state_c, total_c = carry
+            policy_obs = obs_c
+            if not network.object_centric:
+                policy_obs = _prepare_pixel_policy_obs(policy_obs)
             q_vals = network.apply(
                 {"params": params, "batch_stats": batch_stats},
-                obs_c[None, ...],
+                policy_obs[None, ...],
                 train=False,
             )
             action = jnp.argmax(q_vals, axis=-1)[0]
