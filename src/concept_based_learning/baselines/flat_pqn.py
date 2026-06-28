@@ -32,8 +32,8 @@ from jaxatari.wrappers import (
 from concept_based_learning.pqn_visualizer import resolve_config_path
 
 
-class FlatPQNCNN(nn.Module):
-    """Pixel backbone — must stay in sync with pqn_agent.CNN."""
+class CNN(nn.Module):
+    """Pixel backbone — class name must match ``pqn_agent.CNN`` for checkpoint keys."""
 
     norm_type: str = "layer_norm"
 
@@ -80,8 +80,8 @@ class FlatPQNCNN(nn.Module):
         return x
 
 
-class FlatPQNQNetwork(nn.Module):
-    """Q-head — must stay in sync with pqn_agent.QNetwork."""
+class QNetwork(nn.Module):
+    """Q-head — class name must match ``pqn_agent.QNetwork`` for checkpoint keys."""
 
     action_dim: int
     hidden_size: int = 128
@@ -112,7 +112,7 @@ class FlatPQNQNetwork(nn.Module):
                 x = nn.relu(x)
         else:
             x = x / 255.0
-            x = FlatPQNCNN(norm_type=self.norm_type)(x, train)
+            x = CNN(norm_type=self.norm_type)(x, train)
 
         x = nn.Dense(self.action_dim)(x)
         return x
@@ -182,7 +182,7 @@ def flat_pqn_network_kwargs(
     action_dim: int,
     object_centric: bool,
 ) -> dict[str, Any]:
-    """Build FlatPQNQNetwork kwargs aligned with a pqn_agent checkpoint."""
+    """Build QNetwork kwargs aligned with a pqn_agent checkpoint."""
     cfg = normalize_flat_pqn_config(config)
     num_layers = cfg.get("NUM_LAYERS")
     if num_layers is None:
@@ -275,7 +275,7 @@ def make_flat_pqn_eval_env(
 
 def _make_jitted_flat_pqn_episode_runner(
     env,
-    network: FlatPQNQNetwork,
+    network: QNetwork,
     params,
     batch_stats,
     *,
@@ -337,7 +337,7 @@ def run_flat_pqn_greedy_eval(
         config=config,
     )
     action_dim = env.action_space().n
-    network = FlatPQNQNetwork(
+    network = QNetwork(
         **flat_pqn_network_kwargs(
             config,
             params,
@@ -391,3 +391,8 @@ def run_flat_pqn_greedy_eval(
         "max_frames_per_episode": int(max_frames),
         "object_centric": bool(object_centric),
     }
+
+
+# Backwards-compatible aliases (Flax param paths depend on class names).
+FlatPQNCNN = CNN
+FlatPQNQNetwork = QNetwork
