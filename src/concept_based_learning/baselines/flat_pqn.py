@@ -124,6 +124,81 @@ def load_flat_pqn_params(filename: str | os.PathLike) -> dict:
     return unflatten_dict(flattened_dict, sep=",")
 
 
+def _unwrap_wandb_config_value(raw: Any) -> Any:
+    """Unwrap wandb export nodes like ``{"value": 42}`` / nested ``alg.value``."""
+    if isinstance(raw, dict):
+        if set(raw.keys()) == {"value"}:
+            return _unwrap_wandb_config_value(raw["value"])
+        return {k: _unwrap_wandb_config_value(v) for k, v in raw.items()}
+    if isinstance(raw, list):
+        return [_unwrap_wandb_config_value(v) for v in raw]
+    return raw
+
+
+def normalize_flat_pqn_config(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Flatten pqn_agent Hydra configs (top-level + ``alg``) like ``single_run`` does.
+
+    Also accepts wandb JSON exports where every leaf is wrapped in ``{"value": ...}``.
+    """
+    if not config:
+        return {}
+
+    unwrapped = _unwrap_wandb_config_value(config)
+    if not isinstance(unwrapped, dict):
+        return {}
+
+    out = {k: v for k, v in unwrapped.items() if k != "_wandb"}
+    alg = out.pop("alg", None) or out.pop("ALG", None)
+    if isinstance(alg, dict):
+        out = {**out, **alg}
+    return out
+
+
+def infer_flat_pqn_num_layers(params: dict, *, action_dim: int, object_centric: bool) -> int:
+    """
+    Infer MLP depth from checkpoint weights (matches pqn_agent when config omits NUM_LAYERS).
+    """
+    if not object_centric:
+        return 2
+
+    flat = flatten_dict(params, sep="/")
+    hidden_layers = 0
+    for key, val in flat.items():
+        if not key.endswith("kernel") or "Dense" not in key:
+            continue
+        if getattr(val, "ndim", 0) != 2:
+            continue
+        out_dim = int(val.shape[1])
+        if out_dim != int(action_dim):
+            hidden_layers += 1
+    return max(1, hidden_layers) if hidden_layers else 2
+
+
+def flat_pqn_network_kwargs(
+    config: dict[str, Any],
+    params: dict,
+    *,
+    action_dim: int,
+    object_centric: bool,
+) -> dict[str, Any]:
+    """Build FlatPQNQNetwork kwargs aligned with a pqn_agent checkpoint."""
+    cfg = normalize_flat_pqn_config(config)
+    num_layers = cfg.get("NUM_LAYERS")
+    if num_layers is None:
+        num_layers = infer_flat_pqn_num_layers(
+            params, action_dim=action_dim, object_centric=object_centric
+        )
+    return {
+        "action_dim": action_dim,
+        "hidden_size": int(cfg.get("HIDDEN_SIZE", 128)),
+        "num_layers": int(num_layers),
+        "norm_type": str(cfg.get("NORM_TYPE", "layer_norm")),
+        "norm_input": bool(cfg.get("NORM_INPUT", False)),
+        "object_centric": object_centric,
+    }
+
+
 def _load_yaml_config(path: Path) -> dict[str, Any]:
     import yaml
 
@@ -137,15 +212,17 @@ def load_flat_pqn_training_config(model_path: str) -> dict[str, Any]:
     model_dir = Path(resolved).parent
     for candidate in sorted(model_dir.glob("*_config.yaml")):
         try:
-            return OmegaConf.to_container(OmegaConf.load(candidate), resolve=True)
+            raw = OmegaConf.to_container(OmegaConf.load(candidate), resolve=True)
         except Exception:
-            return _load_yaml_config(candidate)
+            raw = _load_yaml_config(candidate)
+        return normalize_flat_pqn_config(raw)
     return {}
 
 
 def infer_flat_pqn_object_centric(model_path: str, config: dict[str, Any]) -> bool:
-    if "OBJECT_CENTRIC" in config:
-        return bool(config["OBJECT_CENTRIC"])
+    cfg = normalize_flat_pqn_config(config)
+    if "OBJECT_CENTRIC" in cfg:
+        return bool(cfg["OBJECT_CENTRIC"])
     name = Path(resolve_config_path(model_path)).name.lower()
     if "_pixel_" in name:
         return False
@@ -160,6 +237,7 @@ def make_flat_pqn_eval_env(
     game_mods: list[str],
     config: dict[str, Any],
 ):
+    cfg = normalize_flat_pqn_config(config)
     mods = list(game_mods) if game_mods else None
     env = jaxatari.make("seaquest", mods=mods)
     env = AtariWrapper(
@@ -173,8 +251,8 @@ def make_flat_pqn_eval_env(
     if object_centric:
         env = ObjectCentricWrapper(
             env,
-            frame_stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
-            frame_skip=int(config.get("FRAME_SKIP", 4)),
+            frame_stack_size=int(cfg.get("FRAME_STACK_SIZE", 4)),
+            frame_skip=int(cfg.get("FRAME_SKIP", 4)),
             clip_reward=False,
         )
         env = NormalizeObservationWrapper(env)
@@ -182,12 +260,12 @@ def make_flat_pqn_eval_env(
     else:
         env = PixelObsWrapper(
             env,
-            do_pixel_resize=bool(config.get("PIXEL_RESIZE", True)),
-            pixel_resize_shape=tuple(config.get("PIXEL_RESIZE_SHAPE", [84, 84])),
-            grayscale=bool(config.get("PIXEL_GRAYSCALE", True)),
-            use_native_downscaling=bool(config.get("USE_NATIVE_DOWNSCALING", True)),
-            frame_stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
-            frame_skip=int(config.get("FRAME_SKIP", 4)),
+            do_pixel_resize=bool(cfg.get("PIXEL_RESIZE", True)),
+            pixel_resize_shape=tuple(cfg.get("PIXEL_RESIZE_SHAPE", [84, 84])),
+            grayscale=bool(cfg.get("PIXEL_GRAYSCALE", True)),
+            use_native_downscaling=bool(cfg.get("USE_NATIVE_DOWNSCALING", True)),
+            frame_stack_size=int(cfg.get("FRAME_STACK_SIZE", 4)),
+            frame_skip=int(cfg.get("FRAME_SKIP", 4)),
             max_pooling=True,
             clip_reward=False,
         )
@@ -258,13 +336,14 @@ def run_flat_pqn_greedy_eval(
         game_mods=game_mods,
         config=config,
     )
+    action_dim = env.action_space().n
     network = FlatPQNQNetwork(
-        action_dim=env.action_space().n,
-        hidden_size=int(config.get("HIDDEN_SIZE", 128)),
-        num_layers=int(config.get("NUM_LAYERS", 3)),
-        norm_type=str(config.get("NORM_TYPE", "layer_norm")),
-        norm_input=bool(config.get("NORM_INPUT", False)),
-        object_centric=object_centric,
+        **flat_pqn_network_kwargs(
+            config,
+            params,
+            action_dim=action_dim,
+            object_centric=object_centric,
+        )
     )
 
     run_episode = _make_jitted_flat_pqn_episode_runner(
