@@ -15,6 +15,7 @@ _STARTED: bool = False
 _NUM_SEEDS: int = 1
 _SEED_ACCUM: int = 0
 _LOGICAL_UPDATES: int = 0
+_HOST_UNITS: int = 0
 _STEP_EVERY: int = 1
 
 
@@ -58,9 +59,23 @@ def _experiment_name(config: Dict[str, Any]) -> str:
     return f"{alg}_{env}"
 
 
+def start_rtpt_with_total_units(total_units: int, config: Dict[str, Any]) -> bool:
+    """
+    Start RTPT when progress is counted in explicit host-side units (e.g. eval episodes).
+
+    ``max_iterations`` becomes ``ceil(total_units / RTPT_STEP_EVERY)``.
+    Pair with :func:`rtpt_host_step` once per completed unit.
+    """
+    cfg = dict(config)
+    cfg["TOTAL_TIMESTEPS"] = max(1, int(total_units))
+    cfg["NUM_STEPS"] = 1
+    cfg["NUM_ENVS"] = 1
+    return start_rtpt(cfg)
+
+
 def start_rtpt(config: Dict[str, Any]) -> bool:
     """Create and start RTPT for this run. Safe to call once per process."""
-    global _RTPT, _STARTED, _NUM_SEEDS, _SEED_ACCUM, _LOGICAL_UPDATES, _STEP_EVERY
+    global _RTPT, _STARTED, _NUM_SEEDS, _SEED_ACCUM, _LOGICAL_UPDATES, _HOST_UNITS, _STEP_EVERY
 
     if not is_rtpt_enabled(config):
         return False
@@ -83,6 +98,7 @@ def start_rtpt(config: Dict[str, Any]) -> bool:
     _NUM_SEEDS = max(1, int(config.get("NUM_SEEDS", 1)))
     _SEED_ACCUM = 0
     _LOGICAL_UPDATES = 0
+    _HOST_UNITS = 0
     _RTPT = RTPT(
         name_initials=str(config.get("RTPT_NAME_INITIALS", "PS")),
         experiment_name=_experiment_name(config),
@@ -91,6 +107,18 @@ def start_rtpt(config: Dict[str, Any]) -> bool:
     _RTPT.start()
     _STARTED = True
     return True
+
+
+def rtpt_host_step() -> None:
+    """Advance RTPT after one host-side unit (e.g. a completed eval episode)."""
+    global _RTPT, _HOST_UNITS, _STEP_EVERY
+
+    if _RTPT is None:
+        return
+
+    _HOST_UNITS += 1
+    if _HOST_UNITS % _STEP_EVERY == 0:
+        _RTPT.step()
 
 
 def rtpt_step_callback() -> None:
@@ -112,10 +140,11 @@ def rtpt_step_callback() -> None:
 
 def reset_rtpt() -> None:
     """Clear module state (tests or successive runs in one interpreter)."""
-    global _RTPT, _STARTED, _NUM_SEEDS, _SEED_ACCUM, _LOGICAL_UPDATES, _STEP_EVERY
+    global _RTPT, _STARTED, _NUM_SEEDS, _SEED_ACCUM, _LOGICAL_UPDATES, _HOST_UNITS, _STEP_EVERY
     _RTPT = None
     _STARTED = False
     _NUM_SEEDS = 1
     _SEED_ACCUM = 0
     _LOGICAL_UPDATES = 0
+    _HOST_UNITS = 0
     _STEP_EVERY = 1

@@ -698,6 +698,7 @@ def run_greedy_eval_episodes(
     base_seed: int | None = None,
     max_frames: int | None = None,
     progress: bool = True,
+    on_episode_done=None,
 ) -> dict:
     """
     Greedy hierarchical eval on the fair eval wrapper (no sticky actions, no episodic life).
@@ -786,6 +787,8 @@ def run_greedy_eval_episodes(
                 jax.device_get(run_episode(jax.random.PRNGKey(ep_seed)))
             )
             episode_returns.append(ep_return)
+            if on_episode_done is not None:
+                on_episode_done()
             if progress:
                 print(f"    return={ep_return:.2f}", flush=True)
 
