@@ -15,6 +15,7 @@ Usage (from project root):
 
   python scripts/run_robustness_eval.py --trial   # 1 seed × 2 episodes, subset of mods
   python scripts/run_robustness_eval.py --list-mods
+  python scripts/run_robustness_eval.py --validate-mods   # reset+step every mod (preflight)
 
 RTPT is initialized once with the total episode count (agents × mods × seeds × episodes)
 so nvidia-smi shows a single ETA for the full run.
@@ -28,16 +29,23 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
+import jax
+import jax.numpy as jnp
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from concept_based_learning.baselines.flat_pqn import run_flat_pqn_greedy_eval  # noqa: E402
+from concept_based_learning.baselines.flat_pqn import (  # noqa: E402
+    load_flat_pqn_training_config,
+    make_flat_pqn_eval_env,
+    run_flat_pqn_greedy_eval,
+)
 from concept_based_learning.pqn_visualizer import (  # noqa: E402
     align_config_with_skill_checkpoint,
+    create_eval_env,
     load_base_config,
     load_config_for_checkpoint,
     load_params_from_file,
@@ -182,6 +190,113 @@ def _eval_mod_for_agent(
         )
 
     raise ValueError(f"Unknown agent key: {agent_key}")
+
+
+def _smoke_reset_and_step(env, seed: int) -> None:
+    """One reset + one NOOP step; forces JAX tracing of the full eval wrapper stack."""
+    key = jax.random.PRNGKey(seed)
+    obs, state = env.reset(key)
+    jax.block_until_ready(obs)
+    step_out = env.step(state, jnp.int32(0))
+    if len(step_out) not in (5, 6):
+        raise ValueError(f"Unexpected step() return length: {len(step_out)}")
+    jax.block_until_ready(step_out[0])
+
+
+def validate_robustness_mods(
+    *,
+    experiment: str,
+    mod_specs: tuple[ModSpec, ...],
+    flat_oc: str | None = None,
+    flat_pixel: str | None = None,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """
+    Preflight: reset + one step for every mod on each eval env stack.
+
+    Catches dtype / tracing bugs before a multi-hour robustness run.
+    """
+    stacks: list[tuple[str, Callable[[ModSpec], Any]]] = []
+
+    base_config = load_base_config(experiment=experiment)
+
+    def _hierarchical_env(mod: ModSpec):
+        eval_cfg = copy.deepcopy(base_config)
+        eval_cfg["GAME_MODS"] = list(mod.mods) if mod.mods else None
+        eval_cfg.pop("EVAL_GAME_MODS", None)
+        env, _renderer = create_eval_env(eval_cfg)
+        return env
+
+    stacks.append(("hierarchical", _hierarchical_env))
+
+    if flat_oc is not None:
+        oc_config = load_flat_pqn_training_config(flat_oc)
+
+        def _flat_oc_env(mod: ModSpec):
+            return make_flat_pqn_eval_env(
+                object_centric=True,
+                game_mods=list(mod.mods),
+                config=oc_config,
+            )
+
+        stacks.append(("flat_oc", _flat_oc_env))
+
+    if flat_pixel is not None:
+        pixel_config = load_flat_pqn_training_config(flat_pixel)
+
+        def _flat_pixel_env(mod: ModSpec):
+            return make_flat_pqn_eval_env(
+                object_centric=False,
+                game_mods=list(mod.mods),
+                config=pixel_config,
+            )
+
+        stacks.append(("flat_pixel", _flat_pixel_env))
+
+    passed: list[dict[str, str]] = []
+    failures: list[dict[str, str]] = []
+
+    print(f"Validating {len(mod_specs)} mod(s) × {len(stacks)} stack(s)...\n")
+    for mod in mod_specs:
+        mods_s = ", ".join(mod.mods) if mod.mods else "(base)"
+        for stack_name, make_env in stacks:
+            label = f"{mod.key} / {stack_name}"
+            print(f"  {label} (mods={mods_s})...", flush=True)
+            try:
+                env = make_env(mod)
+                _smoke_reset_and_step(env, seed)
+                passed.append({"mod": mod.key, "stack": stack_name})
+                print("    ok", flush=True)
+            except Exception as exc:
+                failures.append(
+                    {
+                        "mod": mod.key,
+                        "stack": stack_name,
+                        "mods": mods_s,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                print(f"    FAIL: {exc}", flush=True)
+
+    payload = {
+        "experiment": experiment,
+        "mod_suite": [
+            {"key": m.key, "mods": list(m.mods), "category": m.category}
+            for m in mod_specs
+        ],
+        "stacks": [name for name, _ in stacks],
+        "passed": passed,
+        "failures": failures,
+        "all_ok": len(failures) == 0,
+    }
+    print()
+    if failures:
+        print(f"FAILED: {len(failures)} / {len(mod_specs) * len(stacks)} checks")
+        for item in failures:
+            print(f"  - {item['mod']} [{item['stack']}]: {item['error']}")
+    else:
+        print(f"All {len(passed)} checks passed.")
+    return payload
 
 
 def _attach_drop_from_base(results: dict[str, dict[str, Any]]) -> None:
@@ -406,6 +521,11 @@ def main() -> None:
         help="Print mod suite and exit.",
     )
     parser.add_argument(
+        "--validate-mods",
+        action="store_true",
+        help="Preflight: reset+one step for every mod on each eval env stack; exit 1 on failure.",
+    )
+    parser.add_argument(
         "--no-rtpt",
         action="store_true",
         help="Disable RTPT cluster progress (nvidia-smi ETA).",
@@ -437,19 +557,6 @@ def main() -> None:
             print(f"  {mod.key:28s} [{mod.category:8s}]  {mods_s}")
         return
 
-    agent_keys = tuple(args.agents)
-    if not any(
-        [
-            args.hierarchical_skills and "hierarchical" in agent_keys,
-            args.flat_oc and "flat_oc" in agent_keys,
-            args.flat_pixel and "flat_pixel" in agent_keys,
-        ]
-    ):
-        parser.error(
-            "Provide checkpoints for each selected agent "
-            "(--hierarchical-skills, --flat-oc, --flat-pixel)."
-        )
-
     mod_specs = ROBUSTNESS_MODS
     num_episodes = args.num_episodes
     num_seeds = args.num_seeds
@@ -464,6 +571,31 @@ def main() -> None:
         missing = wanted - {m.key for m in mod_specs}
         if missing:
             raise ValueError(f"Unknown mod keys: {sorted(missing)}")
+
+    if args.validate_mods:
+        payload = validate_robustness_mods(
+            experiment=args.experiment,
+            mod_specs=mod_specs,
+            flat_oc=args.flat_oc,
+            flat_pixel=args.flat_pixel,
+            seed=args.seed,
+        )
+        if not payload["all_ok"]:
+            sys.exit(1)
+        return
+
+    agent_keys = tuple(args.agents)
+    if not any(
+        [
+            args.hierarchical_skills and "hierarchical" in agent_keys,
+            args.flat_oc and "flat_oc" in agent_keys,
+            args.flat_pixel and "flat_pixel" in agent_keys,
+        ]
+    ):
+        parser.error(
+            "Provide checkpoints for each selected agent "
+            "(--hierarchical-skills, --flat-oc, --flat-pixel)."
+        )
 
     payload = run_robustness_eval(
         hierarchical_skills=args.hierarchical_skills,
