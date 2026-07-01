@@ -353,9 +353,10 @@ def single_run(config):
             first_train_states = jax.tree_util.tree_map(lambda x: x[0], train_states)
             current_params = first_train_states.params
 
+            # Skill trainer vmaps over skills; timesteps is [num_skills] after seed[0].
             global_step_end_of_phase = _wandb_env_step(
                 phase_config,
-                int(jax.device_get(first_train_states.timesteps)),
+                int(jax.device_get(first_train_states.timesteps[0])),
                 step_offset_updates=int(phase.step_offset_updates),
             )
             if (

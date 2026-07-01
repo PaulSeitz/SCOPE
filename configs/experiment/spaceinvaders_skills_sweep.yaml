@@ -15,7 +15,7 @@ USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: true
 USE_SKILL_EGO_FEATURES: true
 SKILL_EGO_EXTRA_DIM: 4
-EGO_DISTANCE_CLIP_MAX_PX: 80
+EGO_DISTANCE_CLIP_MAX_PX: 50
 
 GAME_MODS: null
 EVAL_GAME_MODS: null
@@ -27,7 +27,7 @@ alg:
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
   MAX_OBJECTS: 41
   EGO_ACTION_DIM: 18
-  HIDDEN_SIZE: 128
+  HIDDEN_SIZE: 256
   NUM_LAYERS: 3
 
   RESTRICT_FIRE_FOR_NON_DESTROY: false
@@ -47,16 +47,16 @@ alg:
   SKILL_GAMMA: 0.99
   LAMBDA: 0.65
   SKILL_LAMBDA: 0.65
-  LR: 0.0001
+  LR: 0.00005
   MAX_GRAD_NORM: 0.8
 
   OFF_POLICY: true
-  RELABEL_ALL_OBJECTS: true
+  RELABEL_ALL_OBJECTS: false
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
   SKILL_QLAMBDA_WATKINS_CUT: false
   # Keep destroy relabel traces across AVOID dodge interrupts (kill while dodging).
-  SKILL_TARGET_CUT: "lifetime"
+  SKILL_TARGET_CUT: "global"
   # Sparse avoid only: no +0.01/frame survival (reduces false credit under relabel-all).
   AVOID_SURVIVAL_BONUS: 0.0
 
