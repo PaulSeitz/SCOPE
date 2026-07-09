@@ -49,6 +49,111 @@ def meta_target_locked_input_enabled(config: Optional[dict]) -> bool:
     return bool(config and config.get("META_TARGET_LOCKED_INPUT", False))
 
 
+def meta_q_stickiness_enabled(config: Optional[dict]) -> bool:
+    return bool(config and config.get("META_Q_STICKINESS_ENABLED", False))
+
+
+def meta_q_stickiness_threshold(config: Optional[dict]) -> float:
+    if not config:
+        return 0.0
+    return float(config.get("META_Q_STICKINESS_THRESHOLD", 0.0))
+
+
+def _current_target_q(
+    meta_q_vals: jnp.ndarray, target_idxs: jnp.ndarray
+) -> jnp.ndarray:
+    safe = jnp.clip(target_idxs, 0, meta_q_vals.shape[-1] - 1)
+    return jnp.take_along_axis(meta_q_vals, safe[:, None], axis=1).squeeze(1)
+
+
+def _last_target_still_targetable(
+    active_masks: jnp.ndarray, target_idxs: jnp.ndarray
+) -> jnp.ndarray:
+    safe = jnp.clip(target_idxs, 0, active_masks.shape[-1] - 1)
+    return jnp.take_along_axis(active_masks, safe[:, None], axis=1).squeeze(1)
+
+
+def apply_meta_q_stickiness(
+    proposed_targets: jnp.ndarray,
+    last_targets: jnp.ndarray,
+    objects: Any,
+    meta_q_vals: jnp.ndarray,
+    active_masks: jnp.ndarray,
+    config: Optional[dict],
+    *,
+    no_target_idx: int,
+    max_objects: int,
+) -> jnp.ndarray:
+    """
+    Learned-meta stickiness: keep ``last_targets`` while its Q-value stays at/above
+    ``META_Q_STICKINESS_THRESHOLD``; otherwise allow ``proposed_targets``.
+
+    Independent from ``META_TARGET_PERSIST_MODE`` and compatible with
+    ``META_SWITCH_PENALTY`` (switches are still penalized once committed).
+    """
+    if not meta_q_stickiness_enabled(config):
+        return proposed_targets
+
+    threshold = jnp.asarray(
+        meta_q_stickiness_threshold(config), dtype=meta_q_vals.dtype
+    )
+    valid_last = is_valid_persist_target(
+        last_targets, config, no_target_idx=no_target_idx, max_objects=max_objects
+    )
+    disappeared = target_disappeared(objects, last_targets)
+    still_targetable = _last_target_still_targetable(active_masks, last_targets)
+    current_q = _current_target_q(meta_q_vals, last_targets)
+
+    keep_sticky = jnp.logical_and(
+        valid_last,
+        jnp.logical_and(
+            jnp.logical_not(disappeared),
+            jnp.logical_and(still_targetable, current_q >= threshold),
+        ),
+    )
+    return jnp.where(keep_sticky, last_targets, proposed_targets).astype(jnp.int32)
+
+
+def commit_meta_targets(
+    proposed_targets: jnp.ndarray,
+    last_targets: jnp.ndarray,
+    objects: Any,
+    meta_q_vals: jnp.ndarray,
+    active_masks: jnp.ndarray,
+    config: Optional[dict],
+    *,
+    no_target_idx: int,
+    max_objects: int,
+    persist_steps_remaining: jnp.ndarray,
+    suspended_mission_idxs: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Apply learned Q stickiness, then optional heuristic persistence."""
+    targets = apply_meta_q_stickiness(
+        proposed_targets,
+        last_targets,
+        objects,
+        meta_q_vals,
+        active_masks,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=max_objects,
+    )
+    if meta_target_persist_enabled(config):
+        return apply_meta_target_persistence(
+            targets,
+            last_targets,
+            objects,
+            meta_q_vals,
+            active_masks,
+            config,
+            no_target_idx=no_target_idx,
+            max_objects=max_objects,
+            persist_steps_remaining=persist_steps_remaining,
+            suspended_mission_idxs=suspended_mission_idxs,
+        )
+    return targets, persist_steps_remaining, suspended_mission_idxs
+
+
 def _object_field_latest(values: jnp.ndarray) -> jnp.ndarray:
     """
     Latest object-frame field per env.
@@ -174,7 +279,7 @@ def compute_meta_target_locked(
         return jnp.zeros_like(last_targets, dtype=jnp.float32)
 
     mode = meta_target_persist_mode(config)
-    if mode is None:
+    if mode is None and not meta_q_stickiness_enabled(config):
         return jnp.zeros_like(last_targets, dtype=jnp.float32)
 
     valid_last = is_valid_persist_target(
@@ -192,7 +297,9 @@ def compute_meta_target_locked(
             max_objects=max_objects,
         )
 
-    if mode == PERSIST_UNTIL_DONE:
+    if mode is None:
+        locked = jnp.zeros_like(last_targets, dtype=bool)
+    elif mode == PERSIST_UNTIL_DONE:
         locked = jnp.logical_and(valid_last, jnp.logical_not(disappeared))
     elif mode == PERSIST_MISSION_AVOID:
         locked = jnp.logical_and(_on_mission(
@@ -209,6 +316,10 @@ def compute_meta_target_locked(
         )
     else:
         locked = jnp.zeros_like(last_targets, dtype=bool)
+
+    if meta_q_stickiness_enabled(config):
+        q_locked = jnp.logical_and(valid_last, jnp.logical_not(disappeared))
+        locked = jnp.logical_or(locked, q_locked)
 
     return locked.astype(jnp.float32)
 

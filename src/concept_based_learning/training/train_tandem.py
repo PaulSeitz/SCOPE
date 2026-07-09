@@ -8,6 +8,7 @@ from concept_based_learning.observations.action_space import fire_ego_action_ind
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork, CustomTrainState
 from concept_based_learning.networks.meta_factory import create_meta_network
+from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.environments.datatypes import TandemTransition
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
@@ -20,8 +21,9 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_idx,
 )
 from concept_based_learning.environments.meta_target_persistence import (
-    apply_meta_target_persistence,
+    commit_meta_targets,
     compute_meta_target_locked,
+    meta_q_stickiness_enabled,
     meta_target_persist_enabled,
 )
 from concept_based_learning.training.schedules import (
@@ -38,6 +40,12 @@ from concept_based_learning.training.trajectory_cuts import (
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
+from concept_based_learning.training.input_debug import (
+    input_debug_enabled,
+    maybe_jax_check_probe_inputs,
+    maybe_jax_check_rollout_transitions,
+    maybe_jax_check_skill_minibatch,
+)
 from concept_based_learning.training.episode_stats import (
     episodic_log_metrics,
     init_full_game_episode_stats,
@@ -97,12 +105,24 @@ def make_tandem_train(
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
+    skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
+    debug_inputs = input_debug_enabled(config)
+    skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
+    skill_pixel_channels = config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))
+    if isinstance(skill_pixel_channels, list):
+        skill_pixel_channels = tuple(skill_pixel_channels)
+    skill_pixel_kernel = config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))
+    if isinstance(skill_pixel_kernel, list):
+        skill_pixel_kernel = tuple(skill_pixel_kernel)
     skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
     skill_target_cut = normalize_skill_target_cut(
         config.get("SKILL_TARGET_CUT", DEFAULT_SKILL_TARGET_CUT)
     )
     use_target_persistence = meta_target_persist_enabled(config)
+    use_q_stickiness = meta_q_stickiness_enabled(config)
+    use_meta_target_overrides = use_target_persistence or use_q_stickiness
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -130,6 +150,11 @@ def make_tandem_train(
         action_dim=ego_action_dim,
         hidden_size=config["HIDDEN_SIZE"],
         num_layers=config["NUM_LAYERS"],
+        input_mode=skill_input_mode,
+        max_objects=max_objects,
+        embed_dim=skill_embed_dim,
+        pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
+        pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
     )
     meta_network = create_meta_network(config)
 
@@ -165,6 +190,30 @@ def make_tandem_train(
             greedy_actions,
         )
 
+    def _skill_inputs(raw_obs, objects, target_idxs):
+        if skill_input_mode == "ego":
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+        if skill_input_mode == "oc_embed":
+            return jax.vmap(flatten_raw_observation)(raw_obs)
+        if skill_input_mode == "pixel_embed":
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+        raise ValueError(
+            f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
+            "Expected one of: ego, oc_embed, pixel_embed."
+        )
+
+    def _skill_input_single(raw_obs, objects, target_idx):
+        if skill_input_mode == "ego":
+            return get_ego_obs(raw_obs, objects, target_idx)
+        if skill_input_mode == "oc_embed":
+            return flatten_raw_observation(raw_obs)
+        if skill_input_mode == "pixel_embed":
+            return get_ego_obs(raw_obs, objects, target_idx)
+        raise ValueError(
+            f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
+            "Expected one of: ego, oc_embed, pixel_embed."
+        )
+
     def preprocess_transition(x, rng_perm):
         num_steps, num_envs = x.shape[:2]
         rest_shape = x.shape[2:]
@@ -189,14 +238,36 @@ def make_tandem_train(
         rng, _rng = jax.random.split(rng)
         probe_obs_batched, _ = vmap_reset(1)(_rng)
         probe_obs = jax.tree_util.tree_map(lambda x: x[0], probe_obs_batched)
-        probe_ego = get_ego_obs(
-            probe_obs.raw_observation,
-            probe_obs.objects,
-            jnp.array(0, dtype=jnp.int32),
+        probe_target = jnp.array(0, dtype=jnp.int32)
+        probe_ego = _skill_inputs(
+            jax.tree_util.tree_map(
+                lambda x: jnp.expand_dims(x, axis=0), probe_obs.raw_observation
+            ),
+            jax.tree_util.tree_map(
+                lambda x: jnp.expand_dims(x, axis=0), probe_obs.objects
+            ),
+            jnp.expand_dims(probe_target, axis=0),
+        )[0]
+        probe_pixel = (
+            probe_obs.pixel_observation
+            if probe_obs.pixel_observation is not None
+            else probe_obs.raw_observation
         )
+        if debug_inputs:
+            maybe_jax_check_probe_inputs(
+                config,
+                probe_ego=probe_ego,
+                probe_pixel=probe_pixel,
+                probe_target=probe_target,
+                meta_pixel=probe_obs.pixel_observation,
+            )
 
         meta_vars = meta_network.init(
-            rng, probe_obs.raw_observation, probe_obs.objects, train=False
+            rng,
+            probe_obs.raw_observation,
+            probe_obs.objects,
+            train=False,
+            pixel_obs=probe_obs.pixel_observation,
         )
         meta_state = CustomTrainState.create(
             apply_fn=meta_network.apply,
@@ -206,7 +277,13 @@ def make_tandem_train(
         )
 
         def create_skill_state(rng_key, init_p):
-            vars = skill_network.init(rng_key, probe_ego, train=False)
+            vars = skill_network.init(
+                rng_key,
+                probe_ego,
+                train=False,
+                target_idx=probe_target,
+                pixel_obs=probe_pixel,
+            )
             return CustomTrainState.create(
                 apply_fn=skill_network.apply,
                 params=vars["params"] if init_p is None else init_p,
@@ -265,15 +342,26 @@ def make_tandem_train(
                     max_objects=max_objects,
                     persist_steps_remaining=persist_steps_remaining,
                 )
+                pixel_inputs = (
+                    last_obs.pixel_observation
+                    if last_obs.pixel_observation is not None
+                    else last_obs.raw_observation
+                )
                 meta_q_vals = jax.vmap(
-                    lambda obs, objs, locked: meta_network.apply(
+                    lambda obs, objs, pix, locked: meta_network.apply(
                         {"params": meta_state.params},
                         obs,
                         objs,
                         train=False,
                         target_locked=locked,
+                        pixel_obs=pix,
                     )
-                )(last_obs.raw_observation, last_obs.objects, meta_target_locked)
+                )(
+                    last_obs.raw_observation,
+                    last_obs.objects,
+                    pixel_inputs,
+                    meta_target_locked,
+                )
                 active_masks = jax.vmap(
                     lambda objs, raw: build_meta_target_mask(
                         objs, raw, config, hook=meta_mask_hook
@@ -316,22 +404,34 @@ def make_tandem_train(
                     lambda x: forced_target_hook(last_obs.raw_observation, x, config, rng_meta),
                     target_obj_idxs,
                 )
-                if use_target_persistence:
+                if use_meta_target_overrides:
+                    def _apply_meta_target_overrides(proposed):
+                        return commit_meta_targets(
+                            proposed,
+                            last_targets,
+                            last_obs.objects,
+                            meta_q_vals,
+                            active_masks,
+                            config,
+                            no_target_idx=no_target_idx,
+                            max_objects=max_objects,
+                            persist_steps_remaining=persist_steps_remaining,
+                            suspended_mission_idxs=suspended_mission_idxs,
+                        )
+
                     (
                         target_obj_idxs,
                         persist_steps_remaining,
                         suspended_mission_idxs,
-                    ) = apply_meta_target_persistence(
+                    ) = jax.lax.cond(
+                        use_heuristic_warmup,
+                        lambda proposed: (
+                            proposed,
+                            persist_steps_remaining,
+                            suspended_mission_idxs,
+                        ),
+                        _apply_meta_target_overrides,
                         target_obj_idxs,
-                        last_targets,
-                        last_obs.objects,
-                        meta_q_vals,
-                        active_masks,
-                        config,
-                        no_target_idx=no_target_idx,
-                        max_objects=max_objects,
-                        persist_steps_remaining=persist_steps_remaining,
-                        suspended_mission_idxs=suspended_mission_idxs,
                     )
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
@@ -341,8 +441,13 @@ def make_tandem_train(
                     last_obs.objects.semantic_label, safe_target_idxs
                 )
                 active_skills = label_to_skill_idx(raw_labels)
-                ego_obses = jax.vmap(get_ego_obs)(
+                ego_obses = _skill_inputs(
                     last_obs.raw_observation, last_obs.objects, safe_target_idxs
+                )
+                pixel_obses = (
+                    last_obs.pixel_observation
+                    if last_obs.pixel_observation is not None
+                    else last_obs.raw_observation
                 )
 
                 def compute_skill_actions(state, skill_idx):
@@ -350,6 +455,8 @@ def make_tandem_train(
                         {"params": state.params, "batch_stats": state.batch_stats},
                         ego_obses,
                         train=False,
+                        target_idx=safe_target_idxs,
+                        pixel_obs=pixel_obses,
                     )
                     eps_skill = jnp.full(
                         config["NUM_ENVS"],
@@ -591,7 +698,7 @@ def make_tandem_train(
                         objs, raw, config, hook=meta_mask_hook
                     )
                 )(next_obs_for_rollout.objects, next_obs_for_rollout.raw_observation)
-                next_ego_obses = jax.vmap(get_ego_obs)(
+                next_ego_obses = _skill_inputs(
                     next_obs_for_rollout.raw_observation,
                     next_obs_for_rollout.objects,
                     safe_target_idxs,
@@ -601,12 +708,12 @@ def make_tandem_train(
                     obj_ids = jnp.arange(max_objects, dtype=jnp.int32)
                     ego_obs_all_full = jax.vmap(
                         lambda raw, objs: jax.vmap(
-                            lambda obj_idx: get_ego_obs(raw, objs, obj_idx)
+                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx)
                         )(obj_ids)
                     )(last_obs.raw_observation, last_obs.objects)
                     next_ego_obs_all_full = jax.vmap(
                         lambda raw, objs: jax.vmap(
-                            lambda obj_idx: get_ego_obs(raw, objs, obj_idx)
+                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx)
                         )(obj_ids)
                     )(next_obs_for_rollout.raw_observation, next_obs_for_rollout.objects)
                     ego_action_all_full = jax.vmap(
@@ -703,8 +810,18 @@ def make_tandem_train(
                     done=new_done,
                     obs=last_obs.raw_observation,
                     objects=last_obs.objects,
+                    pixel_obs=(
+                        last_obs.pixel_observation
+                        if last_obs.pixel_observation is not None
+                        else last_obs.raw_observation
+                    ),
                     next_obs=next_obs_for_rollout.raw_observation,
                     next_objects=next_obs_for_rollout.objects,
+                    next_pixel_obs=(
+                        next_obs_for_rollout.pixel_observation
+                        if next_obs_for_rollout.pixel_observation is not None
+                        else next_obs_for_rollout.raw_observation
+                    ),
                     target_idx=target_obj_idxs,
                     meta_q_val=meta_q_vals,
                     meta_reward=meta_reward,
@@ -774,6 +891,17 @@ def make_tandem_train(
                 None,
                 config["NUM_STEPS"],
             )
+            if debug_inputs:
+                maybe_jax_check_rollout_transitions(
+                    config,
+                    transitions=transitions,
+                    update_idx=meta_state.n_updates,
+                    max_objects=max_objects,
+                    no_target_idx=no_target_idx,
+                    skill_input_mode=skill_input_mode,
+                    meta_input_mode=meta_input_mode,
+                    relabel_all_objects=relabel_all_objects,
+                )
             (
                 last_obs,
                 env_state,
@@ -808,6 +936,9 @@ def make_tandem_train(
             last_next_objects = jax.tree_util.tree_map(
                 lambda x: x[-1], transitions.next_objects
             )
+            last_next_pixels = jax.tree_util.tree_map(
+                lambda x: x[-1], transitions.next_pixel_obs
+            )
             last_meta_target_locked = compute_meta_target_locked(
                 _last_targets,
                 _suspended_mission_idxs,
@@ -818,14 +949,20 @@ def make_tandem_train(
                 persist_steps_remaining=_persist_steps_remaining,
             )
             last_meta_q = jax.vmap(
-                lambda obs, objs, locked: meta_network.apply(
+                lambda obs, objs, pix, locked: meta_network.apply(
                     {"params": meta_state.params},
                     obs,
                     objs,
                     train=False,
                     target_locked=locked,
+                    pixel_obs=pix,
                 )
-            )(last_next_obs, last_next_objects, last_meta_target_locked)
+            )(
+                last_next_obs,
+                last_next_objects,
+                last_next_pixels,
+                last_meta_target_locked,
+            )
             next_active_mask = transitions.next_active_mask[-1]
             next_active_any = jnp.any(next_active_mask, axis=-1)
             masked_last_q = jnp.max(
@@ -876,6 +1013,7 @@ def make_tandem_train(
                 meta_batch = {
                     "obs": transitions.obs,
                     "objects": transitions.objects,
+                    "pixel_obs": transitions.pixel_obs,
                     "target_idx": transitions.target_idx,
                     "active_mask": transitions.active_mask,
                     "meta_target_locked": transitions.meta_target_locked,
@@ -892,14 +1030,20 @@ def make_tandem_train(
 
                     def _loss_fn(params):
                         q_vals = jax.vmap(
-                            lambda obs, objs, locked: meta_network.apply(
+                            lambda obs, objs, pix, locked: meta_network.apply(
                                 {"params": params},
                                 obs,
                                 objs,
                                 train=True,
                                 target_locked=locked,
+                                pixel_obs=pix,
                             )
-                        )(minibatch["obs"], minibatch["objects"], minibatch["meta_target_locked"])
+                        )(
+                            minibatch["obs"],
+                            minibatch["objects"],
+                            minibatch["pixel_obs"],
+                            minibatch["meta_target_locked"],
+                        )
                         chosen_q = jnp.take_along_axis(
                             q_vals,
                             jnp.expand_dims(minibatch["target_idx"], -1),
@@ -942,13 +1086,32 @@ def make_tandem_train(
                     timesteps=s_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
                 use_one_step_td = skill_bootstrap == "one_step"
+                use_pixel_skill = skill_input_mode == "pixel_embed"
 
                 if relabel_all_objects:
                     # Match train_skills: per-object λ targets with per-slot switch cuts.
+                    obj_ids = jnp.arange(
+                        transitions.next_ego_obs_all.shape[2], dtype=jnp.int32
+                    )
+                    target_idx_all = jnp.broadcast_to(
+                        obj_ids[None, None, :],
+                        transitions.next_ego_obs_all.shape[:3],
+                    )
+                    if use_pixel_skill:
+                        next_pixel_obs_all = transitions.next_pixel_obs[:, :, None, ...]
+                        next_pixel_obs_all = jnp.broadcast_to(
+                            next_pixel_obs_all,
+                            transitions.next_ego_obs_all.shape[:3]
+                            + transitions.next_pixel_obs.shape[2:],
+                        )
+                    else:
+                        next_pixel_obs_all = None
                     next_q_all = skill_network.apply(
                         {"params": s_state.params, "batch_stats": s_state.batch_stats},
                         transitions.next_ego_obs_all,
                         train=False,
+                        target_idx=target_idx_all,
+                        pixel_obs=next_pixel_obs_all,
                     )
                     next_q_max_all = jnp.max(next_q_all, axis=-1)  # [T, E, O]
 
@@ -1008,6 +1171,8 @@ def make_tandem_train(
                         {"params": s_state.params, "batch_stats": s_state.batch_stats},
                         transitions.next_ego_obs_all,
                         train=False,
+                        target_idx=transitions.target_idx,
+                        pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                     )
                     next_q_max_single = jnp.max(next_q_single, axis=-1)
                     target_switch_cut_padded = skill_target_switch_cut_env_padded(
@@ -1030,6 +1195,8 @@ def make_tandem_train(
                         {"params": s_state.params, "batch_stats": s_state.batch_stats},
                         transitions.next_ego_obs_all,
                         train=False,
+                        target_idx=transitions.target_idx,
+                        pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                     )
                     next_q_max_single = jnp.max(next_q_single_all, axis=-1)
 
@@ -1087,6 +1254,8 @@ def make_tandem_train(
                         "active_skill": transitions.active_skill,
                         "target_idx": transitions.target_idx,
                     }
+                    if use_pixel_skill:
+                        train_batch["pixel_obs"] = transitions.pixel_obs
                     minibatches = jax.tree.map(
                         lambda x: preprocess_transition(x, rng_perm),
                         train_batch,
@@ -1098,6 +1267,54 @@ def make_tandem_train(
                         minibatch, target = minibatch_and_target
 
                         def _loss_fn(params):
+                            if minibatch["ego_obs_all"].ndim == 3:
+                                n_objects = minibatch["ego_obs_all"].shape[1]
+                                if n_objects == 1:
+                                    mb_target_idx = minibatch["target_idx"]
+                                else:
+                                    obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
+                                    mb_target_idx = jnp.broadcast_to(
+                                        obj_ids_local[None, :],
+                                        minibatch["ego_obs_all"].shape[:2],
+                                    )
+                                if use_pixel_skill:
+                                    if n_objects == 1:
+                                        mb_pixel_obs = minibatch["pixel_obs"]
+                                    else:
+                                        mb_pixel_obs = minibatch["pixel_obs"][:, None, ...]
+                                        mb_pixel_obs = jnp.broadcast_to(
+                                            mb_pixel_obs,
+                                            minibatch["ego_obs_all"].shape[:2]
+                                            + minibatch["pixel_obs"].shape[1:],
+                                        )
+                                else:
+                                    mb_pixel_obs = None
+                            else:
+                                n_objects = minibatch["ego_obs_all"].shape[1]
+                                obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
+                                mb_target_idx = jnp.broadcast_to(
+                                    obj_ids_local[None, :],
+                                    minibatch["ego_obs_all"].shape[:2],
+                                )
+                                if use_pixel_skill:
+                                    mb_pixel_obs = minibatch["pixel_obs"][:, None, ...]
+                                    mb_pixel_obs = jnp.broadcast_to(
+                                        mb_pixel_obs,
+                                        minibatch["ego_obs_all"].shape[:2]
+                                        + minibatch["pixel_obs"].shape[1:],
+                                    )
+                                else:
+                                    mb_pixel_obs = None
+                            if debug_inputs:
+                                maybe_jax_check_skill_minibatch(
+                                    config,
+                                    update_idx=meta_state.n_updates,
+                                    ego_obs=minibatch["ego_obs_all"],
+                                    target_idx=mb_target_idx,
+                                    pixel_obs=mb_pixel_obs,
+                                    use_pixel_skill=use_pixel_skill,
+                                    site="skill/train_minibatch",
+                                )
                             q_vals, updates = skill_network.apply(
                                 {
                                     "params": params,
@@ -1106,6 +1323,8 @@ def make_tandem_train(
                                 minibatch["ego_obs_all"],
                                 train=True,
                                 mutable=["batch_stats"],
+                                target_idx=mb_target_idx,
+                                pixel_obs=mb_pixel_obs,
                             )
                             chosen_q = jnp.take_along_axis(
                                 q_vals,

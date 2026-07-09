@@ -17,6 +17,7 @@ from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import QNetwork, CustomTrainState, Transition
 from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_DECAY,
@@ -32,6 +33,12 @@ from concept_based_learning.training.trajectory_cuts import (
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
+from concept_based_learning.training.input_debug import (
+    input_debug_enabled,
+    maybe_jax_check_probe_inputs,
+    maybe_jax_check_rollout_transitions,
+    maybe_jax_check_skill_minibatch,
+)
 from concept_based_learning.training.episode_stats import (
     episodic_log_metrics,
     init_full_game_episode_stats,
@@ -136,11 +143,26 @@ def make_train(
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
+    skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
+    debug_inputs = input_debug_enabled(config)
+    skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
+    skill_pixel_channels = config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))
+    if isinstance(skill_pixel_channels, list):
+        skill_pixel_channels = tuple(skill_pixel_channels)
+    skill_pixel_kernel = config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))
+    if isinstance(skill_pixel_kernel, list):
+        skill_pixel_kernel = tuple(skill_pixel_kernel)
 
     skill_network = QNetwork(
         action_dim=EGO_ACTION_DIM,
         hidden_size=config["HIDDEN_SIZE"],
         num_layers=config["NUM_LAYERS"],
+        input_mode=skill_input_mode,
+        max_objects=MAX_OBJECTS,
+        embed_dim=skill_embed_dim,
+        pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
+        pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
     )
     use_learned_meta_policy = frozen_meta_params is not None
     if use_learned_meta_policy:
@@ -188,6 +210,30 @@ def make_train(
         )
         return chosen_actions
 
+    def _skill_inputs(raw_obs, objects, target_idxs):
+        if skill_input_mode == "ego":
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+        if skill_input_mode == "oc_embed":
+            return jax.vmap(flatten_raw_observation)(raw_obs)
+        if skill_input_mode == "pixel_embed":
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+        raise ValueError(
+            f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
+            "Expected one of: ego, oc_embed, pixel_embed."
+        )
+
+    def _skill_input_single(raw_obs, objects, target_idx):
+        if skill_input_mode == "ego":
+            return get_ego_obs(raw_obs, objects, target_idx)
+        if skill_input_mode == "oc_embed":
+            return flatten_raw_observation(raw_obs)
+        if skill_input_mode == "pixel_embed":
+            return get_ego_obs(raw_obs, objects, target_idx)
+        raise ValueError(
+            f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
+            "Expected one of: ego, oc_embed, pixel_embed."
+        )
+
     def train(rng, params, batch_stats):
         eps_scheduler = optax.linear_schedule(
             float(config.get("EPS_START", DEFAULT_SKILL_EPS_START)),
@@ -213,7 +259,13 @@ def make_train(
         def create_agent(rng_key, network, obs_len, init_params=None):
             if init_params is None:
                 init_x = jnp.zeros(obs_len)
-                network_variables = network.init(rng_key, init_x, train=False)
+                network_variables = network.init(
+                    rng_key,
+                    init_x,
+                    train=False,
+                    target_idx=probe_target,
+                    pixel_obs=probe_pixel,
+                )
                 params_local = network_variables["params"]
                 batch_stats_local = network_variables.get("batch_stats", {})
             else:
@@ -232,9 +284,29 @@ def make_train(
         rng_probe, rng = jax.random.split(rng)
         probe_obs_batched, _ = vmap_reset(1)(rng_probe)
         probe_obs = jax.tree_util.tree_map(lambda x: x[0], probe_obs_batched)
-        probe_ego = get_ego_obs(
-            probe_obs.raw_observation, probe_obs.objects, jnp.array(0, dtype=jnp.int32)
+        probe_target = jnp.array(0, dtype=jnp.int32)
+        probe_ego = _skill_inputs(
+            jax.tree_util.tree_map(
+                lambda x: jnp.expand_dims(x, axis=0), probe_obs.raw_observation
+            ),
+            jax.tree_util.tree_map(
+                lambda x: jnp.expand_dims(x, axis=0), probe_obs.objects
+            ),
+            jnp.expand_dims(probe_target, axis=0),
+        )[0]
+        probe_pixel = (
+            probe_obs.pixel_observation
+            if probe_obs.pixel_observation is not None
+            else probe_obs.raw_observation
         )
+        if debug_inputs:
+            maybe_jax_check_probe_inputs(
+                config,
+                probe_ego=probe_ego,
+                probe_pixel=probe_pixel,
+                probe_target=probe_target,
+                meta_pixel=probe_obs.pixel_observation,
+            )
         ego_feat_dim = int(probe_ego.shape[-1])
 
         if params is None:
@@ -357,8 +429,13 @@ def make_train(
                 )(last_obs.objects.semantic_label, safe_target_idxs)
                 active_skills = label_to_skill_idx(raw_labels)
 
-                ego_obses = jax.vmap(get_ego_obs)(
+                ego_obses = _skill_inputs(
                     last_obs.raw_observation, last_obs.objects, safe_target_idxs
+                )
+                pixel_obses = (
+                    last_obs.pixel_observation
+                    if last_obs.pixel_observation is not None
+                    else last_obs.raw_observation
                 )
 
                 def compute_skill_actions(train_state, skill_idx):
@@ -366,6 +443,8 @@ def make_train(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
                         ego_obses,
                         train=False,
+                        target_idx=safe_target_idxs,
+                        pixel_obs=pixel_obses,
                     )
                     _rngs = jax.random.split(rng_skill, config["NUM_ENVS"])
                     eps = jnp.full(config["NUM_ENVS"], eps_scheduler(train_state.n_updates))
@@ -487,7 +566,7 @@ def make_train(
                     + (1.0 - skill_reward_lambda) * skill_rewards
                 )
 
-                next_ego_obses = jax.vmap(get_ego_obs)(
+                next_ego_obses = _skill_inputs(
                     new_obs.raw_observation, new_obs.objects, safe_target_idxs
                 )
 
@@ -495,12 +574,12 @@ def make_train(
                     obj_ids = jnp.arange(MAX_OBJECTS, dtype=jnp.int32)
                     ego_obs_all_full = jax.vmap(
                         lambda raw, objs: jax.vmap(
-                            lambda obj_idx: get_ego_obs(raw, objs, obj_idx)
+                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx)
                         )(obj_ids)
                     )(last_obs.raw_observation, last_obs.objects)
                     next_ego_obs_all_full = jax.vmap(
                         lambda raw, objs: jax.vmap(
-                            lambda obj_idx: get_ego_obs(raw, objs, obj_idx)
+                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx)
                         )(obj_ids)
                     )(new_obs.raw_observation, new_obs.objects)
                     ego_action_all_full = jax.vmap(
@@ -622,6 +701,16 @@ def make_train(
                     target_idx=target_obj_idxs,
                     ego_obs=ego_obses,
                     next_ego_obs=next_ego_obses,
+                    pixel_obs=(
+                        last_obs.pixel_observation
+                        if last_obs.pixel_observation is not None
+                        else last_obs.raw_observation
+                    ),
+                    next_pixel_obs=(
+                        new_obs.pixel_observation
+                        if new_obs.pixel_observation is not None
+                        else new_obs.raw_observation
+                    ),
                     ego_action=chosen_ego_actions,
                     active_skill=active_skills,
                     q_val=all_skill_q_vals,
@@ -686,6 +775,17 @@ def make_train(
                 None,
                 config["NUM_STEPS"],
             )
+            if debug_inputs:
+                maybe_jax_check_rollout_transitions(
+                    config,
+                    transitions=transitions,
+                    update_idx=train_states.n_updates[0],
+                    max_objects=MAX_OBJECTS,
+                    no_target_idx=no_target_idx,
+                    skill_input_mode=skill_input_mode,
+                    meta_input_mode=meta_input_mode,
+                    relabel_all_objects=relabel_all_objects,
+                )
             (
                 last_obs,
                 env_state,
@@ -709,15 +809,34 @@ def make_train(
                     timesteps=train_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
                 use_one_step_td = skill_bootstrap == "one_step"
+                use_pixel_skill = skill_input_mode == "pixel_embed"
 
                 if relabel_all_objects:
                     # Lambda returns over [NUM_STEPS, NUM_ENVS, MAX_OBJECTS].
                     # Bootstrap Q-values come from the online network applied to
                     # next_ego_obs_all (all steps, all objects at once).
+                    obj_ids = jnp.arange(
+                        transitions.next_ego_obs_all.shape[2], dtype=jnp.int32
+                    )
+                    target_idx_all = jnp.broadcast_to(
+                        obj_ids[None, None, :],
+                        transitions.next_ego_obs_all.shape[:3],
+                    )
+                    if use_pixel_skill:
+                        next_pixel_obs_all = transitions.next_pixel_obs[:, :, None, ...]
+                        next_pixel_obs_all = jnp.broadcast_to(
+                            next_pixel_obs_all,
+                            transitions.next_ego_obs_all.shape[:3]
+                            + transitions.next_pixel_obs.shape[2:],
+                        )
+                    else:
+                        next_pixel_obs_all = None
                     next_q_all = skill_network.apply(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
                         transitions.next_ego_obs_all,
                         train=False,
+                        target_idx=target_idx_all,
+                        pixel_obs=next_pixel_obs_all,
                     )
                     # [NUM_STEPS, NUM_ENVS, MAX_OBJECTS]
                     next_q_max_all = jnp.max(next_q_all, axis=-1)
@@ -776,6 +895,8 @@ def make_train(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
                         transitions.next_ego_obs,
                         train=False,
+                        target_idx=transitions.target_idx,
+                        pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                     )
                     next_q_max_single = jnp.max(next_q_single, axis=-1)
                     target_switch_cut_padded = skill_target_switch_cut_env_padded(
@@ -799,6 +920,8 @@ def make_train(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
                         transitions.next_ego_obs,
                         train=False,
+                        target_idx=transitions.target_idx,
+                        pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                     )
                     next_q_max_single = jnp.max(next_q_single_all, axis=-1)  # [T, E]
 
@@ -849,11 +972,61 @@ def make_train(
                         minibatch, target = minibatch_and_target
 
                         def _loss_fn(params):
+                            if minibatch["ego_obs_all"].ndim == 3:
+                                n_objects = minibatch["ego_obs_all"].shape[1]
+                                if n_objects == 1:
+                                    mb_target_idx = minibatch["target_idx"]
+                                else:
+                                    obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
+                                    mb_target_idx = jnp.broadcast_to(
+                                        obj_ids_local[None, :],
+                                        minibatch["ego_obs_all"].shape[:2],
+                                    )
+                                if use_pixel_skill:
+                                    if n_objects == 1:
+                                        mb_pixel_obs = minibatch["pixel_obs"]
+                                    else:
+                                        mb_pixel_obs = minibatch["pixel_obs"][:, None, ...]
+                                        mb_pixel_obs = jnp.broadcast_to(
+                                            mb_pixel_obs,
+                                            minibatch["ego_obs_all"].shape[:2]
+                                            + minibatch["pixel_obs"].shape[1:],
+                                        )
+                                else:
+                                    mb_pixel_obs = None
+                            else:
+                                n_objects = minibatch["ego_obs_all"].shape[1]
+                                obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
+                                mb_target_idx = jnp.broadcast_to(
+                                    obj_ids_local[None, :],
+                                    minibatch["ego_obs_all"].shape[:2],
+                                )
+                                if use_pixel_skill:
+                                    mb_pixel_obs = minibatch["pixel_obs"][:, None, ...]
+                                    mb_pixel_obs = jnp.broadcast_to(
+                                        mb_pixel_obs,
+                                        minibatch["ego_obs_all"].shape[:2]
+                                        + minibatch["pixel_obs"].shape[1:],
+                                    )
+                                else:
+                                    mb_pixel_obs = None
+                            if debug_inputs:
+                                maybe_jax_check_skill_minibatch(
+                                    config,
+                                    update_idx=train_state.n_updates,
+                                    ego_obs=minibatch["ego_obs_all"],
+                                    target_idx=mb_target_idx,
+                                    pixel_obs=mb_pixel_obs,
+                                    use_pixel_skill=use_pixel_skill,
+                                    site="skill/train_minibatch",
+                                )
                             q_vals, updates = skill_network.apply(
                                 {"params": params, "batch_stats": train_state.batch_stats},
                                 minibatch["ego_obs_all"],
                                 train=True,
                                 mutable=["batch_stats"],
+                                target_idx=mb_target_idx,
+                                pixel_obs=mb_pixel_obs,
                             )
                             chosen_action_qvals = jnp.take_along_axis(
                                 q_vals,
@@ -919,6 +1092,8 @@ def make_train(
                         "active_skill": transitions.active_skill,
                         "target_idx": transitions.target_idx,
                     }
+                    if use_pixel_skill:
+                        train_batch["pixel_obs"] = transitions.pixel_obs
                     minibatches = jax.tree.map(
                         lambda x: preprocess_transition(x, _rng), train_batch
                     )
@@ -1148,6 +1323,10 @@ def make_train(
                         {"params": ts.params, "batch_stats": ts.batch_stats},
                         ego_obs_batch,
                         train=False,
+                        target_idx=jnp.array(target_obj_idxs, dtype=jnp.int32),
+                        pixel_obs=obs.pixel_observation
+                        if obs.pixel_observation is not None
+                        else obs.raw_observation,
                     )
                 )(train_states)
                 q_vals = jnp.squeeze(q_vals, axis=1)

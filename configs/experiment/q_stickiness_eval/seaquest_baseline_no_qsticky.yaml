@@ -1,0 +1,87 @@
+# q_stickiness_eval/seaquest_baseline_no_qsticky.yaml
+# Requires phase1 skills at alg.INIT_MODEL_PATH.
+ALG_NAME: hierarchical_pqn
+ENV_NAME: seaquest
+TRAIN_MODE: tandem
+META_ARCHITECTURE: per_object_mlp
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+EGO_DISTANCE_CLIP_MAX_PX: 20
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SAVE_PATH: ./outputs/models/q_stickiness_eval/baseline_no_qsticky
+WANDB_RUN_NAME: sq_qstk_baseline
+WANDB_TAGS:
+- suite:q_stickiness_eval
+- phase:2
+- env:seaquest
+- train_mode:tandem
+- q_sticky:off
+- switch_penalty:off
+- variant:baseline
+META_INPUT_MODE: flat
+SKILL_INPUT_MODE: ego
+META_Q_STICKINESS_ENABLED: false
+META_SWITCH_PENALTY: 0.0
+alg:
+  NUM_SKILLS: 3
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  MAX_OBJECTS: 35
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  META_HIDDEN_SIZE: 256
+  META_PER_OBJECT_NUM_LAYERS: 3
+  META_FLAT_NUM_LAYERS: 3
+  META_EMBED_DIM: 256
+  SKILL_EMBED_DIM: 256
+  META_LR: 0.0005
+  SKILL_LR: 1.0e-05
+  META_USE_NOOP_TARGET: true
+  META_NOOP_TARGET_IDX: 0
+  META_SWITCH_PENALTY: 0.0
+  META_DEATH_PENALTY: -10.0
+  META_REWARD_LAMBDA: 1.0
+  SKILL_REWARD_LAMBDA: 0.0
+  META_Q_STICKINESS_ENABLED: false
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
+  FIRST_FIRE: true
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: true
+  FRAME_STACK_SIZE: 4
+  TOTAL_TIMESTEPS: 30000000
+  NUM_ENVS: 512
+  NUM_STEPS: 64
+  NUM_EPOCHS: 3
+  NUM_MINIBATCHES: 32
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 1.0e-05
+  MAX_GRAD_NORM: 0.8
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: true
+  SKILL_BOOTSTRAP: q_lambda
+  SKILL_QLAMBDA_WATKINS_CUT: false
+  EPS_START: 0.3
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.5
+  META_EPS_START: 0.1
+  META_NUM_EPOCHS: 3
+  SKILL_WARMUP_UPDATES: 200
+  META_LEARN_DURING_WARMUP: false
+  HEURISTIC_MODE: env_specific
+  SKILL_EPS_START: 0.0
+  SKILL_EPS_FINISH: 0.0
+  SKILL_EPS_DECAY: 0.5
+  INIT_MODEL_PATH: ./outputs/models/q_stickiness_eval/phase1_skills/seaquest/hierarchical_pqn_seaquest_seed44_skills.safetensors
+  META_INPUT_MODE: flat
+  SKILL_INPUT_MODE: ego

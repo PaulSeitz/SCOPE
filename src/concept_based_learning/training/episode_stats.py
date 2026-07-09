@@ -5,6 +5,22 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
+def _unwrap_env_state(wrapper_state):
+    """Recursively unwrap nested wrapper states to an object exposing env_state."""
+    cur = wrapper_state
+    for _ in range(8):
+        if hasattr(cur, "env_state"):
+            return cur.env_state
+        if hasattr(cur, "atari_state"):
+            cur = cur.atari_state
+            continue
+        break
+    raise AttributeError(
+        "Could not unwrap env_state from semantic wrapper state; "
+        f"received type {type(wrapper_state)!r}."
+    )
+
+
 def init_per_env_episode_stats(num_envs: int):
     """Return (returned_episode_returns, returned_episode_lengths, episode_lengths)."""
     zeros_f = jnp.zeros((num_envs,), dtype=jnp.float32)
@@ -21,7 +37,7 @@ def init_full_game_episode_stats(num_envs: int):
 
 def remaining_lives_from_semantic_state(state):
     """Remaining lives after a step (1 when the env has no life counter)."""
-    env_state = state.atari_state.env_state
+    env_state = _unwrap_env_state(state.atari_state)
     if hasattr(env_state, "lives"):
         lives = env_state.lives
     elif hasattr(env_state, "player_lives"):

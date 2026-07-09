@@ -35,6 +35,7 @@ from concept_based_learning.environments.choppercommand.choppercommand_policy im
     debug_heuristic_snapshot,
 )
 from concept_based_learning.networks.meta_factory import create_meta_network
+from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
     is_meta_fire_target,
@@ -46,8 +47,9 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_idx,
 )
 from concept_based_learning.environments.meta_target_persistence import (
-    apply_meta_target_persistence,
+    commit_meta_targets,
     compute_meta_target_locked,
+    meta_q_stickiness_enabled,
     meta_target_persist_enabled,
 )
 from concept_based_learning.networks.skill_network import QNetwork
@@ -351,6 +353,19 @@ def label_to_skill_idx(label, num_skills: int):
     return jnp.clip(label - 1, 0, num_skills - 1)
 
 
+def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode == "ego":
+        return get_ego_obs(raw_obs, objects, target_idx)
+    if mode == "oc_embed":
+        return flatten_raw_observation(raw_obs)
+    if mode == "pixel_embed":
+        return get_ego_obs(raw_obs, objects, target_idx)
+    raise ValueError(
+        f"Unknown SKILL_INPUT_MODE={mode!r}. Expected one of: ego, oc_embed, pixel_embed."
+    )
+
+
 def _propose_meta_target(
     obs,
     config,
@@ -391,6 +406,7 @@ def _propose_meta_target(
         obs.objects,
         train=False,
         target_locked=target_locked,
+        pixel_obs=obs.pixel_observation,
     )
     active_mask = build_meta_target_mask(
         obs.objects,
@@ -446,7 +462,7 @@ def _select_target_with_meta(
         suspended_mission_idx=suspended_mission_idx,
         persist_steps_remaining=persist_steps_remaining,
     )
-    if not meta_target_persist_enabled(config):
+    if not (meta_target_persist_enabled(config) or meta_q_stickiness_enabled(config)):
         return proposed, persist_steps_remaining, suspended_mission_idx
 
     last_b = jnp.asarray([last_target_idx], dtype=jnp.int32)
@@ -456,7 +472,7 @@ def _select_target_with_meta(
     steps_b = jnp.asarray([persist_steps_remaining], dtype=jnp.int32)
     suspended_b = jnp.asarray([suspended_mission_idx], dtype=jnp.int32)
 
-    committed, new_steps, new_suspended = apply_meta_target_persistence(
+    committed, new_steps, new_suspended = commit_meta_targets(
         proposed_b,
         last_b,
         obs.objects,
@@ -564,11 +580,20 @@ def _make_jitted_greedy_episode_runner(
         safe_target = jnp.where(target == no_target, 0, target)
         raw_label = obs.objects.semantic_label[-1, safe_target]
         sk_idx = label_to_skill_idx(raw_label, num_skills)
-        ego_obs = get_ego_obs(obs.raw_observation, obs.objects, safe_target)
+        ego_obs = _skill_input_from_obs(config, obs.raw_observation, obs.objects, safe_target)
+        pixel_obs = (
+            obs.pixel_observation
+            if obs.pixel_observation is not None
+            else obs.raw_observation
+        )
 
         def apply_one(params_for_skill):
             return skill_network.apply(
-                {"params": params_for_skill}, ego_obs, train=False
+                {"params": params_for_skill},
+                ego_obs,
+                train=False,
+                target_idx=safe_target,
+                pixel_obs=pixel_obs,
             )
 
         q_all = jax.vmap(apply_one)(skill_params)
@@ -730,6 +755,11 @@ def run_greedy_eval_episodes(
         action_dim=ego_action_dim,
         hidden_size=hidden_size,
         num_layers=num_layers,
+        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
+        max_objects=int(config.get("MAX_OBJECTS", 35)),
+        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
+        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
+        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
     )
     meta_network = create_meta_network(config) if meta_params is not None else None
 
@@ -856,6 +886,11 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         action_dim=ego_action_dim,
         hidden_size=hidden_size,
         num_layers=num_layers,
+        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
+        max_objects=int(config.get("MAX_OBJECTS", 35)),
+        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
+        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
+        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -972,12 +1007,18 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
 
             # Egocentric observation relative to the target
-            ego_obs = get_ego_obs(
+            ego_obs = _skill_input_from_obs(
+                config,
                 obs.raw_observation,
                 obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
+            pixel_obs = (
+                obs.pixel_observation
+                if obs.pixel_observation is not None
+                else obs.raw_observation
+            )
 
             # Extract the most recent frame's distance and angle from the ego features.
             # See `get_ego_obs` / `EGO_OBS_CHANNELS_PER_FRAME` for the per-frame layout.
@@ -1022,6 +1063,8 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                     {"params": params_for_skill},
                     ego_obs_batch,
                     train=False,
+                    target_idx=jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                    pixel_obs=jnp.expand_dims(pixel_obs, 0),
                 )
 
             q_vals = jax.vmap(apply_one)(params_tree)  # [num_skills, 1, ego_action_dim]
@@ -1150,6 +1193,11 @@ def run_live_visualization(
         action_dim=ego_action_dim,
         hidden_size=hidden_size,
         num_layers=num_layers,
+        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
+        max_objects=int(config.get("MAX_OBJECTS", 35)),
+        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
+        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
+        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -1292,12 +1340,18 @@ def run_live_visualization(
             raw_label = obs.objects.semantic_label[-1, target_obj_idx]
             active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
 
-            ego_obs = get_ego_obs(
+            ego_obs = _skill_input_from_obs(
+                config,
                 obs.raw_observation,
                 obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
+            pixel_obs = (
+                obs.pixel_observation
+                if obs.pixel_observation is not None
+                else obs.raw_observation
+            )
 
             channels_per_frame = ego_obs_channels_per_frame()
             last_frame_ego = ego_obs[-channels_per_frame:]
@@ -1339,6 +1393,8 @@ def run_live_visualization(
                     {"params": params_for_skill},
                     ego_obs_batch,
                     train=False,
+                    target_idx=jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                    pixel_obs=jnp.expand_dims(pixel_obs, 0),
                 )
 
             q_vals = jax.vmap(apply_one)(params_tree)

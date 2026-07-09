@@ -6,6 +6,10 @@ import jax.numpy as jnp
 from jaxatari import make as make_atari_env
 from jaxatari.core import MOD_MODULES as JAXATARI_MOD_MODULES
 from jaxatari.wrappers import AtariWrapper
+try:
+    from jaxatari.wrappers import PixelAndObjectObsWrapper
+except ImportError:  # pragma: no cover - compatibility with older jaxatari forks
+    PixelAndObjectObsWrapper = None
 from jaxatari.games.jax_seaquest import SeaquestRenderer
 from jaxatari.games.jax_choppercommand import ChopperCommandRenderer
 from jaxatari.games.jax_spaceinvaders import SpaceInvadersRenderer
@@ -197,9 +201,25 @@ def _lives_from_env_state(env_state: Any) -> jnp.ndarray:
     )
 
 
+def _unwrap_atari_env_state(wrapper_state: Any) -> Any:
+    """Recursively unwrap nested wrapper states until an env_state object is reached."""
+    cur = wrapper_state
+    for _ in range(8):
+        if hasattr(cur, "env_state"):
+            return cur.env_state
+        if hasattr(cur, "atari_state"):
+            cur = cur.atari_state
+            continue
+        break
+    raise AttributeError(
+        "Could not unwrap env_state from wrapper state; "
+        f"received type {type(wrapper_state)!r}."
+    )
+
+
 def _default_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
-    prev_es = prev_env_state.atari_state.env_state
-    next_es = next_env_state.atari_state.env_state
+    prev_es = _unwrap_atari_env_state(prev_env_state)
+    next_es = _unwrap_atari_env_state(next_env_state)
     prev_lives = _lives_from_env_state(prev_es)
     next_lives = _lives_from_env_state(next_es)
     return (prev_lives - next_lives).astype(jnp.int32)
@@ -210,23 +230,23 @@ def _freeway_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.
     Freeway has no lives; treat the start of a collision cooldown as a 'life lost'
     event so the AVOID skill receives the appropriate failure signal.
     """
-    prev_es = prev_env_state.atari_state.env_state
-    next_es = next_env_state.atari_state.env_state
+    prev_es = _unwrap_atari_env_state(prev_env_state)
+    next_es = _unwrap_atari_env_state(next_env_state)
     collision = jnp.logical_and(prev_es.cooldown == 0, next_es.cooldown > 0)
     return collision.astype(jnp.int32)
 
 
 def _pong_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
     """Pong has no lives; enemy scoring a point is the 'life lost' signal."""
-    prev_es = prev_env_state.atari_state.env_state
-    next_es = next_env_state.atari_state.env_state
+    prev_es = _unwrap_atari_env_state(prev_env_state)
+    next_es = _unwrap_atari_env_state(next_env_state)
     return (next_es.enemy_score - prev_es.enemy_score).astype(jnp.int32)
 
 
 def _tennis_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
     """Tennis has no lives; enemy scoring a point is the 'life lost' signal."""
-    prev_es = prev_env_state.atari_state.env_state
-    next_es = next_env_state.atari_state.env_state
+    prev_es = _unwrap_atari_env_state(prev_env_state)
+    next_es = _unwrap_atari_env_state(next_env_state)
     prev_pts = prev_es.game_state.enemy_score
     next_pts = next_es.game_state.enemy_score
     return (next_pts - prev_pts).astype(jnp.int32)
@@ -234,8 +254,8 @@ def _tennis_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.n
 
 def _skiing_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
     """Skiing has no lives; treat start of collision cooldown as a 'life lost' event."""
-    prev_es = prev_env_state.atari_state.env_state
-    next_es = next_env_state.atari_state.env_state
+    prev_es = _unwrap_atari_env_state(prev_env_state)
+    next_es = _unwrap_atari_env_state(next_env_state)
     collision = jnp.logical_and(prev_es.collision_cooldown == 0, next_es.collision_cooldown > 0)
     return collision.astype(jnp.int32)
 
@@ -638,6 +658,8 @@ class EnvManager:
         frame_stack_size = int(config.get("FRAME_STACK_SIZE", 4))
         frame_skip = int(config.get("FRAME_SKIP", 4))
         clip_reward = bool(config.get("CLIP_REWARD", False))
+        meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
+        skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
 
         jax_id = components.jax_game_id
         if game_mods:
@@ -676,6 +698,31 @@ class EnvManager:
             wrapper_kwargs["sticky_actions"] = False
             wrapper_kwargs["episodic_life"] = False
             env = AtariWrapper(env, **wrapper_kwargs)
+
+        # Pixel-based meta encoders need both observation modalities from Jaxtari.
+        if (meta_input_mode == "pixel_embed") or (skill_input_mode == "pixel_embed"):
+            if PixelAndObjectObsWrapper is None:
+                raise ImportError(
+                    "META_INPUT_MODE='pixel_embed' requires PixelAndObjectObsWrapper "
+                    "from jaxtari/jaxatari.wrappers, but it is unavailable in this install."
+                )
+            resize_shape = config.get("META_PIXEL_RESIZE_SHAPE", (84, 84))
+            if isinstance(resize_shape, list):
+                resize_shape = tuple(resize_shape)
+            env = PixelAndObjectObsWrapper(
+                env,
+                do_pixel_resize=bool(config.get("META_PIXEL_DO_RESIZE", False)),
+                pixel_resize_shape=tuple(resize_shape),
+                grayscale=bool(config.get("META_PIXEL_GRAYSCALE", False)),
+                use_native_downscaling=bool(
+                    config.get("META_PIXEL_USE_NATIVE_DOWNSCALING", False)
+                ),
+                smooth_image=bool(config.get("META_PIXEL_SMOOTH_IMAGE", False)),
+                frame_stack_size=frame_stack_size,
+                frame_skip=frame_skip,
+                max_pooling=bool(config.get("META_PIXEL_MAX_POOLING", True)),
+                clip_reward=clip_reward,
+            )
 
         # Compatibility hints used by semantic wrappers when frame-stack handling
         # moved out of AtariWrapper in newer jaxatari versions.

@@ -118,16 +118,22 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         """
         Applies the extraction across the frame stack using vmap.
         """
+        pixel_stack = None
+        raw_stack = obs_stack
+        if isinstance(obs_stack, tuple) and len(obs_stack) == 2:
+            pixel_stack, raw_stack = obs_stack
+
         # We vmap over the first axis (the frame stack)
-        objects_stack = jax.vmap(self._extract_frame_objects)(obs_stack)
+        objects_stack = jax.vmap(self._extract_frame_objects)(raw_stack)
         prepend = lambda objs: prepend_meta_reserved_slots(
             objs, num_reserved=self.meta_reserved_slots
         )
         objects_stack = jax.vmap(prepend)(objects_stack)
 
         return SemanticObservation(
-            raw_observation=obs_stack,  # Pass through the raw stacked observation
+            raw_observation=raw_stack,  # Pass through the stacked object-centric observation
             objects=objects_stack,
+            pixel_observation=pixel_stack,
         )
 
     def _substep_env_state_events(self, prev_env_state, next_env_state):
@@ -171,6 +177,24 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             done = jnp.logical_or(terminated, truncated)
             return obs, new_state, reward, done, info
         raise ValueError(f"Unexpected step() return length: {len(step_out)}")
+
+    def _unwrap_env_state(self, wrapper_state: Any):
+        """
+        Recursively unwrap nested wrapper state containers until we reach an env_state.
+        Works for AtariState and compound states like PixelAndObjectCentricState.
+        """
+        cur = wrapper_state
+        for _ in range(8):  # defensive cap against accidental cycles
+            if hasattr(cur, "env_state"):
+                return cur.env_state
+            if hasattr(cur, "atari_state"):
+                cur = cur.atari_state
+                continue
+            break
+        raise AttributeError(
+            "Could not unwrap env_state from wrapper state; "
+            f"received type {type(wrapper_state)!r}."
+        )
 
     @functools.partial(jax.jit, static_argnums=(0,))
     def reset(self, key: chex.PRNGKey) -> Tuple[SemanticObservation, SemanticState]:
@@ -229,15 +253,15 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             new_atari_state = atari_state
             new_state = SemanticState(atari_state=new_atari_state, obs_stack=obs_stack)
         else:
-            prev_env_state = state.atari_state.env_state
+            prev_env_state = self._unwrap_env_state(state.atari_state)
             obs_stack, new_atari_state, reward, done, info = self._step_env_compat(
                 state.atari_state, action
             )
             accumulated_events = self._substep_env_state_events(
-                prev_env_state, new_atari_state.env_state
+                prev_env_state, self._unwrap_env_state(new_atari_state)
             )
             accumulated_collect_events = self._substep_collect_events(
-                prev_env_state, new_atari_state.env_state
+                prev_env_state, self._unwrap_env_state(new_atari_state)
             )
             new_state = SemanticState(atari_state=new_atari_state)
 

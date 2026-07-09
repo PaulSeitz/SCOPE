@@ -86,6 +86,9 @@ class ConceptObservation:
     # shape: [stack_size, max_objects]
     objects: LabeledObjectObservation
 
+    # Optional stacked pixel observations used by pixel-based meta encoders.
+    pixel_observation: Any = None
+
 
 @struct.dataclass
 class SemanticState:
@@ -105,11 +108,13 @@ class MetaTransition:
 
     obs: Any
     objects: Any
+    pixel_obs: Any
     action: chex.Array
     reward: chex.Array
     done: chex.Array
     next_obs: Any
     next_objects: Any
+    next_pixel_obs: Any
     q_val: chex.Array
     active_mask: chex.Array
     next_active_mask: chex.Array
@@ -125,8 +130,10 @@ class TandemTransition:
     # Meta-policy (System 2)
     obs: Any
     objects: Any
+    pixel_obs: Any
     next_obs: Any
     next_objects: Any
+    next_pixel_obs: Any
     target_idx: chex.Array
     meta_q_val: chex.Array
     meta_reward: chex.Array

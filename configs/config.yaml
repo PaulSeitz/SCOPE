@@ -8,6 +8,8 @@ defaults:
 ENTITY: "paul-seitz-tu-darmstadt"                  # Set to your wandb username or team name if applicable
 PROJECT: "concept_based_learning"
 WANDB_MODE: "online"          # Use "disabled" to turn off wandb logging during debugging
+WANDB_RUN_NAME: null          # Override per experiment yaml (e.g. ablation suites)
+WANDB_TAGS: []                # Extra tags merged in main.py wandb.init (see experiment configs)
 
 # --- RTPT cluster progress (nvidia-smi / ETA; like tqdm) ---
 RTPT_ENABLED: true
@@ -50,6 +52,37 @@ META_POINTER_NUM_LAYERS: 3      # pointer only
 # META_AVOID_RESUME_MISSION: false  # after AVOID interrupt, resume suspended COLLECT/DESTROY when best_avoid_q <= suspended_q + margin
 # META_AVOID_INTERRUPT_MARGIN: 0.0
 # META_TARGET_LOCKED_INPUT: false   # append 0/1 flag to meta input when persistence may override selection
+# META_Q_STICKINESS_ENABLED: false  # keep current target while Q(current) >= threshold
+# META_Q_STICKINESS_THRESHOLD: 0.0  # release stickiness when Q(current target) drops below this
+META_Q_STICKINESS_ENABLED: false
+META_Q_STICKINESS_THRESHOLD: 0.0
+# Meta-policy encoder input mode:
+#   flat       - flatten raw object-centric obs (current default)
+#   oc_embed   - embed object-centric obs first, then meta MLP
+#   pixel_embed- CNN over stacked pixels, then meta MLP (uses Jaxtari PixelAndObjectObsWrapper)
+META_INPUT_MODE: "flat"
+# META_EMBED_DIM: 256
+# META_PIXEL_CNN_CHANNELS: [32, 64]
+# META_PIXEL_CNN_KERNEL_SIZE: [5, 5]
+# Optional pixel-preprocessing knobs used when META_INPUT_MODE=pixel_embed:
+# META_PIXEL_DO_RESIZE: false
+# META_PIXEL_RESIZE_SHAPE: [84, 84]
+# META_PIXEL_GRAYSCALE: false
+# META_PIXEL_USE_NATIVE_DOWNSCALING: false
+# META_PIXEL_SMOOTH_IMAGE: false
+# META_PIXEL_MAX_POOLING: true
+# Skill-policy input mode (System 1), independent from meta:
+#   ego        - current egocentric features (default)
+#   oc_embed   - full object-centric observation embedding + target-index conditioning
+#   pixel_embed- CNN over stacked pixels + target-index conditioning
+SKILL_INPUT_MODE: "ego"
+# SKILL_EMBED_DIM: 256
+# SKILL_PIXEL_CNN_CHANNELS: [32, 64]
+# SKILL_PIXEL_CNN_KERNEL_SIZE: [5, 5]
+# Input sanity checks (shape/finite/mask invariants); logs on host via callback.
+DEBUG_INPUTS: false
+# DEBUG_INPUTS_ASSERT: true
+# DEBUG_INPUTS_LOG_EVERY_N_UPDATES: 1
 # ENV_SEED_BASE: 42           # Optional; default SEED. Each train env gets ENV_SEED_BASE+env_id so skills see diverse layouts. Auto-reset on episode end uses fresh RNG.
 SAVE_PATH: "./outputs/models" # Where to save trained parameters
 LOAD_PATH: null               # Set to path if you want to load a checkpoint

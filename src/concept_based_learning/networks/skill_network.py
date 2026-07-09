@@ -1,8 +1,10 @@
 import jax.numpy as jnp
 from typing import Any
+import math
 
 import chex
 import flax.linen as nn
+import jax
 from flax.training.train_state import TrainState
 
 
@@ -13,9 +15,94 @@ class QNetwork(nn.Module):
     hidden_size: int = 64
     num_layers: int = 3
     norm_type: str = "layer_norm"
+    input_mode: str = "ego"
+    max_objects: int = 35
+    embed_dim: int = 256
+    pixel_cnn_channels: tuple = (32, 64)
+    pixel_cnn_kernel_size: tuple = (5, 5)
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, train: bool):
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        train: bool,
+        *,
+        target_idx=None,
+        pixel_obs=None,
+    ):
+        def _align_target_dims(target_oh: jnp.ndarray, feat: jnp.ndarray) -> jnp.ndarray:
+            """Broadcast target one-hot to match feature tensor rank."""
+            if target_oh.ndim == feat.ndim:
+                return target_oh
+            if target_oh.ndim == feat.ndim - 1:
+                target_oh = jnp.expand_dims(target_oh, axis=-2)
+                out_shape = feat.shape[:-1] + (target_oh.shape[-1],)
+                return jnp.broadcast_to(target_oh, out_shape)
+            raise ValueError(
+                f"Target one-hot rank mismatch: target_oh.ndim={target_oh.ndim}, "
+                f"feature.ndim={feat.ndim}."
+            )
+
+        mode = str(self.input_mode).lower().strip()
+        if target_idx is None:
+            target_idx = jnp.array(0, dtype=jnp.int32)
+        target_idx = jnp.asarray(target_idx, dtype=jnp.int32)
+        target_oh = jax.nn.one_hot(
+            jnp.clip(target_idx, 0, self.max_objects - 1), self.max_objects
+        ).astype(jnp.float32)
+
+        if mode == "ego":
+            pass
+        elif mode in ("oc_embed", "object_embed", "object_embedding"):
+            x = x.astype(jnp.float32)
+            x = nn.Dense(self.embed_dim, name="oc_embed")(x)
+            x = nn.relu(x)
+            target_oh = _align_target_dims(target_oh, x)
+            x = jnp.concatenate([x, target_oh], axis=-1)
+        elif mode in ("pixel_embed", "pixel_embedding", "cnn"):
+            if pixel_obs is None:
+                raise ValueError(
+                    "input_mode='pixel_embed' requires pixel_obs from combined observation wrappers."
+                )
+            img = pixel_obs.astype(jnp.float32) / 255.0
+            # Generic pixel tensor support:
+            # pixel_obs shape is [..., T, H, W, C], where leading dims can be
+            # (batch,), (time,batch,obj), etc. Collapse leading dims to a single
+            # batch axis for conv, then restore after encoding.
+            if img.ndim < 4:
+                raise ValueError(
+                    f"pixel_obs must have rank >=4 with trailing [T,H,W,C], got rank {img.ndim}."
+                )
+            lead_shape = img.shape[:-4]
+            t, h, w, c = img.shape[-4:]
+            n = math.prod(lead_shape) if lead_shape else 1
+            img = jnp.reshape(img, (n, t, h, w, c))
+            img = jnp.transpose(img, (0, 2, 3, 1, 4))  # [N,H,W,T,C]
+            img = jnp.reshape(img, (n, h, w, t * c))   # [N,H,W,T*C]
+            for i, channels in enumerate(self.pixel_cnn_channels):
+                img = nn.Conv(
+                    features=int(channels),
+                    kernel_size=self.pixel_cnn_kernel_size,
+                    strides=(2, 2),
+                    padding="SAME",
+                    name=f"pixel_conv_{i}",
+                )(img)
+                img = nn.relu(img)
+            x = img.reshape(img.shape[0], -1)
+            x = nn.Dense(self.embed_dim, name="pixel_embed_proj")(x)
+            x = nn.relu(x)
+            if lead_shape:
+                x = jnp.reshape(x, lead_shape + (x.shape[-1],))
+            else:
+                x = x[0]
+            target_oh = _align_target_dims(target_oh, x)
+            x = jnp.concatenate([x, target_oh], axis=-1)
+        else:
+            raise ValueError(
+                f"Unknown SKILL_INPUT_MODE={self.input_mode!r}. "
+                "Expected one of: ego, oc_embed, pixel_embed."
+            )
+
         if self.norm_type == "layer_norm":
             normalize = lambda v: nn.LayerNorm()(v)
         else:
@@ -37,6 +124,8 @@ class Transition:
     target_idx: chex.Array
     ego_obs: chex.Array
     next_ego_obs: chex.Array
+    pixel_obs: chex.Array
+    next_pixel_obs: chex.Array
     ego_action: chex.Array
     active_skill: chex.Array
     q_val: chex.Array       # all skills' Q-values [num_skills, num_envs, ego_action_dim]

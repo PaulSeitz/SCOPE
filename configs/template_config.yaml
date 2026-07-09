@@ -1,0 +1,231 @@
+# Template configuration containing all training-related options discovered in
+# project configs and runtime config lookups.
+#
+# Format note:
+# - Top-level keys are merged with `alg` keys in `main.py`.
+# - Keep values at top-level for global run setup; put algorithm/training
+#   hyperparameters under `alg`.
+
+defaults:
+  # Hydra experiment override. Use an existing file in `configs/experiment/*.yaml`
+  # or replace with your own.
+  # Options: any experiment config name, e.g. `seaquest_tandem`.
+  - experiment: seaquest_tandem
+  - _self_
+
+# ---------------------------
+# Global run and logging
+# ---------------------------
+ENTITY: "paul-seitz-tu-darmstadt" # W&B account/team. Options: string or null.
+PROJECT: "concept_based_learning" # W&B project name. Options: string.
+WANDB_MODE: "online"              # Logging backend mode. Options: "online", "offline", "disabled".
+WANDB_RUN_NAME: null              # Custom W&B run name. Options: string or null (auto-name).
+WANDB_TAGS: []                    # Extra W&B tags added to defaults. Options: list[string].
+
+RTPT_ENABLED: true                # Enable RTPT progress reporting. Options: true/false.
+RTPT_NAME_INITIALS: "PS"          # Name initials shown by RTPT. Options: string.
+RTPT_EXPERIMENT_NAME: null        # RTPT label. Options: string or null (auto ALG_ENV_MODE).
+RTPT_STEP_EVERY: 10               # Update RTPT every N training updates. Options: int >= 1.
+
+SEED: 44                          # Base training seed. Options: int.
+NUM_SEEDS: 1                      # Number of vmapped independent seeds per run. Options: int >= 1.
+EVAL_SEED: 43                     # Seed for evaluation/video rollouts. Options: int.
+ENV_SEED_BASE: null               # If set, train env i uses ENV_SEED_BASE+i. Options: int or null (falls back to SEED).
+
+SAVE_PATH: "./outputs/models"     # Directory for checkpoints/config copies/videos. Options: path string or null.
+LOAD_PATH: null                   # Reserved loader path in configs. Options: path string or null.
+LOAD_PARAMS: false                # Reserved legacy flag in configs. Options: true/false.
+INIT_MODEL_PATH: null             # Skill checkpoint to initialize from. Options: path string or null.
+INIT_META_MODEL_PATH: null        # Meta checkpoint for tandem warm start. Options: path string or null.
+
+RECORD_VIDEO: true                # Enable periodic/end-of-run video capture. Options: true/false.
+VIDEO_EVERY_N_UPDATES: 5000       # Video cadence in some pipelines. Options: int >= 1.
+VIDEO_AT_END: true                # Force a final evaluation video. Options: true/false.
+VIDEO_MAX_FRAMES: 600             # Video/eval rollout frame cap. Options: int >= 1.
+EVAL_MAX_FRAMES: 2000             # Standalone eval/visualizer frame cap. Options: int >= 1.
+VISUALIZER_FPS: 15                # FPS for local visualization output. Options: int > 0.
+
+# ---------------------------
+# Environment / experiment selection
+# ---------------------------
+ALG_NAME: "hierarchical_pqn"      # Run identifier used in names/logs. Options: string.
+ENV_NAME: "seaquest"              # Environment name. Options seen: "seaquest","freeway","phoenix","spaceinvaders","choppercommand","beamrider","breakout","pong","kangaroo","tennis","skiing".
+TRAIN_MODE: "tandem"              # Training pipeline. Options: "skills_only","meta_only","tandem".
+
+GAME_MODS: null                   # Train-time environment mods. Options: null or list[string].
+EVAL_GAME_MODS: null              # Eval-only mods override. Options: null (inherit GAME_MODS), [] (disable), or list[string].
+
+USE_LEGACY_EGO_OBS: false         # Use old 10-channel ego observation format. Options: true/false.
+USE_EGO_SIZE_FEATURES: true       # Include object size in ego features. Options: true/false.
+USE_EGO_VELOCITY_FEATURES: true   # Include object velocity in ego features. Options: true/false.
+USE_SKILL_EGO_FEATURES: false     # Append per-skill extra ego features. Options: true/false.
+SKILL_EGO_EXTRA_DIM: 4            # Extra feature dimension per skill when enabled. Options: int >= 0.
+EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization. Options: null or number > 0.
+
+# Seaquest compatibility toggles.
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false           # Use old orientation-relative action mapper. Options: true/false.
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: true             # Prevent ascent near surface in legacy behavior. Options: true/false.
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false   # Guard near-surface deaths in legacy behavior. Options: true/false.
+
+# ---------------------------
+# Meta-network architecture
+# ---------------------------
+META_ARCHITECTURE: "per_object_mlp" # Meta Q-network family. Options: "per_object_mlp","flat_mlp","pointer".
+META_NUM_LAYERS: 3                  # Fallback depth for meta trunk. Options: int >= 1.
+META_PER_OBJECT_NUM_LAYERS: 3       # per_object_mlp depth override. Options: int >= 1.
+META_FLAT_NUM_LAYERS: 3             # flat_mlp depth override. Options: int >= 1.
+META_POINTER_NUM_LAYERS: 3          # pointer depth override. Options: int >= 1.
+META_HIDDEN_SIZE: 256               # Meta hidden width. Options: int >= 1.
+META_NORM_TYPE: "layer_norm"        # Meta normalization. Options: "layer_norm","batch_norm".
+META_EMBED_DIM: 256                 # Embedding dim for some meta input modes. Options: int >= 1.
+
+META_INPUT_MODE: "flat"             # Meta input format. Options: "flat","pixel_embed".
+META_PIXEL_CNN_CHANNELS: [32, 64]   # CNN channels for pixel_embed. Options: list[int].
+META_PIXEL_CNN_KERNEL_SIZE: [5, 5]  # CNN kernel size for pixel_embed. Options: [int,int] or tuple equivalent.
+META_PIXEL_DO_RESIZE: false         # Resize pixel observation before encoder. Options: true/false.
+META_PIXEL_RESIZE_SHAPE: [84, 84]   # Pixel resize target (H,W). Options: [int,int].
+META_PIXEL_GRAYSCALE: false         # Convert pixels to grayscale. Options: true/false.
+META_PIXEL_USE_NATIVE_DOWNSCALING: false # Use backend-native downscaling. Options: true/false.
+META_PIXEL_SMOOTH_IMAGE: false      # Apply smoothing in pixel wrapper. Options: true/false.
+META_PIXEL_MAX_POOLING: true        # Max-pool stacked frames in pixel wrapper. Options: true/false.
+
+# Skill input encoding (System 1), independent from meta-policy settings.
+SKILL_INPUT_MODE: "ego"             # Skill input format. Options: "ego","oc_embed","pixel_embed".
+SKILL_EMBED_DIM: 256                # Embedding dim for oc/pixel skill inputs. Options: int >= 1.
+SKILL_PIXEL_CNN_CHANNELS: [32, 64]  # CNN channels for skill pixel_embed. Options: list[int].
+SKILL_PIXEL_CNN_KERNEL_SIZE: [5, 5] # CNN kernel size for skill pixel_embed. Options: [int,int].
+DEBUG_INPUTS: false                  # Log/check rollout + train input shapes/finite/mask invariants. Options: true/false.
+# DEBUG_INPUTS_ASSERT: true          # Raise on invariant violations when DEBUG_INPUTS=true. Options: true/false.
+# DEBUG_INPUTS_LOG_EVERY_N_UPDATES: 1 # Host log cadence while debugging. Options: int >= 1.
+
+# Optional meta special targets.
+META_USE_NOOP_TARGET: false         # Add/select NOOP pseudo-target. Options: true/false.
+META_NOOP_TARGET_IDX: 0             # Object index reserved for NOOP target. Options: int in [0, MAX_OBJECTS-1].
+META_USE_FIRE_TARGET: false         # Add/select FIRE pseudo-target. Options: true/false.
+META_FIRE_TARGET_IDX: 1             # Object index reserved for FIRE pseudo-target. Options: int in [0, MAX_OBJECTS-1].
+META_FIRE_GAME_ACTION: 1            # Primitive game action triggered by FIRE target. Options: int action id.
+
+# Target persistence (meta output override across steps).
+META_TARGET_PERSIST_MODE: null      # Keep target until condition is met. Options: null/"none","until_done","mission_avoid","fixed_steps".
+META_TARGET_PERSIST_STEPS: 300      # Used when mode=fixed_steps. Options: int >= 1.
+META_AVOID_RESUME_MISSION: false    # Resume suspended mission after avoid in mission_avoid mode. Options: true/false.
+META_AVOID_INTERRUPT_MARGIN: 0.0    # Q-margin to interrupt/resume in mission_avoid mode. Options: float.
+META_TARGET_LOCKED_INPUT: false     # Append lock-state feature to meta input. Options: true/false.
+# Learned-meta Q stickiness (independent from META_TARGET_PERSIST_MODE).
+META_Q_STICKINESS_ENABLED: false   # Keep current target while its Q >= threshold. Options: true/false.
+META_Q_STICKINESS_THRESHOLD: 0.0   # Release stickiness when Q(current target) < threshold. Options: float.
+
+# ---------------------------
+# Algorithm + training hyperparameters
+# ---------------------------
+alg:
+  NUM_SKILLS: 3                     # Number of skill policies. Options: int >= 1.
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"] # Labels for logging. Options: list length NUM_SKILLS.
+  MAX_OBJECTS: 35                   # Number of selectable object slots. Options: int >= 1.
+  EGO_ACTION_DIM: 18                # Skill action-space size in ego coordinates. Options: int >= 1 (commonly 6 or 18).
+  HIDDEN_SIZE: 128                  # Skill network hidden width. Options: int >= 1.
+  NUM_LAYERS: 3                     # Skill network depth. Options: int >= 1.
+
+  TOTAL_TIMESTEPS: 100000000        # Total env steps budget. Options: int >= 1.
+  NUM_ENVS: 2048                    # Parallel env count. Options: int >= 1.
+  NUM_STEPS: 32                     # Rollout horizon per update. Options: int >= 1.
+  NUM_EPOCHS: 3                     # Gradient epochs per rollout. Options: int >= 1.
+  NUM_MINIBATCHES: 64               # Minibatches per epoch. Must divide NUM_STEPS*NUM_ENVS.
+
+  GAMMA: 0.99                       # Global discount for meta and fallback skill updates. Options: float in (0,1].
+  LAMBDA: 0.65                      # Global Q(lambda) factor. Options: float in [0,1].
+  LR: 0.0001                        # Default learning rate fallback. Options: float > 0.
+  MAX_GRAD_NORM: 0.8                # Gradient clipping norm. Options: float > 0.
+
+  # Skill-specific optimization and returns.
+  SKILL_LR: 0.0005                  # Skill optimizer LR override. Options: float > 0.
+  SKILL_GAMMA: 0.99                 # Skill discount override. Options: float in (0,1].
+  SKILL_LAMBDA: 0.65                # Skill lambda override. Options: float in [0,1].
+  SKILL_BOOTSTRAP: "q_lambda"       # Skill target style. Options: "q_lambda","one_step".
+  SKILL_REWARD_LAMBDA: 0.0          # Blend env reward into skill reward. Options: float (commonly 0..1).
+  SKILL_TARGET_CUT: "global"        # Cut strategy at meta target switch. Options: "global","involved","lifetime" (+ aliases: "all","involved_only","her","her_lifetime","none","off").
+  SKILL_QLAMBDA_WATKINS_CUT: false  # Legacy/experimental switch (kept for compatibility). Options: true/false.
+
+  # Meta-specific optimization.
+  META_LR: 0.0005                   # Meta optimizer LR override. Options: float > 0.
+  META_NUM_EPOCHS: 3                # Meta epochs override in tandem. Options: int >= 1.
+  META_REWARD_LAMBDA: 1.0           # Meta reward blending factor in tandem. Options: float.
+  META_SWITCH_PENALTY: -0.05        # Penalty per meta target switch. Options: float.
+  META_DEATH_PENALTY: -10.0         # Penalty when life is lost/death event occurs. Options: float.
+  META_HYSTERESIS_BONUS: 0.0        # Optional hysteresis bias for meta choice stability. Options: float.
+
+  # Epsilon schedules.
+  EPS_START: 0.3                    # Base epsilon start. Options: float in [0,1].
+  EPS_FINISH: 0.05                  # Base epsilon final value. Options: float in [0,1].
+  EPS_DECAY: 0.35                   # Fraction/schedule shape consumed by eps scheduler. Options: float > 0.
+  SKILL_EPS_START: null             # Skill epsilon start override. Options: float in [0,1] or null.
+  SKILL_EPS_FINISH: null            # Skill epsilon finish override. Options: float in [0,1] or null.
+  SKILL_EPS_DECAY: null             # Skill epsilon decay override. Options: float > 0 or null.
+  META_EPS_START: 0.1               # Meta epsilon start override. Options: float in [0,1].
+  META_EPS_FINISH: null             # Meta epsilon finish override. Options: float in [0,1] or null.
+  META_EPS_DECAY: null              # Meta epsilon decay override. Options: float > 0 or null.
+  SKILL_FINETUNE_META_EPS_START: null  # Meta eps start when skill-finetune path is active. Options: float in [0,1] or null.
+  SKILL_FINETUNE_META_EPS_FINISH: null # Meta eps finish for skill-finetune path. Options: float in [0,1] or null.
+  SKILL_FINETUNE_META_EPS_DECAY: null  # Meta eps decay for skill-finetune path. Options: float > 0 or null.
+
+  # Rollout/update behavior.
+  OFF_POLICY: true                  # Use off-policy relabeling/updates in skill learner. Options: true/false.
+  RELABEL_ALL_OBJECTS: true         # Train all object slots each step. Options: true/false.
+  RELABEL_K_OBJECTS: null           # Train only K sampled object slots. Options: int >= 1 or null.
+  STEP_OFFSET: 0                    # Update-step offset for metric continuity across phases. Options: int >= 0.
+  STEP_OFFSET_TIMESTEPS: 0          # Direct env-step offset override for logging. Options: int >= 0.
+  NUM_UPDATES: null                 # Computed internally from timesteps; keep null unless debugging. Options: int or null.
+
+  # Tandem staging controls.
+  SKILL_WARMUP_UPDATES: 0           # Initial updates with heuristic target selection and frozen meta. Options: int >= 0.
+  META_LEARN_DURING_WARMUP: false   # If true, meta also learns during warmup. Options: true/false.
+  SKILL_FREEZE_AFTER_UPDATES: 0     # Stop skill learning after N updates (0 disables). Options: int >= 0.
+
+  # Heuristic target policy.
+  HEURISTIC_MODE: "env_specific"    # Heuristic target selector. Options: "env_specific","nearest","sweep" (sweep only for SpaceInvaders).
+
+  # Action masking / symbolic behavior.
+  RESTRICT_FIRE_FOR_NON_DESTROY: false # Block FIRE for non-destroy skills. Options: true/false.
+  INVALID_EGO_ACTIONS: []           # Always-invalid ego action indices. Options: list[int].
+  FIRE_EGO_ACTION_INDICES: null     # Explicit ego FIRE action indices. Options: list[int] or null.
+  SYMBOLIC_COLLECT_FORCE_UP: false  # Force UP action in collect skill under symbolic mode. Options: true/false.
+  COLLECT_SKILL_INDEX: 1            # Skill index used as collect skill. Options: int in [0, NUM_SKILLS-1].
+  SYMBOLIC_COLLECT_UP_ACTION: 1     # Ego action index used for forced UP. Options: int in [0, EGO_ACTION_DIM-1].
+
+  # Atari wrapper options used by environment manager.
+  FRAME_STACK_SIZE: 4               # Observation frame stack. Options: int >= 1.
+  FRAME_SKIP: 4                     # Action repeat/frame skip. Options: int >= 1.
+  STICKY_ACTIONS: false             # ALE sticky actions during training envs. Options: true/false.
+  EPISODIC_LIFE: true               # Life-loss truncates episodes in training envs. Options: true/false.
+  FIRST_FIRE: true                  # Emit FIRE on reset for games needing start action. Options: true/false.
+  CLIP_REWARD: false                # Clip environment reward in wrappers. Options: true/false.
+
+  # Curriculum options for skills_only mode.
+  CURRICULUM_ENABLED: false         # Enable multi-phase skill curriculum. Options: true/false.
+  CURRICULUM_PHASES: ["collect", "destroy", "avoid"] # Ordered phase names. Options: list[string].
+  CURRICULUM_MODS:
+    collect: ["collect"]            # Mods for collect phase.
+    destroy: ["destroy"]            # Mods for destroy phase.
+    avoid: ["avoid"]                # Mods for avoid phase.
+    # Options: dict phase_name -> list[string] game mods.
+
+  # Environment/label specific shaping knobs (only used in specific env wrappers).
+  AVOID_SURVIVAL_BONUS: 0.0         # Per-step survival bonus for avoid reward branch. Options: float.
+  ALWAYS_ACTIVE_SURFACE_TARGET: false # Seaquest: keep surface waypoint target always available. Options: true/false.
+  SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
+  FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.
+  FREEWAY_THREAT_DIST_THRESH: null  # Freeway threat gating threshold. Options: float > 0 or null.
+  # The following are present in some experiment configs but currently consumed
+  # only by environment-specific reward/label logic.
+  FREEWAY_THREAT_WEIGHTED_DIST_THRESH: null # Options: float > 0 or null.
+  FREEWAY_THREAT_X_WEIGHT: null             # Options: float > 0 or null.
+  FREEWAY_THREAT_Y_WEIGHT: null             # Options: float > 0 or null.
+  AVOID_HIT_PENALTY: null                   # Options: float or null.
+  AVOID_NEAR_TOLERANCE: null                # Options: float >= 0 or null.
+  AVOID_PROXIMITY_GATED: null               # Options: true/false or null.
+  AVOID_SUCCESS_REWARD: null                # Options: float or null.
+  COLLECT_DISTANCE_SHAPING_ENABLED: null    # Options: true/false or null.
+  COLLECT_GOAL_DENSE_SHAPING_ENABLED: null  # Options: true/false or null.
+  COLLECT_GOAL_OBJECT_IDX: null             # Options: int >= 0 or null.
+  COLLECT_GOAL_ONLY_RELABEL: null           # Options: true/false or null.
+  COLLECT_Y_SHAPING_PER_PIXEL: null         # Options: float or null.

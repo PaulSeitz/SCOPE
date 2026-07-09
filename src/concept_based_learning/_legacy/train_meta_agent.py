@@ -26,6 +26,7 @@ from concept_based_learning.training.schedules import eps_decay_transition_steps
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
 from concept_based_learning.environments.datatypes import MetaTransition
 from concept_based_learning.networks.meta_factory import create_meta_network
+from concept_based_learning.networks.meta_network import flatten_raw_observation
 
 
 class CustomTrainState(TrainState):
@@ -63,6 +64,14 @@ def make_meta_train(
     NUM_SKILLS = config["NUM_SKILLS"]
     MAX_OBJECTS = config["MAX_OBJECTS"]
     EGO_ACTION_DIM = config["EGO_ACTION_DIM"]
+    skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
+    skill_pixel_channels = config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))
+    if isinstance(skill_pixel_channels, list):
+        skill_pixel_channels = tuple(skill_pixel_channels)
+    skill_pixel_kernel = config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))
+    if isinstance(skill_pixel_kernel, list):
+        skill_pixel_kernel = tuple(skill_pixel_kernel)
     step_offset_updates = int(config.get("STEP_OFFSET", 0))
     step_offset_timesteps = int(
         config.get(
@@ -106,6 +115,11 @@ def make_meta_train(
         action_dim=EGO_ACTION_DIM,
         hidden_size=config["HIDDEN_SIZE"],
         num_layers=config["NUM_LAYERS"],
+        input_mode=skill_input_mode,
+        max_objects=MAX_OBJECTS,
+        embed_dim=skill_embed_dim,
+        pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
+        pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
     )
 
     # 2. System 2 (Meta-Policy) - LEARNED
@@ -130,25 +144,26 @@ def make_meta_train(
     rng_ck = jax.random.PRNGKey(0)
     _probe_b, _ = vmap_reset(1)(rng_ck)
     _probe = jax.tree_util.tree_map(lambda x: x[0], _probe_b)
-    _probe_ego = get_ego_obs(
-        _probe.raw_observation, _probe.objects, jnp.array(0, dtype=jnp.int32)
-    )
-    env_ego_dim = int(_probe_ego.shape[-1])
-    channels_per_frame = int(ego_obs_channels_per_frame())
-    if env_ego_dim != ckpt_ego_in:
-        _need_stack = (
-            ckpt_ego_in // channels_per_frame
-            if ckpt_ego_in % channels_per_frame == 0
-            else "?"
+    if skill_input_mode == "ego":
+        _probe_ego = get_ego_obs(
+            _probe.raw_observation, _probe.objects, jnp.array(0, dtype=jnp.int32)
         )
-        raise ValueError(
-            f"Frozen skill checkpoint expects MLP input size {ckpt_ego_in}, but this "
-            f"environment's egocentric observation length is {env_ego_dim}. "
-            f"Ego length is {channels_per_frame} × JAXAtari `AtariWrapper` frame stack. Set "
-            f"`experiment.alg.FRAME_STACK_SIZE` so {channels_per_frame} × FRAME_STACK_SIZE matches the checkpoint "
-            f"(e.g. checkpoint {ckpt_ego_in} → FRAME_STACK_SIZE={_need_stack}), and use the "
-            "same value when training System 1."
-        )
+        env_ego_dim = int(_probe_ego.shape[-1])
+        channels_per_frame = int(ego_obs_channels_per_frame())
+        if env_ego_dim != ckpt_ego_in:
+            _need_stack = (
+                ckpt_ego_in // channels_per_frame
+                if ckpt_ego_in % channels_per_frame == 0
+                else "?"
+            )
+            raise ValueError(
+                f"Frozen skill checkpoint expects MLP input size {ckpt_ego_in}, but this "
+                f"environment's egocentric observation length is {env_ego_dim}. "
+                f"Ego length is {channels_per_frame} × JAXAtari `AtariWrapper` frame stack. Set "
+                f"`experiment.alg.FRAME_STACK_SIZE` so {channels_per_frame} × FRAME_STACK_SIZE matches the checkpoint "
+                f"(e.g. checkpoint {ckpt_ego_in} → FRAME_STACK_SIZE={_need_stack}), and use the "
+                "same value when training System 1."
+            )
 
     def _merge_reset_where_done(new_tree, reset_tree, done):
         def _replace(new_leaf, reset_leaf):
@@ -187,6 +202,18 @@ def make_meta_train(
         """
         return jax.tree_util.tree_map(lambda x: x[skill_idx], frozen_skill_params)
 
+    def _skill_input(raw_obs, objects, target_idx):
+        if skill_input_mode == "ego":
+            return get_ego_obs(raw_obs, objects, target_idx)
+        if skill_input_mode == "oc_embed":
+            return flatten_raw_observation(raw_obs)
+        if skill_input_mode == "pixel_embed":
+            return get_ego_obs(raw_obs, objects, target_idx)
+        raise ValueError(
+            f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
+            "Expected one of: ego, oc_embed, pixel_embed."
+        )
+
     # ===============================================================
     # TRAINING LOOP
     # ===============================================================
@@ -210,7 +237,11 @@ def make_meta_train(
         probe_obs = jax.tree_util.tree_map(lambda x: x[0], probe_obs_batched)
 
         meta_vars = meta_network.init(
-            rng, probe_obs.raw_observation, probe_obs.objects, train=False
+            rng,
+            probe_obs.raw_observation,
+            probe_obs.objects,
+            train=False,
+            pixel_obs=probe_obs.pixel_observation,
         )
         meta_params = (
             meta_vars["params"] if init_meta_params is None else init_meta_params
@@ -245,11 +276,20 @@ def make_meta_train(
 
                 # --- 1. System 2 (Meta-Policy) Forward Pass ---
                 # vmap the meta-network over the batch of raw observations
+                pixel_inputs = (
+                    last_obs.pixel_observation
+                    if last_obs.pixel_observation is not None
+                    else last_obs.raw_observation
+                )
                 meta_q_vals = jax.vmap(
-                    lambda obs, objs: meta_network.apply(
-                        {"params": train_state.params}, obs, objs, train=False
+                    lambda obs, objs, pix: meta_network.apply(
+                        {"params": train_state.params},
+                        obs,
+                        objs,
+                        train=False,
+                        pixel_obs=pix,
                     )
-                )(last_obs.raw_observation, last_obs.objects)
+                )(last_obs.raw_observation, last_obs.objects, pixel_inputs)
 
                 # --- 2. Masking & Target Selection ---
                 # Build active masks per environment using the same single-env
@@ -284,7 +324,12 @@ def make_meta_train(
                     )
                     force_noop = jnp.logical_or(jnp.logical_not(any_active), is_noop_target)
 
-                    ego_obs = get_ego_obs(obs.raw_observation, obs.objects, safe_target)
+                    ego_obs = _skill_input(obs.raw_observation, obs.objects, safe_target)
+                    pixel_obs = (
+                        obs.pixel_observation
+                        if obs.pixel_observation is not None
+                        else obs.raw_observation
+                    )
                     raw_label = obs.objects.semantic_label[-1, safe_target]
                     skill_idx = label_to_skill_idx(raw_label)
                     skill_params = _params_for_skill(skill_idx)
@@ -294,7 +339,9 @@ def make_meta_train(
                     skill_qs = skill_network.apply(
                         {"params": skill_params},
                         ego_obs,
-                        train=False
+                        train=False,
+                        target_idx=safe_target,
+                        pixel_obs=pixel_obs,
                     )
 
                     # Optional: FIRE masking for non-destroy skills
@@ -385,14 +432,26 @@ def make_meta_train(
                     apply_penalty, META_SWITCH_PENALTY, 0.0
                 ).astype(processed_rewards.dtype)
 
+                pixel_obs = (
+                    last_obs.pixel_observation
+                    if last_obs.pixel_observation is not None
+                    else last_obs.raw_observation
+                )
+                next_pixel_obs = (
+                    new_obs.pixel_observation
+                    if new_obs.pixel_observation is not None
+                    else new_obs.raw_observation
+                )
                 transition = MetaTransition(
                     obs=last_obs.raw_observation,
                     objects=last_obs.objects,
+                    pixel_obs=pixel_obs,
                     action=target_obj_idxs,
                     reward=meta_rewards,
                     done=new_done,
                     next_obs=new_obs.raw_observation,
                     next_objects=new_obs.objects,
+                    next_pixel_obs=next_pixel_obs,
                     q_val=meta_q_vals,
                     active_mask=active_masks,
                     next_active_mask=next_active_masks,
@@ -448,11 +507,18 @@ def make_meta_train(
             # the final rollout step by slicing each leaf, then vmap over envs.
             last_next_obs = jax.tree_util.tree_map(lambda x: x[-1], transitions.next_obs)
             last_next_objs = jax.tree_util.tree_map(lambda x: x[-1], transitions.next_objects)
+            last_next_pix = jax.tree_util.tree_map(
+                lambda x: x[-1], transitions.next_pixel_obs
+            )
             last_q = jax.vmap(
-                lambda obs, objs: meta_network.apply(
-                    {"params": train_state.params}, obs, objs, train=False
+                lambda obs, objs, pix: meta_network.apply(
+                    {"params": train_state.params},
+                    obs,
+                    objs,
+                    train=False,
+                    pixel_obs=pix,
                 )
-            )(last_next_obs, last_next_objs)
+            )(last_next_obs, last_next_objs, last_next_pix)
 
             # Mask inactive targets before taking max
             next_active_mask = transitions.next_active_mask[-1]
@@ -503,10 +569,14 @@ def make_meta_train(
 
                     def _loss_fn(params):
                         q_vals = jax.vmap(
-                            lambda obs, objs: meta_network.apply(
-                                {"params": params}, obs, objs, train=True
+                            lambda obs, objs, pix: meta_network.apply(
+                                {"params": params},
+                                obs,
+                                objs,
+                                train=True,
+                                pixel_obs=pix,
                             )
-                        )(minibatch.obs, minibatch.objects)
+                        )(minibatch.obs, minibatch.objects, minibatch.pixel_obs)
 
                         chosen_action_qvals = jnp.take_along_axis(
                             q_vals, jnp.expand_dims(minibatch.action, axis=-1), axis=-1
@@ -619,7 +689,11 @@ def make_meta_train(
         for _ in range(max_frames):
             # 1. System 2 (Meta-Policy) Selection
             meta_q_vals = meta_network.apply(
-                {"params": train_state.params}, obs.raw_observation, obs.objects, train=False
+                {"params": train_state.params},
+                obs.raw_observation,
+                obs.objects,
+                train=False,
+                pixel_obs=obs.pixel_observation,
             )
             active_mask = obs.objects.active[-1] > 0.5
             active_mask = meta_mask_hook(
@@ -659,11 +733,20 @@ def make_meta_train(
                 # 2. System 1 (Skills) Execution
                 raw_label = obs.objects.semantic_label[-1, target_obj_idxs]
                 active_skills = label_to_skill_idx(raw_label)
-                ego_obs = get_ego_obs(obs.raw_observation, obs.objects, target_obj_idxs)
+                ego_obs = _skill_input(obs.raw_observation, obs.objects, target_obj_idxs)
                 skill_params = _params_for_skill(active_skills)
+                pixel_obs = (
+                    obs.pixel_observation
+                    if obs.pixel_observation is not None
+                    else obs.raw_observation
+                )
 
                 skill_qs = skill_network.apply(
-                    {"params": skill_params}, jnp.expand_dims(ego_obs, 0), train=False
+                    {"params": skill_params},
+                    jnp.expand_dims(ego_obs, 0),
+                    train=False,
+                    target_idx=jnp.asarray([target_obj_idxs], dtype=jnp.int32),
+                    pixel_obs=jnp.expand_dims(pixel_obs, 0),
                 )[0]
 
                 if restrict_fire_for_non_destroy and int(active_skills) != 0:
