@@ -1317,6 +1317,17 @@ def make_train(
                     obs.raw_observation, obs.objects, target_obj_idxs
                 )
                 ego_obs_batch = ego_obs[np.newaxis, ...]
+                skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+                eval_pixel_obs = (
+                    obs.pixel_observation
+                    if skill_input_mode == "pixel_embed"
+                    else None
+                )
+                if skill_input_mode == "pixel_embed" and eval_pixel_obs is None:
+                    raise ValueError(
+                        "SKILL_INPUT_MODE='pixel_embed' requires pixel_observation from "
+                        "PixelAndObjectObsWrapper, but it is missing."
+                    )
 
                 q_vals = jax.vmap(
                     lambda ts: skill_network.apply(
@@ -1324,9 +1335,7 @@ def make_train(
                         ego_obs_batch,
                         train=False,
                         target_idx=jnp.array(target_obj_idxs, dtype=jnp.int32),
-                        pixel_obs=obs.pixel_observation
-                        if obs.pixel_observation is not None
-                        else obs.raw_observation,
+                        pixel_obs=eval_pixel_obs,
                     )
                 )(train_states)
                 q_vals = jnp.squeeze(q_vals, axis=1)

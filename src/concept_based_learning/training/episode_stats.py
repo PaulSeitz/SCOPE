@@ -5,8 +5,13 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
-def _unwrap_env_state(wrapper_state):
-    """Recursively unwrap nested wrapper states to an object exposing env_state."""
+def unwrap_base_env_state(wrapper_state):
+    """
+    Recursively unwrap nested wrapper states to the base JAXAtari env_state.
+
+    Handles SemanticState -> PixelAndObjectCentricState -> AtariState chains
+    produced when pixel-based input modes add PixelAndObjectObsWrapper.
+    """
     cur = wrapper_state
     for _ in range(8):
         if hasattr(cur, "env_state"):
@@ -16,9 +21,13 @@ def _unwrap_env_state(wrapper_state):
             continue
         break
     raise AttributeError(
-        "Could not unwrap env_state from semantic wrapper state; "
+        "Could not unwrap env_state from wrapper state; "
         f"received type {type(wrapper_state)!r}."
     )
+
+
+# Backwards-compatible alias used internally in this module.
+_unwrap_env_state = unwrap_base_env_state
 
 
 def init_per_env_episode_stats(num_envs: int):

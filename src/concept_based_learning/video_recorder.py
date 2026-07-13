@@ -6,6 +6,8 @@ import numpy as np
 import wandb
 from jaxatari.renderers import JAXGameRenderer
 
+from concept_based_learning.training.episode_stats import unwrap_base_env_state
+
 # Force pygame into headless mode before the first pygame.init() call so the
 # video renderer works on cluster nodes that have no display server.
 # SDL_VIDEODRIVER=dummy uses a null video driver; SDL_AUDIODRIVER=dummy
@@ -222,11 +224,10 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             video_folder = f"{wandb.run.dir}/media/videos/"
             os.makedirs(video_folder, exist_ok=True)
         
-        # Unwrap the exact wrapper chain: LogWrapper -> SubPolicyAdapter -> SeaquestConceptWrapper -> AtariWrapper -> base state
-        # LogWrapper stores the next env's state in .env_state
-        states = states.atari_state
-        # AtariWrapper (nested after SeaquestConceptWrapper) stores the base state in .env_state
-        states = states.env_state
+        # SemanticState.atari_state may be AtariState or PixelAndObjectCentricState
+        # (when pixel_embed adds PixelAndObjectObsWrapper). Unwrap recursively.
+        atari_state = states.atari_state if hasattr(states, "atari_state") else states
+        states = unwrap_base_env_state(atari_state)
 
         # Handle 'dones' to determine video length
         # If dones is (Time, Envs), take the first environment

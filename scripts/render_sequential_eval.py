@@ -44,6 +44,7 @@ from concept_based_learning.pqn_visualizer import (  # noqa: E402
     load_params_from_file,
     run_eval_rollout,
 )
+from concept_based_learning.training.episode_stats import unwrap_base_env_state  # noqa: E402
 from concept_based_learning.video_recorder import (  # noqa: E402
     SKILL_NAMES,
     SidebarRenderer,
@@ -218,7 +219,7 @@ def rollout_to_mp4(
         import jax
         import jax.numpy as jnp
 
-        raw_states = states.atari_state.env_state
+        raw_states = unwrap_base_env_state(states.atari_state)
         leaves = jax.tree_util.tree_leaves(raw_states)
         full_length = leaves[0].shape[0] if leaves else 0
 

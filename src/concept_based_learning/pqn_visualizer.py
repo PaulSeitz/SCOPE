@@ -53,6 +53,7 @@ from concept_based_learning.environments.meta_target_persistence import (
     meta_target_persist_enabled,
 )
 from concept_based_learning.networks.skill_network import QNetwork
+from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
     video_callback,
     wait_for_video_finish,
@@ -366,6 +367,24 @@ def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
     )
 
 
+def _skill_pixel_obs_from_obs(config: dict, obs):
+    """
+    Pixel tensor for skill Q-network forward passes during eval/visualization.
+
+    Only pixel_embed reads this input; ego/oc modes must pass None (not raw_observation,
+    which is a structured game observation object).
+    """
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode != "pixel_embed":
+        return None
+    if obs.pixel_observation is None:
+        raise ValueError(
+            "SKILL_INPUT_MODE='pixel_embed' requires pixel_observation from "
+            "PixelAndObjectObsWrapper, but it is missing."
+        )
+    return obs.pixel_observation
+
+
 def _propose_meta_target(
     obs,
     config,
@@ -581,11 +600,7 @@ def _make_jitted_greedy_episode_runner(
         raw_label = obs.objects.semantic_label[-1, safe_target]
         sk_idx = label_to_skill_idx(raw_label, num_skills)
         ego_obs = _skill_input_from_obs(config, obs.raw_observation, obs.objects, safe_target)
-        pixel_obs = (
-            obs.pixel_observation
-            if obs.pixel_observation is not None
-            else obs.raw_observation
-        )
+        pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
         def apply_one(params_for_skill):
             return skill_network.apply(
@@ -912,7 +927,16 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     # Initialize parameters if none were provided.
     if params_tree is None:
         init_x = jnp.zeros(ego_feat_dim)
-        network_vars = skill_network.init(jax.random.PRNGKey(seed + 1), init_x, train=False)
+        init_pixel = _skill_pixel_obs_from_obs(config, obs)
+        if init_pixel is not None:
+            init_pixel = jnp.expand_dims(init_pixel, 0)
+        network_vars = skill_network.init(
+            jax.random.PRNGKey(seed + 1),
+            init_x,
+            train=False,
+            target_idx=jnp.array(0, dtype=jnp.int32),
+            pixel_obs=init_pixel,
+        )
         base_params = network_vars["params"]
 
         # Replicate the same initialization across all skills.
@@ -1014,11 +1038,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 jnp.array(target_obj_idx, dtype=jnp.int32),
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
-            pixel_obs = (
-                obs.pixel_observation
-                if obs.pixel_observation is not None
-                else obs.raw_observation
-            )
+            pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
             # Extract the most recent frame's distance and angle from the ego features.
             # See `get_ego_obs` / `EGO_OBS_CHANNELS_PER_FRAME` for the per-frame layout.
@@ -1064,7 +1084,11 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                     ego_obs_batch,
                     train=False,
                     target_idx=jnp.asarray([target_obj_idx], dtype=jnp.int32),
-                    pixel_obs=jnp.expand_dims(pixel_obs, 0),
+                    pixel_obs=(
+                        jnp.expand_dims(pixel_obs, 0)
+                        if pixel_obs is not None
+                        else None
+                    ),
                 )
 
             q_vals = jax.vmap(apply_one)(params_tree)  # [num_skills, 1, ego_action_dim]
@@ -1229,7 +1253,7 @@ def run_live_visualization(
     font = pygame.font.Font(None, 20)
 
     # Get one rendered frame to determine window size
-    base_state = state.atari_state.env_state
+    base_state = unwrap_base_env_state(state.atari_state)
     sample_frame = renderer.render(base_state)
     sample_frame = np.array(jax.device_get(sample_frame), dtype=np.uint8)
     if sample_frame.ndim == 2:
@@ -1347,11 +1371,7 @@ def run_live_visualization(
                 jnp.array(target_obj_idx, dtype=jnp.int32),
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
-            pixel_obs = (
-                obs.pixel_observation
-                if obs.pixel_observation is not None
-                else obs.raw_observation
-            )
+            pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
             channels_per_frame = ego_obs_channels_per_frame()
             last_frame_ego = ego_obs[-channels_per_frame:]
@@ -1394,7 +1414,11 @@ def run_live_visualization(
                     ego_obs_batch,
                     train=False,
                     target_idx=jnp.asarray([target_obj_idx], dtype=jnp.int32),
-                    pixel_obs=jnp.expand_dims(pixel_obs, 0),
+                    pixel_obs=(
+                        jnp.expand_dims(pixel_obs, 0)
+                        if pixel_obs is not None
+                        else None
+                    ),
                 )
 
             q_vals = jax.vmap(apply_one)(params_tree)
@@ -1418,7 +1442,7 @@ def run_live_visualization(
         obs, state, _reward, done, _info = env.step(state, global_action)
 
         # Render current frame
-        base_state = state.atari_state.env_state
+        base_state = unwrap_base_env_state(state.atari_state)
         frame = renderer.render(base_state)
         frame = np.array(jax.device_get(frame), dtype=np.uint8)
         if frame.ndim == 2:
