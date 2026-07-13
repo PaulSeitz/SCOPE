@@ -34,6 +34,7 @@ import main as train_main  # noqa: E402
 INPUT_DIR = PROJECT_ROOT / "configs" / "experiment" / "input_ablation"
 QSTICK_DIR = PROJECT_ROOT / "configs" / "experiment" / "q_stickiness_eval"
 
+INPUT_ABLATION_ENVS = ("seaquest", "spaceinvaders")
 INPUT_VARIANT_KEYS = [
     f"mi_{meta}_si_{skill}"
     for meta in ("flat", "oc_embed", "pixel_embed")
@@ -60,9 +61,9 @@ def _flatten_experiment_cfg(raw: dict[str, Any]) -> dict[str, Any]:
     return {**raw, **alg}
 
 
-def _experiment_path(suite: str, key: str) -> Path:
+def _experiment_path(suite: str, key: str, *, env_name: str = "seaquest") -> Path:
     if suite == "input_ablation":
-        return INPUT_DIR / f"seaquest_{key}.yaml"
+        return INPUT_DIR / f"{env_name}_{key}.yaml"
     if suite == "q_stickiness":
         if key == QSTICK_PHASE1:
             return QSTICK_DIR / f"{key}.yaml"
@@ -70,12 +71,23 @@ def _experiment_path(suite: str, key: str) -> Path:
     raise ValueError(f"Unknown suite={suite!r}")
 
 
-def _list_rows(suite: str) -> list[tuple[str, str, list[str]]]:
+def _list_rows(suite: str, *, env_name: str | None = None) -> list[tuple[str, str, list[str]]]:
     rows: list[tuple[str, str, list[str]]] = []
     if suite == "input_ablation":
-        for key in INPUT_VARIANT_KEYS:
-            raw = _load_yaml(_experiment_path(suite, key))
-            rows.append((key, str(raw.get("WANDB_RUN_NAME", key)), list(raw.get("WANDB_TAGS", []))))
+        envs = (env_name,) if env_name else INPUT_ABLATION_ENVS
+        for env in envs:
+            for key in INPUT_VARIANT_KEYS:
+                path = _experiment_path(suite, key, env_name=env)
+                if not path.is_file():
+                    continue
+                raw = _load_yaml(path)
+                rows.append(
+                    (
+                        f"{env}/{key}",
+                        str(raw.get("WANDB_RUN_NAME", key)),
+                        list(raw.get("WANDB_TAGS", [])),
+                    )
+                )
         return rows
     raw_p1 = _load_yaml(_experiment_path(suite, QSTICK_PHASE1))
     rows.append(
@@ -133,17 +145,23 @@ def run_suite(
     phases: list[int],
     wandb_mode: str | None,
     trial_steps: int | None,
+    env_name: str | None = None,
 ) -> None:
     if suite == "input_ablation":
         keys = variants or INPUT_VARIANT_KEYS
-        for key in keys:
-            path = _experiment_path(suite, key)
-            print(f"\n>>> Running {suite}/{path.name}")
-            try:
-                _run_experiment(path, wandb_mode=wandb_mode, trial_steps=trial_steps)
-            except Exception:
-                traceback.print_exc()
-                raise
+        envs = (env_name,) if env_name else INPUT_ABLATION_ENVS
+        for env in envs:
+            for key in keys:
+                path = _experiment_path(suite, key, env_name=env)
+                if not path.is_file():
+                    print(f"\n>>> Skipping missing config {path.name}")
+                    continue
+                print(f"\n>>> Running {suite}/{path.name}")
+                try:
+                    _run_experiment(path, wandb_mode=wandb_mode, trial_steps=trial_steps)
+                except Exception:
+                    traceback.print_exc()
+                    raise
         return
 
     if suite == "q_stickiness":
@@ -189,6 +207,11 @@ def main() -> None:
         default=[1, 2],
         help="For q_stickiness only: 1=skills pretrain, 2=meta tandem variants",
     )
+    parser.add_argument(
+        "--env",
+        choices=list(INPUT_ABLATION_ENVS),
+        help="For input_ablation only: run configs for one environment (default: all present)",
+    )
     parser.add_argument("--list-matrix", action="store_true", help="Print run names and tags")
     parser.add_argument("--trial", action="store_true", help="Short smoke run; wandb disabled by default")
     parser.add_argument("--trial-steps", type=int, default=32768)
@@ -210,6 +233,7 @@ def main() -> None:
         phases=list(args.phases),
         wandb_mode=wandb_mode,
         trial_steps=trial_steps,
+        env_name=args.env,
     )
 
 

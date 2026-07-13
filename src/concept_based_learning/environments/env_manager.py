@@ -1,4 +1,5 @@
 import inspect
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
@@ -368,6 +369,46 @@ def _bootcamp_reward_extractor(
         rewards = rewards[..., 0]
         skill_done = skill_done[..., 0]
     return rewards, skill_done
+
+def semantic_max_objects_from_env(env) -> int:
+    """Return ``max_objects`` from the outermost ``JaxatariSemanticBaseWrapper``."""
+    cur = env
+    for _ in range(16):
+        if isinstance(cur, JaxatariSemanticBaseWrapper):
+            return int(cur.max_objects)
+        nxt = getattr(cur, "env", None)
+        if nxt is None:
+            nxt = getattr(cur, "_env", None)
+        if nxt is None:
+            break
+        cur = nxt
+    raise ValueError(
+        f"Could not find JaxatariSemanticBaseWrapper in env chain "
+        f"(started from {type(env).__name__})."
+    )
+
+
+def align_config_max_objects(
+    config: Dict[str, Any], env, *, env_name: str = ""
+) -> None:
+    """Set ``config['MAX_OBJECTS']`` from the semantic wrapper when missing or wrong."""
+    env_max = semantic_max_objects_from_env(env)
+    cfg_max = config.get("MAX_OBJECTS")
+    label = env_name or str(config.get("ENV_NAME", "env"))
+    if cfg_max is None:
+        config["MAX_OBJECTS"] = env_max
+        print(f"MAX_OBJECTS not set; using {env_max} for {label}.")
+        return
+    cfg_max = int(cfg_max)
+    if cfg_max != env_max:
+        warnings.warn(
+            f"MAX_OBJECTS={cfg_max} does not match semantic wrapper ({env_max}) "
+            f"for ENV_NAME={label!r}; using env value {env_max}.",
+            UserWarning,
+            stacklevel=2,
+        )
+        config["MAX_OBJECTS"] = env_max
+
 
 @dataclass(frozen=True)
 class EnvComponents:

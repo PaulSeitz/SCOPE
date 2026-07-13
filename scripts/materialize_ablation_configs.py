@@ -13,18 +13,42 @@ QSTICK_DIR = ROOT / "configs" / "experiment" / "q_stickiness_eval"
 
 COMMON_ENV = {
     "ALG_NAME": "hierarchical_pqn",
-    "ENV_NAME": "seaquest",
     "TRAIN_MODE": "tandem",
     "META_ARCHITECTURE": "per_object_mlp",
     "USE_LEGACY_EGO_OBS": False,
     "USE_EGO_SIZE_FEATURES": False,
     "USE_EGO_VELOCITY_FEATURES": False,
     "EGO_DISTANCE_CLIP_MAX_PX": 20,
+    "GAME_MODS": None,
+    "EVAL_GAME_MODS": None,
+}
+
+SEAQUEST_ENV = {
+    **COMMON_ENV,
+    "ENV_NAME": "seaquest",
     "USE_LEGACY_SEAQUEST_ACTION_MAPPER": False,
     "USE_LEGACY_SEAQUEST_ASCENT_BLOCK": False,
     "USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD": False,
-    "GAME_MODS": None,
-    "EVAL_GAME_MODS": None,
+}
+
+SPACEINVADERS_ENV = {
+    **COMMON_ENV,
+    "ENV_NAME": "spaceinvaders",
+    "USE_SKILL_EGO_FEATURES": True,
+    "SKILL_EGO_EXTRA_DIM": 4,
+}
+
+ABLATION_ENVS = {
+    "seaquest": {
+        "env": SEAQUEST_ENV,
+        "alg": {"MAX_OBJECTS": 35, "EGO_ACTION_DIM": 18},
+        "prefix": "sq",
+    },
+    "spaceinvaders": {
+        "env": SPACEINVADERS_ENV,
+        "alg": {"MAX_OBJECTS": 41, "EGO_ACTION_DIM": 18},
+        "prefix": "si",
+    },
 }
 
 INPUT_ALG = {
@@ -203,13 +227,13 @@ QSTICK_VARIANTS = [
 ]
 
 
-def _input_variant_doc(meta: str, skill: str, label: str | None) -> str:
+def _input_variant_doc(env_name: str, meta: str, skill: str, label: str | None) -> str:
     title = f"meta={meta}, skill={skill}"
     if label:
         title += f" ({label})"
     return (
-        f"# input_ablation/seaquest_mi_{meta}_si_{skill}.yaml\n"
-        f"# Seaquest tandem input ablation: {title}.\n"
+        f"# input_ablation/{env_name}_mi_{meta}_si_{skill}.yaml\n"
+        f"# {env_name.title()} tandem input ablation: {title}.\n"
         f"# Full scratch tandem (50M steps). Filter in W&B: suite:input_ablation.\n"
     )
 
@@ -221,45 +245,48 @@ def _write_yaml(path: Path, payload: dict) -> None:
 
 
 def materialize_input_ablation() -> None:
-    for meta, skill, label in INPUT_VARIANTS:
-        key = f"mi_{meta}_si_{skill}"
-        tags = [
-            "suite:input_ablation",
-            "env:seaquest",
-            "train_mode:tandem",
-            f"meta_input:{meta}",
-            f"skill_input:{skill}",
-        ]
-        if label:
-            tags.append(f"variant:{label}")
-        else:
-            tags.append(f"variant:{key}")
+    for env_name, profile in ABLATION_ENVS.items():
+        env_prefix = profile["prefix"]
+        for meta, skill, label in INPUT_VARIANTS:
+            key = f"mi_{meta}_si_{skill}"
+            tags = [
+                "suite:input_ablation",
+                f"env:{env_name}",
+                "train_mode:tandem",
+                f"meta_input:{meta}",
+                f"skill_input:{skill}",
+            ]
+            if label:
+                tags.append(f"variant:{label}")
+            else:
+                tags.append(f"variant:{key}")
 
-        alg = {
-            **INPUT_ALG,
-            "META_INPUT_MODE": meta,
-            "SKILL_INPUT_MODE": skill,
-        }
-        payload = {
-            **COMMON_ENV,
-            "SAVE_PATH": f"./outputs/models/input_ablation/{key}",
-            "WANDB_RUN_NAME": f"sq_abl_{key}",
-            "WANDB_TAGS": tags,
-            "META_INPUT_MODE": meta,
-            "SKILL_INPUT_MODE": skill,
-            "alg": alg,
-        }
-        path = INPUT_DIR / f"seaquest_{key}.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        header = _input_variant_doc(meta, skill, label)
-        with path.open("w", encoding="utf-8") as f:
-            f.write(header)
-            yaml.safe_dump(payload, f, sort_keys=False, default_flow_style=False)
+            alg = {
+                **INPUT_ALG,
+                **profile["alg"],
+                "META_INPUT_MODE": meta,
+                "SKILL_INPUT_MODE": skill,
+            }
+            payload = {
+                **profile["env"],
+                "SAVE_PATH": f"./outputs/models/input_ablation/{env_name}_{key}",
+                "WANDB_RUN_NAME": f"{env_prefix}_abl_{key}",
+                "WANDB_TAGS": tags,
+                "META_INPUT_MODE": meta,
+                "SKILL_INPUT_MODE": skill,
+                "alg": alg,
+            }
+            path = INPUT_DIR / f"{env_name}_{key}.yaml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            header = _input_variant_doc(env_name, meta, skill, label)
+            with path.open("w", encoding="utf-8") as f:
+                f.write(header)
+                yaml.safe_dump(payload, f, sort_keys=False, default_flow_style=False)
 
 
 def materialize_q_stickiness() -> None:
     phase1 = {
-        **COMMON_ENV,
+        **SEAQUEST_ENV,
         "TRAIN_MODE": "skills_only",
         "SAVE_PATH": "./outputs/models/q_stickiness_eval/phase1_skills",
         "WANDB_RUN_NAME": "sq_qstk_phase1_skills",
@@ -310,7 +337,7 @@ def materialize_q_stickiness() -> None:
             **variant["overrides"],
         }
         payload = {
-            **COMMON_ENV,
+            **SEAQUEST_ENV,
             "SAVE_PATH": f"./outputs/models/q_stickiness_eval/{variant['key']}",
             "WANDB_RUN_NAME": variant["run_name"],
             "WANDB_TAGS": variant["tags"],

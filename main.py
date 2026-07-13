@@ -11,7 +11,10 @@ from safetensors.flax import save_file
 import hydra
 from omegaconf import OmegaConf
 
-from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.env_manager import (
+    EnvManager,
+    align_config_max_objects,
+)
 from concept_based_learning.environments.heuristics import (
     get_nearest_object_target,
     resolve_heuristic_target_fn,
@@ -129,6 +132,7 @@ def outer_make_train(config, frozen_meta_params=None):
 
     env, _ = create_env_with_mods(train_game_mods, train=True)
     test_env, renderer = create_env_with_mods(eval_game_mods, train=False)
+    align_config_max_objects(config, env, env_name=env_name)
 
     heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
 
@@ -170,6 +174,7 @@ def outer_make_meta_train(config, frozen_skill_params):
 
     env, _ = manager.make_env(env_name, local_cfg, train=True)
     test_env, renderer = manager.make_env(env_name, local_cfg, train=False)
+    align_config_max_objects(local_cfg, env, env_name=env_name)
 
     train_fn, eval_rollout_fn = make_meta_train(
         local_cfg,
@@ -198,6 +203,7 @@ def outer_make_tandem_train(config):
     components = manager.get_components(env_name)
     env, _ = manager.make_env(env_name, config, train=True)
     test_env, renderer = manager.make_env(env_name, config, train=False)
+    align_config_max_objects(config, env, env_name=env_name)
 
     heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
 
