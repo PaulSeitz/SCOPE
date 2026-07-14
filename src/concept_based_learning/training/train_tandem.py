@@ -40,6 +40,7 @@ from concept_based_learning.training.trajectory_cuts import (
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
+from concept_based_learning.training.skill_bootstrap import chunked_skill_network_q_max
 from concept_based_learning.training.input_debug import (
     input_debug_enabled,
     maybe_jax_check_probe_inputs,
@@ -101,6 +102,9 @@ def make_tandem_train(
         if relabel_k_objects is None
         else int(max(1, min(max_objects, int(relabel_k_objects))))
     )
+    skill_bootstrap_chunk_steps = int(config.get("SKILL_BOOTSTRAP_CHUNK_STEPS", 0))
+    if skill_bootstrap_chunk_steps <= 0:
+        skill_bootstrap_chunk_steps = int(config["NUM_STEPS"])
     skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
@@ -1101,14 +1105,16 @@ def make_tandem_train(
                         next_pixel_obs_all = transitions.next_pixel_obs
                     else:
                         next_pixel_obs_all = None
-                    next_q_all = skill_network.apply(
-                        {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                    next_q_max_all = chunked_skill_network_q_max(
+                        skill_network.apply,
+                        s_state.params,
+                        s_state.batch_stats,
                         transitions.next_ego_obs_all,
-                        train=False,
                         target_idx=target_idx_all,
                         pixel_obs=next_pixel_obs_all,
+                        chunk_steps=skill_bootstrap_chunk_steps,
+                        train=False,
                     )
-                    next_q_max_all = jnp.max(next_q_all, axis=-1)  # [T, E, O]
 
                     last_step_done_all = jnp.logical_or(
                         transitions.skill_done_all[-1, :, :, skill_idx],

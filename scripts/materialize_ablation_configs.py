@@ -117,7 +117,7 @@ INPUT_ALG = {
     "EPISODIC_LIFE": True,
     "FRAME_STACK_SIZE": 4,
     "TOTAL_TIMESTEPS": 25_000_000,
-    "NUM_ENVS": 256,
+    "NUM_ENVS": 128,
     "NUM_STEPS": 128,
     "NUM_EPOCHS": 3,
     "NUM_MINIBATCHES": 32,
@@ -129,6 +129,8 @@ INPUT_ALG = {
     "MAX_GRAD_NORM": 0.8,
     "OFF_POLICY": True,
     "RELABEL_ALL_OBJECTS": True,
+    "RELABEL_K_OBJECTS": 15,
+    "SKILL_BOOTSTRAP_CHUNK_STEPS": 16,
     "SKILL_BOOTSTRAP": "q_lambda",
     "SKILL_QLAMBDA_WATKINS_CUT": False,
     "EPS_START": 0.3,
@@ -286,7 +288,8 @@ def _input_variant_doc(
     return (
         f"# input_ablation/{env_name}_mi_{meta}_si_{skill}.yaml\n"
         f"# {env_name.title()} tandem input ablation: {title}.\n"
-        "# Full scratch tandem (~25M steps, 256x128 rollout). Filter: suite:input_ablation.\n"
+        "# Full scratch tandem (~25M steps, 128x128 rollout, relabel_k=15). "
+        "Filter: suite:input_ablation.\n"
     )
 
 
