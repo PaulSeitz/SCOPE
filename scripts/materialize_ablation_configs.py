@@ -116,9 +116,9 @@ INPUT_ALG = {
     "STICKY_ACTIONS": False,
     "EPISODIC_LIFE": True,
     "FRAME_STACK_SIZE": 4,
-    "TOTAL_TIMESTEPS": 10_000_000,
+    "TOTAL_TIMESTEPS": 25_000_000,
     "NUM_ENVS": 512,
-    "NUM_STEPS": 128,
+    "NUM_STEPS": 64,
     "NUM_EPOCHS": 2,
     "NUM_MINIBATCHES": 32,
     "GAMMA": 0.99,
@@ -288,7 +288,7 @@ def _input_variant_doc(
     return (
         f"# input_ablation/{env_name}_mi_{meta}_si_{skill}.yaml\n"
         f"# {env_name.title()} tandem input ablation: {title}.\n"
-        "# Full scratch tandem (10M steps, 512x128 rollout, relabel_k=15). "
+        "# Full scratch tandem (25M steps, 512x64 rollout, relabel_k=15). "
         "Filter: suite:input_ablation.\n"
     )
 
