@@ -1,4 +1,5 @@
 # Curated multi-env input ablation (9 tandem runs, 10M steps each).
+# Validated rollout tier: 512 envs x 128 steps (split-region tandem, ~48GB GPU).
 #
 # RTPT (nvidia-smi): HRL_input_ablation, or HRL_input_ablation1 / HRL_input_ablation2 with --manifest-shard
 #
