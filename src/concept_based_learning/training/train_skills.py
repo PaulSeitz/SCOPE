@@ -852,7 +852,9 @@ def make_train(
                     last_lambda = last_reward_all + skill_gamma * last_next_q
 
                     target_switch_cut = skill_target_switch_cut(
-                        transitions.target_idx, MAX_OBJECTS, skill_target_cut
+                        transitions.target_idx,
+                        transitions.next_ego_obs_all.shape[2],
+                        skill_target_cut,
                     )
 
                     def _get_target_all(carry, xs):
