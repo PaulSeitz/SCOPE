@@ -1,0 +1,88 @@
+# input_ablation/freeway_mi_oc_embed_si_pixel_embed.yaml
+# Freeway tandem input ablation: meta=oc_embed, skill=pixel_embed.
+# Full scratch tandem (25M steps). Filter in W&B: suite:input_ablation.
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: tandem
+META_ARCHITECTURE: per_object_mlp
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: true
+EGO_DISTANCE_CLIP_MAX_PX: 40
+GAME_MODS: null
+EVAL_GAME_MODS: null
+ENV_NAME: freeway
+META_PIXEL_DO_RESIZE: true
+META_PIXEL_USE_NATIVE_DOWNSCALING: true
+META_PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+META_PIXEL_GRAYSCALE: true
+SAVE_PATH: ./outputs/models/input_ablation/freeway_mi_oc_embed_si_pixel_embed
+WANDB_RUN_NAME: fw_abl_mi_oc_embed_si_pixel_embed
+WANDB_TAGS:
+- suite:input_ablation
+- env:freeway
+- train_mode:tandem
+- meta_input:oc_embed
+- skill_input:pixel_embed
+- variant:mi_oc_embed_si_pixel_embed
+META_INPUT_MODE: oc_embed
+SKILL_INPUT_MODE: pixel_embed
+alg:
+  NUM_SKILLS: 3
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  MAX_OBJECTS: 12
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  META_HIDDEN_SIZE: 256
+  META_PER_OBJECT_NUM_LAYERS: 3
+  META_FLAT_NUM_LAYERS: 3
+  META_EMBED_DIM: 256
+  SKILL_EMBED_DIM: 256
+  META_LR: 0.0005
+  SKILL_LR: 0.0005
+  META_USE_NOOP_TARGET: true
+  META_NOOP_TARGET_IDX: 0
+  META_SWITCH_PENALTY: -0.05
+  META_DEATH_PENALTY: -1.0
+  META_REWARD_LAMBDA: 1.0
+  SKILL_REWARD_LAMBDA: 0.0
+  META_Q_STICKINESS_ENABLED: false
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
+  FIRST_FIRE: false
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: false
+  FRAME_STACK_SIZE: 4
+  TOTAL_TIMESTEPS: 25000000
+  NUM_ENVS: 512
+  NUM_STEPS: 64
+  NUM_EPOCHS: 3
+  NUM_MINIBATCHES: 32
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: true
+  SKILL_BOOTSTRAP: q_lambda
+  SKILL_QLAMBDA_WATKINS_CUT: false
+  EPS_START: 0.3
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.35
+  META_EPS_START: 0.8
+  META_NUM_EPOCHS: 3
+  SKILL_WARMUP_UPDATES: 0
+  META_LEARN_DURING_WARMUP: false
+  HEURISTIC_MODE: env_specific
+  META_PIXEL_CNN_CHANNELS: &id001
+  - 16
+  - 32
+  SKILL_PIXEL_CNN_CHANNELS: *id001
+  META_INPUT_MODE: oc_embed
+  SKILL_INPUT_MODE: pixel_embed

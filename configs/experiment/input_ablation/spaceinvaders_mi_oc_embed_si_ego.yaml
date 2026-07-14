@@ -1,6 +1,6 @@
 # input_ablation/spaceinvaders_mi_oc_embed_si_ego.yaml
 # Spaceinvaders tandem input ablation: meta=oc_embed, skill=ego.
-# Full scratch tandem (50M steps). Filter in W&B: suite:input_ablation.
+# Full scratch tandem (25M steps). Filter in W&B: suite:input_ablation.
 ALG_NAME: hierarchical_pqn
 TRAIN_MODE: tandem
 META_ARCHITECTURE: per_object_mlp
@@ -53,7 +53,7 @@ alg:
   STICKY_ACTIONS: false
   EPISODIC_LIFE: true
   FRAME_STACK_SIZE: 4
-  TOTAL_TIMESTEPS: 50000000
+  TOTAL_TIMESTEPS: 25000000
   NUM_ENVS: 512
   NUM_STEPS: 64
   NUM_EPOCHS: 3

@@ -16,6 +16,9 @@ possible, tagging the run with ``oom_fallback:on``.
 Usage (from project root):
   python scripts/run_ablation_eval.py --list-matrix
   python scripts/run_ablation_eval.py --suite input_ablation
+  python scripts/run_ablation_eval.py --suite input_ablation --manifest manifest_multi_env.yaml
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_ablation_eval.py --suite input_ablation --manifest manifest_multi_env.yaml --manifest-shard 1/2 &
+  CUDA_VISIBLE_DEVICES=1 python scripts/run_ablation_eval.py --suite input_ablation --manifest manifest_multi_env.yaml --manifest-shard 2/2 &
   python scripts/run_ablation_eval.py --suite q_stickiness
   python scripts/run_ablation_eval.py --suite q_stickiness --phases 1
   python scripts/run_ablation_eval.py --suite input_ablation --variants mi_flat_si_ego --trial
@@ -26,10 +29,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import sys
 import traceback
 from pathlib import Path
 from typing import Any
+
+# Reduce cudnn autotune memory spikes for pixel_embed tandem runs.
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_strict_conv_algorithm_picker=false")
 
 import yaml
 
@@ -40,8 +47,9 @@ import main as train_main  # noqa: E402
 
 INPUT_DIR = PROJECT_ROOT / "configs" / "experiment" / "input_ablation"
 QSTICK_DIR = PROJECT_ROOT / "configs" / "experiment" / "q_stickiness_eval"
+DEFAULT_INPUT_MANIFEST = INPUT_DIR / "manifest_multi_env.yaml"
 
-INPUT_ABLATION_ENVS = ("seaquest", "spaceinvaders")
+INPUT_ABLATION_ENVS = ("seaquest", "spaceinvaders", "freeway", "beamrider")
 INPUT_VARIANT_KEYS = [
     f"mi_{meta}_si_{skill}"
     for meta in ("flat", "oc_embed", "pixel_embed")
@@ -70,8 +78,14 @@ _SMALLER_BATCH_PAIRS: tuple[tuple[int, int], ...] = (
     (256, 32),
     (128, 64),
     (128, 32),
+    (64, 64),
+    (64, 32),
+    (32, 64),
+    (32, 32),
+    (16, 64),
+    (16, 32),
 )
-_MIN_NUM_ENVS = 128
+_MIN_NUM_ENVS = 16
 _MIN_NUM_STEPS = 32
 _MAX_NUM_STEPS = 128
 
@@ -79,6 +93,59 @@ _MAX_NUM_STEPS = 128
 def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _resolve_manifest_path(manifest: str | Path | None) -> Path | None:
+    if manifest is None:
+        return None
+    path = Path(manifest)
+    if not path.is_absolute():
+        candidate = INPUT_DIR / path
+        if candidate.is_file():
+            return candidate
+        candidate = PROJECT_ROOT / path
+        if candidate.is_file():
+            return candidate
+    return path
+
+
+def _load_input_manifest(path: Path) -> list[tuple[str, str]]:
+    raw = _load_yaml(path)
+    runs = raw.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise ValueError(f"Manifest {path} must contain a non-empty 'runs' list")
+
+    entries: list[tuple[str, str]] = []
+    for idx, entry in enumerate(runs):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Manifest run #{idx} must be a mapping, got {type(entry)!r}")
+        env_name = str(entry.get("env", "")).strip()
+        variant = str(entry.get("variant", "")).strip()
+        if not env_name or not variant:
+            raise ValueError(f"Manifest run #{idx} needs both 'env' and 'variant'")
+        entries.append((env_name, variant))
+    return entries
+
+
+def _parse_manifest_shard(spec: str) -> tuple[int, int]:
+    parts = spec.split("/")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid manifest shard {spec!r}; expected INDEX/TOTAL (e.g. 1/2)")
+    shard_one_based = int(parts[0])
+    num_shards = int(parts[1])
+    if num_shards < 1:
+        raise ValueError(f"manifest shard total must be >= 1, got {num_shards}")
+    if not 1 <= shard_one_based <= num_shards:
+        raise ValueError(
+            f"manifest shard index must be in [1, {num_shards}], got {shard_one_based}"
+        )
+    return shard_one_based - 1, num_shards
+
+
+def _shard_manifest_entries(
+    entries: list[tuple[str, str]], *, shard_idx: int, num_shards: int
+) -> list[tuple[str, str]]:
+    return [entry for i, entry in enumerate(entries) if i % num_shards == shard_idx]
 
 
 def _flatten_experiment_cfg(raw: dict[str, Any]) -> dict[str, Any]:
@@ -96,9 +163,29 @@ def _experiment_path(suite: str, key: str, *, env_name: str = "seaquest") -> Pat
     raise ValueError(f"Unknown suite={suite!r}")
 
 
-def _list_rows(suite: str, *, env_name: str | None = None) -> list[tuple[str, str, list[str]]]:
+def _list_rows(
+    suite: str,
+    *,
+    env_name: str | None = None,
+    manifest_entries: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str, list[str]]]:
     rows: list[tuple[str, str, list[str]]] = []
     if suite == "input_ablation":
+        if manifest_entries is not None:
+            for env, key in manifest_entries:
+                path = _experiment_path(suite, key, env_name=env)
+                if not path.is_file():
+                    rows.append((f"{env}/{key}", f"<missing: {path.name}>", []))
+                    continue
+                raw = _load_yaml(path)
+                rows.append(
+                    (
+                        f"{env}/{key}",
+                        str(raw.get("WANDB_RUN_NAME", key)),
+                        list(raw.get("WANDB_TAGS", [])),
+                    )
+                )
+            return rows
         envs = (env_name,) if env_name else INPUT_ABLATION_ENVS
         for env in envs:
             for key in INPUT_VARIANT_KEYS:
@@ -128,13 +215,19 @@ def _list_rows(suite: str, *, env_name: str | None = None) -> list[tuple[str, st
     return rows
 
 
-def print_matrix(suite: str | None = None) -> None:
+def print_matrix(
+    suite: str | None = None,
+    *,
+    manifest_entries: list[tuple[str, str]] | None = None,
+) -> None:
     suites = ["input_ablation", "q_stickiness"] if suite is None else [suite]
     for s in suites:
         print(f"\n=== {s} ===")
         print(f"{'Variant':<34} {'WANDB_RUN_NAME':<24} WANDB_TAGS")
         print("-" * 100)
-        for key, run_name, tags in _list_rows(s):
+        for key, run_name, tags in _list_rows(
+            s, manifest_entries=manifest_entries if s == "input_ablation" else None
+        ):
             print(f"{key:<34} {run_name:<24} {tags}")
         print("\nW&B filter examples:")
         if s == "input_ablation":
@@ -209,6 +302,8 @@ def _oom_fallback_tiers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             num_envs, num_steps, num_minibatches=num_minibatches
         ):
             return
+        if num_envs >= envs and num_steps >= steps:
+            return
         if num_envs >= envs and _rollout_batch(num_envs, num_steps) >= initial_batch:
             return
 
@@ -281,6 +376,11 @@ def _apply_run_defaults(
         cfg.setdefault("WANDB_TAGS", [])
         if "trial" not in cfg["WANDB_TAGS"]:
             cfg["WANDB_TAGS"] = [*cfg["WANDB_TAGS"], "trial"]
+        meta_mode = str(cfg.get("META_INPUT_MODE", "flat")).lower().strip()
+        skill_mode = str(cfg.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+        if meta_mode == "pixel_embed" or skill_mode == "pixel_embed":
+            cfg["NUM_ENVS"] = min(int(cfg.get("NUM_ENVS", 512)), 128)
+            cfg["NUM_STEPS"] = min(int(cfg.get("NUM_STEPS", 64)), 32)
     cfg.setdefault("ENTITY", "paul-seitz-tu-darmstadt")
     cfg.setdefault("PROJECT", "concept_based_learning")
     cfg.setdefault("SEED", 44)
@@ -312,7 +412,7 @@ def _run_experiment(
     )
 
     tier_cfgs = [base_cfg]
-    if oom_retry and trial_steps is None:
+    if oom_retry:
         tier_cfgs.extend(_oom_fallback_tiers(base_cfg))
 
     last_exc: BaseException | None = None
@@ -351,9 +451,30 @@ def run_suite(
     wandb_mode: str | None,
     trial_steps: int | None,
     env_name: str | None = None,
+    manifest_entries: list[tuple[str, str]] | None = None,
     oom_retry: bool = True,
 ) -> None:
     if suite == "input_ablation":
+        if manifest_entries is not None:
+            for env, key in manifest_entries:
+                path = _experiment_path(suite, key, env_name=env)
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"Manifest entry {env}/{key} has no config at {path}"
+                    )
+                print(f"\n>>> Running {suite}/{path.name}")
+                try:
+                    _run_experiment(
+                        path,
+                        wandb_mode=wandb_mode,
+                        trial_steps=trial_steps,
+                        oom_retry=oom_retry,
+                    )
+                except Exception:
+                    traceback.print_exc()
+                    raise
+            return
+
         keys = variants or INPUT_VARIANT_KEYS
         envs = (env_name,) if env_name else INPUT_ABLATION_ENVS
         for env in envs:
@@ -433,6 +554,25 @@ def main() -> None:
         choices=list(INPUT_ABLATION_ENVS),
         help="For input_ablation only: run configs for one environment (default: all present)",
     )
+    parser.add_argument(
+        "--manifest",
+        nargs="?",
+        const=str(DEFAULT_INPUT_MANIFEST.relative_to(INPUT_DIR)),
+        default=None,
+        metavar="YAML",
+        help=(
+            "For input_ablation: YAML list of env/variant runs "
+            f"(default file: {DEFAULT_INPUT_MANIFEST.name})"
+        ),
+    )
+    parser.add_argument(
+        "--manifest-shard",
+        metavar="INDEX/TOTAL",
+        help=(
+            "With --manifest: run every TOTAL-th entry starting at INDEX "
+            "(e.g. 1/2 and 2/2 split across two GPUs)"
+        ),
+    )
     parser.add_argument("--list-matrix", action="store_true", help="Print run names and tags")
     parser.add_argument("--trial", action="store_true", help="Short smoke run; wandb disabled by default")
     parser.add_argument("--trial-steps", type=int, default=32768)
@@ -445,8 +585,51 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    manifest_entries: list[tuple[str, str]] | None = None
+    if args.manifest is not None:
+        if args.suite != "input_ablation":
+            parser.error("--manifest is only supported with --suite input_ablation")
+        manifest_path = _resolve_manifest_path(args.manifest)
+        if manifest_path is None or not manifest_path.is_file():
+            parser.error(f"Manifest not found: {args.manifest!r}")
+        manifest_entries = _load_input_manifest(manifest_path)
+        if args.variants:
+            variant_set = set(args.variants)
+            manifest_entries = [
+                (env, key) for env, key in manifest_entries if key in variant_set
+            ]
+            if not manifest_entries:
+                parser.error(
+                    f"No manifest runs match --variants {args.variants!r} in "
+                    f"{manifest_path.name}"
+                )
+        if args.env is not None:
+            manifest_entries = [
+                (env, key) for env, key in manifest_entries if env == args.env
+            ]
+            if not manifest_entries:
+                parser.error(
+                    f"No manifest runs for env={args.env!r} in {manifest_path.name}"
+                )
+        if args.manifest_shard is not None:
+            shard_idx, num_shards = _parse_manifest_shard(args.manifest_shard)
+            manifest_entries = _shard_manifest_entries(
+                manifest_entries, shard_idx=shard_idx, num_shards=num_shards
+            )
+            if not manifest_entries:
+                parser.error(
+                    f"Manifest shard {args.manifest_shard!r} matched no runs in "
+                    f"{manifest_path.name}"
+                )
+            print(
+                f"\n>>> Manifest shard {shard_idx + 1}/{num_shards}: "
+                f"{len(manifest_entries)} run(s)"
+            )
+    elif args.manifest_shard is not None:
+        parser.error("--manifest-shard requires --manifest")
+
     if args.list_matrix:
-        print_matrix(args.suite)
+        print_matrix(args.suite, manifest_entries=manifest_entries)
         return
 
     if args.suite is None:
@@ -461,6 +644,7 @@ def main() -> None:
         wandb_mode=wandb_mode,
         trial_steps=trial_steps,
         env_name=args.env,
+        manifest_entries=manifest_entries,
         oom_retry=args.oom_retry,
     )
 

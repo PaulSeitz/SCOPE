@@ -38,6 +38,20 @@ SPACEINVADERS_ENV = {
     "SKILL_EGO_EXTRA_DIM": 4,
 }
 
+FREEWAY_ENV = {
+    **COMMON_ENV,
+    "ENV_NAME": "freeway",
+    "USE_EGO_VELOCITY_FEATURES": True,
+    "EGO_DISTANCE_CLIP_MAX_PX": 40,
+}
+
+BEAMRIDER_ENV = {
+    **COMMON_ENV,
+    "ENV_NAME": "beamrider",
+    "USE_SKILL_EGO_FEATURES": True,
+    "SKILL_EGO_EXTRA_DIM": 4,
+}
+
 ABLATION_ENVS = {
     "seaquest": {
         "env": SEAQUEST_ENV,
@@ -48,6 +62,31 @@ ABLATION_ENVS = {
         "env": SPACEINVADERS_ENV,
         "alg": {"MAX_OBJECTS": 41, "EGO_ACTION_DIM": 18},
         "prefix": "si",
+    },
+    "freeway": {
+        "env": FREEWAY_ENV,
+        "alg": {
+            "MAX_OBJECTS": 12,
+            "EGO_ACTION_DIM": 18,
+            "FIRST_FIRE": False,
+            "EPISODIC_LIFE": False,
+            "META_DEATH_PENALTY": -1.0,
+            "META_EPS_START": 0.8,
+        },
+        "prefix": "fw",
+    },
+    "beamrider": {
+        "env": BEAMRIDER_ENV,
+        "alg": {
+            "MAX_OBJECTS": 31,
+            "EGO_ACTION_DIM": 18,
+            "FIRST_FIRE": True,
+            "EPISODIC_LIFE": True,
+            "META_DEATH_PENALTY": -1.0,
+            "META_USE_FIRE_TARGET": True,
+            "META_FIRE_TARGET_IDX": 1,
+        },
+        "prefix": "br",
     },
 }
 
@@ -77,7 +116,7 @@ INPUT_ALG = {
     "STICKY_ACTIONS": False,
     "EPISODIC_LIFE": True,
     "FRAME_STACK_SIZE": 4,
-    "TOTAL_TIMESTEPS": 50_000_000,
+    "TOTAL_TIMESTEPS": 25_000_000,
     "NUM_ENVS": 512,
     "NUM_STEPS": 64,
     "NUM_EPOCHS": 3,
@@ -234,7 +273,7 @@ def _input_variant_doc(env_name: str, meta: str, skill: str, label: str | None) 
     return (
         f"# input_ablation/{env_name}_mi_{meta}_si_{skill}.yaml\n"
         f"# {env_name.title()} tandem input ablation: {title}.\n"
-        f"# Full scratch tandem (50M steps). Filter in W&B: suite:input_ablation.\n"
+        f"# Full scratch tandem (25M steps). Filter in W&B: suite:input_ablation.\n"
     )
 
 
@@ -242,6 +281,26 @@ def _write_yaml(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, sort_keys=False, default_flow_style=False)
+
+
+def _pixel_embed_wrapper_settings(meta: str, skill: str) -> dict[str, Any]:
+    if meta != "pixel_embed" and skill != "pixel_embed":
+        return {}
+    return {
+        "META_PIXEL_DO_RESIZE": True,
+        "META_PIXEL_USE_NATIVE_DOWNSCALING": True,
+        "META_PIXEL_RESIZE_SHAPE": [84, 84],
+        "META_PIXEL_GRAYSCALE": True,
+    }
+
+
+def _input_alg_for_variant(meta: str, skill: str, profile: dict) -> dict:
+    alg = {**INPUT_ALG, **profile["alg"]}
+    if meta == "pixel_embed" or skill == "pixel_embed":
+        small_cnn = [16, 32]
+        alg["META_PIXEL_CNN_CHANNELS"] = small_cnn
+        alg["SKILL_PIXEL_CNN_CHANNELS"] = small_cnn
+    return alg
 
 
 def materialize_input_ablation() -> None:
@@ -262,13 +321,13 @@ def materialize_input_ablation() -> None:
                 tags.append(f"variant:{key}")
 
             alg = {
-                **INPUT_ALG,
-                **profile["alg"],
+                **_input_alg_for_variant(meta, skill, profile),
                 "META_INPUT_MODE": meta,
                 "SKILL_INPUT_MODE": skill,
             }
             payload = {
                 **profile["env"],
+                **_pixel_embed_wrapper_settings(meta, skill),
                 "SAVE_PATH": f"./outputs/models/input_ablation/{env_name}_{key}",
                 "WANDB_RUN_NAME": f"{env_prefix}_abl_{key}",
                 "WANDB_TAGS": tags,
