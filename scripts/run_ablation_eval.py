@@ -6,12 +6,9 @@ Configs live under ``configs/experiment/input_ablation`` and
 ``configs/experiment/q_stickiness_eval`` with ``WANDB_TAGS`` / ``WANDB_RUN_NAME``
 embedded for W&B filtering.
 
-Checkpoints are written under each YAML's ``SAVE_PATH`` (see ``main.single_run``).
-W&B uses the same ``PROJECT`` / ``ENTITY`` as normal training runs; ablations are
-distinguished by ``WANDB_TAGS`` (e.g. ``suite:input_ablation``) and
-``WANDB_RUN_NAME``. On GPU OOM, ``--oom-retry`` (default) retries with lower
-``NUM_ENVS`` / higher ``NUM_STEPS`` while keeping the update count fixed when
-possible, tagging the run with ``oom_fallback:on``.
+Configs are run sequentially in one Python process (same pattern as
+``run_sequential_eval.py``). RTPT is initialized once with the total update count
+for the shard/manifest so nvidia-smi shows one continuous ETA.
 
 Usage (from project root):
   python scripts/run_ablation_eval.py --list-matrix
@@ -31,7 +28,6 @@ import argparse
 import copy
 import gc
 import os
-import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -47,7 +43,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import main as train_main  # noqa: E402
-from concept_based_learning.training.rtpt_progress import reset_rtpt  # noqa: E402
+from concept_based_learning.training.rtpt_progress import (  # noqa: E402
+    num_updates_from_timesteps,
+    start_rtpt,
+)
 
 INPUT_DIR = PROJECT_ROOT / "configs" / "experiment" / "input_ablation"
 QSTICK_DIR = PROJECT_ROOT / "configs" / "experiment" / "q_stickiness_eval"
@@ -391,12 +390,9 @@ def _apply_run_defaults(
     *,
     wandb_mode: str | None,
     trial_steps: int | None,
-    rtpt_experiment_name: str | None = None,
 ) -> str:
     if wandb_mode is not None:
         cfg["WANDB_MODE"] = wandb_mode
-    if rtpt_experiment_name is not None:
-        cfg["RTPT_EXPERIMENT_NAME"] = rtpt_experiment_name
     if trial_steps is not None:
         cfg["TOTAL_TIMESTEPS"] = int(trial_steps)
         cfg.setdefault("WANDB_TAGS", [])
@@ -427,41 +423,57 @@ def _clear_jax_memory() -> None:
         pass
 
 
+def _updates_for_config_path(path: Path, *, trial_steps: int | None) -> int:
+    """PPO update count for one experiment YAML (after trial overrides)."""
+    raw = _load_yaml(path)
+    cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
+    if trial_steps is not None:
+        cfg["TOTAL_TIMESTEPS"] = int(trial_steps)
+        meta_mode = str(cfg.get("META_INPUT_MODE", "flat")).lower().strip()
+        skill_mode = str(cfg.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+        dual_pixel = meta_mode == "pixel_embed" and skill_mode == "pixel_embed"
+        if meta_mode == "pixel_embed" or skill_mode == "pixel_embed":
+            cap_envs = 64 if dual_pixel else 128
+            cfg["NUM_ENVS"] = min(int(cfg.get("NUM_ENVS", 512)), cap_envs)
+            cfg["NUM_STEPS"] = min(int(cfg.get("NUM_STEPS", 64)), 32)
+        _align_trial_timesteps(cfg)
+    return num_updates_from_timesteps(
+        int(cfg.get("TOTAL_TIMESTEPS", 0)),
+        num_steps=int(cfg.get("NUM_STEPS", 64)),
+        num_envs=int(cfg.get("NUM_ENVS", 512)),
+    )
+
+
+def _init_rtpt_for_paths(
+    paths: list[Path],
+    *,
+    experiment_name: str,
+    trial_steps: int | None,
+) -> None:
+    """One RTPT bar for the whole suite (same pattern as run_sequential_eval.py)."""
+    total = sum(_updates_for_config_path(p, trial_steps=trial_steps) for p in paths)
+    total = max(1, total)
+    if start_rtpt(
+        {
+            "RTPT_ENABLED": True,
+            "RTPT_NAME_INITIALS": "PS",
+            "RTPT_EXPERIMENT_NAME": experiment_name,
+            "RTPT_STEP_EVERY": 10,
+            "TOTAL_TIMESTEPS": total,
+            "NUM_STEPS": 1,
+            "NUM_ENVS": 1,
+        }
+    ):
+        print(
+            f"RTPT initialized: {total:,} total updates across {len(paths)} run(s) "
+            f"({experiment_name}).\n"
+        )
+
+
 def _release_run_memory() -> None:
-    """Drop JAX compilation caches so the next run starts with a clean GPU."""
+    """Best-effort JAX cache drop between sequential runs in one process."""
     gc.collect()
     _clear_jax_memory()
-
-
-def _spawn_experiment_worker(
-    path: Path,
-    *,
-    wandb_mode: str | None,
-    trial_steps: int | None,
-    oom_retry: bool,
-    rtpt_experiment_name: str | None,
-) -> None:
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--worker-run",
-        str(path.resolve()),
-    ]
-    if wandb_mode is not None:
-        cmd.extend(["--wandb-mode", wandb_mode])
-    if trial_steps is not None:
-        cmd.append("--trial")
-        cmd.extend(["--trial-steps", str(trial_steps)])
-    if not oom_retry:
-        cmd.append("--no-oom-retry")
-    if rtpt_experiment_name is not None:
-        cmd.extend(["--rtpt-experiment-name", rtpt_experiment_name])
-    print(f">>> Spawning worker: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Worker exited with code {result.returncode} for {path.name}"
-        )
 
 
 def _run_experiment(
@@ -470,27 +482,22 @@ def _run_experiment(
     wandb_mode: str | None,
     trial_steps: int | None,
     oom_retry: bool,
-    rtpt_experiment_name: str | None = None,
-    isolated: bool = False,
 ) -> None:
-    if isolated:
-        _spawn_experiment_worker(
-            path,
-            wandb_mode=wandb_mode,
-            trial_steps=trial_steps,
-            oom_retry=oom_retry,
-            rtpt_experiment_name=rtpt_experiment_name,
-        )
-        return
-
     raw = _load_yaml(path)
     base_cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
     base_run_name = _apply_run_defaults(
         base_cfg,
         wandb_mode=wandb_mode,
         trial_steps=trial_steps,
-        rtpt_experiment_name=rtpt_experiment_name,
     )
+
+    print(f"\n{'=' * 70}")
+    print(f"  START: {path.name}")
+    print(
+        f"  ENV={base_cfg.get('ENV_NAME')}  MODE={base_cfg.get('TRAIN_MODE')}  "
+        f"STEPS={base_cfg.get('TOTAL_TIMESTEPS', 0):,}"
+    )
+    print(f"{'=' * 70}\n")
 
     tier_cfgs = [base_cfg]
     if oom_retry:
@@ -509,8 +516,9 @@ def _run_experiment(
                 f"mode={tier_cfg.get('OOM_FALLBACK_MODE')}"
             )
         try:
-            reset_rtpt()
             train_main.single_run(tier_cfg)
+            print(f"\n  DONE: {path.name}\n")
+            _release_run_memory()
             return
         except Exception as exc:
             last_exc = exc
@@ -519,11 +527,36 @@ def _run_experiment(
                 raise
             print(f"\n>>> OOM detected for {path.name}; trying lower-memory tier...")
             traceback.print_exc()
-        finally:
             _release_run_memory()
 
     if last_exc is not None:
         raise last_exc
+
+
+def _collect_input_ablation_paths(
+    *,
+    manifest_entries: list[tuple[str, str]] | None,
+    variants: list[str] | None,
+    env_name: str | None,
+) -> list[Path]:
+    paths: list[Path] = []
+    if manifest_entries is not None:
+        for env, key in manifest_entries:
+            path = _experiment_path("input_ablation", key, env_name=env)
+            if path.is_file():
+                paths.append(path)
+        return paths
+
+    keys = variants or INPUT_VARIANT_KEYS
+    envs = (env_name,) if env_name else INPUT_ABLATION_ENVS
+    for env in envs:
+        for key in keys:
+            path = _experiment_path("input_ablation", key, env_name=env)
+            if path.is_file():
+                paths.append(path)
+            else:
+                print(f"\n>>> Skipping missing config {path.name}")
+    return paths
 
 
 def run_suite(
@@ -537,9 +570,13 @@ def run_suite(
     manifest_entries: list[tuple[str, str]] | None = None,
     oom_retry: bool = True,
     rtpt_experiment_name: str | None = None,
-    isolate_runs: bool = True,
 ) -> None:
     if suite == "input_ablation":
+        paths = _collect_input_ablation_paths(
+            manifest_entries=manifest_entries,
+            variants=variants,
+            env_name=env_name,
+        )
         if manifest_entries is not None:
             for env, key in manifest_entries:
                 path = _experiment_path(suite, key, env_name=env)
@@ -547,42 +584,23 @@ def run_suite(
                     raise FileNotFoundError(
                         f"Manifest entry {env}/{key} has no config at {path}"
                     )
-                print(f"\n>>> Running {suite}/{path.name}")
-                try:
-                    _run_experiment(
-                        path,
-                        wandb_mode=wandb_mode,
-                        trial_steps=trial_steps,
-                        oom_retry=oom_retry,
-                        rtpt_experiment_name=rtpt_experiment_name,
-                        isolated=isolate_runs,
-                    )
-                except Exception:
-                    traceback.print_exc()
-                    raise
-            return
-
-        keys = variants or INPUT_VARIANT_KEYS
-        envs = (env_name,) if env_name else INPUT_ABLATION_ENVS
-        for env in envs:
-            for key in keys:
-                path = _experiment_path(suite, key, env_name=env)
-                if not path.is_file():
-                    print(f"\n>>> Skipping missing config {path.name}")
-                    continue
-                print(f"\n>>> Running {suite}/{path.name}")
-                try:
-                    _run_experiment(
-                        path,
-                        wandb_mode=wandb_mode,
-                        trial_steps=trial_steps,
-                        oom_retry=oom_retry,
-                        rtpt_experiment_name=rtpt_experiment_name,
-                        isolated=isolate_runs,
-                    )
-                except Exception:
-                    traceback.print_exc()
-                    raise
+        if rtpt_experiment_name is not None and paths:
+            _init_rtpt_for_paths(
+                paths,
+                experiment_name=rtpt_experiment_name,
+                trial_steps=trial_steps,
+            )
+        for path in paths:
+            try:
+                _run_experiment(
+                    path,
+                    wandb_mode=wandb_mode,
+                    trial_steps=trial_steps,
+                    oom_retry=oom_retry,
+                )
+            except Exception:
+                traceback.print_exc()
+                raise
         return
 
     if suite == "q_stickiness":
@@ -672,32 +690,7 @@ def main() -> None:
         default=True,
         help="On GPU OOM, retry with lower NUM_ENVS / adjusted NUM_STEPS (default: on)",
     )
-    parser.add_argument(
-        "--in-process",
-        action="store_true",
-        help=(
-            "Run every config in this process (default: one subprocess per config "
-            "so GPU memory is released between runs)"
-        ),
-    )
-    parser.add_argument("--worker-run", type=Path, default=None, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--rtpt-experiment-name", default=None, help=argparse.SUPPRESS
-    )
     args = parser.parse_args()
-
-    if args.worker_run is not None:
-        wandb_mode = _resolve_wandb_mode(trial=args.trial, wandb_mode=args.wandb_mode)
-        trial_steps = args.trial_steps if args.trial else None
-        _run_experiment(
-            args.worker_run,
-            wandb_mode=wandb_mode,
-            trial_steps=trial_steps,
-            oom_retry=args.oom_retry,
-            rtpt_experiment_name=args.rtpt_experiment_name,
-            isolated=False,
-        )
-        return
 
     manifest_entries: list[tuple[str, str]] | None = None
     if args.manifest is not None:
@@ -768,7 +761,6 @@ def main() -> None:
         manifest_entries=manifest_entries,
         oom_retry=args.oom_retry,
         rtpt_experiment_name=rtpt_experiment_name,
-        isolate_runs=not args.in_process,
     )
 
 
