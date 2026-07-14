@@ -1,18 +1,18 @@
 # q_stickiness_eval/seaquest_qsticky_t0.yaml
 # Requires phase1 skills at alg.INIT_MODEL_PATH.
 ALG_NAME: hierarchical_pqn
-ENV_NAME: seaquest
 TRAIN_MODE: tandem
 META_ARCHITECTURE: per_object_mlp
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: false
 EGO_DISTANCE_CLIP_MAX_PX: 20
+GAME_MODS: null
+EVAL_GAME_MODS: null
+ENV_NAME: seaquest
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
-GAME_MODS: null
-EVAL_GAME_MODS: null
 SAVE_PATH: ./outputs/models/q_stickiness_eval/qsticky_t0
 WANDB_RUN_NAME: sq_qstk_t0
 WANDB_TAGS:

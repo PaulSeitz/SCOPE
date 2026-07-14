@@ -1,0 +1,80 @@
+# input_ablation/spaceinvaders_mi_flat_si_ego.yaml
+# Spaceinvaders tandem input ablation: meta=flat, skill=ego (baseline).
+# Full scratch tandem (50M steps). Filter in W&B: suite:input_ablation.
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: tandem
+META_ARCHITECTURE: per_object_mlp
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+EGO_DISTANCE_CLIP_MAX_PX: 20
+GAME_MODS: null
+EVAL_GAME_MODS: null
+ENV_NAME: spaceinvaders
+USE_SKILL_EGO_FEATURES: true
+SKILL_EGO_EXTRA_DIM: 4
+SAVE_PATH: ./outputs/models/input_ablation/spaceinvaders_mi_flat_si_ego
+WANDB_RUN_NAME: si_abl_mi_flat_si_ego
+WANDB_TAGS:
+- suite:input_ablation
+- env:spaceinvaders
+- train_mode:tandem
+- meta_input:flat
+- skill_input:ego
+- variant:baseline
+META_INPUT_MODE: flat
+SKILL_INPUT_MODE: ego
+alg:
+  NUM_SKILLS: 3
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  MAX_OBJECTS: 41
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  META_HIDDEN_SIZE: 256
+  META_PER_OBJECT_NUM_LAYERS: 3
+  META_FLAT_NUM_LAYERS: 3
+  META_EMBED_DIM: 256
+  SKILL_EMBED_DIM: 256
+  META_LR: 0.0005
+  SKILL_LR: 0.0005
+  META_USE_NOOP_TARGET: true
+  META_NOOP_TARGET_IDX: 0
+  META_SWITCH_PENALTY: -0.05
+  META_DEATH_PENALTY: -10.0
+  META_REWARD_LAMBDA: 1.0
+  SKILL_REWARD_LAMBDA: 0.0
+  META_Q_STICKINESS_ENABLED: false
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
+  FIRST_FIRE: true
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: true
+  FRAME_STACK_SIZE: 4
+  TOTAL_TIMESTEPS: 50000000
+  NUM_ENVS: 512
+  NUM_STEPS: 64
+  NUM_EPOCHS: 3
+  NUM_MINIBATCHES: 32
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: true
+  SKILL_BOOTSTRAP: q_lambda
+  SKILL_QLAMBDA_WATKINS_CUT: false
+  EPS_START: 0.3
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.35
+  META_EPS_START: 0.1
+  META_NUM_EPOCHS: 3
+  SKILL_WARMUP_UPDATES: 0
+  META_LEARN_DURING_WARMUP: false
+  HEURISTIC_MODE: env_specific
+  META_INPUT_MODE: flat
+  SKILL_INPUT_MODE: ego

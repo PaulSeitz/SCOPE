@@ -2,19 +2,19 @@
 # Seaquest tandem input ablation: meta=flat, skill=ego (baseline).
 # Full scratch tandem (50M steps). Filter in W&B: suite:input_ablation.
 ALG_NAME: hierarchical_pqn
-ENV_NAME: seaquest
 TRAIN_MODE: tandem
 META_ARCHITECTURE: per_object_mlp
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: false
 EGO_DISTANCE_CLIP_MAX_PX: 20
+GAME_MODS: null
+EVAL_GAME_MODS: null
+ENV_NAME: seaquest
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
-GAME_MODS: null
-EVAL_GAME_MODS: null
-SAVE_PATH: ./outputs/models/input_ablation/mi_flat_si_ego
+SAVE_PATH: ./outputs/models/input_ablation/seaquest_mi_flat_si_ego
 WANDB_RUN_NAME: sq_abl_mi_flat_si_ego
 WANDB_TAGS:
 - suite:input_ablation
