@@ -1,3 +1,5 @@
+import time
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1598,59 +1600,110 @@ def make_tandem_train(
 
         return metrics
 
+    collect_vmap = jax.vmap(collect_rollout, in_axes=(0, 0, 0, 0))
+    meta_vmap = jax.vmap(meta_bootstrap_and_train, in_axes=(0, 0, 0, 0))
+    skills_vmap = jax.vmap(skills_bootstrap_and_train, in_axes=(0, 0, 0, 0))
+    metrics_vmap = jax.vmap(
+        compute_update_metrics,
+        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    )
+
     collect_jit = jax.jit(
-        jax.vmap(collect_rollout, in_axes=(0, 0, 0, 0)),
-        donate_argnums=(0, 1, 2, 3),
+        collect_vmap,
+        # Only donate mutable carry + rng; meta/skill states are read-only in R1 and
+        # must stay alive for R2/R3 (donating them reuses buffers and deletes refs).
+        donate_argnums=(2, 3),
     )
     meta_jit = jax.jit(
-        jax.vmap(meta_bootstrap_and_train, in_axes=(0, 0, 0, 0)),
+        meta_vmap,
         donate_argnums=(0, 2, 3),
     )
     skills_jit = jax.jit(
-        jax.vmap(skills_bootstrap_and_train, in_axes=(0, 0, 0, 0)),
+        skills_vmap,
         donate_argnums=(0, 2, 3),
     )
     init_fn = jax.jit(jax.vmap(init_runner, in_axes=(0, None, None)))
-    metrics_jit = jax.jit(
-        jax.vmap(
-            compute_update_metrics,
-            in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-        )
-    )
+    metrics_jit = jax.jit(metrics_vmap)
 
-    def compile_regions(rng, init_meta_params=None, init_skill_params=None):
+    def compile_regions(
+        rng,
+        init_meta_params=None,
+        init_skill_params=None,
+        *,
+        timings: dict[str, float] | None = None,
+        benchmark_exec: bool = False,
+    ):
         """Lower/compile all region jits once (uses init output shapes for collect/meta/skills).
 
-        Each region is lowered before its first execution so donated input buffers
-        are not referenced again after donation (see donate_argnums on collect/meta/skills).
+        Donated region jits must not call ``lower`` after an exec that deleted inputs.
+        We compile every region from init refs plus ``eval_shape`` stand-ins for cross-region
+        outputs (no copy+exec probes). Optional ``benchmark_exec`` runs one training-style
+        update after all regions are compiled (for smoke timing only).
         """
+        def _mark(name: str, t0: float) -> None:
+            if timings is not None:
+                timings[name] = time.time() - t0
+
+        t0 = time.time()
         init_fn.lower(rng, init_meta_params, init_skill_params).compile()
+        _mark("init_fn", t0)
+
+        t0 = time.time()
         runner_state = init_fn(rng, init_meta_params, init_skill_params)
+        _mark("init_fn_exec", t0)
         meta_state, skill_states, collect_carry, rng_carry = _unpack_runner_state(
             runner_state
         )
 
+        t0 = time.time()
         collect_jit.lower(meta_state, skill_states, collect_carry, rng_carry).compile()
-        new_collect, transitions, persist_carry, car_hits_sum = collect_jit(
-            meta_state, skill_states, collect_carry, rng_carry
+        _mark("collect_jit", t0)
+
+        new_collect, transitions, persist_carry, car_hits_sum = jax.eval_shape(
+            collect_vmap,
+            meta_state,
+            skill_states,
+            collect_carry,
+            rng_carry,
         )
 
+        t0 = time.time()
         meta_jit.lower(meta_state, transitions, rng_carry, persist_carry).compile()
-        meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
-            meta_state, transitions, rng_carry, persist_carry
+        _mark("meta_jit", t0)
+
+        (
+            meta_state_shape,
+            _rng_shape,
+            meta_loss,
+            meta_qvals,
+            skip_meta,
+        ) = jax.eval_shape(
+            meta_vmap,
+            meta_state,
+            transitions,
+            rng_carry,
+            persist_carry,
         )
         meta_n_updates = meta_state.n_updates
 
+        t0 = time.time()
         skills_jit.lower(
             skill_states, transitions, meta_n_updates, rng_carry
         ).compile()
-        skill_states, skill_metrics, skills_frozen = skills_jit(
-            skill_states, transitions, meta_n_updates, rng_carry
+        _mark("skills_jit", t0)
+
+        _, skill_metrics, skills_frozen = jax.eval_shape(
+            skills_vmap,
+            skill_states,
+            transitions,
+            meta_n_updates,
+            rng_carry,
         )
 
+        t0 = time.time()
         metrics_jit.lower(
             transitions,
-            meta_state,
+            meta_state_shape,
             meta_loss,
             meta_qvals,
             skip_meta,
@@ -1662,6 +1715,52 @@ def make_tandem_train(
             new_collect[6],
             new_collect[7],
         ).compile()
+        _mark("metrics_jit", t0)
+
+        if not benchmark_exec:
+            return
+
+        runner_state = init_fn(rng, init_meta_params, init_skill_params)
+        meta_state, skill_states, collect_carry, rng_carry = _unpack_runner_state(
+            runner_state
+        )
+        t0 = time.time()
+        new_collect, transitions, persist_carry, car_hits_sum = collect_jit(
+            meta_state, skill_states, collect_carry, rng_carry
+        )
+        _mark("collect_jit_exec", t0)
+
+        t0 = time.time()
+        meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
+            meta_state, transitions, rng_carry, persist_carry
+        )
+        _mark("meta_jit_exec", t0)
+
+        meta_n_updates = meta_state.n_updates
+        t0 = time.time()
+        skill_states, skill_metrics, skills_frozen = skills_jit(
+            skill_states, transitions, meta_n_updates, rng_carry
+        )
+        _mark("skills_jit_exec", t0)
+
+        t0 = time.time()
+        jax.block_until_ready(
+            metrics_jit(
+                transitions,
+                meta_state,
+                meta_loss,
+                meta_qvals,
+                skip_meta,
+                skill_metrics,
+                skills_frozen,
+                car_hits_sum,
+                new_collect[2],
+                new_collect[3],
+                new_collect[6],
+                new_collect[7],
+            )
+        )
+        _mark("metrics_jit_exec", t0)
 
     def run_training(rng, init_meta_params=None, init_skill_params=None):
         """Python update loop: R1 → R2 → R3 → R4 (metrics/wandb/RTPT on host)."""

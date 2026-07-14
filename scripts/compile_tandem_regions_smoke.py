@@ -93,115 +93,6 @@ def _has_accelerator() -> bool:
         return False
 
 
-def _unpack_runner_state(runner_state: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Mirror ``train_tandem._unpack_runner_state`` for compile shape warmup."""
-    (
-        meta_state,
-        skill_states,
-        expl_state,
-        running_returns,
-        returned_episode_returns,
-        returned_episode_lengths,
-        episode_lengths,
-        full_game_running,
-        returned_game_returns,
-        returned_game_lengths,
-        game_lengths,
-        rng,
-    ) = runner_state
-    collect_carry = (
-        expl_state,
-        running_returns,
-        returned_episode_returns,
-        returned_episode_lengths,
-        episode_lengths,
-        full_game_running,
-        returned_game_returns,
-        returned_game_lengths,
-        game_lengths,
-    )
-    return meta_state, skill_states, collect_carry, rng
-
-
-def _compile_regions_timed(
-    bundle: dict[str, Any],
-    rng: Any,
-    *,
-    init_meta_params: Any = None,
-    init_skill_params: Any = None,
-) -> dict[str, float]:
-    """Compile each region once; time first lower().compile() or first invocation."""
-    init_fn = bundle["init_fn"]
-    collect_jit = bundle["collect_jit"]
-    meta_jit = bundle["meta_jit"]
-    skills_jit = bundle["skills_jit"]
-    metrics_jit = bundle["metrics_jit"]
-
-    timings: dict[str, float] = {}
-
-    t0 = time.time()
-    init_fn.lower(rng, init_meta_params, init_skill_params).compile()
-    timings["init_fn"] = time.time() - t0
-
-    t0 = time.time()
-    runner_state = init_fn(rng, init_meta_params, init_skill_params)
-    timings["init_fn_exec"] = time.time() - t0
-
-    meta_state, skill_states, collect_carry, rng_carry = _unpack_runner_state(runner_state)
-
-    t0 = time.time()
-    collect_jit.lower(meta_state, skill_states, collect_carry, rng_carry).compile()
-    timings["collect_jit"] = time.time() - t0
-
-    t0 = time.time()
-    new_collect, transitions, persist_carry, car_hits_sum = collect_jit(
-        meta_state, skill_states, collect_carry, rng_carry
-    )
-    timings["collect_jit_exec"] = time.time() - t0
-
-    t0 = time.time()
-    meta_jit.lower(meta_state, transitions, rng_carry, persist_carry).compile()
-    timings["meta_jit"] = time.time() - t0
-
-    t0 = time.time()
-    meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
-        meta_state, transitions, rng_carry, persist_carry
-    )
-    timings["meta_jit_exec"] = time.time() - t0
-
-    meta_n_updates = meta_state.n_updates
-
-    t0 = time.time()
-    skills_jit.lower(skill_states, transitions, meta_n_updates, rng_carry).compile()
-    timings["skills_jit"] = time.time() - t0
-
-    t0 = time.time()
-    skill_states, skill_metrics, skills_frozen = skills_jit(
-        skill_states, transitions, meta_n_updates, rng_carry
-    )
-    timings["skills_jit_exec"] = time.time() - t0
-
-    metrics_args = (
-        transitions,
-        meta_state,
-        meta_loss,
-        meta_qvals,
-        skip_meta,
-        skill_metrics,
-        skills_frozen,
-        car_hits_sum,
-        new_collect[2],
-        new_collect[3],
-        new_collect[6],
-        new_collect[7],
-    )
-    t0 = time.time()
-    metrics_jit.lower(*metrics_args).compile()
-    timings["metrics_jit"] = time.time() - t0
-
-    return timings
-
-
 def _is_donation_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "array has been deleted" in msg or "donated" in msg
@@ -222,7 +113,7 @@ def _print_compile_failure_hint(exc: BaseException, num_envs: int) -> None:
         print(
             "\nLikely buffer-donation bug (not OOM): a region jit was lowered or "
             "re-invoked with inputs already donated by a prior region execution. "
-            "compile_regions must lower each region before its first donated exec.",
+            "Use copy probes for donated exec and lower meta/skills from init refs.",
             file=sys.stderr,
         )
         return
@@ -290,6 +181,11 @@ def main() -> int:
         help="Rollout length per env (default: keep YAML value, else 128)",
     )
     parser.add_argument(
+        "--benchmark-exec",
+        action="store_true",
+        help="After compile, run one donated exec probe per region for timing (default: compile-only)",
+    )
+    parser.add_argument(
         "--compile-only",
         action="store_true",
         help="Only compile regions; do not run training (default unless --run-one-update)",
@@ -334,10 +230,18 @@ def main() -> int:
         return 1
 
     rng = jax.random.split(jax.random.PRNGKey(int(config["SEED"])), config["NUM_SEEDS"])
+    compile_regions = bundle["compile_regions"]
 
     try:
+        timings: dict[str, float] = {}
         t_compile = time.time()
-        timings = _compile_regions_timed(bundle, rng)
+        compile_regions(
+            rng,
+            None,
+            None,
+            timings=timings,
+            benchmark_exec=args.benchmark_exec,
+        )
         total_compile = time.time() - t_compile
 
         print("\n--- Compile results (all regions OK) ---")
@@ -350,9 +254,8 @@ def main() -> int:
             else:
                 print(f"  {name}: compile {compile_s:.2f}s")
         print(f"  total: {total_compile:.2f}s")
-
-        # Also exercise bundle.compile_regions for API parity with main.py.
-        bundle["compile_regions"](rng, None, None)
+        if not args.benchmark_exec:
+            print("  (compile-only; pass --benchmark-exec for per-region exec timings)")
         print("bundle['compile_regions'] OK (main.py entry point)")
 
     except Exception as exc:
