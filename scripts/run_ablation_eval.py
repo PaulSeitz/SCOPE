@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -37,6 +39,7 @@ from typing import Any
 
 # Reduce cudnn autotune memory spikes for pixel_embed tandem runs.
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_strict_conv_algorithm_picker=false")
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 
 import yaml
 
@@ -44,10 +47,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import main as train_main  # noqa: E402
+from concept_based_learning.training.rtpt_progress import reset_rtpt  # noqa: E402
 
 INPUT_DIR = PROJECT_ROOT / "configs" / "experiment" / "input_ablation"
 QSTICK_DIR = PROJECT_ROOT / "configs" / "experiment" / "q_stickiness_eval"
 DEFAULT_INPUT_MANIFEST = INPUT_DIR / "manifest_multi_env.yaml"
+INPUT_ABLATION_RTPT_BASE = "HRL_input_ablation"
 
 INPUT_ABLATION_ENVS = ("seaquest", "spaceinvaders", "freeway", "beamrider")
 INPUT_VARIANT_KEYS = [
@@ -146,6 +151,14 @@ def _shard_manifest_entries(
     entries: list[tuple[str, str]], *, shard_idx: int, num_shards: int
 ) -> list[tuple[str, str]]:
     return [entry for i, entry in enumerate(entries) if i % num_shards == shard_idx]
+
+
+def _input_ablation_rtpt_name(manifest_shard: str | None = None) -> str:
+    """RTPT label on the cluster: HRL_input_ablation, HRL_input_ablation1, …"""
+    if manifest_shard is None:
+        return INPUT_ABLATION_RTPT_BASE
+    shard_idx, _ = _parse_manifest_shard(manifest_shard)
+    return f"{INPUT_ABLATION_RTPT_BASE}{shard_idx + 1}"
 
 
 def _flatten_experiment_cfg(raw: dict[str, Any]) -> dict[str, Any]:
@@ -363,14 +376,27 @@ def _mark_oom_fallback(cfg: dict[str, Any], *, base_run_name: str) -> None:
         cfg["WANDB_RUN_NAME"] = f"{run_name}{suffix}"
 
 
+def _align_trial_timesteps(cfg: dict[str, Any]) -> None:
+    """Ensure trial runs execute at least one PPO update."""
+    batch = int(cfg.get("NUM_ENVS", 512)) * int(cfg.get("NUM_STEPS", 64))
+    if batch <= 0:
+        return
+    total = int(cfg.get("TOTAL_TIMESTEPS", 0))
+    updates = max(1, total // batch)
+    cfg["TOTAL_TIMESTEPS"] = updates * batch
+
+
 def _apply_run_defaults(
     cfg: dict[str, Any],
     *,
     wandb_mode: str | None,
     trial_steps: int | None,
+    rtpt_experiment_name: str | None = None,
 ) -> str:
     if wandb_mode is not None:
         cfg["WANDB_MODE"] = wandb_mode
+    if rtpt_experiment_name is not None:
+        cfg["RTPT_EXPERIMENT_NAME"] = rtpt_experiment_name
     if trial_steps is not None:
         cfg["TOTAL_TIMESTEPS"] = int(trial_steps)
         cfg.setdefault("WANDB_TAGS", [])
@@ -378,9 +404,12 @@ def _apply_run_defaults(
             cfg["WANDB_TAGS"] = [*cfg["WANDB_TAGS"], "trial"]
         meta_mode = str(cfg.get("META_INPUT_MODE", "flat")).lower().strip()
         skill_mode = str(cfg.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+        dual_pixel = meta_mode == "pixel_embed" and skill_mode == "pixel_embed"
         if meta_mode == "pixel_embed" or skill_mode == "pixel_embed":
-            cfg["NUM_ENVS"] = min(int(cfg.get("NUM_ENVS", 512)), 128)
+            cap_envs = 64 if dual_pixel else 128
+            cfg["NUM_ENVS"] = min(int(cfg.get("NUM_ENVS", 512)), cap_envs)
             cfg["NUM_STEPS"] = min(int(cfg.get("NUM_STEPS", 64)), 32)
+        _align_trial_timesteps(cfg)
     cfg.setdefault("ENTITY", "paul-seitz-tu-darmstadt")
     cfg.setdefault("PROJECT", "concept_based_learning")
     cfg.setdefault("SEED", 44)
@@ -398,17 +427,69 @@ def _clear_jax_memory() -> None:
         pass
 
 
+def _release_run_memory() -> None:
+    """Drop JAX compilation caches so the next run starts with a clean GPU."""
+    gc.collect()
+    _clear_jax_memory()
+
+
+def _spawn_experiment_worker(
+    path: Path,
+    *,
+    wandb_mode: str | None,
+    trial_steps: int | None,
+    oom_retry: bool,
+    rtpt_experiment_name: str | None,
+) -> None:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--worker-run",
+        str(path.resolve()),
+    ]
+    if wandb_mode is not None:
+        cmd.extend(["--wandb-mode", wandb_mode])
+    if trial_steps is not None:
+        cmd.append("--trial")
+        cmd.extend(["--trial-steps", str(trial_steps)])
+    if not oom_retry:
+        cmd.append("--no-oom-retry")
+    if rtpt_experiment_name is not None:
+        cmd.extend(["--rtpt-experiment-name", rtpt_experiment_name])
+    print(f">>> Spawning worker: {' '.join(cmd)}")
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Worker exited with code {result.returncode} for {path.name}"
+        )
+
+
 def _run_experiment(
     path: Path,
     *,
     wandb_mode: str | None,
     trial_steps: int | None,
     oom_retry: bool,
+    rtpt_experiment_name: str | None = None,
+    isolated: bool = False,
 ) -> None:
+    if isolated:
+        _spawn_experiment_worker(
+            path,
+            wandb_mode=wandb_mode,
+            trial_steps=trial_steps,
+            oom_retry=oom_retry,
+            rtpt_experiment_name=rtpt_experiment_name,
+        )
+        return
+
     raw = _load_yaml(path)
     base_cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
     base_run_name = _apply_run_defaults(
-        base_cfg, wandb_mode=wandb_mode, trial_steps=trial_steps
+        base_cfg,
+        wandb_mode=wandb_mode,
+        trial_steps=trial_steps,
+        rtpt_experiment_name=rtpt_experiment_name,
     )
 
     tier_cfgs = [base_cfg]
@@ -428,6 +509,7 @@ def _run_experiment(
                 f"mode={tier_cfg.get('OOM_FALLBACK_MODE')}"
             )
         try:
+            reset_rtpt()
             train_main.single_run(tier_cfg)
             return
         except Exception as exc:
@@ -437,7 +519,8 @@ def _run_experiment(
                 raise
             print(f"\n>>> OOM detected for {path.name}; trying lower-memory tier...")
             traceback.print_exc()
-            _clear_jax_memory()
+        finally:
+            _release_run_memory()
 
     if last_exc is not None:
         raise last_exc
@@ -453,6 +536,8 @@ def run_suite(
     env_name: str | None = None,
     manifest_entries: list[tuple[str, str]] | None = None,
     oom_retry: bool = True,
+    rtpt_experiment_name: str | None = None,
+    isolate_runs: bool = True,
 ) -> None:
     if suite == "input_ablation":
         if manifest_entries is not None:
@@ -469,6 +554,8 @@ def run_suite(
                         wandb_mode=wandb_mode,
                         trial_steps=trial_steps,
                         oom_retry=oom_retry,
+                        rtpt_experiment_name=rtpt_experiment_name,
+                        isolated=isolate_runs,
                     )
                 except Exception:
                     traceback.print_exc()
@@ -490,6 +577,8 @@ def run_suite(
                         wandb_mode=wandb_mode,
                         trial_steps=trial_steps,
                         oom_retry=oom_retry,
+                        rtpt_experiment_name=rtpt_experiment_name,
+                        isolated=isolate_runs,
                     )
                 except Exception:
                     traceback.print_exc()
@@ -583,7 +672,32 @@ def main() -> None:
         default=True,
         help="On GPU OOM, retry with lower NUM_ENVS / adjusted NUM_STEPS (default: on)",
     )
+    parser.add_argument(
+        "--in-process",
+        action="store_true",
+        help=(
+            "Run every config in this process (default: one subprocess per config "
+            "so GPU memory is released between runs)"
+        ),
+    )
+    parser.add_argument("--worker-run", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--rtpt-experiment-name", default=None, help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
+
+    if args.worker_run is not None:
+        wandb_mode = _resolve_wandb_mode(trial=args.trial, wandb_mode=args.wandb_mode)
+        trial_steps = args.trial_steps if args.trial else None
+        _run_experiment(
+            args.worker_run,
+            wandb_mode=wandb_mode,
+            trial_steps=trial_steps,
+            oom_retry=args.oom_retry,
+            rtpt_experiment_name=args.rtpt_experiment_name,
+            isolated=False,
+        )
+        return
 
     manifest_entries: list[tuple[str, str]] | None = None
     if args.manifest is not None:
@@ -637,6 +751,13 @@ def main() -> None:
 
     wandb_mode = _resolve_wandb_mode(trial=args.trial, wandb_mode=args.wandb_mode)
     trial_steps = args.trial_steps if args.trial else None
+    rtpt_experiment_name = (
+        _input_ablation_rtpt_name(args.manifest_shard)
+        if args.suite == "input_ablation"
+        else None
+    )
+    if rtpt_experiment_name is not None:
+        print(f"RTPT experiment name: {rtpt_experiment_name}")
     run_suite(
         args.suite,
         variants=args.variants,
@@ -646,6 +767,8 @@ def main() -> None:
         env_name=args.env,
         manifest_entries=manifest_entries,
         oom_retry=args.oom_retry,
+        rtpt_experiment_name=rtpt_experiment_name,
+        isolate_runs=not args.in_process,
     )
 
 

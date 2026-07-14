@@ -65,17 +65,18 @@ class QNetwork(nn.Module):
                     "input_mode='pixel_embed' requires pixel_obs from combined observation wrappers."
                 )
             img = pixel_obs.astype(jnp.float32) / 255.0
-            # Generic pixel tensor support:
-            # pixel_obs shape is [..., T, H, W, C], where leading dims can be
-            # (batch,), (time,batch,obj), etc. Collapse leading dims to a single
-            # batch axis for conv, then restore after encoding.
+            # pixel_obs shape is [..., T, H, W, C]. Leading dims are shared screen
+            # batch axes (e.g. time/env), not per-object slots. When target_idx has
+            # extra object axes (relabel-all-objects), encode pixels once and broadcast
+            # the embedding — meta keeps its own separate pixel encoder.
             if img.ndim < 4:
                 raise ValueError(
                     f"pixel_obs must have rank >=4 with trailing [T,H,W,C], got rank {img.ndim}."
                 )
-            lead_shape = img.shape[:-4]
+            pixel_lead_shape = img.shape[:-4]
+            target_lead_shape = target_idx.shape
             t, h, w, c = img.shape[-4:]
-            n = math.prod(lead_shape) if lead_shape else 1
+            n = math.prod(pixel_lead_shape) if pixel_lead_shape else 1
             img = jnp.reshape(img, (n, t, h, w, c))
             img = jnp.transpose(img, (0, 2, 3, 1, 4))  # [N,H,W,T,C]
             img = jnp.reshape(img, (n, h, w, t * c))   # [N,H,W,T*C]
@@ -88,13 +89,23 @@ class QNetwork(nn.Module):
                     name=f"pixel_conv_{i}",
                 )(img)
                 img = nn.relu(img)
-            x = img.reshape(img.shape[0], -1)
-            x = nn.Dense(self.embed_dim, name="pixel_embed_proj")(x)
-            x = nn.relu(x)
-            if lead_shape:
-                x = jnp.reshape(x, lead_shape + (x.shape[-1],))
+            pixel_embed = img.reshape(img.shape[0], -1)
+            pixel_embed = nn.Dense(self.embed_dim, name="pixel_embed_proj")(pixel_embed)
+            pixel_embed = nn.relu(pixel_embed)
+            if pixel_lead_shape:
+                pixel_embed = jnp.reshape(pixel_embed, pixel_lead_shape + (pixel_embed.shape[-1],))
             else:
-                x = x[0]
+                pixel_embed = pixel_embed[0]
+
+            if len(target_lead_shape) > len(pixel_lead_shape):
+                for _ in range(len(target_lead_shape) - len(pixel_lead_shape)):
+                    pixel_embed = jnp.expand_dims(pixel_embed, axis=-2)
+                x = jnp.broadcast_to(
+                    pixel_embed,
+                    target_lead_shape + (pixel_embed.shape[-1],),
+                )
+            else:
+                x = pixel_embed
             target_oh = _align_target_dims(target_oh, x)
             x = jnp.concatenate([x, target_oh], axis=-1)
         else:

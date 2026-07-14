@@ -1,5 +1,7 @@
 # Curated multi-env input ablation (9 full tandem runs, 25M steps each).
 #
+# RTPT (nvidia-smi): HRL_input_ablation, or HRL_input_ablation1 / HRL_input_ablation2 with --manifest-shard
+#
 # Single GPU (all 9 runs, sequential):
 #   python scripts/run_ablation_eval.py --suite input_ablation --manifest manifest_multi_env.yaml
 #

@@ -1098,12 +1098,7 @@ def make_tandem_train(
                         transitions.next_ego_obs_all.shape[:3],
                     )
                     if use_pixel_skill:
-                        next_pixel_obs_all = transitions.next_pixel_obs[:, :, None, ...]
-                        next_pixel_obs_all = jnp.broadcast_to(
-                            next_pixel_obs_all,
-                            transitions.next_ego_obs_all.shape[:3]
-                            + transitions.next_pixel_obs.shape[2:],
-                        )
+                        next_pixel_obs_all = transitions.next_pixel_obs
                     else:
                         next_pixel_obs_all = None
                     next_q_all = skill_network.apply(
@@ -1278,15 +1273,7 @@ def make_tandem_train(
                                         minibatch["ego_obs_all"].shape[:2],
                                     )
                                 if use_pixel_skill:
-                                    if n_objects == 1:
-                                        mb_pixel_obs = minibatch["pixel_obs"]
-                                    else:
-                                        mb_pixel_obs = minibatch["pixel_obs"][:, None, ...]
-                                        mb_pixel_obs = jnp.broadcast_to(
-                                            mb_pixel_obs,
-                                            minibatch["ego_obs_all"].shape[:2]
-                                            + minibatch["pixel_obs"].shape[1:],
-                                        )
+                                    mb_pixel_obs = minibatch["pixel_obs"]
                                 else:
                                     mb_pixel_obs = None
                             else:
@@ -1297,12 +1284,7 @@ def make_tandem_train(
                                     minibatch["ego_obs_all"].shape[:2],
                                 )
                                 if use_pixel_skill:
-                                    mb_pixel_obs = minibatch["pixel_obs"][:, None, ...]
-                                    mb_pixel_obs = jnp.broadcast_to(
-                                        mb_pixel_obs,
-                                        minibatch["ego_obs_all"].shape[:2]
-                                        + minibatch["pixel_obs"].shape[1:],
-                                    )
+                                    mb_pixel_obs = minibatch["pixel_obs"]
                                 else:
                                     mb_pixel_obs = None
                             if debug_inputs:

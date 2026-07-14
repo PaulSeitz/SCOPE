@@ -272,8 +272,14 @@ def _host_assert_skill_minibatch(
         _host_assert_finite("pixel_obs", pixel_obs)
         ego_np = np.asarray(ego_obs)
         pix_np = np.asarray(pixel_obs)
-        if tuple(pix_np.shape[: ego_np.ndim - 1]) != tuple(ego_np.shape[:-1]):
-            raise ValueError("DEBUG_INPUTS: pixel_obs lead dims must match ego_obs.")
+        ego_lead = ego_np.shape[:-1]
+        pix_lead = pix_np.shape[:-4]
+        if len(pix_lead) > len(ego_lead) or tuple(ego_lead[: len(pix_lead)]) != tuple(
+            pix_lead
+        ):
+            raise ValueError(
+                "DEBUG_INPUTS: pixel_obs shared lead dims must prefix ego_obs/object axes."
+            )
 
 
 def _jax_host_log_rollout(
