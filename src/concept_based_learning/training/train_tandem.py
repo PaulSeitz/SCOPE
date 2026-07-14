@@ -1619,27 +1619,35 @@ def make_tandem_train(
     )
 
     def compile_regions(rng, init_meta_params=None, init_skill_params=None):
-        """Lower/compile all region jits once (uses init output shapes for collect/meta/skills)."""
+        """Lower/compile all region jits once (uses init output shapes for collect/meta/skills).
+
+        Each region is lowered before its first execution so donated input buffers
+        are not referenced again after donation (see donate_argnums on collect/meta/skills).
+        """
         init_fn.lower(rng, init_meta_params, init_skill_params).compile()
         runner_state = init_fn(rng, init_meta_params, init_skill_params)
         meta_state, skill_states, collect_carry, rng_carry = _unpack_runner_state(
             runner_state
         )
+
+        collect_jit.lower(meta_state, skill_states, collect_carry, rng_carry).compile()
         new_collect, transitions, persist_carry, car_hits_sum = collect_jit(
             meta_state, skill_states, collect_carry, rng_carry
         )
+
+        meta_jit.lower(meta_state, transitions, rng_carry, persist_carry).compile()
         meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
             meta_state, transitions, rng_carry, persist_carry
         )
         meta_n_updates = meta_state.n_updates
-        skill_states, skill_metrics, skills_frozen = skills_jit(
-            skill_states, transitions, meta_n_updates, rng_carry
-        )
-        collect_jit.lower(meta_state, skill_states, collect_carry, rng_carry).compile()
-        meta_jit.lower(meta_state, transitions, rng_carry, persist_carry).compile()
+
         skills_jit.lower(
             skill_states, transitions, meta_n_updates, rng_carry
         ).compile()
+        skill_states, skill_metrics, skills_frozen = skills_jit(
+            skill_states, transitions, meta_n_updates, rng_carry
+        )
+
         metrics_jit.lower(
             transitions,
             meta_state,

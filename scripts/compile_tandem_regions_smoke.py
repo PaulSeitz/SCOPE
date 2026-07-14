@@ -202,6 +202,39 @@ def _compile_regions_timed(
     return timings
 
 
+def _is_donation_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "array has been deleted" in msg or "donated" in msg
+
+
+def _is_oom_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "out of memory" in msg
+        or "resource_exhausted" in msg
+        or "cuda error" in msg
+        or "hbm" in msg
+    )
+
+
+def _print_compile_failure_hint(exc: BaseException, num_envs: int) -> None:
+    if _is_donation_error(exc):
+        print(
+            "\nLikely buffer-donation bug (not OOM): a region jit was lowered or "
+            "re-invoked with inputs already donated by a prior region execution. "
+            "compile_regions must lower each region before its first donated exec.",
+            file=sys.stderr,
+        )
+        return
+    if _is_oom_error(exc):
+        _print_memory_guidance(num_envs)
+        return
+    print(
+        "\nCompile failed for an unknown reason; see traceback above.",
+        file=sys.stderr,
+    )
+
+
 def _print_memory_guidance(num_envs: int) -> None:
     print("\n--- Memory / env-count guidance ---")
     print(
@@ -324,7 +357,7 @@ def main() -> int:
 
     except Exception as exc:
         print(f"\nCOMPILE FAILED: {exc}", file=sys.stderr)
-        _print_memory_guidance(args.num_envs)
+        _print_compile_failure_hint(exc, args.num_envs)
         return 1
 
     if run_training_after:
