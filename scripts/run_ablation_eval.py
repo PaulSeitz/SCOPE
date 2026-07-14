@@ -91,7 +91,7 @@ _SMALLER_BATCH_PAIRS: tuple[tuple[int, int], ...] = (
 )
 _MIN_NUM_ENVS = 16
 _MIN_NUM_STEPS = 32
-_MAX_NUM_STEPS = 128
+_MAX_NUM_STEPS = 256
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -288,6 +288,16 @@ def _is_oom_error(exc: BaseException) -> bool:
     return any(needle in msg for needle in needles)
 
 
+def _align_timesteps_to_batch(cfg: dict[str, Any]) -> None:
+    """Round TOTAL_TIMESTEPS down to a whole number of rollout batches."""
+    batch = _rollout_batch(int(cfg.get("NUM_ENVS", 512)), int(cfg.get("NUM_STEPS", 64)))
+    if batch <= 0:
+        return
+    total = int(cfg.get("TOTAL_TIMESTEPS", 0))
+    updates = max(1, total // batch)
+    cfg["TOTAL_TIMESTEPS"] = updates * batch
+
+
 def _oom_fallback_tiers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Build lower-memory rollout tiers, preserving update count when possible."""
     num_minibatches = int(cfg.get("NUM_MINIBATCHES", 32))
@@ -328,6 +338,7 @@ def _oom_fallback_tiers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             tier["TOTAL_TIMESTEPS"] = target_updates * _rollout_batch(num_envs, num_steps)
         tier["OOM_FALLBACK_MODE"] = mode
         tier["OOM_FALLBACK_ROLLOUT"] = f"{num_envs}x{num_steps}"
+        _align_timesteps_to_batch(tier)
         tiers.append(tier)
         seen_pairs.add(pair)
 
@@ -351,7 +362,14 @@ def _oom_fallback_tiers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             mode="smaller_batch",
         )
 
-    tiers.sort(key=lambda t: (int(t["NUM_ENVS"]), int(t["NUM_STEPS"])))
+    # Try the least disruptive tiers first: same batch (fewer envs), then
+    # smaller batches from largest to smallest — not 16 envs on the first retry.
+    def _tier_priority(t: dict[str, Any]) -> tuple[int, int, int]:
+        mode_rank = 0 if t.get("OOM_FALLBACK_MODE") == "same_batch" else 1
+        batch = _rollout_batch(int(t["NUM_ENVS"]), int(t["NUM_STEPS"]))
+        return (mode_rank, -batch, -int(t["NUM_ENVS"]))
+
+    tiers.sort(key=_tier_priority)
     return tiers
 
 

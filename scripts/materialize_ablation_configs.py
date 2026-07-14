@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -116,8 +117,8 @@ INPUT_ALG = {
     "EPISODIC_LIFE": True,
     "FRAME_STACK_SIZE": 4,
     "TOTAL_TIMESTEPS": 25_000_000,
-    "NUM_ENVS": 512,
-    "NUM_STEPS": 64,
+    "NUM_ENVS": 256,
+    "NUM_STEPS": 128,
     "NUM_EPOCHS": 3,
     "NUM_MINIBATCHES": 32,
     "GAMMA": 0.99,
@@ -139,6 +140,14 @@ INPUT_ALG = {
     "META_LEARN_DURING_WARMUP": False,
     "HEURISTIC_MODE": "env_specific",
 }
+
+
+def _align_total_timesteps(total: int, num_envs: int, num_steps: int) -> int:
+    batch = int(num_envs) * int(num_steps)
+    if batch <= 0:
+        return int(total)
+    return (int(total) // batch) * batch
+
 
 INPUT_VARIANTS = [
     ("flat", "ego", "baseline"),
@@ -265,14 +274,19 @@ QSTICK_VARIANTS = [
 ]
 
 
-def _input_variant_doc(env_name: str, meta: str, skill: str, label: str | None) -> str:
+def _input_variant_doc(
+    env_name: str,
+    meta: str,
+    skill: str,
+    label: str | None,
+) -> str:
     title = f"meta={meta}, skill={skill}"
     if label:
         title += f" ({label})"
     return (
         f"# input_ablation/{env_name}_mi_{meta}_si_{skill}.yaml\n"
         f"# {env_name.title()} tandem input ablation: {title}.\n"
-        f"# Full scratch tandem (25M steps). Filter in W&B: suite:input_ablation.\n"
+        "# Full scratch tandem (~25M steps, 256x128 rollout). Filter: suite:input_ablation.\n"
     )
 
 
@@ -324,6 +338,11 @@ def materialize_input_ablation() -> None:
                 "META_INPUT_MODE": meta,
                 "SKILL_INPUT_MODE": skill,
             }
+            alg["TOTAL_TIMESTEPS"] = _align_total_timesteps(
+                int(INPUT_ALG["TOTAL_TIMESTEPS"]),
+                int(alg["NUM_ENVS"]),
+                int(alg["NUM_STEPS"]),
+            )
             payload = {
                 **profile["env"],
                 **_pixel_embed_wrapper_settings(meta, skill),
