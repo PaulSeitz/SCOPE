@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from main import outer_make_train  # noqa: E402
+from main import outer_make_train, outer_make_tandem_train  # noqa: E402
 
 
 def _load_experiment_config(name: str) -> dict:
@@ -56,3 +56,14 @@ def test_skills_training_compile_and_one_step(experiment: str):
     compiled = train_vjit.lower(rng, None, None).compile()
     out = jax.block_until_ready(compiled(rng, None, None))
     assert "runner_state" in out
+
+
+@pytest.mark.slow
+def test_tandem_training_compile_and_one_step():
+    config = {**_load_experiment_config("seaquest_tandem"), **_smoke_overrides()}
+    tandem_regions, _ = outer_make_tandem_train(config)
+    rng = jax.random.split(jax.random.PRNGKey(0), config["NUM_SEEDS"])
+    tandem_regions["compile_regions"](rng, None, None)
+    out = jax.block_until_ready(tandem_regions["run_training"](rng, None, None))
+    assert "runner_state" in out
+    assert "metrics" in out

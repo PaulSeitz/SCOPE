@@ -193,8 +193,11 @@ def outer_make_meta_train(config, frozen_skill_params):
 
 def outer_make_tandem_train(config):
     """
-    Constructs base environments and returns the tandem trainer.
-    Tandem training runs on the configured base environment without curriculum phases.
+    Constructs base environments and returns the tandem JIT region bundle.
+
+    ``make_tandem_train`` returns separate compiled regions (init, collect, meta,
+    skills) each wrapped in ``jax.jit(jax.vmap(...))`` over seeds. Training is
+    orchestrated in Python via ``run_training`` (one region launch per update).
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
     _configure_ego_obs_format(config)
@@ -207,7 +210,7 @@ def outer_make_tandem_train(config):
 
     heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
 
-    train_fn = make_tandem_train(
+    tandem_regions = make_tandem_train(
         config,
         env,
         test_env,
@@ -221,7 +224,7 @@ def outer_make_tandem_train(config):
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
     )
-    return train_fn, renderer
+    return tandem_regions, renderer
 
 
 def single_run(config):
@@ -578,13 +581,14 @@ def single_run(config):
 
         print("\n=== Tandem Training (Joint Skills + Meta-Policy) ===")
         start_compile = time.time()
-        train_fn, _ = outer_make_tandem_train(tandem_config)
-        train_vjit = jax.jit(jax.vmap(train_fn, in_axes=(0, None, None)))
-        train_vjit.lower(rngs, init_meta_params, init_skill_params).compile()
-        print(f"Tandem compilation took {time.time() - start_compile:.2f} seconds.")
+        tandem_regions, _ = outer_make_tandem_train(tandem_config)
+        tandem_regions["compile_regions"](rngs, init_meta_params, init_skill_params)
+        print(f"Tandem region compilation took {time.time() - start_compile:.2f} seconds.")
 
         tandem_t0 = time.time()
-        outs = jax.block_until_ready(train_vjit(rngs, init_meta_params, init_skill_params))
+        outs = jax.block_until_ready(
+            tandem_regions["run_training"](rngs, init_meta_params, init_skill_params)
+        )
         print(f"Tandem training completed in {time.time() - tandem_t0:.2f} seconds.")
 
         meta_state, skill_states, *_ = outs["runner_state"]

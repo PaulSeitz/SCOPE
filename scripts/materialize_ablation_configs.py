@@ -116,10 +116,10 @@ INPUT_ALG = {
     "STICKY_ACTIONS": False,
     "EPISODIC_LIFE": True,
     "FRAME_STACK_SIZE": 4,
-    "TOTAL_TIMESTEPS": 25_000_000,
+    "TOTAL_TIMESTEPS": 10_000_000,
     "NUM_ENVS": 128,
     "NUM_STEPS": 128,
-    "NUM_EPOCHS": 3,
+    "NUM_EPOCHS": 2,
     "NUM_MINIBATCHES": 32,
     "GAMMA": 0.99,
     "SKILL_GAMMA": 0.99,
@@ -137,7 +137,7 @@ INPUT_ALG = {
     "EPS_FINISH": 0.05,
     "EPS_DECAY": 0.35,
     "META_EPS_START": 0.1,
-    "META_NUM_EPOCHS": 3,
+    "META_NUM_EPOCHS": 2,
     "SKILL_WARMUP_UPDATES": 0,
     "META_LEARN_DURING_WARMUP": False,
     "HEURISTIC_MODE": "env_specific",
@@ -288,7 +288,7 @@ def _input_variant_doc(
     return (
         f"# input_ablation/{env_name}_mi_{meta}_si_{skill}.yaml\n"
         f"# {env_name.title()} tandem input ablation: {title}.\n"
-        "# Full scratch tandem (~25M steps, 128x128 rollout, relabel_k=15). "
+        "# Full scratch tandem (10M steps, 128x128 rollout, relabel_k=15). "
         "Filter: suite:input_ablation.\n"
     )
 
