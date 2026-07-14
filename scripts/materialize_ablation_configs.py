@@ -17,7 +17,7 @@ COMMON_ENV = {
     "META_ARCHITECTURE": "per_object_mlp",
     "USE_LEGACY_EGO_OBS": False,
     "USE_EGO_SIZE_FEATURES": False,
-    "USE_EGO_VELOCITY_FEATURES": False,
+    "USE_EGO_VELOCITY_FEATURES": True,
     "EGO_DISTANCE_CLIP_MAX_PX": 20,
     "GAME_MODS": None,
     "EVAL_GAME_MODS": None,
@@ -41,7 +41,6 @@ SPACEINVADERS_ENV = {
 FREEWAY_ENV = {
     **COMMON_ENV,
     "ENV_NAME": "freeway",
-    "USE_EGO_VELOCITY_FEATURES": True,
     "EGO_DISTANCE_CLIP_MAX_PX": 40,
 }
 
