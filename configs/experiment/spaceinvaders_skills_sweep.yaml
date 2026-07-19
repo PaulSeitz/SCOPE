@@ -54,7 +54,6 @@ alg:
   RELABEL_ALL_OBJECTS: false
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
-  SKILL_QLAMBDA_WATKINS_CUT: false
   # Keep destroy relabel traces across AVOID dodge interrupts (kill while dodging).
   SKILL_TARGET_CUT: "global"
   # Sparse avoid only: no +0.01/frame survival (reduces false credit under relabel-all).

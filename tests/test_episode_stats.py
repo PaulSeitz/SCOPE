@@ -103,3 +103,43 @@ def test_full_game_accumulates_across_lives():
     )
     assert float(metrics["returned_game_returns"]) == 600.0
     assert float(metrics["returned_episode_returns"]) == 400.0
+
+
+def test_full_game_commits_on_time_limit_without_life_loss():
+    """Time-limited envs (e.g. Freeway) end with done=True, life_lost=0."""
+    full_run, returned_game, returned_game_len, game_len = init_full_game_episode_stats(1)
+
+    game_over = is_game_over(
+        jnp.array([True]),
+        jnp.array([0], dtype=jnp.int32),
+        jnp.array([1], dtype=jnp.int32),
+        jnp.array([1], dtype=jnp.int32),
+    )
+    assert bool(game_over[0])
+
+    full_run, returned_game, returned_game_len, game_len = update_full_game_episode_stats(
+        full_run,
+        returned_game,
+        returned_game_len,
+        game_len,
+        jnp.array([35.0]),
+        game_over,
+    )
+    assert float(returned_game[0]) == 35.0
+
+    metrics = episodic_log_metrics(
+        jnp.zeros(1),
+        jnp.zeros(1),
+        returned_game_returns=returned_game,
+    )
+    assert float(metrics["env/game_return"]) == 35.0
+
+
+def test_mid_life_death_is_not_game_over():
+    game_over = is_game_over(
+        jnp.array([True]),
+        jnp.array([1], dtype=jnp.int32),
+        jnp.array([3], dtype=jnp.int32),
+        jnp.array([2], dtype=jnp.int32),
+    )
+    assert not bool(game_over[0])

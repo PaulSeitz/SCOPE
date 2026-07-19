@@ -89,7 +89,6 @@ alg:
   RELABEL_ALL_OBJECTS: true
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
-  SKILL_QLAMBDA_WATKINS_CUT: false
   SKILL_LAMBDA: 0.65
 
   # --- Exploration (Epsilon-Greedy) ---

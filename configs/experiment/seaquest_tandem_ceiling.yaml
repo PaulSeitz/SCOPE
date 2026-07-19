@@ -74,7 +74,6 @@ alg:
   RELABEL_ALL_OBJECTS: true
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
-  SKILL_QLAMBDA_WATKINS_CUT: false
 
   # Skill lambda/TD bootstrap cuts at meta target switches (relabel-all path).
   #   global   — cut every object slot at each switch (default)

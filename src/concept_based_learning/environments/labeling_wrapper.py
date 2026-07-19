@@ -91,10 +91,10 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
                         "visual_id": spaces.Box(0, 255, obj_shape, jnp.int32),
                         "state": spaces.Box(0, 255, obj_shape, jnp.int32),
                         "orientation": spaces.Box(-180, 180, obj_shape, jnp.int32),
+                        "semantic_label": spaces.Box(
+                            0, NUM_LABELS - 1, obj_shape, jnp.int32
+                        ),
                     }
-                ),
-                "object_labels": spaces.Box(
-                    0, NUM_LABELS - 1, obj_shape, jnp.int32
                 ),
             }
         )

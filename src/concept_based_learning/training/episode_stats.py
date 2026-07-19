@@ -93,14 +93,23 @@ def update_per_env_episode_stats(
 
 def is_game_over(done, life_lost, prev_lives, lives_after_step):
     """
-    True when the full game ends (last life lost), not a single episodic-life death.
+    True when the full game ends, not a single episodic-life death.
+
+    Covers last-life loss, time-limit truncation, and envs with no life counter
+    (e.g. Freeway), all of which hard-reset the env slot via ``reset_mask``.
 
     Uses pre-reset env state from the step output; post-reset merged state still has
     full lives and must not be used here.
     """
     last_life_lost = jnp.logical_and(life_lost > 0, prev_lives <= life_lost)
     no_lives_left = lives_after_step <= 0
-    return jnp.logical_and(done, jnp.logical_or(no_lives_left, last_life_lost))
+    return jnp.logical_and(
+        done,
+        jnp.logical_or(
+            life_lost <= 0,
+            jnp.logical_or(no_lives_left, last_life_lost),
+        ),
+    )
 
 
 def update_full_game_episode_stats(

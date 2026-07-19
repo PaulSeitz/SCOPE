@@ -26,12 +26,6 @@ from jaxatari.games.jax_tennis import TennisRenderer
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
 )
-from concept_based_learning.environments.skill_rewards import AVOID_SURVIVAL_REWARD
-from concept_based_learning.environments.datatypes import (
-    LABEL_DESTROY,
-    LABEL_COLLECT,
-    LABEL_AVOID,
-)
 from concept_based_learning.environments.seaquest.label import (
     SeaquestSemanticWrapper,
     seaquest_action_mapper,
@@ -95,18 +89,6 @@ from concept_based_learning.environments.freeway.freeway_policy import (
     NO_TARGET_IDX as freeway_NO_TARGET_IDX,
     set_freeway_heuristic_params,
 )
-from concept_based_learning.environments.bootcamp.bootcamp_label import (
-    BootcampSemanticWrapper,
-)
-from concept_based_learning.environments.bootcamp.bootcamp_action_mapper import (
-    bootcamp_action_mapper,
-)
-from concept_based_learning.environments.bootcamp.bootcamp_policy import (
-    get_heuristic_target as bootcamp_get_heuristic_target,
-    NO_TARGET_IDX as bootcamp_NO_TARGET_IDX,
-    bootcamp_fixed_target_index_from_game_mods,
-)
-
 from concept_based_learning.environments.pong.pong_label import (
     PongSemanticWrapper,
     pong_action_mapper,
@@ -153,8 +135,8 @@ def _normalize_game_mods(raw: Union[None, str, List[Any]]) -> Optional[List[str]
     """
     Coerce Hydra / YAML GAME_MODS into a list of mod name strings.
 
-    JAXAtari expects string keys matching the game mod controller REGISTRY (e.g. skillbootcamp:
-    ``destroy``, ``avoid``, ``collect`` — not Seaquest-style ``destroy_curriculum``).
+    JAXAtari expects string keys matching the game mod controller REGISTRY
+    (e.g. ``destroy``, ``avoid``, ``collect`` — not Seaquest-style ``destroy_curriculum``).
     """
     if raw is None:
         return None
@@ -283,92 +265,6 @@ def _wrap_reward_extractor_5arg(reward_extractor_5arg: Callable[..., Any]):
 
     return _wrapped
 
-
-def _bootcamp_fixed_target_idx_from_config(config: Dict[str, Any]) -> Optional[int]:
-    return bootcamp_fixed_target_index_from_game_mods(
-        _normalize_game_mods(config.get("GAME_MODS", None))
-    )
-
-
-def _bootcamp_resolve_curriculum_mods(
-    env_key: str, phase_name: str, curriculum_mods: Dict[str, Any]
-) -> Optional[List[str]]:
-    del env_key
-    raw = (curriculum_mods or {}).get(phase_name)
-    mods_list: List[str] = [] if raw is None else [str(x) for x in list(raw)]
-    if not mods_list and phase_name != "full" and phase_name in ("destroy", "collect", "avoid"):
-        return [phase_name]
-    return mods_list if mods_list else None
-
-
-def _bootcamp_reward_extractor(
-    prev_raw_obs: Any,
-    next_raw_obs: Any,
-    prev_target: Any,
-    next_target: Any,
-    life_lost: jnp.ndarray,
-    info: Optional[Dict[str, Any]],
-    config: Dict[str, Any],
-):
-    del config, prev_raw_obs, next_raw_obs, next_target
-    life_lost_arr = jnp.atleast_1d(life_lost)
-
-    # Bootcamp now runs continuously with immediate respawns. In that setting a
-    # target can be consumed and replaced in one step, hiding active 1->0
-    # transitions. Use env-reported per-step events from info for robust rewards.
-    def _info_get(key: str):
-        z = jnp.zeros_like(life_lost_arr, dtype=jnp.int32)
-        if info is None:
-            return z
-        if isinstance(info, dict):
-            return info.get(key, z)
-        if hasattr(info, key):
-            return getattr(info, key)
-        return z
-
-    def _last_frame(e):
-        return jnp.ravel(e)[-1] if jnp.ndim(e) > 0 else e
-
-    prev_label = _last_frame(prev_target.semantic_label)
-    swd = jnp.atleast_1d(_info_get("step_win_destroy")) != 0
-    swc = jnp.atleast_1d(_info_get("step_win_collect")) != 0
-    sfa = jnp.atleast_1d(_info_get("step_fail_avoid")) != 0
-    sfd = jnp.atleast_1d(_info_get("step_fail_destroy_touch")) != 0
-    swa = jnp.atleast_1d(_info_get("step_win_avoid")) != 0
-
-    is_destroy = jnp.full_like(swd, prev_label == LABEL_DESTROY, dtype=jnp.bool_)
-    is_collect = jnp.full_like(swd, prev_label == LABEL_COLLECT, dtype=jnp.bool_)
-    is_avoid = jnp.full_like(swd, prev_label == LABEL_AVOID, dtype=jnp.bool_)
-
-    destroy_reward = jnp.where(
-        is_destroy,
-        jnp.where(swd, 1.0, jnp.where(sfd, -1.0, 0.0)),
-        0.0,
-    )
-    destroy_done = jnp.logical_and(is_destroy, jnp.logical_or(swd, sfd))
-
-    collect_reward = jnp.where(is_collect, jnp.where(swc, 1.0, 0.0), 0.0)
-    collect_done = jnp.logical_and(is_collect, swc)
-
-    avoid_reward = jnp.where(
-        is_avoid,
-        jnp.where(
-            swa,
-            1.0,
-            jnp.where(sfa, -10.0, AVOID_SURVIVAL_REWARD),
-        ),
-        0.0,
-    )
-    avoid_done = jnp.logical_and(is_avoid, jnp.logical_or(swa, sfa))
-
-    rewards = jnp.stack([destroy_reward, collect_reward, avoid_reward]).astype(jnp.float32)
-    skill_done = jnp.stack([destroy_done, collect_done, avoid_done]).astype(jnp.bool_)
-
-    # Preserve scalar output shape when called outside vmapped training loops.
-    if jnp.ndim(life_lost) == 0:
-        rewards = rewards[..., 0]
-        skill_done = skill_done[..., 0]
-    return rewards, skill_done
 
 def semantic_max_objects_from_env(env) -> int:
     """Return ``max_objects`` from the outermost ``JaxatariSemanticBaseWrapper``."""

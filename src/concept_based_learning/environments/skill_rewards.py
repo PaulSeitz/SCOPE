@@ -231,6 +231,11 @@ def extract_skill_rewards(
 
     rewards    = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
     skill_done = jnp.array([destroy_done,   collect_done,   avoid_done],   dtype=jnp.bool_)
+
+    eligible = object_reward_eligible(prev_target, next_target)
+    rewards = jnp.where(eligible, rewards, jnp.zeros_like(rewards))
+    skill_done = jnp.logical_and(skill_done, eligible)
+
     return rewards, skill_done
 
 

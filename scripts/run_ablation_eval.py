@@ -408,6 +408,7 @@ def _apply_run_defaults(
     *,
     wandb_mode: str | None,
     trial_steps: int | None,
+    record_video: bool = True,
 ) -> str:
     if wandb_mode is not None:
         cfg["WANDB_MODE"] = wandb_mode
@@ -427,8 +428,8 @@ def _apply_run_defaults(
     cfg.setdefault("ENTITY", "paul-seitz-tu-darmstadt")
     cfg.setdefault("PROJECT", "concept_based_learning")
     cfg.setdefault("SEED", 44)
-    cfg["RECORD_VIDEO"] = False
-    cfg["VIDEO_AT_END"] = False
+    cfg["RECORD_VIDEO"] = record_video
+    cfg["VIDEO_AT_END"] = record_video
     return str(cfg.get("WANDB_RUN_NAME", "run"))
 
 
@@ -500,6 +501,7 @@ def _run_experiment(
     wandb_mode: str | None,
     trial_steps: int | None,
     oom_retry: bool,
+    record_video: bool,
 ) -> None:
     raw = _load_yaml(path)
     base_cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
@@ -507,6 +509,7 @@ def _run_experiment(
         base_cfg,
         wandb_mode=wandb_mode,
         trial_steps=trial_steps,
+        record_video=record_video,
     )
 
     print(f"\n{'=' * 70}")
@@ -588,6 +591,7 @@ def run_suite(
     manifest_entries: list[tuple[str, str]] | None = None,
     oom_retry: bool = True,
     rtpt_experiment_name: str | None = None,
+    record_video: bool = True,
 ) -> None:
     if suite == "input_ablation":
         paths = _collect_input_ablation_paths(
@@ -615,6 +619,7 @@ def run_suite(
                     wandb_mode=wandb_mode,
                     trial_steps=trial_steps,
                     oom_retry=oom_retry,
+                    record_video=record_video,
                 )
             except Exception:
                 traceback.print_exc()
@@ -630,6 +635,7 @@ def run_suite(
                 wandb_mode=wandb_mode,
                 trial_steps=trial_steps,
                 oom_retry=oom_retry,
+                record_video=record_video,
             )
         if 2 in phases:
             keys = variants or QSTICK_PHASE2_KEYS
@@ -643,6 +649,7 @@ def run_suite(
                     wandb_mode=wandb_mode,
                     trial_steps=trial_steps,
                     oom_retry=oom_retry,
+                    record_video=record_video,
                 )
         return
 
@@ -707,6 +714,11 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="On GPU OOM, retry with lower NUM_ENVS / adjusted NUM_STEPS (default: on)",
+    )
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Skip end-of-run W&B video (default: record video/tandem at end of training)",
     )
     args = parser.parse_args()
 
@@ -779,6 +791,7 @@ def main() -> None:
         manifest_entries=manifest_entries,
         oom_retry=args.oom_retry,
         rtpt_experiment_name=rtpt_experiment_name,
+        record_video=not args.no_video,
     )
 
 

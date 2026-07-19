@@ -16,9 +16,17 @@ import optax
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import QNetwork, CustomTrainState, Transition
-from concept_based_learning.networks.meta_network import MetaQNetwork
+from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
-from concept_based_learning.environments.datatypes import ConceptObservation
+from concept_based_learning.environments.meta_target_mask import (
+    is_meta_fire_target,
+    is_meta_noop_target,
+    meta_fire_game_action,
+    meta_fire_target_enabled,
+    meta_fire_target_idx,
+    meta_noop_target_enabled,
+    meta_noop_target_idx,
+)
 from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_DECAY,
     DEFAULT_SKILL_EPS_FINISH,
@@ -118,6 +126,12 @@ def make_train(
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
+    meta_noop_enabled = meta_noop_target_enabled(config)
+    meta_noop_idx = meta_noop_target_idx(config)
+    meta_fire_enabled = meta_fire_target_enabled(config)
+    meta_fire_idx = meta_fire_target_idx(config)
+    meta_fire_action = int(meta_fire_game_action(config))
+    meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
 
     def label_to_skill_idx(label):
         return jnp.clip(label - 1, 0, NUM_SKILLS - 1)
@@ -148,7 +162,6 @@ def make_train(
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
     skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
-    meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
     debug_inputs = input_debug_enabled(config)
     skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
     skill_pixel_channels = config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))
@@ -170,11 +183,7 @@ def make_train(
     )
     use_learned_meta_policy = frozen_meta_params is not None
     if use_learned_meta_policy:
-        meta_network = MetaQNetwork(
-            action_dim=MAX_OBJECTS,
-            hidden_size=config.get("META_HIDDEN_SIZE", 256),
-            num_skills=NUM_SKILLS,
-        )
+        meta_network = create_meta_network(config)
         meta_eps_start = float(
             config.get("SKILL_FINETUNE_META_EPS_START", config.get("EPS_START", 0.2))
         )
@@ -375,10 +384,20 @@ def make_train(
                     fallback_mask = jnp.zeros_like(active_masks).at[:, 0].set(True)
                     safe_masks = jnp.where(any_active[:, None], active_masks, fallback_mask)
                     meta_q_vals = jax.vmap(
-                        lambda obs, objs: meta_network.apply(
-                            {"params": frozen_meta_params}, obs, objs, train=False
+                        lambda obs, objs, pix: meta_network.apply(
+                            {"params": frozen_meta_params},
+                            obs,
+                            objs,
+                            train=False,
+                            pixel_obs=pix,
                         )
-                    )(last_obs.raw_observation, last_obs.objects)
+                    )(
+                        last_obs.raw_observation,
+                        last_obs.objects,
+                        last_obs.pixel_observation
+                        if meta_input_mode == "pixel_embed"
+                        else None,
+                    )
                     meta_eps = jnp.full(
                         config["NUM_ENVS"],
                         meta_eps_scheduler(train_states.n_updates[0]),
@@ -427,11 +446,28 @@ def make_train(
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
                 )
+                no_target = target_obj_idxs == no_target_idx
+                meta_noop = is_meta_noop_target(
+                    target_obj_idxs,
+                    config,
+                    noop_idx=meta_noop_idx,
+                    enabled=meta_noop_enabled,
+                )
+                meta_fire = is_meta_fire_target(
+                    target_obj_idxs,
+                    config,
+                    fire_idx=meta_fire_idx,
+                    enabled=meta_fire_enabled,
+                )
+                force_noop = jnp.logical_or(no_target, meta_noop)
 
                 raw_labels = jax.vmap(
                     lambda labels, idx: labels[-1, idx]
                 )(last_obs.objects.semantic_label, safe_target_idxs)
                 active_skills = label_to_skill_idx(raw_labels)
+                active_skills = jnp.where(
+                    force_noop | meta_fire, 0, active_skills
+                )
 
                 ego_obses = _skill_inputs(
                     last_obs.raw_observation, last_obs.objects, safe_target_idxs
@@ -501,8 +537,7 @@ def make_train(
                         symbolic_collect_ego_action,
                         chosen_ego_actions,
                     )
-                no_target = target_obj_idxs == no_target_idx
-                chosen_ego_actions = jnp.where(no_target, 0, chosen_ego_actions)
+                chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
                 global_actions = jax.vmap(action_mapper)(
                     chosen_ego_actions,
@@ -510,13 +545,18 @@ def make_train(
                     target_obj_idxs,
                     last_obs.objects,
                 )
+                global_actions = jnp.where(
+                    meta_fire,
+                    jnp.full_like(global_actions, meta_fire_action),
+                    global_actions,
+                )
                 if symbolic_collect_enabled:
                     global_actions = jnp.where(
                         active_skills == symbolic_collect_skill_idx,
                         jnp.full_like(global_actions, symbolic_collect_up_action),
                         global_actions,
                     )
-                global_actions = jnp.where(no_target, 0, global_actions)
+                global_actions = jnp.where(force_noop, 0, global_actions)
 
                 step_obs, step_env_state, raw_rewards, new_done, info = vmap_step(
                     env_state, global_actions
@@ -549,7 +589,9 @@ def make_train(
                     )
 
                 prev_targets = jax.vmap(get_target_obj)(last_obs.objects, safe_target_idxs)
-                next_targets = jax.vmap(get_target_obj)(new_obs.objects, safe_target_idxs)
+                next_targets = jax.vmap(get_target_obj)(
+                    step_obs.objects, safe_target_idxs
+                )
 
                 rewards_and_masks = jax.vmap(
                     lambda pr, nr, pt, nt, ll, inf: extract_all_skills_rewards(
@@ -557,13 +599,21 @@ def make_train(
                     )
                 )(
                     last_obs.raw_observation,
-                    new_obs.raw_observation,
+                    step_obs.raw_observation,
                     prev_targets,
                     next_targets,
                     life_lost,
                     info,
                 )
                 skill_rewards, skill_done = rewards_and_masks
+                if meta_noop_enabled:
+                    skill_rewards = jnp.where(
+                        meta_noop[:, jnp.newaxis], 0.0, skill_rewards
+                    )
+                if meta_fire_enabled:
+                    skill_rewards = jnp.where(
+                        meta_fire[:, jnp.newaxis], 0.0, skill_rewards
+                    )
                 base_env_reward = jnp.sign(raw_rewards)
                 skill_rewards = (
                     skill_reward_lambda * base_env_reward[:, jnp.newaxis]
@@ -612,9 +662,9 @@ def make_train(
                         _all_object_rewards
                     )(
                         last_obs.raw_observation,
-                        new_obs.raw_observation,
+                        step_obs.raw_observation,
                         last_obs.objects,
-                        new_obs.objects,
+                        step_obs.objects,
                         life_lost,
                         info,
                     )
@@ -631,6 +681,14 @@ def make_train(
                         config,
                         objects=last_obs.objects,
                     )
+                    if meta_noop_enabled:
+                        relabel_mask_full = relabel_mask_full.at[:, meta_noop_idx].set(
+                            False
+                        )
+                    if meta_fire_enabled:
+                        relabel_mask_full = relabel_mask_full.at[:, meta_fire_idx].set(
+                            False
+                        )
 
                     if relabel_k_objects is not None:
                         rng, rng_relabel = jax.random.split(rng)
@@ -665,7 +723,7 @@ def make_train(
                         skill_done_all = skill_done_all_full
                         relabel_mask = relabel_mask_full
                 else:
-                    base_valid = target_obj_idxs != no_target_idx
+                    base_valid = jnp.logical_not(force_noop | meta_fire)
                     ego_obs_all = ego_obses[:, jnp.newaxis, :]
                     next_ego_obs_all = next_ego_obses[:, jnp.newaxis, :]
                     ego_action_all = chosen_ego_actions[:, jnp.newaxis]
@@ -1296,8 +1354,21 @@ def make_train(
                 target_obj_idxs = int(jnp.ravel(target_obj_idxs)[0])
             prev_target_idx = target_obj_idxs
 
-            if target_obj_idxs == no_target_idx:
+            eval_meta_noop = bool(
+                meta_noop_enabled
+                and target_obj_idxs == meta_noop_idx
+            )
+            eval_meta_fire = bool(
+                meta_fire_enabled
+                and target_obj_idxs == meta_fire_idx
+            )
+
+            if target_obj_idxs == no_target_idx or eval_meta_noop:
                 global_action = 0
+                active_skills = 0
+                combined_q = np.array([0.0, 0.0, 0.0])
+            elif eval_meta_fire:
+                global_action = meta_fire_action
                 active_skills = 0
                 combined_q = np.array([0.0, 0.0, 0.0])
             else:

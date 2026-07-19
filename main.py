@@ -1,7 +1,6 @@
 import os
 import time
 import copy
-import functools
 import warnings
 import jax
 import jax.numpy as jnp
@@ -15,10 +14,7 @@ from concept_based_learning.environments.env_manager import (
     EnvManager,
     align_config_max_objects,
 )
-from concept_based_learning.environments.heuristics import (
-    get_nearest_object_target,
-    resolve_heuristic_target_fn,
-)
+from concept_based_learning.environments.heuristics import resolve_heuristic_target_fn
 from concept_based_learning.curriculum import build_skill_phases
 from concept_based_learning.training.train_skills import make_train
 from concept_based_learning._legacy.train_meta_agent import make_meta_train
@@ -105,9 +101,6 @@ def outer_make_train(config, frozen_meta_params=None):
     `EVAL_GAME_MODS` is null or omitted) so end-of-phase videos and eval
     rollouts match the environment actually trained on (e.g. curriculum mods).
 
-    Skillbootcamp: set ``EGO_ACTION_DIM`` to **18** (full egocentric table) or **6**
-    (primitives only) so skill Q-heads match ``bootcamp_action_mapper``; the mapper
-    supports both (see ``bootcamp_action_mapper`` module docstring).
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
     _configure_ego_obs_format(config)

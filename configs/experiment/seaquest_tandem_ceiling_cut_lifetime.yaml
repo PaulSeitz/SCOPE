@@ -70,7 +70,6 @@ alg:
   RELABEL_ALL_OBJECTS: true
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
-  SKILL_QLAMBDA_WATKINS_CUT: false
 
   SKILL_TARGET_CUT: "lifetime"
 

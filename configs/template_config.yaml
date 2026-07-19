@@ -33,13 +33,10 @@ EVAL_SEED: 43                     # Seed for evaluation/video rollouts. Options:
 ENV_SEED_BASE: null               # If set, train env i uses ENV_SEED_BASE+i. Options: int or null (falls back to SEED).
 
 SAVE_PATH: "./outputs/models"     # Directory for checkpoints/config copies/videos. Options: path string or null.
-LOAD_PATH: null                   # Reserved loader path in configs. Options: path string or null.
-LOAD_PARAMS: false                # Reserved legacy flag in configs. Options: true/false.
 INIT_MODEL_PATH: null             # Skill checkpoint to initialize from. Options: path string or null.
 INIT_META_MODEL_PATH: null        # Meta checkpoint for tandem warm start. Options: path string or null.
 
 RECORD_VIDEO: true                # Enable periodic/end-of-run video capture. Options: true/false.
-VIDEO_EVERY_N_UPDATES: 5000       # Video cadence in some pipelines. Options: int >= 1.
 VIDEO_AT_END: true                # Force a final evaluation video. Options: true/false.
 VIDEO_MAX_FRAMES: 600             # Video/eval rollout frame cap. Options: int >= 1.
 EVAL_MAX_FRAMES: 2000             # Standalone eval/visualizer frame cap. Options: int >= 1.
@@ -70,11 +67,10 @@ USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false   # Guard near-surface deaths i
 # ---------------------------
 # Meta-network architecture
 # ---------------------------
-META_ARCHITECTURE: "per_object_mlp" # Meta Q-network family. Options: "per_object_mlp","flat_mlp","pointer".
+META_ARCHITECTURE: "per_object_mlp" # Meta Q-network family. Options: "per_object_mlp","flat_mlp".
 META_NUM_LAYERS: 3                  # Fallback depth for meta trunk. Options: int >= 1.
 META_PER_OBJECT_NUM_LAYERS: 3       # per_object_mlp depth override. Options: int >= 1.
 META_FLAT_NUM_LAYERS: 3             # flat_mlp depth override. Options: int >= 1.
-META_POINTER_NUM_LAYERS: 3          # pointer depth override. Options: int >= 1.
 META_HIDDEN_SIZE: 256               # Meta hidden width. Options: int >= 1.
 META_NORM_TYPE: "layer_norm"        # Meta normalization. Options: "layer_norm","batch_norm".
 META_EMBED_DIM: 256                 # Embedding dim for some meta input modes. Options: int >= 1.
@@ -144,7 +140,6 @@ alg:
   SKILL_BOOTSTRAP: "q_lambda"       # Skill target style. Options: "q_lambda","one_step".
   SKILL_REWARD_LAMBDA: 0.0          # Blend env reward into skill reward. Options: float (commonly 0..1).
   SKILL_TARGET_CUT: "global"        # Cut strategy at meta target switch. Options: "global","involved","lifetime" (+ aliases: "all","involved_only","her","her_lifetime","none","off").
-  SKILL_QLAMBDA_WATKINS_CUT: false  # Legacy/experimental switch (kept for compatibility). Options: true/false.
 
   # Meta-specific optimization.
   META_LR: 0.0005                   # Meta optimizer LR override. Options: float > 0.
@@ -152,7 +147,6 @@ alg:
   META_REWARD_LAMBDA: 1.0           # Meta reward blending factor in tandem. Options: float.
   META_SWITCH_PENALTY: -0.05        # Penalty per meta target switch. Options: float.
   META_DEATH_PENALTY: -10.0         # Penalty when life is lost/death event occurs. Options: float.
-  META_HYSTERESIS_BONUS: 0.0        # Optional hysteresis bias for meta choice stability. Options: float.
 
   # Epsilon schedules.
   EPS_START: 0.3                    # Base epsilon start. Options: float in [0,1].
@@ -215,17 +209,3 @@ alg:
   SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
   FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.
   FREEWAY_THREAT_DIST_THRESH: null  # Freeway threat gating threshold. Options: float > 0 or null.
-  # The following are present in some experiment configs but currently consumed
-  # only by environment-specific reward/label logic.
-  FREEWAY_THREAT_WEIGHTED_DIST_THRESH: null # Options: float > 0 or null.
-  FREEWAY_THREAT_X_WEIGHT: null             # Options: float > 0 or null.
-  FREEWAY_THREAT_Y_WEIGHT: null             # Options: float > 0 or null.
-  AVOID_HIT_PENALTY: null                   # Options: float or null.
-  AVOID_NEAR_TOLERANCE: null                # Options: float >= 0 or null.
-  AVOID_PROXIMITY_GATED: null               # Options: true/false or null.
-  AVOID_SUCCESS_REWARD: null                # Options: float or null.
-  COLLECT_DISTANCE_SHAPING_ENABLED: null    # Options: true/false or null.
-  COLLECT_GOAL_DENSE_SHAPING_ENABLED: null  # Options: true/false or null.
-  COLLECT_GOAL_OBJECT_IDX: null             # Options: int >= 0 or null.
-  COLLECT_GOAL_ONLY_RELABEL: null           # Options: true/false or null.
-  COLLECT_Y_SHAPING_PER_PIXEL: null         # Options: float or null.

@@ -22,8 +22,6 @@ alg:
   # Meta-network settings (System 2)
   META_HIDDEN_SIZE: 256
   META_LR: 0.00025
-  # Additive sticky-target bonus (applied before argmax in meta target selection).
-  META_HYSTERESIS_BONUS: 0.0
   # Make a dedicated NOOP target selectable (index 0 by convention).
   META_USE_NOOP_TARGET: true
   META_NOOP_TARGET_IDX: 0

@@ -61,12 +61,26 @@ class SkiingSemanticWrapper(JaxatariSemanticBaseWrapper):
         hit_tree = jnp.logical_and(new_collision, next_env_state.collision_type == 1)
         hit_mogul = jnp.logical_and(new_collision, next_env_state.collision_type == 2)
 
-        pole_mask = jnp.zeros(_N_FLAG_PAIRS * 2, dtype=jnp.int32).at[0].set(
-            hit_flag.astype(jnp.int32)
-        )
+        skier_x = next_env_state.skier_x.astype(jnp.float32)
+
+        def _closest_slot_x(rows, count):
+            xs = rows[:count, 0].astype(jnp.float32)
+            return jnp.argmin(jnp.abs(xs - skier_x)).astype(jnp.int32)
+
+        pole_mask = jnp.zeros(_N_FLAG_PAIRS * 2, dtype=jnp.int32)
+        gate_idx = _closest_slot_x(next_env_state.flags, _N_FLAG_PAIRS)
+        pole_mask = pole_mask.at[gate_idx].set(hit_flag.astype(jnp.int32))
+        pole_mask = pole_mask.at[_N_FLAG_PAIRS + gate_idx].set(hit_flag.astype(jnp.int32))
+
         center_mask = jnp.zeros(_N_FLAG_PAIRS, dtype=jnp.int32)
-        tree_mask = jnp.zeros(_N_TREES, dtype=jnp.int32).at[0].set(hit_tree.astype(jnp.int32))
-        mogul_mask = jnp.zeros(_N_MOGULS, dtype=jnp.int32).at[0].set(hit_mogul.astype(jnp.int32))
+        tree_idx = _closest_slot_x(next_env_state.trees, _N_TREES)
+        tree_mask = jnp.zeros(_N_TREES, dtype=jnp.int32).at[tree_idx].set(
+            hit_tree.astype(jnp.int32)
+        )
+        mogul_idx = _closest_slot_x(next_env_state.moguls, _N_MOGULS)
+        mogul_mask = jnp.zeros(_N_MOGULS, dtype=jnp.int32).at[mogul_idx].set(
+            hit_mogul.astype(jnp.int32)
+        )
         return jnp.concatenate([pole_mask, center_mask, tree_mask, mogul_mask])  # (12,)
 
     def _substep_collect_events(self, prev_env_state, next_env_state):

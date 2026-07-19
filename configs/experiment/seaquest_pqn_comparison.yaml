@@ -83,7 +83,6 @@ alg:
   RELABEL_ALL_OBJECTS: false
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: "q_lambda"
-  SKILL_QLAMBDA_WATKINS_CUT: false
 
   # --- Exploration (Epsilon-Greedy) ---
   # Baseline PQN (pqn_agent.py): ε 1 → 0.01 over EPS_DECAY * NUM_UPDATES_DECAY updates.

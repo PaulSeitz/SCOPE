@@ -11,8 +11,7 @@ from concept_based_learning.networks.meta_network import MetaQNetwork
 
 # per_object_mlp: global + per-slot object features, shared row-wise MLP (default)
 # flat_mlp: raw obs vector only -> Dense(MAX_OBJECTS)
-# pointer: affordance intent + spatial attention over object slots (legacy)
-META_ARCHITECTURE_CHOICES = ("per_object_mlp", "flat_mlp", "pointer")
+META_ARCHITECTURE_CHOICES = ("per_object_mlp", "flat_mlp")
 
 
 def _meta_num_layers(config: Dict[str, Any], arch_key: str) -> int:
@@ -60,22 +59,8 @@ def create_meta_network(config: Dict[str, Any]) -> nn.Module:
         )
         return FlatMetaQNetwork(**kwargs)
 
-    if arch in ("pointer", "affordance_pointer", "affordance"):
-        from concept_based_learning._legacy.affordance_pointer_network import (
-            MetaQNetwork as AffordancePointerMetaQNetwork,
-        )
-
-        kwargs = _meta_network_kwargs(
-            config, num_layers=_meta_num_layers(config, "META_POINTER_NUM_LAYERS")
-        )
-        kwargs.pop("meta_input_mode", None)
-        kwargs.pop("meta_embed_dim", None)
-        kwargs.pop("pixel_cnn_channels", None)
-        kwargs.pop("pixel_cnn_kernel_size", None)
-        return AffordancePointerMetaQNetwork(**kwargs)
-
     raise ValueError(
         f"Unknown META_ARCHITECTURE={arch!r}. "
         f"Choose one of: {', '.join(META_ARCHITECTURE_CHOICES)} "
-        f"(aliases: mlp, flat, raw_obs, affordance_pointer)."
+        f"(aliases: mlp, flat, raw_obs)."
     )
