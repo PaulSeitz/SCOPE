@@ -320,16 +320,24 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
         traceback.print_exc()
 
 
-def wait_for_video_finish():
-    """Call this at the end of your script to prevent crashing."""
+def wait_for_video_finish(timeout: float | None = 600.0):
+    """Block until the background video thread finishes (or ``timeout`` seconds).
+
+    End-of-run videos (esp. skills_only with long episodes + sidebar) often take
+    well over 30s; a short timeout caused ``wandb.finish()`` to close the run
+    before ``wandb.Video`` was logged, so skills_only runs appeared to have no
+    videos. Default timeout is 10 minutes; pass ``None`` to wait indefinitely.
+    """
     global CURRENT_VIDEO_THREAD
     if CURRENT_VIDEO_THREAD is not None and CURRENT_VIDEO_THREAD.is_alive():
         print("Waiting for background video rendering to finish...")
         try:
-            # Use timeout to prevent hanging
-            CURRENT_VIDEO_THREAD.join(timeout=30)
+            CURRENT_VIDEO_THREAD.join(timeout=timeout)
             if CURRENT_VIDEO_THREAD.is_alive():
-                print("Warning: Video rendering still in progress but timeout reached.")
+                print(
+                    "Warning: Video rendering still in progress but timeout "
+                    f"reached ({timeout}s)."
+                )
             else:
                 print("Video rendering done.")
         except Exception as e:

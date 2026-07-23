@@ -28,8 +28,10 @@ from concept_based_learning.observations.egocentric import (
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.environments.heuristics import (
+    initial_policy_state,
     resolve_heuristic_target_fn,
     resolve_heuristic_with_mission_fn,
+    resolve_heuristic_with_state_fn,
 )
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
@@ -890,6 +892,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     components = manager.get_components(env_name)
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
+    heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
@@ -949,6 +952,22 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             base_params,
         )
 
+    # JIT skill Q eval once — the old per-step jax.vmap.apply was the reason
+    # skills_only end videos appeared to hang after "Recording...".
+    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch):
+        def apply_one(params_for_skill):
+            return skill_network.apply(
+                {"params": params_for_skill},
+                ego_batch,
+                train=False,
+                target_idx=target_idx_arr,
+                pixel_obs=pixel_batch,
+            )
+
+        return jax.vmap(apply_one)(params_stack)
+
+    apply_all_skills = jax.jit(_apply_all_skills)
+
     # Rollout storage
     states_list = []
     active_list = []
@@ -966,13 +985,26 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     # Persistent target index for the heuristic meta-policy
     prev_target_idx = no_target_idx
     mission_target_idx = no_target_idx
+    policy_state = initial_policy_state(no_target_idx)
     persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
-    for _ in range(max_frames):
+    print(f"Eval rollout: collecting up to {max_frames} frames...")
+    for frame_i in range(max_frames):
+        if frame_i > 0 and frame_i % 100 == 0:
+            print(f"  eval frame {frame_i}/{max_frames}...")
         rng, step_key = jax.random.split(rng)
 
         if meta_network is None:
-            if heuristic_with_mission is not None:
+            if heuristic_with_state is not None:
+                target_obj_idx, policy_state = heuristic_with_state(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    policy_state,
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            elif heuristic_with_mission is not None:
                 target_obj_idx, mission_target_idx = heuristic_with_mission(
                     obs.raw_observation,
                     obs.objects,
@@ -1082,21 +1114,14 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
             # Evaluate all skills' Q-values on the current ego observation.
-            def apply_one(params_for_skill):
-                return skill_network.apply(
-                    {"params": params_for_skill},
-                    ego_obs_batch,
-                    train=False,
-                    target_idx=jnp.asarray([target_obj_idx], dtype=jnp.int32),
-                    pixel_obs=(
-                        jnp.expand_dims(pixel_obs, 0)
-                        if pixel_obs is not None
-                        else None
-                    ),
-                )
-
-            q_vals = jax.vmap(apply_one)(params_tree)  # [num_skills, 1, ego_action_dim]
-            q_vals = jnp.squeeze(q_vals, axis=1)      # [num_skills, ego_action_dim]
+            target_idx_arr = jnp.asarray([target_obj_idx], dtype=jnp.int32)
+            pixel_batch = (
+                jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
+            )
+            q_vals = apply_all_skills(
+                params_tree, ego_obs_batch, target_idx_arr, pixel_batch
+            )  # [num_skills, 1, ego_action_dim]
+            q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, ego_action_dim]
 
             combined_q = np.array(jnp.max(q_vals, axis=-1))
 
@@ -1136,6 +1161,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         if done:
             break
 
+    print(f"Eval rollout done ({len(states_list)} frames).")
     if not states_list:
         raise RuntimeError("No frames collected during evaluation rollout.")
 

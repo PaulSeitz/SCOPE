@@ -375,17 +375,13 @@ def single_run(config):
             if (
                 phase_config.get("RECORD_VIDEO")
                 and phase_config.get("VIDEO_AT_END", True)
-                and eval_rollout_fn is not None
             ):
                 video_key = f"video/{phase_idx + 1:02d}_{phase.name}"
                 video_output_path = None
-                if (
-                    phase_config.get("WANDB_MODE", "disabled") == "disabled"
-                    or wandb.run is None
-                ):
-                    save_root = resolve_config_path(
-                        phase_config.get("SAVE_PATH", "./outputs/models")
-                    )
+                save_root = resolve_config_path(
+                    phase_config.get("SAVE_PATH", "./outputs/models")
+                )
+                if save_root is not None:
                     vdir = os.path.join(
                         save_root,
                         "curriculum_videos",
@@ -408,7 +404,9 @@ def single_run(config):
                 )
                 if use_wandb_video or video_output_path:
                     print(f"Recording end-of-phase video for '{phase.name}'...")
-                    eval_rng = jax.random.PRNGKey(eval_seed)
+                    # Use the shared visualizer rollout (same path as tandem videos).
+                    # train_skills.eval_rollout is an unjitted Python loop that can
+                    # appear to hang for many minutes on Seaquest heuristics.
                     (
                         states,
                         active_agents,
@@ -416,11 +414,14 @@ def single_run(config):
                         dones,
                         target_obj_idxs,
                         objects_bbox,
-                    ) = eval_rollout_fn(
-                        runner_state,
-                        eval_rng,
-                        global_step_end_of_phase,
-                        phase_config.get("VIDEO_MAX_FRAMES", 2000),
+                        distances,
+                        angles,
+                        renderer,
+                    ) = run_eval_rollout(
+                        phase_config,
+                        params_tree=current_params,
+                        meta_params=None,
+                        max_frames=phase_config.get("VIDEO_MAX_FRAMES", 600),
                     )
                     video_callback(
                         states,
@@ -431,13 +432,14 @@ def single_run(config):
                         renderer,
                         target_obj_idxs=target_obj_idxs,
                         objects_bbox=objects_bbox,
+                        distances=distances,
+                        angles=angles,
                         video_key=video_key,
                         wandb_step=global_step_end_of_phase,
-                        video_output_path=(
-                            video_output_path if not use_wandb_video else None
-                        ),
+                        video_output_path=video_output_path,
                     )
                     wait_for_video_finish()
+                    print(f"End-of-phase video for '{phase.name}' finished.")
                 else:
                     print(
                         f"RECORD_VIDEO/VIDEO_AT_END set for phase '{phase.name}' "
@@ -445,7 +447,9 @@ def single_run(config):
                         "skipping video."
                     )
         last_global_step = int(phases[-1].step_offset_updates) + int(
-            base_config.get("TOTAL_TIMESTEPS", 0) // base_config.get("NUM_STEPS", 128) // base_config.get("NUM_ENVS", 512)
+            base_config.get("TOTAL_TIMESTEPS", 0)
+            // base_config.get("NUM_STEPS", 128)
+            // base_config.get("NUM_ENVS", 512)
         )
         # More robust: return the computed end step from the last phase
         last_global_step = global_step_end_of_phase if phases else 0
@@ -762,6 +766,8 @@ def single_run(config):
                 save_file(flat_meta_params, meta_model_path)
                 print(f"Meta-policy parameters saved to {meta_model_path}")
     finally:
+        # Ensure background video threads finish before closing the wandb run.
+        wait_for_video_finish()
         if wandb.run is not None:
             wandb.finish()
 
