@@ -123,9 +123,16 @@ def selected_skill_outcome_metrics(
     selected (valid meta targets only), so meta misalignment shows up as high
     ``selected_frac`` with low ``selected_success_rate``.
     """
+    from concept_based_learning.environments.datatypes import project_skill_outcomes
+
     num_skills = len(skill_names)
     pure_rewards = _recover_pure_skill_rewards(
         skill_rewards, env_reward, skill_reward_lambda
+    )
+    # Reward extractors always emit the full skill vocabulary; project onto the
+    # configured NUM_SKILLS heads (folds NAVIGATE→COLLECT / JUMP_OVER→AVOID).
+    pure_rewards, skill_done = project_skill_outcomes(
+        pure_rewards, skill_done, num_skills
     )
 
     if valid_mask is None:

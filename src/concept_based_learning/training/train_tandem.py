@@ -18,6 +18,7 @@ from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.environments.datatypes import (
     TandemTransition,
     label_to_skill_idx as _label_to_skill_idx,
+    project_skill_outcomes,
 )
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
@@ -740,6 +741,9 @@ def make_tandem_train(
                 life_lost,
                 info,
             )
+            skill_rewards, skill_done = project_skill_outcomes(
+                skill_rewards, skill_done, num_skills
+            )
             if meta_noop_enabled:
                 skill_rewards = jnp.where(
                     meta_noop[:, jnp.newaxis], 0.0, skill_rewards
@@ -861,6 +865,9 @@ def make_tandem_train(
                     new_obs.objects,
                     life_lost,
                     info,
+                )
+                skill_rewards_all_full, skill_done_all_full = project_skill_outcomes(
+                    skill_rewards_all_full, skill_done_all_full, num_skills
                 )
                 skill_rewards_all_full = (
                     skill_reward_lambda * base_env_reward[:, jnp.newaxis, jnp.newaxis]

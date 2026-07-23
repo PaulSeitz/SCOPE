@@ -33,7 +33,10 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_enabled,
     meta_noop_target_idx,
 )
-from concept_based_learning.environments.datatypes import label_to_skill_idx as _label_to_skill_idx
+from concept_based_learning.environments.datatypes import (
+    label_to_skill_idx as _label_to_skill_idx,
+    project_skill_outcomes,
+)
 from concept_based_learning.environments.heuristics import initial_policy_state
 from concept_based_learning.training.logging_metrics import (
     flag_combination_occupancy_metrics,
@@ -642,6 +645,9 @@ def make_train(
                     info,
                 )
                 skill_rewards, skill_done = rewards_and_masks
+                skill_rewards, skill_done = project_skill_outcomes(
+                    skill_rewards, skill_done, NUM_SKILLS
+                )
                 if meta_noop_enabled:
                     skill_rewards = jnp.where(
                         meta_noop[:, jnp.newaxis], 0.0, skill_rewards
@@ -705,6 +711,9 @@ def make_train(
                         step_obs.objects,
                         life_lost,
                         info,
+                    )
+                    rewards_all_full, skill_done_all_full = project_skill_outcomes(
+                        rewards_all_full, skill_done_all_full, NUM_SKILLS
                     )
                     rewards_all_full = (
                         skill_reward_lambda * base_env_reward[:, jnp.newaxis, jnp.newaxis]

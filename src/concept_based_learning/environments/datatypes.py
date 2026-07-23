@@ -64,6 +64,64 @@ def label_to_skill_idx(label, num_skills: int):
     return jnp.clip(skill, 0, num_skills - 1)
 
 
+def project_skill_outcomes(rewards, skill_done, num_skills: int):
+    """
+    Project full-vocab reward/done vectors onto ``num_skills`` trained heads.
+
+    ``extract_skill_rewards`` always returns width ``NUM_SKILL_LABELS`` (5).
+    When configs truncate with ``NUM_SKILLS < 5``, fold remapped channels the
+    same way as :func:`label_to_skill_idx`:
+      NAVIGATE  → COLLECT when ``num_skills < 4``
+      JUMP_OVER → AVOID   when ``num_skills < 5``
+    """
+    rewards = jnp.asarray(rewards)
+    skill_done = jnp.asarray(skill_done)
+    num_skills = int(num_skills)
+    if num_skills < 1:
+        raise ValueError(f"num_skills must be >= 1, got {num_skills}")
+
+    full_w = int(rewards.shape[-1])
+    out_w = min(num_skills, full_w)
+    out_r = rewards[..., :out_w]
+    out_d = skill_done[..., :out_w]
+
+    collect_i = LABEL_COLLECT - 1
+    avoid_i = LABEL_AVOID - 1
+    navigate_i = LABEL_NAVIGATE - 1
+    jump_i = LABEL_JUMP_OVER - 1
+
+    if num_skills < LABEL_NAVIGATE and full_w > navigate_i and out_w > collect_i:
+        nav_r = rewards[..., navigate_i]
+        nav_d = skill_done[..., navigate_i]
+        out_r = out_r.at[..., collect_i].add(nav_r)
+        out_d = out_d.at[..., collect_i].set(
+            jnp.logical_or(out_d[..., collect_i], nav_d)
+        )
+
+    if num_skills < LABEL_JUMP_OVER and full_w > jump_i and out_w > avoid_i:
+        jump_r = rewards[..., jump_i]
+        jump_d = skill_done[..., jump_i]
+        out_r = out_r.at[..., avoid_i].add(jump_r)
+        out_d = out_d.at[..., avoid_i].set(
+            jnp.logical_or(out_d[..., avoid_i], jump_d)
+        )
+
+    if out_w < num_skills:
+        pad = num_skills - out_w
+        out_r = jnp.concatenate(
+            [out_r, jnp.zeros(rewards.shape[:-1] + (pad,), dtype=out_r.dtype)],
+            axis=-1,
+        )
+        out_d = jnp.concatenate(
+            [
+                out_d,
+                jnp.zeros(skill_done.shape[:-1] + (pad,), dtype=out_d.dtype),
+            ],
+            axis=-1,
+        )
+    return out_r, out_d
+
+
 def static_blocker_arrays(rects):
     """
     Build object-array fragments for static occluders (walls, shields, ...).

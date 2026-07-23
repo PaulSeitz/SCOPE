@@ -678,89 +678,92 @@ def single_run(config):
     final_skill_params = None
     final_meta_params = None
 
-    total_timesteps = int(base_config.get("TOTAL_TIMESTEPS", 0))
-    if train_mode == "skills_only":
-        final_skill_params, _ = run_skill_curriculum(prev_params, total_timesteps)
-    elif train_mode == "meta_only":
-        if prev_params is None:
-            raise ValueError(
-                "Mode 'meta_only' requires INIT_MODEL_PATH containing skill parameters."
-            )
-        final_skill_params = prev_params
-        meta_divisor = int(base_config.get("NUM_STEPS", 128)) * int(
-            base_config.get("NUM_ENVS", 512)
-        )
-        dropped = int(total_timesteps) % max(1, meta_divisor)
-        if dropped != 0:
-            warnings.warn(
-                f"TOTAL_TIMESTEPS={total_timesteps} is not divisible by NUM_STEPS*NUM_ENVS="
-                f"{meta_divisor}; dropping {dropped} timesteps in meta training.",
-                UserWarning,
-                stacklevel=2,
-            )
-        final_meta_params, _, final_skill_params = run_meta_training(
-            final_skill_params, total_timesteps, step_offset=0
-        )
-    elif train_mode == "tandem":
-        init_meta_params = None
-        init_meta_path = base_config.get("INIT_META_MODEL_PATH")
-        if init_meta_path is not None:
-            print(f"Initializing meta-policy from checkpoint: {init_meta_path}")
-            init_meta_params = load_params_from_file(init_meta_path)
-        final_skill_params, final_meta_params = run_tandem_training(
-            total_timesteps,
-            init_meta_params=init_meta_params,
-            init_skill_params=prev_params,
-        )
-    else:
-        raise ValueError(
-            f"Unknown TRAIN_MODE: {train_mode}. Supported modes: skills_only, meta_only, tandem."
-        )
-
-    print(f"\nTraining run completed in {time.time() - global_t0:.2f} seconds.")
-
-    # Optional: Save final config (hyperparameters) and model parameters to disk
-    save_path = resolve_config_path(base_config.get("SAVE_PATH", None))
-    if save_path is not None:
-        save_dir = os.path.join(save_path, env_name)
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Save config
-        OmegaConf.save(
-            base_config,
-            os.path.join(save_dir, f'{alg_name}_{env_name}_seed{base_config["SEED"]}_config.yaml'),
-        )
-        print(f"Config saved to {save_dir}")
-
-        if final_skill_params is not None:
-            flat_skill_params = flatten_dict(final_skill_params, sep=",")
-            if final_meta_params is None:
-                skills_filename = f'{alg_name}_{env_name}_seed{base_config["SEED"]}.safetensors'
-            else:
-                skills_filename = (
-                    f'{alg_name}_{env_name}_seed{base_config["SEED"]}_skills.safetensors'
+    final_skill_params = None
+    final_meta_params = None
+    try:
+        total_timesteps = int(base_config.get("TOTAL_TIMESTEPS", 0))
+        if train_mode == "skills_only":
+            final_skill_params, _ = run_skill_curriculum(prev_params, total_timesteps)
+        elif train_mode == "meta_only":
+            if prev_params is None:
+                raise ValueError(
+                    "Mode 'meta_only' requires INIT_MODEL_PATH containing skill parameters."
                 )
-            skills_model_path = _safe_checkpoint_path(
-                os.path.join(save_dir, skills_filename),
-                init_model_path=init_model_path,
+            final_skill_params = prev_params
+            meta_divisor = int(base_config.get("NUM_STEPS", 128)) * int(
+                base_config.get("NUM_ENVS", 512)
             )
-            save_file(flat_skill_params, skills_model_path)
-            print(f"Skill model parameters saved to {skills_model_path}")
-
-        if final_meta_params is not None:
-            flat_meta_params = flatten_dict(final_meta_params, sep=",")
-            meta_model_path = _safe_checkpoint_path(
-                os.path.join(
-                    save_dir,
-                    f'{alg_name}_{env_name}_seed{base_config["SEED"]}_meta.safetensors',
-                ),
-                init_model_path=init_model_path,
+            dropped = int(total_timesteps) % max(1, meta_divisor)
+            if dropped != 0:
+                warnings.warn(
+                    f"TOTAL_TIMESTEPS={total_timesteps} is not divisible by NUM_STEPS*NUM_ENVS="
+                    f"{meta_divisor}; dropping {dropped} timesteps in meta training.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            final_meta_params, _, final_skill_params = run_meta_training(
+                final_skill_params, total_timesteps, step_offset=0
             )
-            save_file(flat_meta_params, meta_model_path)
-            print(f"Meta-policy parameters saved to {meta_model_path}")
+        elif train_mode == "tandem":
+            init_meta_params = None
+            init_meta_path = base_config.get("INIT_META_MODEL_PATH")
+            if init_meta_path is not None:
+                print(f"Initializing meta-policy from checkpoint: {init_meta_path}")
+                init_meta_params = load_params_from_file(init_meta_path)
+            final_skill_params, final_meta_params = run_tandem_training(
+                total_timesteps,
+                init_meta_params=init_meta_params,
+                init_skill_params=prev_params,
+            )
+        else:
+            raise ValueError(
+                f"Unknown TRAIN_MODE: {train_mode}. Supported modes: skills_only, meta_only, tandem."
+            )
 
-    if wandb.run is not None:
-        wandb.finish()
+        print(f"\nTraining run completed in {time.time() - global_t0:.2f} seconds.")
+
+        # Optional: Save final config (hyperparameters) and model parameters to disk
+        save_path = resolve_config_path(base_config.get("SAVE_PATH", None))
+        if save_path is not None:
+            save_dir = os.path.join(save_path, env_name)
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Save config
+            OmegaConf.save(
+                base_config,
+                os.path.join(save_dir, f'{alg_name}_{env_name}_seed{base_config["SEED"]}_config.yaml'),
+            )
+            print(f"Config saved to {save_dir}")
+
+            if final_skill_params is not None:
+                flat_skill_params = flatten_dict(final_skill_params, sep=",")
+                if final_meta_params is None:
+                    skills_filename = f'{alg_name}_{env_name}_seed{base_config["SEED"]}.safetensors'
+                else:
+                    skills_filename = (
+                        f'{alg_name}_{env_name}_seed{base_config["SEED"]}_skills.safetensors'
+                    )
+                skills_model_path = _safe_checkpoint_path(
+                    os.path.join(save_dir, skills_filename),
+                    init_model_path=init_model_path,
+                )
+                save_file(flat_skill_params, skills_model_path)
+                print(f"Skill model parameters saved to {skills_model_path}")
+
+            if final_meta_params is not None:
+                flat_meta_params = flatten_dict(final_meta_params, sep=",")
+                meta_model_path = _safe_checkpoint_path(
+                    os.path.join(
+                        save_dir,
+                        f'{alg_name}_{env_name}_seed{base_config["SEED"]}_meta.safetensors',
+                    ),
+                    init_model_path=init_model_path,
+                )
+                save_file(flat_meta_params, meta_model_path)
+                print(f"Meta-policy parameters saved to {meta_model_path}")
+    finally:
+        if wandb.run is not None:
+            wandb.finish()
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="config")
