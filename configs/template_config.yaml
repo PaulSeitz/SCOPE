@@ -55,8 +55,10 @@ EVAL_GAME_MODS: null              # Eval-only mods override. Options: null (inhe
 USE_LEGACY_EGO_OBS: false         # Use old 10-channel ego observation format. Options: true/false.
 USE_EGO_SIZE_FEATURES: true       # Include object size in ego features. Options: true/false.
 USE_EGO_VELOCITY_FEATURES: true   # Include object velocity in ego features. Options: true/false.
-USE_SKILL_EGO_FEATURES: false     # Append per-skill extra ego features. Options: true/false.
-SKILL_EGO_EXTRA_DIM: 4            # Extra feature dimension per skill when enabled. Options: int >= 0.
+# Shared across all skills: 1.0 when a DESTROY/AVOID/JUMP_OVER/BLOCKER object lies on the player→target ray.
+USE_EGO_BLOCKING_FEATURES: false  # Append line-of-sight blocked flag (1 channel/frame). Options: true/false.
+# DESTROY-oriented weapon_state (+1 ready / 0 aimed in-flight / -1 wasted in-flight).
+USE_EGO_WEAPON_FEATURES: false    # Append weapon_state ego channel (1 channel/frame). Options: true/false.
 EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization. Options: null or number > 0.
 
 # Seaquest compatibility toggles.
@@ -115,8 +117,10 @@ META_Q_STICKINESS_THRESHOLD: 0.0   # Release stickiness when Q(current target) <
 # Algorithm + training hyperparameters
 # ---------------------------
 alg:
-  NUM_SKILLS: 3                     # Number of skill policies. Options: int >= 1.
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"] # Labels for logging. Options: list length NUM_SKILLS.
+  # Skill idx = label - 1. Full vocabulary: DESTROY, COLLECT, AVOID, NAVIGATE, JUMP_OVER.
+  # With NUM_SKILLS < 5, NAVIGATE falls back to COLLECT and JUMP_OVER to AVOID.
+  NUM_SKILLS: 3                     # Number of skill policies. Options: int in [1, 5].
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"] # Labels for logging. Options: list length NUM_SKILLS. Example 5-skill: ["DESTROY","COLLECT","AVOID","NAVIGATE","JUMP_OVER"].
   MAX_OBJECTS: 35                   # Number of selectable object slots. Options: int >= 1.
   EGO_ACTION_DIM: 18                # Skill action-space size in ego coordinates. Options: int >= 1 (commonly 6 or 18).
   HIDDEN_SIZE: 128                  # Skill network hidden width. Options: int >= 1.
@@ -192,7 +196,7 @@ alg:
   STICKY_ACTIONS: false             # ALE sticky actions during training envs. Options: true/false.
   EPISODIC_LIFE: true               # Life-loss truncates episodes in training envs. Options: true/false.
   FIRST_FIRE: true                  # Emit FIRE on reset for games needing start action. Options: true/false.
-  CLIP_REWARD: false                # Clip environment reward in wrappers. Options: true/false.
+  CLIP_REWARD: false                # Sign-clip env reward for TD targets (+ wrapper). Options: true/false. Default true in trainers if omitted.
 
   # Curriculum options for skills_only mode.
   CURRICULUM_ENABLED: false         # Enable multi-phase skill curriculum. Options: true/false.

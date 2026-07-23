@@ -36,8 +36,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from concept_based_learning.environments.datatypes import (  # noqa: E402
     LABEL_AVOID,
+    LABEL_BLOCKER,
     LABEL_COLLECT,
     LABEL_DESTROY,
+    LABEL_JUMP_OVER,
+    LABEL_NAVIGATE,
     LABEL_NOOP,
 )
 from concept_based_learning.environments.env_manager import EnvManager  # noqa: E402
@@ -66,8 +69,14 @@ from concept_based_learning.pqn_visualizer import (  # noqa: E402
     validate_skill_checkpoint_ego_dim,
 )
 
+from concept_based_learning.environments.skill_rewards import (  # noqa: E402
+    SKILL_REGISTRY,
+    SKILL_REWARD_ORDER,
+)
+
 # Avoid importing video_recorder (it forces SDL_VIDEODRIVER=dummy for headless clusters).
-SKILL_NAMES = ["DESTROY", "COLLECT", "AVOID"]
+# Skill index = label - 1; derived from the global skill registry.
+SKILL_NAMES = [name.upper() for name in SKILL_REWARD_ORDER]
 
 # Object slot names aligned with SeaquestSemanticWrapper / reward_dashboard layout.
 SEAQUEST_OBJECT_NAMES = (
@@ -88,9 +97,8 @@ FREEWAY_OBJECT_NAMES = (
 
 LABEL_NAMES = {
     LABEL_NOOP: "NOOP",
-    LABEL_DESTROY: "DESTROY",
-    LABEL_COLLECT: "COLLECT",
-    LABEL_AVOID: "AVOID",
+    **{spec.label: spec.name.upper() for spec in SKILL_REGISTRY},
+    LABEL_BLOCKER: "BLOCKER",
 }
 
 LABEL_COLORS = {
@@ -98,6 +106,9 @@ LABEL_COLORS = {
     LABEL_DESTROY: (255, 80, 80),
     LABEL_COLLECT: (80, 255, 80),
     LABEL_AVOID: (255, 200, 60),
+    LABEL_NAVIGATE: (80, 200, 255),
+    LABEL_JUMP_OVER: (200, 120, 255),
+    LABEL_BLOCKER: (120, 120, 120),
 }
 
 BLACK = (0, 0, 0)

@@ -10,6 +10,8 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_COLLECT,
     LABEL_DESTROY,
+    LABEL_JUMP_OVER,
+    LABEL_NAVIGATE,
 )
 from concept_based_learning.environments.meta_target_mask import (
     is_meta_fire_target,
@@ -218,7 +220,13 @@ def _labels_at(objects: Any, target_idxs: jnp.ndarray) -> jnp.ndarray:
 
 def _is_mission_target(objects: Any, target_idxs: jnp.ndarray) -> jnp.ndarray:
     labels = _labels_at(objects, target_idxs)
-    return jnp.logical_or(labels == LABEL_COLLECT, labels == LABEL_DESTROY)
+    return jnp.logical_or(
+        labels == LABEL_COLLECT,
+        jnp.logical_or(
+            labels == LABEL_DESTROY,
+            jnp.logical_or(labels == LABEL_NAVIGATE, labels == LABEL_JUMP_OVER),
+        ),
+    )
 
 
 def _on_mission(

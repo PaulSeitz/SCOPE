@@ -8,10 +8,17 @@ import optax
 
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.observations.egocentric import get_ego_obs
-from concept_based_learning.networks.skill_network import QNetwork as SkillQNetwork, CustomTrainState
+from concept_based_learning.networks.skill_network import (
+    PIXEL_SKILL_INPUT_MODES,
+    QNetwork as SkillQNetwork,
+    CustomTrainState,
+)
 from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
-from concept_based_learning.environments.datatypes import TandemTransition
+from concept_based_learning.environments.datatypes import (
+    TandemTransition,
+    label_to_skill_idx as _label_to_skill_idx,
+)
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
     is_meta_fire_target,
@@ -58,6 +65,15 @@ from concept_based_learning.training.episode_stats import (
     update_full_game_episode_stats,
     update_per_env_episode_stats,
 )
+from concept_based_learning.training.logging_metrics import (
+    flag_combination_occupancy_metrics,
+    info_log_metrics,
+    metrics_to_wandb_log_dict,
+    player_progress_metrics,
+    reset_flag_combo_cumulative,
+    resolve_skill_names,
+    selected_skill_outcome_metrics,
+)
 
 
 def make_tandem_train(
@@ -83,6 +99,7 @@ def make_tandem_train(
     assert (config["NUM_STEPS"] * config["NUM_ENVS"]) % config["NUM_MINIBATCHES"] == 0, (
         "NUM_MINIBATCHES must divide NUM_STEPS * NUM_ENVS"
     )
+    reset_flag_combo_cumulative()
 
     num_skills = config["NUM_SKILLS"]
     max_objects = config["MAX_OBJECTS"]
@@ -115,6 +132,7 @@ def make_tandem_train(
     meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
     debug_inputs = input_debug_enabled(config)
     skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
+    skill_pixel_target_embed_dim = int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16))
     skill_pixel_channels = config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))
     if isinstance(skill_pixel_channels, list):
         skill_pixel_channels = tuple(skill_pixel_channels)
@@ -123,6 +141,9 @@ def make_tandem_train(
         skill_pixel_kernel = tuple(skill_pixel_kernel)
     skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
+    # Default True preserves historical tandem TD targets (DQN/PQN Atari sign-clip).
+    # Set CLIP_REWARD: false to train on raw env returns (also disables wrapper clip).
+    clip_env_reward = bool(config.get("CLIP_REWARD", True))
     skill_target_cut = normalize_skill_target_cut(
         config.get("SKILL_TARGET_CUT", DEFAULT_SKILL_TARGET_CUT)
     )
@@ -132,9 +153,10 @@ def make_tandem_train(
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
+    skill_names = resolve_skill_names(config, num_skills)
 
     def label_to_skill_idx(label):
-        return jnp.clip(label - 1, 0, num_skills - 1)
+        return _label_to_skill_idx(label, num_skills)
 
     def make_linear_schedule(start, finish, decay_cfg):
         return optax.linear_schedule(
@@ -161,6 +183,7 @@ def make_tandem_train(
         embed_dim=skill_embed_dim,
         pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
         pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
+        pixel_target_embed_dim=skill_pixel_target_embed_dim,
     )
     meta_network = create_meta_network(config)
 
@@ -201,11 +224,11 @@ def make_tandem_train(
             return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
-        if skill_input_mode == "pixel_embed":
+        if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
             return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, oc_embed, pixel_embed."
+            "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
     def _skill_input_single(raw_obs, objects, target_idx):
@@ -213,11 +236,11 @@ def make_tandem_train(
             return get_ego_obs(raw_obs, objects, target_idx)
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
-        if skill_input_mode == "pixel_embed":
+        if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
             return get_ego_obs(raw_obs, objects, target_idx)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, oc_embed, pixel_embed."
+            "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
     def preprocess_transition(x, rng_perm):
@@ -389,7 +412,7 @@ def make_tandem_train(
         )
 
     def collect_rollout(meta_state, skill_states, collect_carry, rng):
-        """R1 — env rollout; returns updated carry, transitions, persist carry, car_hits."""
+        """R1 — env rollout; returns updated carry, transitions, persist carry, car_hits, infos."""
         (
             expl_state,
             running_returns,
@@ -726,7 +749,9 @@ def make_tandem_train(
                     meta_fire[:, jnp.newaxis], 0.0, skill_rewards
                 )
 
-            base_env_reward = jnp.sign(env_reward)
+            base_env_reward = (
+                jnp.sign(env_reward) if clip_env_reward else env_reward
+            )
             skill_rewards_for_training = (
                 skill_reward_lambda * base_env_reward[:, jnp.newaxis]
                 + (1.0 - skill_reward_lambda) * skill_rewards
@@ -948,7 +973,7 @@ def make_tandem_train(
                 returned_game_returns,
                 returned_game_lengths,
                 game_lengths,
-            ), transition
+            ), (transition, info)
 
 
         rng, _rng = jax.random.split(rng)
@@ -960,7 +985,7 @@ def make_tandem_train(
             (config["NUM_ENVS"],), no_target_idx, dtype=jnp.int32
         )
         init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
-        carry_final, transitions = jax.lax.scan(
+        carry_final, (transitions, infos) = jax.lax.scan(
             _step_env,
             (
                 *expl_state,
@@ -1027,7 +1052,7 @@ def make_tandem_train(
             returned_game_lengths,
             game_lengths,
         )
-        return new_collect_carry, transitions, persist_carry, car_hits_sum
+        return new_collect_carry, transitions, persist_carry, car_hits_sum, infos
 
     def meta_bootstrap_and_train(meta_state, transitions, rng, persist_carry):
         """R2 — meta λ-bootstrap + PQN (transitions read-only)."""
@@ -1206,7 +1231,7 @@ def make_tandem_train(
                 timesteps=s_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
             )
             use_one_step_td = skill_bootstrap == "one_step"
-            use_pixel_skill = skill_input_mode == "pixel_embed"
+            use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
 
             if relabel_all_objects:
                 # Match train_skills: per-object λ targets with per-slot switch cuts.
@@ -1523,6 +1548,7 @@ def make_tandem_train(
         returned_episode_lengths,
         returned_game_returns,
         returned_game_lengths,
+        infos,
     ):
         """R4 — pure metric tensors for one update (host logging outside JIT)."""
         valid_target_mask = (transitions.target_idx != no_target_idx).astype(
@@ -1592,6 +1618,38 @@ def make_tandem_train(
             )
         )
 
+        skill_valid = transitions.target_idx != no_target_idx
+        if meta_noop_enabled:
+            skill_valid = jnp.logical_and(
+                skill_valid, transitions.target_idx != meta_noop_idx
+            )
+        if meta_fire_enabled:
+            skill_valid = jnp.logical_and(
+                skill_valid, transitions.target_idx != meta_fire_idx
+            )
+        metrics.update(
+            selected_skill_outcome_metrics(
+                transitions.active_skill,
+                transitions.skill_done,
+                transitions.skill_rewards,
+                skill_names,
+                valid_mask=skill_valid,
+                env_reward=transitions.env_reward,
+                skill_reward_lambda=skill_reward_lambda,
+            )
+        )
+        if skill_input_mode == "ego" or skill_input_mode in PIXEL_SKILL_INPUT_MODES:
+            metrics.update(
+                flag_combination_occupancy_metrics(
+                    transitions.ego_obs,
+                    transitions.active_skill,
+                    skill_names,
+                    valid_mask=skill_valid,
+                )
+            )
+        metrics.update(info_log_metrics(infos))
+        metrics.update(player_progress_metrics(transitions.obs))
+
         if log_freeway_car_hits:
             metrics["freeway/car_hit_rate"] = (
                 car_hits_sum / freeway_env_steps_per_update
@@ -1605,7 +1663,7 @@ def make_tandem_train(
     skills_vmap = jax.vmap(skills_bootstrap_and_train, in_axes=(0, 0, 0, 0))
     metrics_vmap = jax.vmap(
         compute_update_metrics,
-        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     )
 
     collect_jit = jax.jit(
@@ -1659,7 +1717,7 @@ def make_tandem_train(
         collect_jit.lower(meta_state, skill_states, collect_carry, rng_carry).compile()
         _mark("collect_jit", t0)
 
-        new_collect, transitions, persist_carry, car_hits_sum = jax.eval_shape(
+        new_collect, transitions, persist_carry, car_hits_sum, infos = jax.eval_shape(
             collect_vmap,
             meta_state,
             skill_states,
@@ -1714,6 +1772,7 @@ def make_tandem_train(
             new_collect[3],
             new_collect[6],
             new_collect[7],
+            infos,
         ).compile()
         _mark("metrics_jit", t0)
 
@@ -1725,7 +1784,7 @@ def make_tandem_train(
             runner_state
         )
         t0 = time.time()
-        new_collect, transitions, persist_carry, car_hits_sum = collect_jit(
+        new_collect, transitions, persist_carry, car_hits_sum, infos = collect_jit(
             meta_state, skill_states, collect_carry, rng_carry
         )
         _mark("collect_jit_exec", t0)
@@ -1758,6 +1817,7 @@ def make_tandem_train(
                 new_collect[3],
                 new_collect[6],
                 new_collect[7],
+                infos,
             )
         )
         _mark("metrics_jit_exec", t0)
@@ -1770,7 +1830,7 @@ def make_tandem_train(
             meta_state, skill_states, collect_carry, rng_carry = _unpack_runner_state(
                 runner_state
             )
-            new_collect, transitions, persist_carry, car_hits_sum = collect_jit(
+            new_collect, transitions, persist_carry, car_hits_sum, infos = collect_jit(
                 meta_state, skill_states, collect_carry, rng_carry
             )
             meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
@@ -1793,6 +1853,7 @@ def make_tandem_train(
                 new_collect[3],
                 new_collect[6],
                 new_collect[7],
+                infos,
             )
             all_metrics.append(metrics)
 
@@ -1801,9 +1862,7 @@ def make_tandem_train(
                     import wandb
 
                     if wandb.run is not None:
-                        log_dict = {
-                            k: float(np.asarray(v).mean()) for k, v in metrics.items()
-                        }
+                        log_dict = metrics_to_wandb_log_dict(metrics)
                         step = int(
                             log_dict.get(
                                 "env/step", log_dict.get("global/update_steps", 0)

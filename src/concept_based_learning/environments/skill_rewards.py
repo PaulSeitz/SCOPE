@@ -2,25 +2,53 @@
 Global skill reward contract — env-independent.
 
 Reward magnitudes and trigger conditions:
-  AVOID   : +0.01 per frame while tracking an active AVOID target without collision
-            -1  on rising edge of AABB overlap (player enters object hitbox)
-  COLLECT : +1  on rising edge of AABB overlap, or next_target.was_collected == 1
-  DESTROY : +1  when next_target.was_killed == 1 (set by env wrapper from raw state)
-            -1  when the player dies while in contact with this specific object
+  AVOID    : +0.01 per frame while tracking an active AVOID target without collision
+             -1  on rising edge of AABB overlap (player enters object hitbox)
+  COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1
+  DESTROY  : +1  when next_target.was_killed == 1 (set by env wrapper from raw state)
+             -1  when the player dies while in contact with this specific object
+  NAVIGATE : identical to COLLECT; separate label for static waypoint targets so
+             they can be routed to a dedicated skill head
+  JUMP_OVER: +1  when the relative horizontal offset (player center - target
+             center) changes side between t and t+1 while the player is fully
+             above the target at both frames and never touches it (covers both
+             "player leaps over object" and "object passes underneath")
+             -1  on rising edge of AABB overlap, or next_target.was_killed == 1
 
 All rewards fire on transition edges so sustained overlap cannot be farmed.
 DESTROY relies on was_killed rather than position-based disappearance detection
 because JAX-Atari zeros position for both torpedo kills and scroll-offs.
+
+The reward/done vectors are ordered by skill index (label - 1); see
+SKILL_REGISTRY / SKILL_REWARD_ORDER.
+
+Adding a new skill:
+  1. Add a LABEL_* constant in datatypes.py (contiguous, before LABEL_META_FIRE)
+     and bump LABEL_META_FIRE / NUM_LABELS.
+  2. Write a reward function ``(ctx: RewardContext) -> (reward, done)`` below.
+     Label gating is applied by the registry loop — the function only encodes
+     the skill's success/failure mechanics.
+  3. Append a SkillSpec to SKILL_REGISTRY at the position matching its label.
+The reward vector width, name tables, and eligibility plumbing follow from the
+registry; env label files and training code need no changes beyond assigning
+the new label (and sizing NUM_SKILLS/SKILL_NAMES in configs that use it).
 """
 
 from __future__ import annotations
 
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
 
-from concept_based_learning.environments.datatypes import LABEL_AVOID, LABEL_COLLECT, LABEL_DESTROY
+from concept_based_learning.environments.datatypes import (
+    LABEL_AVOID,
+    LABEL_COLLECT,
+    LABEL_DESTROY,
+    LABEL_JUMP_OVER,
+    LABEL_NAVIGATE,
+)
 
 # Unified reward magnitudes — single source of truth.
 AVOID_SURVIVAL_REWARD  =  0.01
@@ -28,9 +56,51 @@ AVOID_FAILURE_REWARD   = -1.0
 COLLECT_SUCCESS_REWARD =  1.0
 DESTROY_SUCCESS_REWARD =  1.0
 DESTROY_FAILURE_REWARD = -1.0
+NAVIGATE_SUCCESS_REWARD = 1.0
+JUMP_SUCCESS_REWARD    =  1.0
+JUMP_FAILURE_REWARD    = -1.0
+
 # Shrink interaction hitboxes for edge-triggered overlap rewards.
 # This reduces reward farming from grazing at object borders.
 OVERLAP_INSET_PX = 1
+
+
+@dataclass(frozen=True)
+class RewardContext:
+    """Per-transition quantities shared by all skill reward functions.
+
+    Player/target structs are last-frame (unstacked); overlaps use the inset
+    AABB check, with next_overlap falling back to prev_target's position when
+    the target was collected in place (see reward_transition_context).
+    """
+
+    prev_player: Any
+    next_player: Any
+    prev_target: Any
+    next_target: Any
+    prev_overlap: jnp.ndarray
+    next_overlap: jnp.ndarray
+    overlap_rising_edge: jnp.ndarray
+    life_lost: jnp.ndarray
+    avoid_survival_reward: float
+
+
+@dataclass(frozen=True)
+class SkillSpec:
+    """One entry of the global skill vocabulary.
+
+    ``label`` must equal registry position + 1 (skill_idx = label - 1, matching
+    label_to_skill_idx in the training modules).  ``compute`` returns
+    (reward, done) for a transition; the registry loop applies label gating.
+    ``collect_in_place_fallback`` marks labels whose in-place target
+    deactivation (can_go_offscreen=0) counts as overlap at t+1 — envs that zero
+    object positions on the collection step need this to keep the AABB signal.
+    """
+
+    name: str
+    label: int
+    compute: Callable[[RewardContext], Tuple[jnp.ndarray, jnp.ndarray]]
+    collect_in_place_fallback: bool = False
 
 
 def last_frame(tree):
@@ -109,6 +179,7 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
 
     Returns:
         prev_player  — last-frame player struct at t
+        next_player  — last-frame player struct at t+1
         prev_target  — last-frame target struct at t
         next_target  — last-frame target struct at t+1
         prev_overlap — bool: AABB overlap at t
@@ -129,20 +200,148 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
     # collision is registered, so next_target.x/y = 0 and the overlap check
     # against next_target always fails.
     #
-    # When can_go_offscreen=0 and the label is COLLECT, deactivation means the
+    # When can_go_offscreen=0 and the label opts into the fallback (COLLECT-like
+    # skills, see SkillSpec.collect_in_place_fallback), deactivation means the
     # player collected/triggered the object in place.  Scroll-off objects and
-    # non-COLLECT labels are excluded (e.g. DESTROY kills must use was_killed).
+    # other labels are excluded (e.g. DESTROY kills must use was_killed).
     just_deactivated = jnp.logical_and(prev_target.active > 0, next_target.active == 0)
+    is_collect_like = jnp.zeros_like(just_deactivated)
+    for spec in SKILL_REGISTRY:
+        if spec.collect_in_place_fallback:
+            is_collect_like = jnp.logical_or(
+                is_collect_like, prev_target.semantic_label == spec.label
+            )
     collected_in_place = jnp.logical_and(
         just_deactivated,
-        jnp.logical_and(
-            prev_target.can_go_offscreen == 0,
-            prev_target.semantic_label == LABEL_COLLECT,
-        ),
+        jnp.logical_and(prev_target.can_go_offscreen == 0, is_collect_like),
     )
     next_overlap = jnp.where(collected_in_place, jnp.array(True), next_overlap_live)
 
-    return prev_player, prev_target, next_target, prev_overlap, next_overlap
+    return prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap
+
+
+# ---------------------------------------------------------------------------
+# Per-skill reward functions.
+#
+# Each takes a RewardContext and returns (reward, done) for one transition.
+# Label gating (semantic_label == spec.label) is applied by the registry loop
+# in extract_skill_rewards, so these encode only the skill's mechanics.
+# ---------------------------------------------------------------------------
+
+
+def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # was_killed is stamped on next_target by the env wrapper from raw game state —
+    # the only reliable kill signal when the env zeros position for both kills and
+    # scroll-offs (e.g. JAX-Atari Seaquest).
+    success = ctx.next_target.was_killed == 1
+    # Failure: player died while in contact with this specific object.
+    # Guard: not if this step was a collect/avoid rising-edge (surfacing into the
+    # surface waypoint while simultaneously losing oxygen would otherwise misfire).
+    failure = jnp.logical_and(
+        ctx.life_lost > 0,
+        jnp.logical_and(ctx.prev_overlap, jnp.logical_not(ctx.overlap_rising_edge)),
+    )
+    reward = jnp.where(
+        success,
+        DESTROY_SUCCESS_REWARD,
+        jnp.where(failure, DESTROY_FAILURE_REWARD, 0.0),
+    )
+    return reward, jnp.logical_or(success, failure)
+
+
+def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    success = jnp.logical_or(
+        ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
+    )
+    return jnp.where(success, COLLECT_SUCCESS_REWARD, 0.0), success
+
+
+def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
+    # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
+    failure = jnp.logical_or(
+        ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
+    )
+    survival = jnp.logical_and(
+        ctx.prev_target.active > 0, jnp.logical_not(failure)
+    )
+    reward = jnp.where(
+        failure,
+        AVOID_FAILURE_REWARD,
+        jnp.where(survival, ctx.avoid_survival_reward, 0.0),
+    )
+    return reward, failure
+
+
+def _navigate_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # Same contract as COLLECT (rising-edge overlap or env-stamped was_collected);
+    # a separate label so static waypoints get their own skill head.
+    success = jnp.logical_or(
+        ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
+    )
+    return jnp.where(success, NAVIGATE_SUCCESS_REWARD, 0.0), success
+
+
+def _jump_over_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # Success: the relative horizontal offset (player center - target center)
+    # changes side between t and t+1 while the player is fully above the target
+    # at both frames and never touches it.  Only relative position matters, so
+    # this covers both "player leaps over object" and "object rolls underneath".
+    # Centers are compared at 2x scale to stay in integer arithmetic.
+    prev_dx = (2 * ctx.prev_player.x + ctx.prev_player.width) - (
+        2 * ctx.prev_target.x + ctx.prev_target.width
+    )
+    next_dx = (2 * ctx.next_player.x + ctx.next_player.width) - (
+        2 * ctx.next_target.x + ctx.next_target.width
+    )
+    crossed = (prev_dx > 0) != (next_dx > 0)
+    # y grows downward: "above" means player bottom edge at or above target top.
+    above_prev = ctx.prev_player.y + ctx.prev_player.height <= ctx.prev_target.y
+    above_next = ctx.next_player.y + ctx.next_player.height <= ctx.next_target.y
+    no_contact = jnp.logical_not(
+        jnp.logical_or(ctx.prev_overlap, ctx.next_overlap)
+    )
+    # Require the target to still be active at t+1: envs zero positions of
+    # deactivated objects, which would fake a crossing.
+    success = jnp.logical_and(
+        ctx.next_target.active > 0,
+        jnp.logical_and(
+            crossed,
+            jnp.logical_and(jnp.logical_and(above_prev, above_next), no_contact),
+        ),
+    )
+    # Failure: contact — rising-edge AABB overlap or env-stamped was_killed
+    # (envs whose collision detection is more accurate than AABB).
+    failure = jnp.logical_or(
+        ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
+    )
+    reward = jnp.where(
+        success,
+        JUMP_SUCCESS_REWARD,
+        jnp.where(failure, JUMP_FAILURE_REWARD, 0.0),
+    )
+    return reward, jnp.logical_or(success, failure)
+
+
+# Global skill vocabulary. Registry position must equal label - 1
+# (skill_idx = label - 1, see label_to_skill_idx in the training modules).
+SKILL_REGISTRY: Tuple[SkillSpec, ...] = (
+    SkillSpec("destroy", LABEL_DESTROY, _destroy_reward),
+    SkillSpec("collect", LABEL_COLLECT, _collect_reward, collect_in_place_fallback=True),
+    SkillSpec("avoid", LABEL_AVOID, _avoid_reward),
+    SkillSpec("navigate", LABEL_NAVIGATE, _navigate_reward, collect_in_place_fallback=True),
+    SkillSpec("jump_over", LABEL_JUMP_OVER, _jump_over_reward),
+)
+
+for _idx, _spec in enumerate(SKILL_REGISTRY):
+    assert _spec.label == _idx + 1, (
+        f"SKILL_REGISTRY[{_idx}] = {_spec.name!r} has label {_spec.label}; "
+        "registry position must equal label - 1."
+    )
+
+# Skill ordering of the reward/done vectors returned by extract_skill_rewards.
+SKILL_REWARD_ORDER = tuple(spec.name for spec in SKILL_REGISTRY)
+NUM_SKILL_REWARDS = len(SKILL_REGISTRY)
 
 
 def extract_skill_rewards(
@@ -155,7 +354,7 @@ def extract_skill_rewards(
     avoid_survival_reward: float = AVOID_SURVIVAL_REWARD,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Compute rewards and done signals for all three skills against a single target.
+    Compute rewards and done signals for all skills against a single target.
 
     This is the only place reward values are computed. Env-specific files call
     this after extracting object positions/dimensions — no reward logic elsewhere.
@@ -168,69 +367,37 @@ def extract_skill_rewards(
         life_lost    : scalar int — number of lives lost this step
 
     Returns:
-        rewards   : float32 [3] — [destroy, collect, avoid]
-        skill_done: bool    [3] — [destroy, collect, avoid]
+        rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
+        skill_done: bool    [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
     """
-    _prev_player, prev_target, next_target, prev_overlap, next_overlap = \
+    prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
 
-    # Rising edge: not overlapping at t, overlapping at t+1.
-    overlap_rising_edge = jnp.logical_and(jnp.logical_not(prev_overlap), next_overlap)
-
-    is_destroy = prev_target.semantic_label == LABEL_DESTROY
-    is_collect = prev_target.semantic_label == LABEL_COLLECT
-    is_avoid = prev_target.semantic_label == LABEL_AVOID
-
-    # ---- COLLECT ----
-    collect_success = jnp.logical_and(
-        is_collect,
-        jnp.logical_or(overlap_rising_edge, next_target.was_collected == 1),
-    )
-    collect_reward  = jnp.where(collect_success, COLLECT_SUCCESS_REWARD, 0.0)
-    collect_done    = collect_success
-
-    # ---- AVOID ----
-    # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
-    # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
-    avoid_failure = jnp.logical_and(
-        is_avoid,
-        jnp.logical_or(overlap_rising_edge, next_target.was_killed == 1),
-    )
-    avoid_survival = jnp.logical_and(
-        is_avoid,
-        jnp.logical_and(prev_target.active > 0, jnp.logical_not(avoid_failure)),
-    )
-    avoid_reward = jnp.where(
-        avoid_failure,
-        AVOID_FAILURE_REWARD,
-        jnp.where(avoid_survival, avoid_survival_reward, 0.0),
-    )
-    avoid_done    = avoid_failure
-
-    # ---- DESTROY ----
-    # was_killed is stamped on next_target by the env wrapper from raw game state —
-    # the only reliable kill signal when the env zeros position for both kills and
-    # scroll-offs (e.g. JAX-Atari Seaquest).
-    destroy_success = jnp.logical_and(is_destroy, next_target.was_killed == 1)
-    # Failure: player died while in contact with this specific object.
-    # Guard: not if this step was a collect/avoid rising-edge (surfacing into the
-    # surface waypoint while simultaneously losing oxygen would otherwise misfire).
-    destroy_failure = jnp.logical_and(
-        is_destroy,
-        jnp.logical_and(
-            life_lost > 0,
-            jnp.logical_and(prev_overlap, jnp.logical_not(overlap_rising_edge)),
+    ctx = RewardContext(
+        prev_player=prev_player,
+        next_player=next_player,
+        prev_target=prev_target,
+        next_target=next_target,
+        prev_overlap=prev_overlap,
+        next_overlap=next_overlap,
+        # Rising edge: not overlapping at t, overlapping at t+1.
+        overlap_rising_edge=jnp.logical_and(
+            jnp.logical_not(prev_overlap), next_overlap
         ),
+        life_lost=life_lost,
+        avoid_survival_reward=avoid_survival_reward,
     )
-    destroy_reward = jnp.where(
-        destroy_success,
-        DESTROY_SUCCESS_REWARD,
-        jnp.where(destroy_failure, DESTROY_FAILURE_REWARD, 0.0),
-    )
-    destroy_done = jnp.logical_or(destroy_success, destroy_failure)
 
-    rewards    = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done,   collect_done,   avoid_done],   dtype=jnp.bool_)
+    rewards_list = []
+    done_list = []
+    for spec in SKILL_REGISTRY:
+        is_label = prev_target.semantic_label == spec.label
+        reward, done = spec.compute(ctx)
+        rewards_list.append(jnp.where(is_label, reward, 0.0))
+        done_list.append(jnp.logical_and(is_label, done))
+
+    rewards = jnp.stack(rewards_list).astype(jnp.float32)
+    skill_done = jnp.stack(done_list).astype(jnp.bool_)
 
     eligible = object_reward_eligible(prev_target, next_target)
     rewards = jnp.where(eligible, rewards, jnp.zeros_like(rewards))

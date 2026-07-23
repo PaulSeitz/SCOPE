@@ -8,6 +8,10 @@ import jax
 from flax.training.train_state import TrainState
 
 
+# Skill input modes whose forward pass reads pixel_obs (require PixelAndObjectObsWrapper).
+PIXEL_SKILL_INPUT_MODES = ("pixel_embed", "pixel_embed_cond")
+
+
 class QNetwork(nn.Module):
     """Simple MLP Q-network for skills (System 1). Maps ego-centric features → action-values."""
 
@@ -20,6 +24,7 @@ class QNetwork(nn.Module):
     embed_dim: int = 256
     pixel_cnn_channels: tuple = (32, 64)
     pixel_cnn_kernel_size: tuple = (5, 5)
+    pixel_target_embed_dim: int = 16
 
     @nn.compact
     def __call__(
@@ -59,16 +64,20 @@ class QNetwork(nn.Module):
             x = nn.relu(x)
             target_oh = _align_target_dims(target_oh, x)
             x = jnp.concatenate([x, target_oh], axis=-1)
-        elif mode in ("pixel_embed", "pixel_embedding", "cnn"):
+        elif mode in ("pixel_embed", "pixel_embedding", "cnn", "pixel_embed_cond"):
+            target_conditioned = mode == "pixel_embed_cond"
             if pixel_obs is None:
                 raise ValueError(
-                    "input_mode='pixel_embed' requires pixel_obs from combined observation wrappers."
+                    f"input_mode={mode!r} requires pixel_obs from combined observation wrappers."
                 )
             img = pixel_obs.astype(jnp.float32) / 255.0
             # pixel_obs shape is [..., T, H, W, C]. Leading dims are shared screen
             # batch axes (e.g. time/env), not per-object slots. When target_idx has
-            # extra object axes (relabel-all-objects), encode pixels once and broadcast
-            # the embedding — meta keeps its own separate pixel encoder.
+            # extra object axes (relabel-all-objects):
+            #   pixel_embed:      encode pixels once, broadcast the embedding.
+            #   pixel_embed_cond: broadcast the *image* per target so the CNN sees
+            #                     the target index as tiled input channels. The conv
+            #                     stack then runs once per (screen, target) pair.
             if img.ndim < 4:
                 raise ValueError(
                     f"pixel_obs must have rank >=4 with trailing [T,H,W,C], got rank {img.ndim}."
@@ -76,10 +85,39 @@ class QNetwork(nn.Module):
             pixel_lead_shape = img.shape[:-4]
             target_lead_shape = target_idx.shape
             t, h, w, c = img.shape[-4:]
-            n = math.prod(pixel_lead_shape) if pixel_lead_shape else 1
+            extra_target_axes = len(target_lead_shape) - len(pixel_lead_shape)
+            if extra_target_axes < 0:
+                raise ValueError(
+                    f"target_idx rank {len(target_lead_shape)} must be >= pixel lead rank "
+                    f"{len(pixel_lead_shape)}."
+                )
+
+            if target_conditioned:
+                lead_shape = target_lead_shape
+                for _ in range(extra_target_axes):
+                    img = jnp.expand_dims(img, axis=len(pixel_lead_shape))
+                img = jnp.broadcast_to(img, lead_shape + (t, h, w, c))
+            else:
+                lead_shape = pixel_lead_shape
+
+            n = math.prod(lead_shape) if lead_shape else 1
             img = jnp.reshape(img, (n, t, h, w, c))
             img = jnp.transpose(img, (0, 2, 3, 1, 4))  # [N,H,W,T,C]
             img = jnp.reshape(img, (n, h, w, t * c))   # [N,H,W,T*C]
+
+            if target_conditioned:
+                # Embed the target one-hot and tile it spatially so the conv stack
+                # is conditioned on which object slot to focus on.
+                target_emb = nn.Dense(
+                    self.pixel_target_embed_dim, name="pixel_target_embed"
+                )(jnp.reshape(target_oh, (n, self.max_objects)))
+                target_emb = nn.relu(target_emb)
+                target_planes = jnp.broadcast_to(
+                    target_emb[:, None, None, :],
+                    (n, h, w, self.pixel_target_embed_dim),
+                )
+                img = jnp.concatenate([img, target_planes], axis=-1)
+
             for i, channels in enumerate(self.pixel_cnn_channels):
                 img = nn.Conv(
                     features=int(channels),
@@ -92,13 +130,13 @@ class QNetwork(nn.Module):
             pixel_embed = img.reshape(img.shape[0], -1)
             pixel_embed = nn.Dense(self.embed_dim, name="pixel_embed_proj")(pixel_embed)
             pixel_embed = nn.relu(pixel_embed)
-            if pixel_lead_shape:
-                pixel_embed = jnp.reshape(pixel_embed, pixel_lead_shape + (pixel_embed.shape[-1],))
+            if lead_shape:
+                pixel_embed = jnp.reshape(pixel_embed, lead_shape + (pixel_embed.shape[-1],))
             else:
                 pixel_embed = pixel_embed[0]
 
-            if len(target_lead_shape) > len(pixel_lead_shape):
-                for _ in range(len(target_lead_shape) - len(pixel_lead_shape)):
+            if not target_conditioned and extra_target_axes > 0:
+                for _ in range(extra_target_axes):
                     pixel_embed = jnp.expand_dims(pixel_embed, axis=-2)
                 x = jnp.broadcast_to(
                     pixel_embed,
@@ -111,7 +149,7 @@ class QNetwork(nn.Module):
         else:
             raise ValueError(
                 f"Unknown SKILL_INPUT_MODE={self.input_mode!r}. "
-                "Expected one of: ego, oc_embed, pixel_embed."
+                "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
             )
 
         if self.norm_type == "layer_norm":

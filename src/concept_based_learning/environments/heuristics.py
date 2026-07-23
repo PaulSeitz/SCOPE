@@ -2,6 +2,7 @@ import functools
 
 import jax.numpy as jnp
 
+from concept_based_learning.environments.manual_policy.state import PolicyState
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
     get_heuristic_target as spaceinvaders_sweep_heuristic_target,
     get_heuristic_target_with_mission as spaceinvaders_sweep_heuristic_with_mission,
@@ -44,6 +45,29 @@ def uses_sweep_mission_state(config, env_name: str) -> bool:
 
 
 def resolve_heuristic_with_mission_fn(config, env_name: str):
+    """Legacy SI-sweep helper; prefer ``resolve_heuristic_with_state_fn``."""
     if uses_sweep_mission_state(config, env_name):
         return spaceinvaders_sweep_heuristic_with_mission
     return None
+
+
+def _sweep_as_policy_state(raw_obs, objects, prev_target, state, rng):
+    target, mission = spaceinvaders_sweep_heuristic_with_mission(
+        raw_obs, objects, prev_target, state.mission_target, rng
+    )
+    return target, state.replace(mission_target=mission.astype(jnp.int32))
+
+
+def resolve_heuristic_with_state_fn(config, env_name: str, components):
+    """Return ``(raw, objects, prev, PolicyState, rng) -> (target, PolicyState)`` or None."""
+    if uses_sweep_mission_state(config, env_name):
+        return _sweep_as_policy_state
+    return getattr(components, "get_heuristic_with_state", None)
+
+
+def uses_heuristic_policy_state(config, env_name: str, components) -> bool:
+    return resolve_heuristic_with_state_fn(config, env_name, components) is not None
+
+
+def initial_policy_state(no_target_idx: int = -1) -> PolicyState:
+    return PolicyState.zero(no_target_idx=no_target_idx)

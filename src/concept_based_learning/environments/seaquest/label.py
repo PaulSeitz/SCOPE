@@ -8,6 +8,7 @@ from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
     LABEL_COLLECT,
+    LABEL_NAVIGATE,
     LABEL_AVOID,
     SemanticState,
 )
@@ -240,7 +241,7 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         surface_w      = player_w
         surface_h      = jnp.array([_SURFACE_WAYPOINT_H], dtype=jnp.int32)
         surface_active = jnp.array([1], dtype=jnp.int32)
-        surface_label  = jnp.array([LABEL_COLLECT], dtype=jnp.int32)
+        surface_label  = jnp.array([LABEL_NAVIGATE], dtype=jnp.int32)
         surface_offscreen = jnp.array([0], dtype=jnp.int32)
 
         final_x         = jnp.concatenate([all_x,         surface_x])

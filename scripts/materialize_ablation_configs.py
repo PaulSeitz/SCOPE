@@ -35,8 +35,7 @@ SEAQUEST_ENV = {
 SPACEINVADERS_ENV = {
     **COMMON_ENV,
     "ENV_NAME": "spaceinvaders",
-    "USE_SKILL_EGO_FEATURES": True,
-    "SKILL_EGO_EXTRA_DIM": 4,
+    "USE_EGO_WEAPON_FEATURES": True,
 }
 
 FREEWAY_ENV = {
@@ -48,8 +47,7 @@ FREEWAY_ENV = {
 BEAMRIDER_ENV = {
     **COMMON_ENV,
     "ENV_NAME": "beamrider",
-    "USE_SKILL_EGO_FEATURES": True,
-    "SKILL_EGO_EXTRA_DIM": 4,
+    "USE_EGO_WEAPON_FEATURES": True,
 }
 
 ABLATION_ENVS = {

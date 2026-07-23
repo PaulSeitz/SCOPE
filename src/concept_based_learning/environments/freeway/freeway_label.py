@@ -7,7 +7,7 @@ from concept_based_learning.environments.labeling_wrapper import (
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_AVOID,
-    LABEL_COLLECT,
+    LABEL_NAVIGATE,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
 from concept_based_learning.observations.action_space import (
@@ -162,7 +162,7 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
         goal_w      = jnp.array([FREEWAY_CHICKEN_HIT_W], dtype=jnp.int32)
         goal_h      = jnp.array([FREEWAY_CHICKEN_HIT_H], dtype=jnp.int32)
         goal_active = jnp.array([1], dtype=jnp.int32)
-        goal_label  = jnp.array([LABEL_COLLECT], dtype=jnp.int32)
+        goal_label  = jnp.array([LABEL_NAVIGATE], dtype=jnp.int32)
         goal_visual_id = jnp.array([-1], dtype=jnp.int32)
         goal_offscreen = jnp.array([0], dtype=jnp.int32)  # fixed goal never scrolls
 

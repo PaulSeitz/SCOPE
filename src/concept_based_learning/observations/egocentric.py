@@ -3,10 +3,13 @@
 import jax
 import jax.numpy as jnp
 
+from concept_based_learning.observations.line_of_sight import line_of_sight_blocked
 from concept_based_learning.observations.skill_ego_features import (
+    DISCRETE_SKILL_EGO_FLAGS,
     build_skill_ego_extras_stacked,
-    configure_skill_ego_features,
+    configure_ego_weapon_features,
     skill_ego_extra_channels_per_frame,
+    using_ego_weapon_features,
 )
 
 # ---------------------------------------------------------------------------
@@ -27,6 +30,9 @@ EGO_OBS_CHANNELS_PER_FRAME = TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME
 _USE_LEGACY_EGO_OBS = False
 _USE_EGO_SIZE_FEATURES = True
 _USE_EGO_VELOCITY_FEATURES = True
+# Line-of-sight / blocking channel: 1.0 when an occluding object (BLOCKING_LABELS)
+# lies on the player→target segment. Shared by all skills. Off by default.
+_USE_EGO_BLOCKING_FEATURES = False
 # None = normalize by MAX_DIST (full screen diagonal). Otherwise clip Euclidean
 # distance in pixels to this cap, then divide by the cap so feature ∈ [0, 1].
 _EGO_DISTANCE_CLIP_MAX_PX: float | None = None
@@ -58,6 +64,27 @@ def using_ego_size_features() -> bool:
 def using_ego_velocity_features() -> bool:
     """Return True when radial/tangential velocity channels are included."""
     return _USE_EGO_VELOCITY_FEATURES
+
+
+def set_ego_blocking_features(enabled: bool) -> None:
+    """Enable/disable the shared line-of-sight blocked channel (adds 1 channel/frame)."""
+    global _USE_EGO_BLOCKING_FEATURES
+    _USE_EGO_BLOCKING_FEATURES = bool(enabled)
+
+
+def set_ego_los_features(enabled: bool) -> None:
+    """Backward-compatible alias for ``set_ego_blocking_features``."""
+    set_ego_blocking_features(enabled)
+
+
+def using_ego_blocking_features() -> bool:
+    """Return True when the shared line-of-sight blocked channel is included."""
+    return _USE_EGO_BLOCKING_FEATURES
+
+
+def using_ego_los_features() -> bool:
+    """Backward-compatible alias for ``using_ego_blocking_features``."""
+    return using_ego_blocking_features()
 
 
 def using_legacy_ego_obs() -> bool:
@@ -93,12 +120,22 @@ def configure_ego_obs_from_config(config: dict) -> None:
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
     set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    # Shared blocking/LOS flag (new name preferred; old USE_EGO_LOS_FEATURES still works).
+    blocking = config.get(
+        "USE_EGO_BLOCKING_FEATURES",
+        config.get("USE_EGO_LOS_FEATURES", False),
+    )
+    set_ego_blocking_features(bool(blocking))
     clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
     set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
-    configure_skill_ego_features(
-        enabled=bool(config.get("USE_SKILL_EGO_FEATURES", False)),
-        num_skills=int(config.get("NUM_SKILLS", 3)),
-        extra_dim_per_skill=int(config.get("SKILL_EGO_EXTRA_DIM", 4)),
+    # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
+    # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
+    weapon = config.get(
+        "USE_EGO_WEAPON_FEATURES",
+        config.get("USE_SKILL_EGO_FEATURES", False),
+    )
+    configure_ego_weapon_features(
+        enabled=bool(weapon),
         env_name=str(config.get("ENV_NAME", "")),
     )
 
@@ -120,21 +157,54 @@ def distance_pixels_from_feature(feature: jnp.ndarray | float) -> float:
 
 def ego_obs_channels_per_frame() -> int:
     """Return active per-frame ego feature channel count."""
+    los_channels = 1 if _USE_EGO_BLOCKING_FEATURES else 0
     if _USE_LEGACY_EGO_OBS:
         # Legacy channel groups:
         #   always: dx, dy, sin(o), cos(o)             -> 4
         #   velocity (optional): dvx, dvy              -> +2
         #   size (optional): t_w, t_h, p_w, p_h        -> +4
+        #   line-of-sight (optional): blocked          -> +1
         return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
             4 if _USE_EGO_SIZE_FEATURES else 0
-        ) + skill_ego_extra_channels_per_frame()
+        ) + los_channels + skill_ego_extra_channels_per_frame()
     # Target-aligned channel groups:
     #   always: distance, sin(psi), cos(psi)          -> 3
     #   velocity (optional): radial, tangential       -> +2
     #   size (optional): target_w, target_h           -> +2
+    #   line-of-sight (optional): blocked             -> +1
     return 3 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
         2 if _USE_EGO_SIZE_FEATURES else 0
-    ) + skill_ego_extra_channels_per_frame()
+    ) + los_channels + skill_ego_extra_channels_per_frame()
+
+
+def ego_base_channels_per_frame() -> int:
+    """Per-frame channel count excluding skill extras (includes LOS when enabled)."""
+    return ego_obs_channels_per_frame() - skill_ego_extra_channels_per_frame()
+
+
+def discrete_ego_flag_layout() -> list[tuple[str, int, int, float]]:
+    """
+    Active discrete flag channels in the latest ego frame.
+
+    Returns ``(name, channel_index_within_frame, n_levels, level_offset)`` in
+    digit order used by occupancy histograms (digit 0 = first entry). Shared
+    flags (LOS) come first; per-skill extras follow in registry order.
+    Binary flags use ``n_levels=2``; ternary weapon_state uses 3.
+    """
+    layout: list[tuple[str, int, int, float]] = []
+    extras_width = skill_ego_extra_channels_per_frame()
+    base = ego_base_channels_per_frame()
+    if _USE_EGO_BLOCKING_FEATURES:
+        # LOS is the last base channel (immediately before skill extras).
+        layout.append(("los_blocked", base - 1, 2, 0.0))
+    if using_ego_weapon_features() and extras_width > 0:
+        for flag in DISCRETE_SKILL_EGO_FLAGS:
+            idx = base + int(flag.offset)
+            if 0 <= flag.offset < extras_width:
+                layout.append(
+                    (flag.name, idx, int(flag.n_levels), float(flag.level_offset))
+                )
+    return layout
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +329,46 @@ def _frame_geometry_target_aligned(
     psi = jnp.arctan2(jnp.sin(psi), jnp.cos(psi))
 
     return distance, theta_target, psi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+
+
+def _los_blocked_stacked(
+    objects,
+    target_idx,
+    p_cxs,
+    p_cys,
+    t_cxs,
+    t_cys,
+    *,
+    y_is_bottom_edge: bool,
+) -> jnp.ndarray:
+    """Per-frame line-of-sight blocked flags (float32 [stack]) for the target."""
+    return jax.vmap(
+        lambda pcx, pcy, tcx, tcy, ox, oy, ow, oh, oact, olab: line_of_sight_blocked(
+            pcx,
+            pcy,
+            tcx,
+            tcy,
+            target_idx,
+            ox,
+            oy,
+            ow,
+            oh,
+            oact,
+            olab,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        p_cxs,
+        p_cys,
+        t_cxs,
+        t_cys,
+        objects.x,
+        objects.y,
+        objects.width,
+        objects.height,
+        objects.active,
+        objects.semantic_label,
+    ).astype(jnp.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +532,21 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
     channels.extend([jnp.sin(psis), jnp.cos(psis)])
-    skill_extras = build_skill_ego_extras_stacked(raw_observation)
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
     if skill_extras.shape[-1] > 0:
         stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
     else:
@@ -516,7 +640,21 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([t_w_norm, t_h_norm, p_w_norm, p_h_norm])
     channels.extend([sin_o, cos_o])
-    skill_extras = build_skill_ego_extras_stacked(raw_observation)
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cx,
+                p_cy,
+                t_cx,
+                t_cy,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
     if skill_extras.shape[-1] > 0:
         stacked_ego = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
     else:

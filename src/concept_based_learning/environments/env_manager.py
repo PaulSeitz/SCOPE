@@ -37,6 +37,7 @@ from concept_based_learning.environments.seaquest.label import (
 )
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     get_heuristic_target,
+    get_heuristic_target_with_state as seaquest_get_heuristic_with_state,
     NO_TARGET_IDX,
     apply_meta_mask_overrides as seaquest_meta_mask_hook,
     get_forced_target_override as seaquest_forced_target_hook,
@@ -112,6 +113,11 @@ from concept_based_learning.environments.kangaroo.kangaroo_label import (
     kangaroo_action_mapper,
     kangaroo_inverse_action_mapper,
     extract_all_skills_rewards as kangaroo_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+    get_heuristic_target as kangaroo_get_heuristic_target,
+    get_heuristic_target_with_state as kangaroo_get_heuristic_with_state,
+    NO_TARGET_IDX as kangaroo_NO_TARGET_IDX,
 )
 from concept_based_learning.environments.skiing.skiing_label import (
     SkiingSemanticWrapper,
@@ -337,6 +343,13 @@ class EnvComponents:
     resolve_curriculum_mods: Callable[..., Optional[List[str]]]
     meta_mask_hook: Callable[..., Any]
     forced_target_hook: Callable[..., Any]
+    # Optional stateful heuristic: (raw, objects, prev_target, PolicyState, rng)
+    # -> (target, PolicyState).  Used for Sequence / ClimbLadders / SI sweep.
+    get_heuristic_with_state: Optional[Callable[..., Any]] = None
+    # If True, clear PolicyState (plan_idx / mission) on life loss as well as
+    # episode reset.  Needed for Sequence plans that should restart on respawn
+    # (e.g. Kangaroo); leave False when stickiness across lives is fine.
+    reset_policy_on_life_lost: bool = False
 
 
 class EnvManager:
@@ -370,6 +383,7 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=seaquest_meta_mask_hook,
             forced_target_hook=seaquest_forced_target_hook,
+            get_heuristic_with_state=seaquest_get_heuristic_with_state,
         )
 
         # ChopperCommand registration
@@ -501,8 +515,8 @@ class EnvManager:
             jax_game_id="kangaroo",
             semantic_wrapper_cls=KangarooSemanticWrapper,
             renderer_cls=KangarooRenderer,
-            get_heuristic_target=generic_get_heuristic_target,
-            no_target_idx=generic_NO_TARGET_IDX,
+            get_heuristic_target=kangaroo_get_heuristic_target,
+            no_target_idx=kangaroo_NO_TARGET_IDX,
             action_mapper=kangaroo_action_mapper,
             inverse_action_mapper=kangaroo_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(kangaroo_extract_all_skills_rewards),
@@ -511,6 +525,8 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
+            get_heuristic_with_state=kangaroo_get_heuristic_with_state,
+            reset_policy_on_life_lost=True,
         )
 
         self._registry["skiing"] = EnvComponents(
@@ -637,7 +653,9 @@ class EnvManager:
             env = AtariWrapper(env, **wrapper_kwargs)
 
         # Pixel-based meta encoders need both observation modalities from Jaxtari.
-        if (meta_input_mode == "pixel_embed") or (skill_input_mode == "pixel_embed"):
+        if (meta_input_mode == "pixel_embed") or (
+            skill_input_mode in ("pixel_embed", "pixel_embed_cond")
+        ):
             if PixelAndObjectObsWrapper is None:
                 raise ImportError(
                     "META_INPUT_MODE='pixel_embed' requires PixelAndObjectObsWrapper "

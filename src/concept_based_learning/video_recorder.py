@@ -6,6 +6,7 @@ import numpy as np
 import wandb
 from jaxatari.renderers import JAXGameRenderer
 
+from concept_based_learning.environments.skill_rewards import SKILL_REWARD_ORDER
 from concept_based_learning.training.episode_stats import unwrap_base_env_state
 
 # Force pygame into headless mode before the first pygame.init() call so the
@@ -23,8 +24,9 @@ pygame.font.init()
 
 CURRENT_VIDEO_THREAD = None
 
-# Skill index 0 = DESTROY, 1 = COLLECT, 2 = AVOID (matches label_to_skill_idx in train_agent)
-SKILL_NAMES = ["DESTROY", "COLLECT", "AVOID"]
+# Skill index = label - 1 (matches label_to_skill_idx in train_agent).
+# Derived from the global skill registry so new skills appear automatically.
+SKILL_NAMES = [name.upper() for name in SKILL_REWARD_ORDER]
 TARGET_OUTLINE_COLOR = (255, 50, 50)  # Red, same as label_visualizer LABEL_DESTROY
 TARGET_OUTLINE_WIDTH = 3
 

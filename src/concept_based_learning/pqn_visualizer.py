@@ -52,7 +52,7 @@ from concept_based_learning.environments.meta_target_persistence import (
     meta_q_stickiness_enabled,
     meta_target_persist_enabled,
 )
-from concept_based_learning.networks.skill_network import QNetwork
+from concept_based_learning.networks.skill_network import PIXEL_SKILL_INPUT_MODES, QNetwork
 from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -347,11 +347,12 @@ def create_eval_env(config):
 
 
 def label_to_skill_idx(label, num_skills: int):
-    """
-    Map semantic labels to skill indices, matching the convention in train_agent.make_train:
-    0 = NOOP, 1 = DESTROY, 2 = COLLECT, 3 = AVOID  → skills 0..num_skills-1 (no NOOP skill).
-    """
-    return jnp.clip(label - 1, 0, num_skills - 1)
+    """Delegate to the shared mapping in ``environments.datatypes``."""
+    from concept_based_learning.environments.datatypes import (
+        label_to_skill_idx as _shared,
+    )
+
+    return _shared(label, num_skills)
 
 
 def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
@@ -360,10 +361,11 @@ def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
         return get_ego_obs(raw_obs, objects, target_idx)
     if mode == "oc_embed":
         return flatten_raw_observation(raw_obs)
-    if mode == "pixel_embed":
+    if mode in PIXEL_SKILL_INPUT_MODES:
         return get_ego_obs(raw_obs, objects, target_idx)
     raise ValueError(
-        f"Unknown SKILL_INPUT_MODE={mode!r}. Expected one of: ego, oc_embed, pixel_embed."
+        f"Unknown SKILL_INPUT_MODE={mode!r}. "
+        "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
     )
 
 
@@ -371,15 +373,15 @@ def _skill_pixel_obs_from_obs(config: dict, obs):
     """
     Pixel tensor for skill Q-network forward passes during eval/visualization.
 
-    Only pixel_embed reads this input; ego/oc modes must pass None (not raw_observation,
+    Only pixel modes read this input; ego/oc modes must pass None (not raw_observation,
     which is a structured game observation object).
     """
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
-    if mode != "pixel_embed":
+    if mode not in PIXEL_SKILL_INPUT_MODES:
         return None
     if obs.pixel_observation is None:
         raise ValueError(
-            "SKILL_INPUT_MODE='pixel_embed' requires pixel_observation from "
+            f"SKILL_INPUT_MODE={mode!r} requires pixel_observation from "
             "PixelAndObjectObsWrapper, but it is missing."
         )
     return obs.pixel_observation
@@ -775,6 +777,7 @@ def run_greedy_eval_episodes(
         embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
         pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
         pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
+        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
     )
     meta_network = create_meta_network(config) if meta_params is not None else None
 
@@ -906,6 +909,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
         pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
         pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
+        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -1222,6 +1226,7 @@ def run_live_visualization(
         embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
         pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
         pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
+        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
     )
 
     rng = jax.random.PRNGKey(seed)

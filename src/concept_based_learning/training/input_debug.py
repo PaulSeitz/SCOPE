@@ -109,7 +109,7 @@ def host_check_probe_inputs(
 
     if input_debug_assert(config):
         _host_assert_finite("probe_ego", probe_ego)
-        if probe_pixel is not None and skill_mode == "pixel_embed":
+        if probe_pixel is not None and skill_mode in ("pixel_embed", "pixel_embed_cond"):
             _host_assert_finite("probe_pixel", probe_pixel)
 
     tgt = int(np.asarray(probe_target).reshape(()))
@@ -118,10 +118,10 @@ def host_check_probe_inputs(
             f"DEBUG_INPUTS: probe_target={tgt} out of range [0, {max_objects})."
         )
 
-    if skill_mode == "pixel_embed":
+    if skill_mode in ("pixel_embed", "pixel_embed_cond"):
         if probe_pixel is None:
             raise ValueError(
-                "DEBUG_INPUTS: SKILL_INPUT_MODE=pixel_embed but probe pixel_obs is None."
+                f"DEBUG_INPUTS: SKILL_INPUT_MODE={skill_mode} but probe pixel_obs is None."
             )
         if int(np.asarray(probe_pixel).ndim) < 4:
             raise ValueError(
@@ -183,7 +183,7 @@ def maybe_jax_check_probe_inputs(
 
     pixel_arg = (
         probe_pixel
-        if skill_mode == "pixel_embed" and probe_pixel is not None
+        if skill_mode in ("pixel_embed", "pixel_embed_cond") and probe_pixel is not None
         else jnp.array([], dtype=jnp.float32)
     )
     meta_arg = (
@@ -328,7 +328,7 @@ def maybe_jax_check_rollout_transitions(
 
     skill_mode = skill_input_mode.lower().strip()
     meta_mode = meta_input_mode.lower().strip()
-    use_pixel_skill = skill_mode == "pixel_embed"
+    use_pixel_skill = skill_mode in ("pixel_embed", "pixel_embed_cond")
     use_pixel_meta = meta_mode == "pixel_embed"
 
     if input_debug_assert(config):

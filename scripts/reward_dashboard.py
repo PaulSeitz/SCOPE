@@ -30,11 +30,15 @@ from concept_based_learning.environments.datatypes import (
     LABEL_DESTROY,
     LABEL_COLLECT,
     LABEL_AVOID,
+    LABEL_NAVIGATE,
+    LABEL_JUMP_OVER,
 )
 from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.environments.heuristics import (
+    initial_policy_state,
     resolve_heuristic_target_fn,
     resolve_heuristic_with_mission_fn,
+    resolve_heuristic_with_state_fn,
 )
 from concept_based_learning.environments.skill_rewards import object_reward_eligible
 
@@ -52,16 +56,21 @@ DARK_GRAY = (50,  50,  50)
 ORANGE    = (255, 160, 30)
 
 TARGET_COLOR = (255, 60, 60)
+NAVIGATE_COLOR = (80, 200, 255)
+# Visual size of NAVIGATE waypoints in *game* pixels (objects themselves are 1x1).
+NAVIGATE_MARKER_GAME_PX = 8
 
 SKILL_NAMES  = ["Destroy", "Collect", "Avoid"]
 # Colour per skill for reward display
 SKILL_COLORS = [ORANGE, CYAN, MAGENTA]
 
 LABEL_NAMES = {
-    LABEL_NOOP:    "Noop",
-    LABEL_DESTROY: "Destroy",
-    LABEL_COLLECT: "Collect",
-    LABEL_AVOID:   "Avoid",
+    LABEL_NOOP:      "Noop",
+    LABEL_DESTROY:   "Destroy",
+    LABEL_COLLECT:   "Collect",
+    LABEL_AVOID:     "Avoid",
+    LABEL_NAVIGATE:  "Navigate",
+    LABEL_JUMP_OVER: "JumpOver",
 }
 
 # Seaquest slot names — index 0 is the meta-NOOP dummy added by the wrapper.
@@ -116,6 +125,8 @@ class RewardDashboard:
         env_name: str,
         get_heuristic_target,
         get_heuristic_with_mission=None,
+        get_heuristic_with_state=None,
+        reset_policy_on_life_lost=False,
         no_target_idx,
         reward_extractor,
         extract_life_lost,
@@ -127,6 +138,8 @@ class RewardDashboard:
         self.env_name = env_name.lower()
         self.get_heuristic_target = get_heuristic_target
         self.get_heuristic_with_mission = get_heuristic_with_mission
+        self.get_heuristic_with_state = get_heuristic_with_state
+        self.reset_policy_on_life_lost = bool(reset_policy_on_life_lost)
         self.no_target_idx = no_target_idx
         self.reward_extractor = reward_extractor
         self.extract_life_lost = extract_life_lost
@@ -158,6 +171,7 @@ class RewardDashboard:
         self.rng_key = jax.random.key(42)
         self.prev_target_idx = self.no_target_idx
         self.mission_target_idx = self.no_target_idx
+        self.policy_state = initial_policy_state(self.no_target_idx)
         self.current_target_idx = self.no_target_idx
         # concept_rewards[skill, obj] — only the tracked target is computed each step
         self.concept_rewards: np.ndarray = np.zeros((3, 1), dtype=np.float32)
@@ -180,6 +194,7 @@ class RewardDashboard:
         self.total_reward = 0.0
         self.prev_target_idx = self.no_target_idx
         self.mission_target_idx = self.no_target_idx
+        self.policy_state = initial_policy_state(self.no_target_idx)
         self.current_target_idx = self.no_target_idx
         self.concept_rewards = np.zeros((3, 1), dtype=np.float32)
         self.event_log = []
@@ -197,7 +212,14 @@ class RewardDashboard:
                 raw = self.prev_obs.raw_observation
                 objs = self.prev_obs.objects
                 prev_idx = jnp.array(self.prev_target_idx, dtype=jnp.int32)
-                if self.get_heuristic_with_mission is not None:
+                if self.get_heuristic_with_state is not None:
+                    out = self.get_heuristic_with_state(
+                        raw, objs, prev_idx, self.policy_state, key_pol
+                    )
+                    target_idx = int(jnp.ravel(out[0])[0])
+                    self.policy_state = out[1]
+                    mission_idx = int(jnp.ravel(self.policy_state.mission_target)[0])
+                elif self.get_heuristic_with_mission is not None:
                     mission_arr = jnp.array(self.mission_target_idx, dtype=jnp.int32)
                     out = self.get_heuristic_with_mission(
                         raw, objs, prev_idx, mission_arr, key_pol
@@ -218,6 +240,17 @@ class RewardDashboard:
 
         self.obs, self.state, env_reward, done, info = self.env.step(self.state, action)
         self.total_reward += float(env_reward)
+
+        # Optional env-specific: restart Sequence plan on soft respawn.
+        if self.reset_policy_on_life_lost and self.prev_state is not None:
+            try:
+                life_lost = self.extract_life_lost(self.prev_state, self.state)
+                if float(np.asarray(jax.device_get(life_lost)).reshape(())) > 0:
+                    self.policy_state = initial_policy_state(self.no_target_idx)
+                    self.prev_target_idx = self.no_target_idx
+                    self.mission_target_idx = self.no_target_idx
+            except Exception:
+                pass
 
         if self.prev_obs is not None:
             self._compute_rewards(target_idx, mission_idx, env_reward, info)
@@ -349,7 +382,48 @@ class RewardDashboard:
         else:
             pygame.draw.rect(self.screen, DARK_GRAY, (10, 10, self.game_w, self.game_h))
 
+        self._draw_navigate_checkpoints()
         self._draw_target_outline()
+
+    def _object_screen_rect(self, x, y, w, h, *, min_game_px: int = 1):
+        """Map an object AABB to screen pixels; enforce a minimum on-screen size."""
+        gw = max(int(w), int(min_game_px))
+        gh = max(int(h), int(min_game_px))
+        # Centre the inflated rect on the object's geometric centre.
+        cx = float(x) + float(w) / 2.0
+        cy = float(y) + float(h) / 2.0
+        sx = 10 + int(round((cx - gw / 2.0) * self.game_scale))
+        sy = 10 + int(round((cy - gh / 2.0) * self.game_scale))
+        return sx, sy, gw * self.game_scale, gh * self.game_scale
+
+    def _draw_navigate_checkpoints(self):
+        """Draw enlarged markers for active NAVIGATE waypoints (they are 1x1 in obs)."""
+        if self.obs is None:
+            return
+        try:
+            xa = np.array(self.obs.objects.x[-1])
+            ya = np.array(self.obs.objects.y[-1])
+            wa = np.array(self.obs.objects.width[-1])
+            ha = np.array(self.obs.objects.height[-1])
+            act = np.array(self.obs.objects.active[-1])
+            labels = np.array(self.obs.objects.semantic_label[-1])
+        except Exception:
+            return
+
+        for i in range(int(act.shape[0])):
+            if act[i] <= 0 or int(labels[i]) != LABEL_NAVIGATE:
+                continue
+            sx, sy, sw, sh = self._object_screen_rect(
+                xa[i], ya[i], wa[i], ha[i], min_game_px=NAVIGATE_MARKER_GAME_PX
+            )
+            is_target = i == int(self.current_target_idx)
+            color = TARGET_COLOR if is_target else NAVIGATE_COLOR
+            width = 3 if is_target else 2
+            pygame.draw.rect(self.screen, color, (sx, sy, sw, sh), width)
+            # Small filled centre so 1px waypoints stay readable when not selected.
+            cx = sx + sw // 2
+            cy = sy + sh // 2
+            pygame.draw.circle(self.screen, color, (cx, cy), max(2, self.game_scale), 0)
 
     def _draw_target_outline(self):
         if self.obs is None or self.current_target_idx == self.no_target_idx:
@@ -361,17 +435,17 @@ class RewardDashboard:
             wa = np.array(self.obs.objects.width[-1])
             ha = np.array(self.obs.objects.height[-1])
             act = np.array(self.obs.objects.active[-1])
+            labels = np.array(self.obs.objects.semantic_label[-1])
         except Exception:
             return
         if idx >= len(act) or act[idx] <= 0:
             return
-        x, y, w, h = int(xa[idx]), int(ya[idx]), int(wa[idx]), int(ha[idx])
-        if w < 2 or h < 2:
+        # NAVIGATE markers already highlight the selected checkpoint.
+        if int(labels[idx]) == LABEL_NAVIGATE:
             return
-        sx = 10 + int(x * self.game_scale)
-        sy = 10 + int(y * self.game_scale)
-        pygame.draw.rect(self.screen, TARGET_COLOR,
-                         (sx, sy, w * self.game_scale, h * self.game_scale), 2)
+        x, y, w, h = int(xa[idx]), int(ya[idx]), int(wa[idx]), int(ha[idx])
+        sx, sy, sw, sh = self._object_screen_rect(x, y, w, h, min_game_px=2)
+        pygame.draw.rect(self.screen, TARGET_COLOR, (sx, sy, sw, sh), 2)
 
     def _draw_panel(self):
         x0 = self.panel_x
@@ -601,6 +675,12 @@ def main():
         env_name=env_name,
         get_heuristic_target=resolve_heuristic_target_fn(cfg, env_name, components),
         get_heuristic_with_mission=resolve_heuristic_with_mission_fn(cfg, env_name),
+        get_heuristic_with_state=resolve_heuristic_with_state_fn(
+            cfg, env_name, components
+        ),
+        reset_policy_on_life_lost=bool(
+            getattr(components, "reset_policy_on_life_lost", False)
+        ),
         no_target_idx=components.no_target_idx,
         reward_extractor=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,

@@ -3,8 +3,8 @@ import jax.numpy as jnp
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
-    LABEL_COLLECT,
     LABEL_AVOID,
+    LABEL_NAVIGATE,
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import extract_skill_rewards
@@ -145,7 +145,7 @@ class SkiingSemanticWrapper(JaxatariSemanticBaseWrapper):
         n_moguls = moguls.x.shape[0]      # 2
 
         pole_labels = jnp.full(n_flag_pairs * 2, LABEL_AVOID, dtype=jnp.int32)
-        center_labels = jnp.full(n_flag_pairs, LABEL_COLLECT, dtype=jnp.int32)
+        center_labels = jnp.full(n_flag_pairs, LABEL_NAVIGATE, dtype=jnp.int32)
         tree_labels = jnp.full(n_trees, LABEL_AVOID, dtype=jnp.int32)
         mogul_labels = jnp.full(n_moguls, LABEL_AVOID, dtype=jnp.int32)
 

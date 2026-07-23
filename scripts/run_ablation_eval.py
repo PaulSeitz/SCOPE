@@ -419,8 +419,9 @@ def _apply_run_defaults(
             cfg["WANDB_TAGS"] = [*cfg["WANDB_TAGS"], "trial"]
         meta_mode = str(cfg.get("META_INPUT_MODE", "flat")).lower().strip()
         skill_mode = str(cfg.get("SKILL_INPUT_MODE", "ego")).lower().strip()
-        dual_pixel = meta_mode == "pixel_embed" and skill_mode == "pixel_embed"
-        if meta_mode == "pixel_embed" or skill_mode == "pixel_embed":
+        skill_pixel = skill_mode in ("pixel_embed", "pixel_embed_cond")
+        dual_pixel = meta_mode == "pixel_embed" and skill_pixel
+        if meta_mode == "pixel_embed" or skill_pixel:
             cap_envs = 64 if dual_pixel else 128
             cfg["NUM_ENVS"] = min(int(cfg.get("NUM_ENVS", 512)), cap_envs)
             cfg["NUM_STEPS"] = min(int(cfg.get("NUM_STEPS", 64)), 32)
@@ -450,8 +451,9 @@ def _updates_for_config_path(path: Path, *, trial_steps: int | None) -> int:
         cfg["TOTAL_TIMESTEPS"] = int(trial_steps)
         meta_mode = str(cfg.get("META_INPUT_MODE", "flat")).lower().strip()
         skill_mode = str(cfg.get("SKILL_INPUT_MODE", "ego")).lower().strip()
-        dual_pixel = meta_mode == "pixel_embed" and skill_mode == "pixel_embed"
-        if meta_mode == "pixel_embed" or skill_mode == "pixel_embed":
+        skill_pixel = skill_mode in ("pixel_embed", "pixel_embed_cond")
+        dual_pixel = meta_mode == "pixel_embed" and skill_pixel
+        if meta_mode == "pixel_embed" or skill_pixel:
             cap_envs = 64 if dual_pixel else 128
             cfg["NUM_ENVS"] = min(int(cfg.get("NUM_ENVS", 512)), cap_envs)
             cfg["NUM_STEPS"] = min(int(cfg.get("NUM_STEPS", 64)), 32)

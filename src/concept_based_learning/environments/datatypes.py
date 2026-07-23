@@ -12,13 +12,76 @@ from jaxatari.wrappers import JaxatariWrapper, AtariState
 from jaxatari.environment import ObjectObservation
 
 # Universal Semantic Labels
+# Skill labels must stay contiguous starting at 1: skill_idx = label - 1
+# (see label_to_skill_idx).
 LABEL_NOOP = 0
 LABEL_DESTROY = 1
 LABEL_COLLECT = 2
 LABEL_AVOID = 3
+# NAVIGATE shares the COLLECT reward contract but targets static waypoints,
+# so it can be routed to a dedicated skill head.
+LABEL_NAVIGATE = 4
+LABEL_JUMP_OVER = 5
 # Reserved meta-policy slot: selecting this index executes FIRE (not a skill).
-LABEL_META_FIRE = 4
-NUM_LABELS = 5
+LABEL_META_FIRE = 6
+# Structural obstacle (wall segment, shield, ...): never a meta target, never
+# rewarded — exists only to occlude the skill line-of-sight feature.  Env label
+# files emit these as virtual objects (same pattern as virtual waypoints).
+LABEL_BLOCKER = 7
+NUM_LABELS = 8
+
+# Labels whose objects occlude the player→target line-of-sight ray.
+# Solid/hazardous things block (enemies, hazards, structural blockers);
+# collect-like objects don't (e.g. Seaquest divers can be shot through).
+BLOCKING_LABELS = (LABEL_DESTROY, LABEL_AVOID, LABEL_JUMP_OVER, LABEL_BLOCKER)
+
+# Full skill vocabulary (label - 1).  Configs may use a prefix (NUM_SKILLS < 5);
+# label_to_skill_idx remaps the extended labels onto the closest base skill.
+NUM_SKILL_LABELS = 5
+
+
+def label_to_skill_idx(label, num_skills: int):
+    """Map semantic label → skill index in ``[0, num_skills)``.
+
+    Base mapping is ``skill_idx = label - 1``.  When ``num_skills`` truncates the
+    vocabulary, extended labels fall back so 3-skill runs keep working after
+    waypoints emit ``LABEL_NAVIGATE``:
+      NAVIGATE  → COLLECT (1) when ``num_skills < 4``
+      JUMP_OVER → AVOID (2) when ``num_skills < 5``
+    """
+    label = jnp.asarray(label)
+    skill = label - 1
+    skill = jnp.where(
+        jnp.logical_and(label == LABEL_NAVIGATE, num_skills < LABEL_NAVIGATE),
+        LABEL_COLLECT - 1,
+        skill,
+    )
+    skill = jnp.where(
+        jnp.logical_and(label == LABEL_JUMP_OVER, num_skills < LABEL_JUMP_OVER),
+        LABEL_AVOID - 1,
+        skill,
+    )
+    return jnp.clip(skill, 0, num_skills - 1)
+
+
+def static_blocker_arrays(rects):
+    """
+    Build object-array fragments for static occluders (walls, shields, ...).
+
+    ``rects`` is a Python sequence of ``(x, y, width, height)`` screen rects
+    (top-left convention).  Returns ``(x, y, w, h, active, labels)`` int32
+    arrays of length ``len(rects)`` with ``active=1`` and ``LABEL_BLOCKER``,
+    ready to be concatenated into a label file's object groups the same way
+    virtual waypoints are.  Blockers are never meta targets and earn no
+    rewards; they only occlude the skill line-of-sight feature.
+    """
+    xs = jnp.array([r[0] for r in rects], dtype=jnp.int32)
+    ys = jnp.array([r[1] for r in rects], dtype=jnp.int32)
+    ws = jnp.array([r[2] for r in rects], dtype=jnp.int32)
+    hs = jnp.array([r[3] for r in rects], dtype=jnp.int32)
+    active = jnp.ones(len(rects), dtype=jnp.int32)
+    labels = jnp.full(len(rects), LABEL_BLOCKER, dtype=jnp.int32)
+    return xs, ys, ws, hs, active, labels
 
 
 class EgocentricAction(enum.Enum):

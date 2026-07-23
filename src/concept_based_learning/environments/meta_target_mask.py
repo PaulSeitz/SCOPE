@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 
 import jax.numpy as jnp
 
-from concept_based_learning.environments.datatypes import LABEL_NOOP
+from concept_based_learning.environments.datatypes import LABEL_BLOCKER, LABEL_NOOP
 from concept_based_learning.environments.meta_object_layout import (
     META_FIRE_OBJECT_IDX,
     META_NOOP_OBJECT_IDX,
@@ -134,11 +134,16 @@ def build_meta_target_mask(
 
     An index is selectable when:
     - ``objects.active`` is set on the latest frame, and
-    - ``semantic_label`` is not ``LABEL_NOOP`` (padding / structural blocks), then
+    - ``semantic_label`` is not ``LABEL_NOOP`` (padding) and not ``LABEL_BLOCKER``
+      (structural occluders for the line-of-sight feature), then
     - any environment-specific ``hook`` is applied.
     """
     active = _latest_object_frame(objects.active) > 0.5
-    targetable_label = _latest_object_frame(objects.semantic_label) != LABEL_NOOP
+    latest_labels = _latest_object_frame(objects.semantic_label)
+    targetable_label = jnp.logical_and(
+        latest_labels != LABEL_NOOP,
+        latest_labels != LABEL_BLOCKER,
+    )
     mask = jnp.logical_and(active, targetable_label)
     if hook is not None:
         mask = hook(raw_obs, mask, config, objects)

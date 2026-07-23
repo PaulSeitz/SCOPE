@@ -14,8 +14,14 @@ import numpy as np
 import optax
 
 from concept_based_learning.observations.egocentric import get_ego_obs
+from concept_based_learning.observations.egocentric import _get_player as _get_player_entity
 from concept_based_learning.observations.action_space import fire_ego_action_indices
-from concept_based_learning.networks.skill_network import QNetwork, CustomTrainState, Transition
+from concept_based_learning.networks.skill_network import (
+    PIXEL_SKILL_INPUT_MODES,
+    QNetwork,
+    CustomTrainState,
+    Transition,
+)
 from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.environments.meta_target_mask import (
@@ -26,6 +32,17 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_fire_target_idx,
     meta_noop_target_enabled,
     meta_noop_target_idx,
+)
+from concept_based_learning.environments.datatypes import label_to_skill_idx as _label_to_skill_idx
+from concept_based_learning.environments.heuristics import initial_policy_state
+from concept_based_learning.training.logging_metrics import (
+    flag_combination_occupancy_metrics,
+    info_log_metrics,
+    metrics_to_wandb_log_dict,
+    player_progress_metrics,
+    reset_flag_combo_cumulative,
+    resolve_skill_names,
+    selected_skill_outcome_metrics,
 )
 from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_DECAY,
@@ -75,6 +92,8 @@ def make_train(
     fixed_target_idx_from_config,
     meta_mask_hook,
     forced_target_hook,
+    get_heuristic_with_state=None,
+    reset_policy_on_life_lost=False,
 ):
     """
     Factory that creates a `train(rng, params, batch_stats)` function.
@@ -90,6 +109,7 @@ def make_train(
     assert (config["NUM_STEPS"] * config["NUM_ENVS"]) % config["NUM_MINIBATCHES"] == 0, (
         "NUM_MINIBATCHES must divide NUM_STEPS * NUM_ENVS"
     )
+    reset_flag_combo_cumulative()
 
     NUM_SKILLS = config["NUM_SKILLS"]
     MAX_OBJECTS = config["MAX_OBJECTS"]
@@ -114,15 +134,13 @@ def make_train(
         skill_bootstrap_chunk_steps = int(config["NUM_STEPS"])
     skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
+    # Default True preserves historical sign-clipped env TD targets (DQN/PQN Atari).
+    clip_env_reward = bool(config.get("CLIP_REWARD", True))
     skill_target_cut = normalize_skill_target_cut(
         config.get("SKILL_TARGET_CUT", DEFAULT_SKILL_TARGET_CUT)
     )
 
-    _raw_skill_names = config.get("SKILL_NAMES")
-    if _raw_skill_names is None or len(_raw_skill_names) != NUM_SKILLS:
-        skill_names = [f"skill_{i}" for i in range(NUM_SKILLS)]
-    else:
-        skill_names = [str(n) for n in _raw_skill_names]
+    skill_names = resolve_skill_names(config, NUM_SKILLS)
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -134,7 +152,7 @@ def make_train(
     meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
 
     def label_to_skill_idx(label):
-        return jnp.clip(label - 1, 0, NUM_SKILLS - 1)
+        return _label_to_skill_idx(label, NUM_SKILLS)
 
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
@@ -148,16 +166,11 @@ def make_train(
     NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
 
     fixed_target_idx = fixed_target_idx_from_config(config)
-    use_sweep_mission = (
+    use_policy_state = (
         frozen_meta_params is None
         and fixed_target_idx is None
-        and str(config.get("HEURISTIC_MODE", "")).lower() == "sweep"
-        and str(config.get("ENV_NAME", "")).lower() == "spaceinvaders"
+        and get_heuristic_with_state is not None
     )
-    if use_sweep_mission:
-        from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
-            get_heuristic_target_with_mission,
-        )
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
@@ -180,6 +193,7 @@ def make_train(
         embed_dim=skill_embed_dim,
         pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
         pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
+        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
     )
     use_learned_meta_policy = frozen_meta_params is not None
     if use_learned_meta_policy:
@@ -228,11 +242,11 @@ def make_train(
             return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
-        if skill_input_mode == "pixel_embed":
+        if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
             return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, oc_embed, pixel_embed."
+            "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
     def _skill_input_single(raw_obs, objects, target_idx):
@@ -240,11 +254,11 @@ def make_train(
             return get_ego_obs(raw_obs, objects, target_idx)
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
-        if skill_input_mode == "pixel_embed":
+        if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
             return get_ego_obs(raw_obs, objects, target_idx)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, oc_embed, pixel_embed."
+            "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
     def train(rng, params, batch_stats):
@@ -353,8 +367,9 @@ def make_train(
                     running_returns,
                     rng,
                     last_targets,
-                    last_missions,
+                    last_policy_states,
                     car_hits_sum,
+                    peak_altitude,
                     returned_episode_returns,
                     returned_episode_lengths,
                     episode_lengths,
@@ -369,6 +384,7 @@ def make_train(
                 rng_skill, rng_policy = jax.random.split(rng_step)
 
                 policy_rngs = jax.random.split(rng_policy, config["NUM_ENVS"])
+                policy_states = last_policy_states
                 if use_learned_meta_policy:
                     active_masks = jax.vmap(lambda obj: obj.active[-1] > 0.5)(
                         last_obs.objects
@@ -424,14 +440,14 @@ def make_train(
                             dtype=jnp.int32,
                         )
                     else:
-                        if use_sweep_mission:
-                            target_obj_idxs, mission_obj_idxs = jax.vmap(
-                                get_heuristic_target_with_mission
+                        if use_policy_state:
+                            target_obj_idxs, policy_states = jax.vmap(
+                                get_heuristic_with_state
                             )(
                                 last_obs.raw_observation,
                                 last_obs.objects,
                                 last_targets,
-                                last_missions,
+                                last_policy_states,
                                 policy_rngs,
                             )
                         else:
@@ -441,7 +457,7 @@ def make_train(
                                 last_targets,
                                 policy_rngs,
                             )
-                            mission_obj_idxs = last_missions
+                            policy_states = last_policy_states
 
                 safe_target_idxs = jnp.where(
                     target_obj_idxs == no_target_idx, 0, target_obj_idxs
@@ -580,8 +596,28 @@ def make_train(
                 new_env_state = _merge_reset_where_done(
                     step_env_state, reset_state, reset_mask
                 )
+                _zero_ps = initial_policy_state(no_target_idx)
+                _zero_batched = jax.tree_util.tree_map(
+                    lambda x: jnp.broadcast_to(x, (config["NUM_ENVS"],)),
+                    _zero_ps,
+                )
+                policy_reset = reset_mask
+                if reset_policy_on_life_lost:
+                    policy_reset = jnp.logical_or(policy_reset, life_lost > 0)
+                policy_states = jax.tree_util.tree_map(
+                    lambda cur, z: jnp.where(policy_reset, z, cur),
+                    policy_states,
+                    _zero_batched,
+                )
 
                 car_hits_sum = car_hits_sum + jnp.sum(life_lost > 0)
+
+                # Track climb progress (Atari y grows downward → altitude = 210 - y).
+                _py = _get_player_entity(last_obs.raw_observation).y
+                _py = _py[..., -1] if _py.ndim >= 1 else _py
+                _alt = jnp.asarray(210.0, dtype=jnp.float32) - _py.astype(jnp.float32)
+                peak_altitude = jnp.maximum(peak_altitude, _alt)
+                peak_altitude = jnp.where(reset_mask, _alt, peak_altitude)
 
                 def get_target_obj(objects, idx):
                     return jax.tree_util.tree_map(
@@ -614,7 +650,9 @@ def make_train(
                     skill_rewards = jnp.where(
                         meta_fire[:, jnp.newaxis], 0.0, skill_rewards
                     )
-                base_env_reward = jnp.sign(raw_rewards)
+                base_env_reward = (
+                    jnp.sign(raw_rewards) if clip_env_reward else raw_rewards
+                )
                 skill_rewards = (
                     skill_reward_lambda * base_env_reward[:, jnp.newaxis]
                     + (1.0 - skill_reward_lambda) * skill_rewards
@@ -794,8 +832,9 @@ def make_train(
                     running_returns,
                     rng,
                     target_obj_idxs,
-                    mission_obj_idxs,
+                    policy_states,
                     car_hits_sum,
+                    peak_altitude,
                     returned_episode_returns,
                     returned_episode_lengths,
                     episode_lengths,
@@ -807,15 +846,16 @@ def make_train(
 
             rng, _rng = jax.random.split(rng)
             init_car_hits_sum = jnp.array(0.0, dtype=jnp.float32)
+            init_peak_altitude = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.float32)
             init_last_targets = jnp.full(
                 (config["NUM_ENVS"],),
                 no_target_idx,
                 dtype=jnp.int32,
             )
-            init_last_missions = jnp.full(
-                (config["NUM_ENVS"],),
-                no_target_idx,
-                dtype=jnp.int32,
+            _zero_ps = initial_policy_state(no_target_idx)
+            init_last_policy_states = jax.tree_util.tree_map(
+                lambda x: jnp.broadcast_to(x, (config["NUM_ENVS"],)),
+                _zero_ps,
             )
             carry_final, (transitions, infos) = jax.lax.scan(
                 _step_env,
@@ -824,8 +864,9 @@ def make_train(
                     running_returns,
                     _rng,
                     init_last_targets,
-                    init_last_missions,
+                    init_last_policy_states,
                     init_car_hits_sum,
+                    init_peak_altitude,
                     returned_episode_returns,
                     returned_episode_lengths,
                     episode_lengths,
@@ -854,8 +895,9 @@ def make_train(
                 running_returns,
                 rng,
                 _last_targets,
-                _last_missions,
+                _last_policy_states,
                 car_hits_sum,
+                peak_altitude,
                 returned_episode_returns,
                 returned_episode_lengths,
                 episode_lengths,
@@ -871,7 +913,7 @@ def make_train(
                     timesteps=train_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
                 use_one_step_td = skill_bootstrap == "one_step"
-                use_pixel_skill = skill_input_mode == "pixel_embed"
+                use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
 
                 if relabel_all_objects:
                     # Lambda returns over [NUM_STEPS, NUM_ENVS, MAX_OBJECTS].
@@ -1182,11 +1224,42 @@ def make_train(
 
             metrics["env/reward_mean"] = jnp.mean(transitions.env_reward)
 
-            try:
-                info_metrics = {f"info/{k}": jnp.mean(v) for k, v in infos.items()}
-                metrics.update(info_metrics)
-            except AttributeError:
-                pass
+            skill_valid = transitions.target_idx != no_target_idx
+            if meta_noop_enabled:
+                skill_valid = jnp.logical_and(
+                    skill_valid, transitions.target_idx != meta_noop_idx
+                )
+            if meta_fire_enabled:
+                skill_valid = jnp.logical_and(
+                    skill_valid, transitions.target_idx != meta_fire_idx
+                )
+            metrics.update(
+                selected_skill_outcome_metrics(
+                    transitions.active_skill,
+                    transitions.skill_done,
+                    transitions.rewards,
+                    skill_names,
+                    valid_mask=skill_valid,
+                    env_reward=(
+                        jnp.sign(transitions.env_reward)
+                        if clip_env_reward
+                        else transitions.env_reward
+                    ),
+                    skill_reward_lambda=skill_reward_lambda,
+                )
+            )
+            if skill_input_mode == "ego" or skill_input_mode in PIXEL_SKILL_INPUT_MODES:
+                metrics.update(
+                    flag_combination_occupancy_metrics(
+                        transitions.ego_obs,
+                        transitions.active_skill,
+                        skill_names,
+                        valid_mask=skill_valid,
+                    )
+                )
+            metrics.update(info_log_metrics(infos))
+            metrics.update(player_progress_metrics(last_obs.raw_observation))
+            metrics["env/player_altitude_peak_mean"] = jnp.mean(peak_altitude)
 
             metrics.update(
                 episodic_log_metrics(
@@ -1215,13 +1288,7 @@ def make_train(
                         return
                     if wandb.run is None:
                         return
-                    log_dict = {}
-                    for key, value in m.items():
-                        value_np = np.asarray(value)
-                        if value_np.size == 1:
-                            log_dict[key] = float(value_np.ravel()[0])
-                        else:
-                            log_dict[key] = float(value_np.mean())
+                    log_dict = metrics_to_wandb_log_dict(m)
                     local_step = int(log_dict.get("update_steps", 0))
                     step = int(
                         log_dict.get(
@@ -1328,22 +1395,21 @@ def make_train(
 
         rng, _rng_policy = jax.random.split(rng)
         prev_target_idx = no_target_idx
-        mission_target_idx = no_target_idx
+        policy_state = initial_policy_state(no_target_idx)
 
         for _ in range(max_frames):
             rng, step_key = jax.random.split(rng)
             if fixed_target_idx is not None:
                 target_obj_idxs = fixed_target_idx
-            elif use_sweep_mission:
-                target_obj_idxs, mission_target_idx = get_heuristic_target_with_mission(
+            elif use_policy_state:
+                target_obj_idxs, policy_state = get_heuristic_with_state(
                     obs.raw_observation,
                     obs.objects,
                     jnp.array(prev_target_idx, dtype=jnp.int32),
-                    jnp.array(mission_target_idx, dtype=jnp.int32),
+                    policy_state,
                     step_key,
                 )
                 target_obj_idxs = int(jnp.ravel(target_obj_idxs)[0])
-                mission_target_idx = int(jnp.ravel(mission_target_idx)[0])
             else:
                 target_obj_idxs = get_heuristic_target(
                     obs.raw_observation,
@@ -1381,13 +1447,13 @@ def make_train(
                 skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
                 eval_pixel_obs = (
                     obs.pixel_observation
-                    if skill_input_mode == "pixel_embed"
+                    if skill_input_mode in PIXEL_SKILL_INPUT_MODES
                     else None
                 )
-                if skill_input_mode == "pixel_embed" and eval_pixel_obs is None:
+                if skill_input_mode in PIXEL_SKILL_INPUT_MODES and eval_pixel_obs is None:
                     raise ValueError(
-                        "SKILL_INPUT_MODE='pixel_embed' requires pixel_observation from "
-                        "PixelAndObjectObsWrapper, but it is missing."
+                        f"SKILL_INPUT_MODE={skill_input_mode!r} requires pixel_observation "
+                        "from PixelAndObjectObsWrapper, but it is missing."
                     )
 
                 q_vals = jax.vmap(

@@ -14,7 +14,10 @@ from concept_based_learning.environments.env_manager import (
     EnvManager,
     align_config_max_objects,
 )
-from concept_based_learning.environments.heuristics import resolve_heuristic_target_fn
+from concept_based_learning.environments.heuristics import (
+    resolve_heuristic_target_fn,
+    resolve_heuristic_with_state_fn,
+)
 from concept_based_learning.curriculum import build_skill_phases
 from concept_based_learning.training.train_skills import make_train
 from concept_based_learning._legacy.train_meta_agent import make_meta_train
@@ -70,7 +73,8 @@ def _configure_ego_obs_format(config: dict) -> None:
         f"(legacy={config.get('USE_LEGACY_EGO_OBS', False)}, "
         f"size={config.get('USE_EGO_SIZE_FEATURES', True)}, "
         f"velocity={config.get('USE_EGO_VELOCITY_FEATURES', True)}, "
-        f"skill_extras={config.get('USE_SKILL_EGO_FEATURES', False)}, "
+        f"weapon={config.get('USE_EGO_WEAPON_FEATURES', config.get('USE_SKILL_EGO_FEATURES', False))}, "
+        f"blocking={config.get('USE_EGO_BLOCKING_FEATURES', config.get('USE_EGO_LOS_FEATURES', False))}, "
         f"{clip_note})"
     )
 
@@ -128,6 +132,9 @@ def outer_make_train(config, frozen_meta_params=None):
     align_config_max_objects(config, env, env_name=env_name)
 
     heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_state_fn = resolve_heuristic_with_state_fn(
+        config, env_name, components
+    )
 
     # Call the hierarchical training loop; returns (train_fn, eval_rollout_fn)
     train_fn, eval_rollout_fn = make_train(
@@ -145,6 +152,10 @@ def outer_make_train(config, frozen_meta_params=None):
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
+        get_heuristic_with_state=heuristic_with_state_fn,
+        reset_policy_on_life_lost=bool(
+            getattr(components, "reset_policy_on_life_lost", False)
+        ),
     )
     return train_fn, eval_rollout_fn, renderer
 

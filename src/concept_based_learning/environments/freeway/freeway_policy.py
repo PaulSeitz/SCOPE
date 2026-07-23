@@ -14,15 +14,19 @@ Targeting priority:
        |dx_center| < X_AHEAD_THRESH  AND  dy_center < Y_AHEAD_THRESH
   4. TARGET a car in the same lane (y overlapping or very close) if it is approaching
      within IN_LANE_DIST and the x bands overlap.
-  5. Otherwise select the COLLECT goal.
+  5. Otherwise select the NAVIGATE goal.
 """
 
 import jax.numpy as jnp
 
-from concept_based_learning.environments.datatypes import LABEL_AVOID, LABEL_COLLECT
+from concept_based_learning.environments.datatypes import (
+    LABEL_AVOID,
+    LABEL_COLLECT,
+    LABEL_NAVIGATE,
+)
 
-NO_TARGET_IDX = -1  # unused in practice: the top collect goal is always present
-COLLECT_GOAL_IDX = 11  # slot 0=NOOP, 1-10=cars, 11=collect goal
+NO_TARGET_IDX = -1  # unused in practice: the top navigate goal is always present
+COLLECT_GOAL_IDX = 11  # slot 0=NOOP, 1-10=cars, 11=navigate goal
 
 # ── Thresholds ───────────────────────────────────────────────────────────────
 # Ahead car: edge-to-edge vertical gap and center-to-center horizontal gap.
@@ -83,7 +87,7 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     labels = objects.semantic_label[-1]
 
     is_avoid   = labels == LABEL_AVOID
-    is_collect = labels == LABEL_COLLECT
+    is_collect = jnp.logical_or(labels == LABEL_COLLECT, labels == LABEL_NAVIGATE)
     valid_avoid   = jnp.logical_and(active, is_avoid)
     valid_collect = jnp.logical_and(active, is_collect)
 
