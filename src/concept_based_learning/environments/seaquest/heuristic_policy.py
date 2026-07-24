@@ -9,7 +9,9 @@ small tweak: DESTROY and AVOID share one threat tier.
   no threat on screen).
 - Close AVOID/DESTROY within ``CLOSE_DANGER_RANGE`` overrides, but never
   interrupts an active surfacing commit (low O₂ / full divers).
-- Surface waypoint (slot 34, LABEL_NAVIGATE) when oxygen is low or divers ≥ 6.
+- Surface waypoint (slot 34, LABEL_NAVIGATE) when oxygen is low *underwater*,
+  while refilling at the surface with divers on board, or when divers ≥ 6.
+  (Does not force surface during life-start oxygen fill at y≈46.)
 
 Object slots after meta-NOOP:
   divers 1–4, sharks 5–16, subs 17–28, surface sub 29,
@@ -43,16 +45,34 @@ SURFACE_SUB_NEAR_RANGE = 40.0  # retained for callers / future use
 CLOSE_DANGER_RANGE = 25.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 X_AXIS_WEIGHT = 1.0  # NOTE: deactivated for now (weight == 1 → Euclidean)
+# Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
+PLAYER_UNDERWATER_Y = 52.0
 
 
 def _surface_required_from_raw(raw_observation):
-    """True when surfacing is required (low O2 or six divers). Supports batched raw obs."""
+    """True when surfacing is required (low O2 underwater, refill, or six divers).
+
+    Life start sits at y≈46 while oxygen fills 0→64. Treating that as
+    ``oxygen_low`` would force the surface NAVIGATE waypoint every life and
+    trap skills on an already-reached target. Low O2 only forces surface once
+    underwater, or while refilling at the surface with divers on board.
+    """
     last = jax.tree_util.tree_map(
         lambda x: x[..., -1] if jnp.ndim(x) > 0 else x, raw_observation
     )
+    oxygen_low = last.oxygen_level < OXYGEN_LOW_THRESHOLD
+    full_divers = last.collected_divers >= 6
+    py = last.player.y
+    underwater = py > PLAYER_UNDERWATER_Y
+    oxygen_low_underwater = jnp.logical_and(oxygen_low, underwater)
+    # Stay on the WP while refilling after a real rescue (divers still held).
+    refilling = jnp.logical_and(
+        jnp.logical_not(underwater),
+        jnp.logical_and(oxygen_low, last.collected_divers > 0),
+    )
     return jnp.logical_or(
-        last.oxygen_level < OXYGEN_LOW_THRESHOLD,
-        last.collected_divers >= 6,
+        full_divers,
+        jnp.logical_or(oxygen_low_underwater, refilling),
     )
 
 
@@ -173,7 +193,17 @@ def _select_target(raw_observation, objects, prev_target_idx):
     oxygen_low = oxygen < OXYGEN_LOW_THRESHOLD
     collected_divers = raw_observation.collected_divers[-1]
     have_full_divers = collected_divers >= 6
-    force_surface = jnp.logical_or(oxygen_low, have_full_divers)
+    py = raw_observation.player.y[-1]
+    underwater = py > PLAYER_UNDERWATER_Y
+    oxygen_low_underwater = jnp.logical_and(oxygen_low, underwater)
+    refilling = jnp.logical_and(
+        jnp.logical_not(underwater),
+        jnp.logical_and(oxygen_low, collected_divers > 0),
+    )
+    force_surface = jnp.logical_or(
+        have_full_divers,
+        jnp.logical_or(oxygen_low_underwater, refilling),
+    )
 
     is_threat = jnp.logical_or(labels == LABEL_AVOID, labels == LABEL_DESTROY)
     is_close_danger = jnp.logical_and(distances <= CLOSE_DANGER_RANGE, is_threat)

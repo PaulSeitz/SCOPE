@@ -1,7 +1,7 @@
 # feature_eval/seaquest_skills_heuristic.yaml
 # Full skills_only training under the env-specific Seaquest heuristic (NAVIGATE
 # surface waypoint, sticky DESTROY/COLLECT). No meta — heuristic for the whole run.
-# Skill hyperparams aligned with the strong tandem baseline.
+# Ego blocking (LoS) channel ON — pair with seaquest_skills_heuristic_noblock.
 # Filter: suite:feature_eval
 
 ALG_NAME: hierarchical_pqn

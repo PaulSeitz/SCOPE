@@ -6,14 +6,19 @@ Reward magnitudes and trigger conditions:
              -1  on rising edge of AABB overlap (player enters object hitbox)
   COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1
   DESTROY  : +1  when next_target.was_killed == 1 (set by env wrapper from raw state)
-             -1  when the player dies while in contact with this specific object
-  NAVIGATE : identical to COLLECT; separate label for static waypoint targets so
-             they can be routed to a dedicated skill head
+  NAVIGATE : +1  on rising-edge overlap / was_collected (arrive at waypoint);
+             +0.01 when centre-distance to the (still active) waypoint decreases
+             between t and t+1 (progress shaping for long-horizon ladders /
+             surface runs). COLLECT stays sparse — no per-step progress term.
   JUMP_OVER: +1  when the relative horizontal offset (player center - target
              center) changes side between t and t+1 while the player is fully
              above the target at both frames and never touches it (covers both
              "player leaps over object" and "object passes underneath")
              -1  on rising edge of AABB overlap, or next_target.was_killed == 1
+
+  All skills additionally receive ``SKILL_DEATH_PENALTY`` (-1) and a skill-done
+  when ``life_lost > 0``, even if the death was not clearly that skill's fault
+  (overrides a same-step success so e.g. suicidal surfacing is not rewarded).
 
 All rewards fire on transition edges so sustained overlap cannot be farmed.
 DESTROY relies on was_killed rather than position-based disappearance detection
@@ -55,10 +60,13 @@ AVOID_SURVIVAL_REWARD  =  0.01
 AVOID_FAILURE_REWARD   = -1.0
 COLLECT_SUCCESS_REWARD =  1.0
 DESTROY_SUCCESS_REWARD =  1.0
-DESTROY_FAILURE_REWARD = -1.0
+DESTROY_FAILURE_REWARD = -1.0  # retained for contact-conditioned destroy fails
 NAVIGATE_SUCCESS_REWARD = 1.0
+NAVIGATE_PROGRESS_REWARD = 0.01  # distance-to-waypoint decreased this step
 JUMP_SUCCESS_REWARD    =  1.0
 JUMP_FAILURE_REWARD    = -1.0
+# Applied to every skill on life loss (see extract_skill_rewards).
+SKILL_DEATH_PENALTY    = -1.0
 
 # Shrink interaction hitboxes for edge-triggered overlap rewards.
 # This reduces reward farming from grazing at object borders.
@@ -233,20 +241,9 @@ def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # was_killed is stamped on next_target by the env wrapper from raw game state —
     # the only reliable kill signal when the env zeros position for both kills and
     # scroll-offs (e.g. JAX-Atari Seaquest).
+    # Life-loss penalty is applied uniformly in extract_skill_rewards.
     success = ctx.next_target.was_killed == 1
-    # Failure: player died while in contact with this specific object.
-    # Guard: not if this step was a collect/avoid rising-edge (surfacing into the
-    # surface waypoint while simultaneously losing oxygen would otherwise misfire).
-    failure = jnp.logical_and(
-        ctx.life_lost > 0,
-        jnp.logical_and(ctx.prev_overlap, jnp.logical_not(ctx.overlap_rising_edge)),
-    )
-    reward = jnp.where(
-        success,
-        DESTROY_SUCCESS_REWARD,
-        jnp.where(failure, DESTROY_FAILURE_REWARD, 0.0),
-    )
-    return reward, jnp.logical_or(success, failure)
+    return jnp.where(success, DESTROY_SUCCESS_REWARD, 0.0), success
 
 
 def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -259,6 +256,7 @@ def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
 def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
     # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
+    # Life-loss penalty is applied uniformly in extract_skill_rewards.
     failure = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
     )
@@ -274,12 +272,33 @@ def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
 
 
 def _navigate_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    # Same contract as COLLECT (rising-edge overlap or env-stamped was_collected);
-    # a separate label so static waypoints get their own skill head.
+    # Arrive: same sparse contract as COLLECT (overlap / was_collected).
+    # Progress: dense shaping when centre-distance to the waypoint shrinks —
+    # needed for far static targets (Kangaroo ladders). Idle / retreat get 0.
+    # Life-loss penalty is applied uniformly in extract_skill_rewards.
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
-    return jnp.where(success, NAVIGATE_SUCCESS_REWARD, 0.0), success
+    prev_px = ctx.prev_player.x + ctx.prev_player.width / 2.0
+    prev_py = ctx.prev_player.y + ctx.prev_player.height / 2.0
+    next_px = ctx.next_player.x + ctx.next_player.width / 2.0
+    next_py = ctx.next_player.y + ctx.next_player.height / 2.0
+    prev_tx = ctx.prev_target.x + ctx.prev_target.width / 2.0
+    prev_ty = ctx.prev_target.y + ctx.prev_target.height / 2.0
+    next_tx = ctx.next_target.x + ctx.next_target.width / 2.0
+    next_ty = ctx.next_target.y + ctx.next_target.height / 2.0
+    prev_dist = jnp.sqrt((prev_px - prev_tx) ** 2 + (prev_py - prev_ty) ** 2)
+    next_dist = jnp.sqrt((next_px - next_tx) ** 2 + (next_py - next_ty) ** 2)
+    both_active = jnp.logical_and(
+        ctx.prev_target.active > 0, ctx.next_target.active > 0
+    )
+    progressed = jnp.logical_and(both_active, next_dist < prev_dist)
+    reward = jnp.where(
+        success,
+        NAVIGATE_SUCCESS_REWARD,
+        jnp.where(progressed, NAVIGATE_PROGRESS_REWARD, 0.0),
+    )
+    return reward, success
 
 
 def _jump_over_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -388,11 +407,16 @@ def extract_skill_rewards(
         avoid_survival_reward=avoid_survival_reward,
     )
 
+    died = ctx.life_lost > 0
+
     rewards_list = []
     done_list = []
     for spec in SKILL_REGISTRY:
         is_label = prev_target.semantic_label == spec.label
         reward, done = spec.compute(ctx)
+        # Death overrides same-step success (e.g. overlapping surface WP while dying).
+        reward = jnp.where(died, SKILL_DEATH_PENALTY, reward)
+        done = jnp.logical_or(done, died)
         rewards_list.append(jnp.where(is_label, reward, 0.0))
         done_list.append(jnp.logical_and(is_label, done))
 
