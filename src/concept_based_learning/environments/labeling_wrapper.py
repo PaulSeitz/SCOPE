@@ -249,6 +249,11 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
                 total_reward = total_reward + step_reward
                 done = jnp.logical_or(done, step_done)
                 info = step_info
+            # JAXAtari convention: info["env_reward"] is the unclipped frame-skip sum
+            # (see AtariWrapper / LogWrapper). Overwrite the last-substep value so
+            # trainers can log true Atari score while still clipping the step reward.
+            if isinstance(info, dict):
+                info = {**info, "env_reward": total_reward}
             reward = jnp.sign(total_reward) if self.clip_reward else total_reward
             new_atari_state = atari_state
             new_state = SemanticState(atari_state=new_atari_state, obs_stack=obs_stack)

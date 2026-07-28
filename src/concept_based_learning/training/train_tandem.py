@@ -62,6 +62,7 @@ from concept_based_learning.training.episode_stats import (
     init_full_game_episode_stats,
     init_per_env_episode_stats,
     is_game_over,
+    logging_env_reward,
     remaining_lives_from_semantic_state,
     update_full_game_episode_stats,
     update_per_env_episode_stats,
@@ -692,6 +693,8 @@ def make_tandem_train(
             new_obs = step_obs
             new_env_state = step_env_state
 
+            # Prefer info["env_reward"] so CLIP_REWARD does not distort logged returns.
+            log_rewards = logging_env_reward(info, env_reward)
             (
                 running_returns,
                 returned_episode_returns,
@@ -702,7 +705,7 @@ def make_tandem_train(
                 returned_episode_returns,
                 returned_episode_lengths,
                 episode_lengths,
-                env_reward,
+                log_rewards,
                 new_done,
             )
             (
@@ -715,7 +718,7 @@ def make_tandem_train(
                 returned_game_returns,
                 returned_game_lengths,
                 game_lengths,
-                env_reward,
+                log_rewards,
                 game_over,
             )
 

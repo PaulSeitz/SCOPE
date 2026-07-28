@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax.numpy as jnp
+
+
+def logging_env_reward(info: Any, fallback_reward: jnp.ndarray) -> jnp.ndarray:
+    """
+    Unclipped env score increment for episode / full-game return logging.
+
+    JAXAtari stores the pre-clip reward in ``info["env_reward"]`` (see
+    ``AtariWrapper`` / ``LogWrapper``). Prefer that so ``CLIP_REWARD`` only
+    affects TD targets, not ``charts/avg_game_return`` / video-comparable scores.
+    """
+    if isinstance(info, dict) and "env_reward" in info:
+        return info["env_reward"]
+    env_reward = getattr(info, "env_reward", None)
+    if env_reward is not None:
+        return env_reward
+    return fallback_reward
 
 
 def unwrap_base_env_state(wrapper_state):
@@ -156,7 +174,8 @@ def episodic_log_metrics(
     Metrics dict: PPO-style per-life mean and full-game mean.
 
     ``returned_episode_returns`` is comparable to CleanRL PPO with ``episodic_life=True``.
-    ``returned_game_returns`` matches eval videos / ``episodic_life=False`` rollouts.
+    ``returned_game_returns`` matches eval videos / ``episodic_life=False`` rollouts
+    when fed unclipped ``info["env_reward"]`` (not sign-clipped step rewards).
     """
     ppo_mean_return = jnp.mean(returned_episode_returns)
     ppo_mean_length = jnp.mean(returned_episode_lengths)

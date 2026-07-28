@@ -73,6 +73,7 @@ from concept_based_learning.training.episode_stats import (
     init_full_game_episode_stats,
     init_per_env_episode_stats,
     is_game_over,
+    logging_env_reward,
     remaining_lives_from_semantic_state,
     update_full_game_episode_stats,
     update_per_env_episode_stats,
@@ -779,6 +780,8 @@ def make_train(
                     relabel_mask = base_valid[:, jnp.newaxis]
 
 
+                # Prefer info["env_reward"] so CLIP_REWARD does not distort logged returns.
+                log_rewards = logging_env_reward(info, raw_rewards)
                 (
                     running_returns,
                     returned_episode_returns,
@@ -789,7 +792,7 @@ def make_train(
                     returned_episode_returns,
                     returned_episode_lengths,
                     episode_lengths,
-                    raw_rewards,
+                    log_rewards,
                     new_done,
                 )
                 (
@@ -802,7 +805,7 @@ def make_train(
                     returned_game_returns,
                     returned_game_lengths,
                     game_lengths,
-                    raw_rewards,
+                    log_rewards,
                     game_over,
                 )
 
