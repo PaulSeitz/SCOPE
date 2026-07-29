@@ -4,7 +4,14 @@ Heuristic meta-policy for Seaquest.
 Priority (low → high):
 - Default: nearest COLLECT (diver), with sticky COLLECT/DESTROY while active
   and no close threat.
-- Close AVOID ∪ DESTROY within ``CLOSE_DANGER_RANGE`` (30px) interrupts.
+- Close threats interrupt:
+    * missiles (AVOID): ``AVOID_RANGE``, or ``AVOID_CLOSING_RANGE`` when
+      closing on the player (frame-diff vx); closing AVOID is preferred.
+    * sharks (DESTROY): ``CLOSE_DANGER_RANGE`` (tight — allow divers behind).
+    * underwater subs (DESTROY): ``SUB_DESTROY_RANGE`` (looser — engage
+      before sitting on the nose).
+  DESTROY targets nearly vertically aligned (|dx| small, |dy| dominant) are
+  skipped so FORWARD≠dive-into-enemy.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
   at the surface with divers on board, or when divers ≥ 6 — but only if the
   surface sub is inactive / left of the player, or oxygen is critical.
@@ -39,10 +46,27 @@ SURFACE_DUMMY_IDX = 34
 # Real surface submarine in the flattened object list (after meta NOOP).
 SURFACE_SUB_IDX = 29
 
+# Slot ranges (inclusive) after meta NOOP.
+SHARK_LO, SHARK_HI = 5, 16
+SUB_LO, SUB_HI = 17, 28
+MISSILE_LO, MISSILE_HI = 30, 33
+
 OXYGEN_LOW_THRESHOLD = 15.0
 CRITICAL_OXYGEN_THRESHOLD = 5.0
 SURFACE_SUB_NEAR_RANGE = 15.0
-CLOSE_DANGER_RANGE = 30.0
+# Sharks / default DESTROY interrupt — tight so divers with enemies behind
+# stay collectable.
+CLOSE_DANGER_RANGE = 18.0
+# Underwater subs: engage from farther so DESTROY isn't forced nose-on.
+SUB_DESTROY_RANGE = 42.0
+# Enemy missiles.
+AVOID_RANGE = 22.0
+AVOID_CLOSING_RANGE = 40.0
+AVOID_Y_BAND = 14.0  # closing missiles must share a loose y-band
+# Prefer closing AVOID over equally distant DESTROY when scoring.
+CLOSING_AVOID_SCORE_BONUS = 8.0
+# Skip DESTROY when nearly stacked vertically (|dx| small, |dy| larger).
+VERTICAL_ALIGN_MAX_DX = 8.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 X_AXIS_WEIGHT = 1.0  # NOTE: deactivated for now (weight == 1 → Euclidean)
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
@@ -180,6 +204,14 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None, objec
     return current_targets
 
 
+def _object_vx(objects):
+    """Per-slot horizontal velocity from the frame stack (0 if stack size < 2)."""
+    x = objects.x
+    if x.shape[0] < 2:
+        return jnp.zeros(x.shape[-1], dtype=jnp.float32)
+    return (x[-1] - x[-2]).astype(jnp.float32)
+
+
 def _select_target(raw_observation, objects, prev_target_idx):
     """Diver-first selection; close AVOID/DESTROY interrupt; gated surfacing."""
     px = raw_observation.player.x[-1]
@@ -200,6 +232,8 @@ def _select_target(raw_observation, objects, prev_target_idx):
 
     dx = px_center - ox_center
     dy = py_center - oy_center
+    abs_dx = jnp.abs(dx)
+    abs_dy = jnp.abs(dy)
     distances = jnp.sqrt(dx ** 2 + dy ** 2)
     weighted_distances = jnp.sqrt((X_AXIS_WEIGHT * dx) ** 2 + dy ** 2)
 
@@ -208,6 +242,10 @@ def _select_target(raw_observation, objects, prev_target_idx):
     avoid_mask = jnp.logical_and(normal_active_mask, labels == LABEL_AVOID)
     destroy_mask = jnp.logical_and(normal_active_mask, labels == LABEL_DESTROY)
     collect_mask = jnp.logical_and(normal_active_mask, labels == LABEL_COLLECT)
+
+    is_shark = jnp.logical_and(idxs >= SHARK_LO, idxs <= SHARK_HI)
+    is_sub = jnp.logical_and(idxs >= SUB_LO, idxs <= SUB_HI)
+    is_missile = jnp.logical_and(idxs >= MISSILE_LO, idxs <= MISSILE_HI)
 
     # Surface sub: only a threat when near surface and within a tight range.
     is_surface_sub = idxs == SURFACE_SUB_IDX
@@ -222,9 +260,40 @@ def _select_target(raw_observation, objects, prev_target_idx):
         jnp.logical_or(jnp.logical_not(is_surface_sub), surface_sub_eligible),
     )
 
-    threat_mask = jnp.logical_or(avoid_mask, destroy_mask)
-    close_threat_mask = jnp.logical_and(threat_mask, distances <= CLOSE_DANGER_RANGE)
-    threat_dist = jnp.where(close_threat_mask, weighted_distances, jnp.inf)
+    # DESTROY: skip nearly vertical alignments (FORWARD would dive into them).
+    nearly_vertical = jnp.logical_and(
+        abs_dx <= VERTICAL_ALIGN_MAX_DX,
+        abs_dy > abs_dx,
+    )
+    destroy_aimable = jnp.logical_and(destroy_mask, jnp.logical_not(nearly_vertical))
+
+    # Per-slot DESTROY range: subs farther, sharks tight.
+    destroy_range = jnp.where(is_sub, SUB_DESTROY_RANGE, CLOSE_DANGER_RANGE)
+    destroy_close = jnp.logical_and(destroy_aimable, distances <= destroy_range)
+
+    # AVOID: closing missiles get a longer interrupt range.
+    vx = _object_vx(objects)
+    closing = jnp.logical_or(
+        jnp.logical_and(ox_center > px_center, vx < -0.5),
+        jnp.logical_and(ox_center < px_center, vx > 0.5),
+    )
+    same_lane = abs_dy <= AVOID_Y_BAND
+    closing_threat = jnp.logical_and(closing, same_lane)
+    avoid_range = jnp.where(
+        jnp.logical_and(is_missile, closing_threat),
+        AVOID_CLOSING_RANGE,
+        AVOID_RANGE,
+    )
+    avoid_close = jnp.logical_and(avoid_mask, distances <= avoid_range)
+
+    close_threat_mask = jnp.logical_or(destroy_close, avoid_close)
+    # Score: prefer closing AVOID slightly over same-distance DESTROY.
+    threat_score = weighted_distances - jnp.where(
+        jnp.logical_and(avoid_close, closing_threat),
+        CLOSING_AVOID_SCORE_BONUS,
+        0.0,
+    )
+    threat_dist = jnp.where(close_threat_mask, threat_score, jnp.inf)
     best_threat_idx = jnp.argmin(threat_dist).astype(jnp.int32)
     any_close_threat = jnp.any(close_threat_mask)
 
@@ -246,18 +315,17 @@ def _select_target(raw_observation, objects, prev_target_idx):
 
     # Default: nearest diver (or sticky mission); close threats interrupt.
     collect_or_sticky = jnp.where(keep_prev, prev_target_idx, best_collect_idx)
-    # If sticky was DESTROY far away and no collect, still OK; if no collect and
-    # no sticky, fall through via any_collect check below.
     best_normal_idx = jnp.where(any_close_threat, best_threat_idx, collect_or_sticky)
+    # Fallback when nothing close / no diver: nearest aimable DESTROY or AVOID.
+    fallback_threat = jnp.logical_or(destroy_aimable, avoid_mask)
     best_normal_idx = jnp.where(
         jnp.logical_or(any_close_threat, jnp.logical_or(keep_prev, any_collect)),
         best_normal_idx,
-        # No diver / sticky / close threat: nearest any remaining threat (far).
         jnp.where(
-            jnp.any(threat_mask),
-            jnp.argmin(jnp.where(threat_mask, weighted_distances, jnp.inf)).astype(
-                jnp.int32
-            ),
+            jnp.any(fallback_threat),
+            jnp.argmin(
+                jnp.where(fallback_threat, weighted_distances, jnp.inf)
+            ).astype(jnp.int32),
             best_normal_idx,
         ),
     )
@@ -271,8 +339,7 @@ def _select_target(raw_observation, objects, prev_target_idx):
         target_idx,
     )
 
-    # Close danger still overrides non-surface picks (same as any_close_threat
-    # above when not surfacing). While surfacing, never interrupt.
+    # Close danger still overrides non-surface picks. While surfacing, never interrupt.
     target_idx = jnp.where(
         jnp.logical_and(any_close_threat, jnp.logical_not(force_surface)),
         best_threat_idx,

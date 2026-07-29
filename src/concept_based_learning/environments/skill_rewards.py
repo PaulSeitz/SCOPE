@@ -16,9 +16,11 @@ Reward magnitudes and trigger conditions:
              "player leaps over object" and "object passes underneath")
              -1  on rising edge of AABB overlap, or next_target.was_killed == 1
 
-  All skills additionally receive ``SKILL_DEATH_PENALTY`` (-1) and a skill-done
-  when ``life_lost > 0``, even if the death was not clearly that skill's fault
-  (overrides a same-step success so e.g. suicidal surfacing is not rewarded).
+  All skills: success/failure as above. Additionally, AVOID and DESTROY receive
+  ``SKILL_DEATH_PENALTY`` (-1) and a skill-done when ``life_lost > 0`` (overrides
+  a same-step success). COLLECT / NAVIGATE / JUMP_OVER do **not** get the death
+  penalty — dying while collecting is usually caused by threats those skills
+  cannot see or control.
 
 All rewards fire on transition edges so sustained overlap cannot be farmed.
 DESTROY relies on was_killed rather than position-based disappearance detection
@@ -65,7 +67,9 @@ NAVIGATE_SUCCESS_REWARD = 1.0
 NAVIGATE_PROGRESS_REWARD = 0.01  # distance-to-waypoint decreased this step
 JUMP_SUCCESS_REWARD    =  1.0
 JUMP_FAILURE_REWARD    = -1.0
-# Applied to every skill on life loss (see extract_skill_rewards).
+# Applied to AVOID / DESTROY on life loss (see extract_skill_rewards).
+# COLLECT / NAVIGATE / JUMP_OVER are exempt — death is usually from threats
+# outside those skills' control.
 SKILL_DEATH_PENALTY    = -1.0
 
 # Shrink interaction hitboxes for edge-triggered overlap rewards.
@@ -414,9 +418,16 @@ def extract_skill_rewards(
     for spec in SKILL_REGISTRY:
         is_label = prev_target.semantic_label == spec.label
         reward, done = spec.compute(ctx)
-        # Death overrides same-step success (e.g. overlapping surface WP while dying).
-        reward = jnp.where(died, SKILL_DEATH_PENALTY, reward)
-        done = jnp.logical_or(done, died)
+        # Death penalty only for combat skills (AVOID / DESTROY).
+        death_applies = jnp.logical_and(
+            died,
+            jnp.logical_or(
+                spec.label == LABEL_AVOID,
+                spec.label == LABEL_DESTROY,
+            ),
+        )
+        reward = jnp.where(death_applies, SKILL_DEATH_PENALTY, reward)
+        done = jnp.logical_or(done, death_applies)
         rewards_list.append(jnp.where(is_label, reward, 0.0))
         done_list.append(jnp.logical_and(is_label, done))
 

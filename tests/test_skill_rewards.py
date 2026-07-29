@@ -5,11 +5,12 @@ import pytest
 from flax import struct
 
 from concept_based_learning.environments.datatypes import (
+    LABEL_AVOID,
     LABEL_COLLECT,
+    LABEL_DESTROY,
     LABEL_NAVIGATE,
 )
 from concept_based_learning.environments.skill_rewards import (
-    COLLECT_SUCCESS_REWARD,
     NAVIGATE_PROGRESS_REWARD,
     NAVIGATE_SUCCESS_REWARD,
     SKILL_DEATH_PENALTY,
@@ -101,9 +102,30 @@ def test_collect_stays_sparse_no_progress_term():
     assert not bool(d[1])
 
 
-def test_death_overrides_navigate_progress():
+def test_death_does_not_penalize_navigate_or_collect():
     prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_NAVIGATE)
     next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(1))
-    assert float(r[3]) == SKILL_DEATH_PENALTY
-    assert bool(d[3])
+    # Progress still applies; death does not override NAVIGATE.
+    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    assert not bool(d[3])
+
+    prev_c, prev_tc = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_c, next_tc = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    rc, dc = extract_skill_rewards(prev_c, next_c, prev_tc, next_tc, jnp.int32(1))
+    assert float(rc[1]) == 0.0
+    assert not bool(dc[1])
+
+
+def test_death_penalizes_avoid_and_destroy():
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(1))
+    assert float(r[0]) == SKILL_DEATH_PENALTY
+    assert bool(d[0])
+
+    prev_a, prev_ta = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_a, next_ta = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    ra, da = extract_skill_rewards(prev_a, next_a, prev_ta, next_ta, jnp.int32(1))
+    assert float(ra[2]) == SKILL_DEATH_PENALTY
+    assert bool(da[2])

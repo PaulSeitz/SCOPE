@@ -15,6 +15,7 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     CLOSE_DANGER_RANGE,
+    SUB_DESTROY_RANGE,
     SURFACE_DUMMY_IDX,
     SURFACE_SUB_IDX,
     SURFACE_SUB_NEAR_RANGE,
@@ -68,49 +69,56 @@ def _make_objects(
     *,
     diver_xy=None,
     shark_xy=None,
+    sub_xy=None,
     surface_sub_xy=None,
     surface_sub_active=False,
+    stack_len=1,
     n_slots=35,
 ):
     """Build stacked objects with meta-NOOP at 0 (caller uses game slots 1..)."""
-    x = jnp.zeros((1, n_slots), dtype=jnp.float32)
-    y = jnp.zeros((1, n_slots), dtype=jnp.float32)
-    w = jnp.full((1, n_slots), 8.0, dtype=jnp.float32)
-    h = jnp.full((1, n_slots), 8.0, dtype=jnp.float32)
-    active = jnp.zeros((1, n_slots), dtype=jnp.float32)
-    labels = jnp.full((1, n_slots), -1, dtype=jnp.int32)
+    x = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
+    y = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
+    w = jnp.full((stack_len, n_slots), 8.0, dtype=jnp.float32)
+    h = jnp.full((stack_len, n_slots), 8.0, dtype=jnp.float32)
+    active = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
+    labels = jnp.full((stack_len, n_slots), -1, dtype=jnp.int32)
 
     # Slot layout after meta NOOP: divers 1-4, sharks 5-16, ..., surface sub 29, WP 34
-    labels = labels.at[0, 1:5].set(LABEL_COLLECT)
-    labels = labels.at[0, 5:17].set(LABEL_DESTROY)
-    labels = labels.at[0, 17:29].set(LABEL_DESTROY)
-    labels = labels.at[0, SURFACE_SUB_IDX].set(LABEL_AVOID)
-    labels = labels.at[0, 30:34].set(LABEL_AVOID)
-    labels = labels.at[0, SURFACE_DUMMY_IDX].set(LABEL_NAVIGATE)
-    active = active.at[0, SURFACE_DUMMY_IDX].set(1.0)
-    # Surface WP tracks player-ish; exact pos unused when excluded from scoring.
-    y = y.at[0, SURFACE_DUMMY_IDX].set(44.0)
+    labels = labels.at[:, 1:5].set(LABEL_COLLECT)
+    labels = labels.at[:, 5:17].set(LABEL_DESTROY)
+    labels = labels.at[:, 17:29].set(LABEL_DESTROY)
+    labels = labels.at[:, SURFACE_SUB_IDX].set(LABEL_AVOID)
+    labels = labels.at[:, 30:34].set(LABEL_AVOID)
+    labels = labels.at[:, SURFACE_DUMMY_IDX].set(LABEL_NAVIGATE)
+    active = active.at[:, SURFACE_DUMMY_IDX].set(1.0)
+    y = y.at[:, SURFACE_DUMMY_IDX].set(44.0)
 
     if diver_xy is not None:
         dx, dy = diver_xy
-        x = x.at[0, 1].set(dx)
-        y = y.at[0, 1].set(dy)
-        active = active.at[0, 1].set(1.0)
+        x = x.at[:, 1].set(dx)
+        y = y.at[:, 1].set(dy)
+        active = active.at[:, 1].set(1.0)
 
     if shark_xy is not None:
         sx, sy = shark_xy
-        x = x.at[0, 5].set(sx)
-        y = y.at[0, 5].set(sy)
-        active = active.at[0, 5].set(1.0)
+        x = x.at[:, 5].set(sx)
+        y = y.at[:, 5].set(sy)
+        active = active.at[:, 5].set(1.0)
+
+    if sub_xy is not None:
+        sx, sy = sub_xy
+        x = x.at[:, 17].set(sx)
+        y = y.at[:, 17].set(sy)
+        active = active.at[:, 17].set(1.0)
 
     if surface_sub_xy is not None:
         ssx, ssy = surface_sub_xy
-        x = x.at[0, SURFACE_SUB_IDX].set(ssx)
-        y = y.at[0, SURFACE_SUB_IDX].set(ssy)
-        w = w.at[0, SURFACE_SUB_IDX].set(8.0)
-        h = h.at[0, SURFACE_SUB_IDX].set(11.0)
+        x = x.at[:, SURFACE_SUB_IDX].set(ssx)
+        y = y.at[:, SURFACE_SUB_IDX].set(ssy)
+        w = w.at[:, SURFACE_SUB_IDX].set(8.0)
+        h = h.at[:, SURFACE_SUB_IDX].set(11.0)
         if surface_sub_active:
-            active = active.at[0, SURFACE_SUB_IDX].set(1.0)
+            active = active.at[:, SURFACE_SUB_IDX].set(1.0)
 
     return SimpleNamespace(
         x=x,
@@ -123,24 +131,49 @@ def _make_objects(
 
 
 def test_close_danger_range_matches_plan():
-    assert CLOSE_DANGER_RANGE == 30.0
+    assert CLOSE_DANGER_RANGE == 18.0
+    assert SUB_DESTROY_RANGE == 42.0
     assert SURFACE_SUB_NEAR_RANGE == 15.0
 
 
 def test_prefers_diver_when_threat_is_far():
-    # Player at (80,100); diver nearby; shark far away (>30px).
+    # Player at (80,100); diver nearby; shark beyond CLOSE_DANGER_RANGE.
     raw = _make_raw(px=80.0, py=100.0)
     objs = _make_objects(diver_xy=(100.0, 100.0), shark_xy=(80.0, 160.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 1  # diver slot
 
 
+def test_diver_preferred_when_shark_behind_but_outside_tight_range():
+    # Shark ~25px away (was interrupt at 30, now 18) — stay on diver.
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(100.0, 100.0), shark_xy=(80.0, 125.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 1
+
+
 def test_close_threat_overrides_diver():
     raw = _make_raw(px=80.0, py=100.0)
-    # Shark within 30px, diver also present.
-    objs = _make_objects(diver_xy=(120.0, 100.0), shark_xy=(90.0, 105.0))
+    # Shark within CLOSE_DANGER_RANGE, horizontally offset (not vertical).
+    objs = _make_objects(diver_xy=(120.0, 100.0), shark_xy=(95.0, 105.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 5  # shark
+
+
+def test_vertical_shark_does_not_interrupt_diver():
+    # Shark almost directly below player — DESTROY skipped (vertical gate).
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(120.0, 100.0), shark_xy=(84.0, 115.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 1
+
+
+def test_sub_selected_from_farther_than_shark_range():
+    # Sub ~35px away: beyond shark range (18) but within SUB_DESTROY_RANGE (42).
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(140.0, 100.0), sub_xy=(120.0, 100.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 17  # first sub slot
 
 
 def test_surface_sub_ignored_when_deep():
