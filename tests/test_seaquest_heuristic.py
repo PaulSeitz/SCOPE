@@ -18,6 +18,7 @@ from concept_based_learning.environments.seaquest.heuristic_policy import (
     SURFACE_DUMMY_IDX,
     SURFACE_SUB_IDX,
     SURFACE_SUB_NEAR_RANGE,
+    apply_meta_mask_overrides,
     get_heuristic_target,
 )
 
@@ -209,3 +210,35 @@ def test_surface_wp_blocked_when_sub_on_right_unless_critical_o2():
     )
     target_crit = get_heuristic_target(raw_crit, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target_crit) == SURFACE_DUMMY_IDX
+
+
+def test_meta_mask_overrides_batched_objects_surface_gate():
+    """Batched objects are [B, stack, N]; must not index stack as object slots."""
+    num_envs, stack_len, n_slots = 4, 2, 35
+    px = jnp.full((num_envs, stack_len), 80.0, dtype=jnp.float32)
+    py = jnp.full((num_envs, stack_len), 100.0, dtype=jnp.float32)
+    pw = jnp.full((num_envs, stack_len), 16.0, dtype=jnp.float32)
+    oxygen = jnp.full((num_envs, stack_len), 64.0, dtype=jnp.float32)
+    divers = jnp.full((num_envs, stack_len), 6.0, dtype=jnp.float32)
+
+    x = jnp.zeros((num_envs, stack_len, n_slots), dtype=jnp.float32)
+    w = jnp.full((num_envs, stack_len, n_slots), 8.0, dtype=jnp.float32)
+    active = jnp.zeros((num_envs, stack_len, n_slots), dtype=jnp.float32)
+    # Env 0: sub left of player → surface OK. Env 1: sub on right → blocked.
+    x = x.at[0, -1, SURFACE_SUB_IDX].set(20.0)
+    x = x.at[1, -1, SURFACE_SUB_IDX].set(120.0)
+    active = active.at[:, -1, SURFACE_SUB_IDX].set(1.0)
+    active = active.at[:, -1, SURFACE_DUMMY_IDX].set(1.0)
+
+    raw = SimpleNamespace(
+        player=SimpleNamespace(x=px, y=py, width=pw),
+        oxygen_level=oxygen,
+        collected_divers=divers,
+    )
+    objs = SimpleNamespace(x=x, width=w, active=active)
+    masks = jnp.ones((num_envs, n_slots), dtype=bool)
+
+    out = apply_meta_mask_overrides(raw, masks, {}, objects=objs)
+    assert out.shape == (num_envs, n_slots)
+    assert bool(out[0, SURFACE_DUMMY_IDX]) is True
+    assert bool(out[1, SURFACE_DUMMY_IDX]) is False

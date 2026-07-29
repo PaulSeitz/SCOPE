@@ -57,6 +57,16 @@ def _latest_leaf(x):
     return x[..., -1] if x.ndim > 0 else x
 
 
+def _latest_object_frame(field):
+    """Latest stack frame: ``[B, stack, ...]`` → ``[B, ...]``, ``[stack, ...]`` → ``[...]``."""
+    field = jnp.asarray(field)
+    if field.ndim >= 3:
+        return field[:, -1, ...]
+    if field.ndim == 2:
+        return field[-1]
+    return field
+
+
 def _surface_approach_clear(raw_observation, objects=None):
     """True if surfacing is safe enough: sub gone/left, or O₂ critical."""
     oxygen = _latest_leaf(raw_observation.oxygen_level)
@@ -65,22 +75,17 @@ def _surface_approach_clear(raw_observation, objects=None):
     px = _latest_leaf(player.x) + _latest_leaf(player.width) / 2.0
 
     if objects is not None:
-        ox = objects.x[-1]
-        ow = objects.width[-1]
-        active = objects.active[-1] > 0.5
-        sub_active = active[SURFACE_SUB_IDX]
-        sub_cx = ox[SURFACE_SUB_IDX] + ow[SURFACE_SUB_IDX] / 2.0
+        ox = _latest_object_frame(objects.x)
+        ow = _latest_object_frame(objects.width)
+        active = _latest_object_frame(objects.active) > 0.5
+        sub_active = active[..., SURFACE_SUB_IDX]
+        sub_cx = ox[..., SURFACE_SUB_IDX] + ow[..., SURFACE_SUB_IDX] / 2.0
     else:
         # enemies layout: [12 sharks, 12 subs, 1 surface sub]
         enemies = raw_observation.enemies
-        ex = jnp.asarray(enemies.x)
-        ew = jnp.asarray(enemies.width)
-        ea = jnp.asarray(enemies.active)
-        # [stack, 25] or [B, stack, 25] → drop stack axis.
-        if ex.ndim >= 3:
-            ex, ew, ea = ex[:, -1, ...], ew[:, -1, ...], ea[:, -1, ...]
-        elif ex.ndim == 2:
-            ex, ew, ea = ex[-1], ew[-1], ea[-1]
+        ex = _latest_object_frame(enemies.x)
+        ew = _latest_object_frame(enemies.width)
+        ea = _latest_object_frame(enemies.active)
         sub_active = ea[..., 24] > 0.5
         sub_cx = ex[..., 24] + ew[..., 24] / 2.0
 
