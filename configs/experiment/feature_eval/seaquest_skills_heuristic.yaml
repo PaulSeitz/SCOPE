@@ -44,8 +44,8 @@ alg:
   HIDDEN_SIZE: 128
   NUM_LAYERS: 3
   SKILL_EMBED_DIM: 256
-  # Lower LR after the ~10M phase-change: 1e-3 discovered fast but thrashed the plateau.
-  SKILL_LR: 0.00025
+  # Discovery LR: 2.5e-4 from scratch blocked the ~10M phase-change; stabilize later.
+  SKILL_LR: 0.001
   SKILL_REWARD_LAMBDA: 0.0
   CLIP_REWARD: true
   RESTRICT_FIRE_FOR_NON_DESTROY: false
@@ -68,10 +68,9 @@ alg:
   RELABEL_ALL_OBJECTS: false
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: q_lambda
-  # Breakthrough ~coincides with ε floor: go greedy earlier/harder so full games
-  # aren't killed by residual random actions. Tiny floor keeps mild anti-collapse.
+  # Keep enough exploration through discovery; floor ~0.01 after ~20% of updates.
   EPS_START: 0.2
-  EPS_FINISH: 0.001
-  EPS_DECAY: 0.15
+  EPS_FINISH: 0.01
+  EPS_DECAY: 0.2
   HEURISTIC_MODE: env_specific
   SKILL_INPUT_MODE: ego

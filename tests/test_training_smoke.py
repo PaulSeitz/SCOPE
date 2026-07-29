@@ -24,6 +24,22 @@ def _load_experiment_config(name: str) -> dict:
     return {**raw, **alg}
 
 
+@pytest.mark.slow
+def test_skills_ego_embed_compile_and_one_step():
+    """SKILL_INPUT_MODE=ego_embed: Dense projection of ego features before Q MLP."""
+    config = {
+        **_load_experiment_config("feature_eval/seaquest_skills_heuristic_ego_embed"),
+        **_smoke_overrides(),
+    }
+    assert str(config.get("SKILL_INPUT_MODE", "")).lower().strip() == "ego_embed"
+    train_fn, _, _ = outer_make_train(config)
+    train_vjit = jax.jit(jax.vmap(train_fn, in_axes=(0, None, None)))
+    rng = jax.random.split(jax.random.PRNGKey(0), config["NUM_SEEDS"])
+    compiled = train_vjit.lower(rng, None, None).compile()
+    out = jax.block_until_ready(compiled(rng, None, None))
+    assert "runner_state" in out
+
+
 def _smoke_overrides() -> dict:
     return {
         "WANDB_MODE": "disabled",
