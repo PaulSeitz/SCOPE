@@ -189,7 +189,7 @@ def discrete_ego_flag_layout() -> list[tuple[str, int, int, float]]:
     Returns ``(name, channel_index_within_frame, n_levels, level_offset)`` in
     digit order used by occupancy histograms (digit 0 = first entry). Shared
     flags (LOS) come first; per-skill extras follow in registry order.
-    Binary flags use ``n_levels=2``; ternary weapon_state uses 3.
+    Binary flags use ``n_levels=2`` (los, can_fire, facing_enemy).
     """
     layout: list[tuple[str, int, int, float]] = []
     extras_width = skill_ego_extra_channels_per_frame()

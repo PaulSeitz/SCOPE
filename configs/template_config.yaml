@@ -57,8 +57,8 @@ USE_EGO_SIZE_FEATURES: true       # Include object size in ego features. Options
 USE_EGO_VELOCITY_FEATURES: true   # Include object velocity in ego features. Options: true/false.
 # Shared across all skills: 1.0 when a DESTROY/AVOID/JUMP_OVER/BLOCKER object lies on the player→target ray.
 USE_EGO_BLOCKING_FEATURES: false  # Append line-of-sight blocked flag (1 channel/frame). Options: true/false.
-# DESTROY-oriented weapon_state (+1 ready / 0 aimed in-flight / -1 wasted in-flight).
-USE_EGO_WEAPON_FEATURES: false    # Append weapon_state ego channel (1 channel/frame). Options: true/false.
+# DESTROY-oriented weapon extras: can_fire (±1) + facing_enemy (±1).
+USE_EGO_WEAPON_FEATURES: false    # Append can_fire + facing_enemy (2 channels/frame). Options: true/false.
 EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization. Options: null or number > 0.
 
 # Seaquest compatibility toggles.

@@ -5,13 +5,17 @@ from concept_based_learning.observations.egocentric import (
     ego_obs_channels_per_frame,
 )
 from concept_based_learning.observations.skill_ego_features import (
-    WEAPON_IN_FLIGHT_AIMED,
-    WEAPON_IN_FLIGHT_WASTED,
-    WEAPON_READY,
+    CAN_FIRE_IN_FLIGHT,
+    CAN_FIRE_READY,
+    FACING_ENEMY_NO,
+    FACING_ENEMY_YES,
     build_skill_ego_extras_stacked,
     configure_skill_ego_features,
     latch_weapon_state,
     skill_ego_extra_channels_per_frame,
+    WEAPON_IN_FLIGHT_AIMED,
+    WEAPON_IN_FLIGHT_WASTED,
+    WEAPON_READY,
 )
 
 
@@ -21,14 +25,14 @@ class _FakeProjectiles:
 
 
 class _FakePlayer:
-    def __init__(self, n_frames: int, orientation=0.0, x=10.0, width=4.0):
+    def __init__(self, n_frames: int, orientation=90.0, x=10.0, width=4.0):
         self.x = jnp.full((n_frames,), x, dtype=jnp.float32)
         self.width = jnp.full((n_frames,), width, dtype=jnp.float32)
         self.orientation = jnp.full((n_frames,), orientation, dtype=jnp.float32)
 
 
 class _FakeRawObs:
-    def __init__(self, torpedo_active, orientation=0.0, x=10.0):
+    def __init__(self, torpedo_active, orientation=90.0, x=10.0):
         n = torpedo_active.shape[0]
         self.player = _FakePlayer(n, orientation=orientation, x=x)
         active = jnp.zeros((n, 5), dtype=jnp.float32)
@@ -74,12 +78,13 @@ class _FakeGroupedProjectileObs:
 
 def test_skill_ego_extra_channel_count():
     configure_skill_ego_features(enabled=True, env_name="seaquest")
-    assert skill_ego_extra_channels_per_frame() == 1
+    assert skill_ego_extra_channels_per_frame() == 2
     configure_skill_ego_features(enabled=False, env_name="seaquest")
     assert skill_ego_extra_channels_per_frame() == 0
 
 
 def test_latch_weapon_state_ready_aimed_wasted():
+    # Legacy ternary helper still available for regression.
     can_fire = jnp.array([1.0, 0.0, 0.0, 1.0], dtype=jnp.float32)
     aim_ok = jnp.array([True, True, False, True])
     ws = latch_weapon_state(can_fire, aim_ok)
@@ -100,86 +105,95 @@ def test_latch_weapon_state_ready_aimed_wasted():
     ]
 
 
-def test_seaquest_weapon_state_ready_and_aimed():
+def test_seaquest_can_fire_and_facing_enemy_when_aimed():
     configure_skill_ego_features(enabled=True, env_name="seaquest")
+    # Real jaxatari Seaquest: 90 = facing right.
     raw = _FakeRawObs(
         jnp.array([0.0, 1.0, 1.0]),
-        orientation=0.0,
+        orientation=90.0,
         x=10.0,
     )
     objects = _FakeObjects(3, target_x=40.0)
     extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
-    assert extras.shape == (3, 1)
-    assert float(extras[0, 0]) == WEAPON_READY
-    assert float(extras[1, 0]) == WEAPON_IN_FLIGHT_AIMED
-    assert float(extras[2, 0]) == WEAPON_IN_FLIGHT_AIMED
+    assert extras.shape == (3, 2)
+    assert float(extras[0, 0]) == CAN_FIRE_READY
+    assert float(extras[1, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[2, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[0, 1]) == FACING_ENEMY_YES
+    assert float(extras[1, 1]) == FACING_ENEMY_YES
+    assert float(extras[2, 1]) == FACING_ENEMY_YES
 
 
-def test_seaquest_weapon_state_wasted_when_facing_away():
+def test_seaquest_facing_enemy_no_when_facing_away():
     configure_skill_ego_features(enabled=True, env_name="seaquest")
+    # 270 = facing left; target is to the right.
     raw = _FakeRawObs(
         jnp.array([0.0, 1.0, 1.0]),
-        orientation=180.0,
+        orientation=270.0,
         x=10.0,
     )
     objects = _FakeObjects(3, target_x=40.0)
     extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
-    assert float(extras[0, 0]) == WEAPON_READY
-    assert float(extras[1, 0]) == WEAPON_IN_FLIGHT_WASTED
-    assert float(extras[2, 0]) == WEAPON_IN_FLIGHT_WASTED
+    assert float(extras[0, 0]) == CAN_FIRE_READY
+    assert float(extras[0, 1]) == FACING_ENEMY_NO
+    assert float(extras[1, 1]) == FACING_ENEMY_NO
 
 
-def test_seaquest_weapon_state_ignores_target_crossing_after_fire():
+def test_seaquest_facing_enemy_updates_when_target_crosses():
     configure_skill_ego_features(enabled=True, env_name="seaquest")
     raw = _FakeRawObs(
         jnp.array([0.0, 1.0, 1.0]),
-        orientation=0.0,
+        orientation=90.0,
         x=50.0,
     )
     objects = _FakeObjects(3, target_x=80.0)
-    objects.x = objects.x.at[2, 0].set(10.0)
+    objects.x = objects.x.at[2, 0].set(10.0)  # crosses behind after fire
     extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
-    assert float(extras[1, 0]) == WEAPON_IN_FLIGHT_AIMED
-    assert float(extras[2, 0]) == WEAPON_IN_FLIGHT_AIMED
+    assert float(extras[0, 1]) == FACING_ENEMY_YES
+    assert float(extras[1, 1]) == FACING_ENEMY_YES
+    # facing_enemy is live geometry (not fire-latched).
+    assert float(extras[2, 1]) == FACING_ENEMY_NO
 
 
-def test_phoenix_weapon_state_in_flight_is_aimed():
+def test_phoenix_can_fire_facing_always_yes():
     configure_skill_ego_features(enabled=True, env_name="phoenix")
     raw = _FakeSingleProjectileObs(jnp.array([1.0, 0.0]))
     extras = build_skill_ego_extras_stacked(raw)
-    assert extras.shape == (2, 1)
-    assert float(extras[0, 0]) == WEAPON_IN_FLIGHT_AIMED
-    assert float(extras[1, 0]) == WEAPON_READY
+    assert extras.shape == (2, 2)
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[1, 0]) == CAN_FIRE_READY
+    assert float(extras[0, 1]) == FACING_ENEMY_YES
+    assert float(extras[1, 1]) == FACING_ENEMY_YES
 
 
-def test_spaceinvaders_weapon_state_in_flight_is_aimed():
+def test_spaceinvaders_can_fire():
     configure_skill_ego_features(enabled=True, env_name="spaceinvaders")
     raw = _FakePlayerBulletObs(jnp.array([1.0, 0.0]))
     extras = build_skill_ego_extras_stacked(raw)
-    assert float(extras[0, 0]) == WEAPON_IN_FLIGHT_AIMED
-    assert float(extras[1, 0]) == WEAPON_READY
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[1, 0]) == CAN_FIRE_READY
 
 
-def test_choppercommand_weapon_state_ready():
+def test_choppercommand_can_fire():
     configure_skill_ego_features(enabled=True, env_name="choppercommand")
     raw = _FakeGroupedProjectileObs(
         "player_missiles",
         jnp.array([[1.0, 0.0], [0.0, 0.0]]),
     )
     extras = build_skill_ego_extras_stacked(raw)
-    assert float(extras[0, 0]) == WEAPON_IN_FLIGHT_AIMED
-    assert float(extras[1, 0]) == WEAPON_READY
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[1, 0]) == CAN_FIRE_READY
 
 
-def test_beamrider_weapon_state_ready():
+def test_beamrider_can_fire():
     configure_skill_ego_features(enabled=True, env_name="beamrider")
     raw = _FakeGroupedProjectileObs(
         "player_shots",
         jnp.array([[1.0], [0.0]]),
     )
     extras = build_skill_ego_extras_stacked(raw)
-    assert float(extras[0, 0]) == WEAPON_IN_FLIGHT_AIMED
-    assert float(extras[1, 0]) == WEAPON_READY
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[1, 0]) == CAN_FIRE_READY
 
 
 def test_ego_obs_channels_include_velocity_and_weapon():
@@ -192,5 +206,5 @@ def test_ego_obs_channels_include_velocity_and_weapon():
             "ENV_NAME": "seaquest",
         }
     )
-    # distance + v_r + v_t + sin/cos + weapon_state
-    assert ego_obs_channels_per_frame() == 5 + 1
+    # distance + v_r + v_t + sin/cos + can_fire + facing_enemy
+    assert ego_obs_channels_per_frame() == 5 + 2

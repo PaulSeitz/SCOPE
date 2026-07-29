@@ -6,9 +6,20 @@ from concept_based_learning.training.episode_stats import (
     init_full_game_episode_stats,
     init_per_env_episode_stats,
     is_game_over,
+    logging_env_reward,
     update_full_game_episode_stats,
     update_per_env_episode_stats,
 )
+
+
+def test_logging_env_reward_prefers_unclipped_info():
+    clipped = jnp.array([1.0, -1.0, 0.0], dtype=jnp.float32)
+    unclipped = jnp.array([20.0, -50.0, 0.0], dtype=jnp.float32)
+    got = logging_env_reward({"env_reward": unclipped}, clipped)
+    assert jnp.allclose(got, unclipped)
+
+    got_fallback = logging_env_reward({"other": 1}, clipped)
+    assert jnp.allclose(got_fallback, clipped)
 
 
 def test_ppo_style_per_life_mean():

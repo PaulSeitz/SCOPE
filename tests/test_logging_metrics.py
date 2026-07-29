@@ -142,12 +142,13 @@ def test_discrete_ego_flag_layout_los_and_weapon_state():
             "ENV_NAME": "seaquest",
         }
     )
-    # Base: distance + sin + cos + los = 4; weapon = 1; total = 5
-    assert ego_obs_channels_per_frame() == 5
+    # Base: distance + sin + cos + los = 4; can_fire + facing_enemy = 2; total = 6
+    assert ego_obs_channels_per_frame() == 6
     layout = discrete_ego_flag_layout()
     assert layout == [
         ("los_blocked", 3, 2, 0.0),
-        ("weapon_state", 4, 3, 1.0),
+        ("can_fire", 4, 2, 1.0),
+        ("facing_enemy", 5, 2, 1.0),
     ]
 
 
@@ -164,31 +165,33 @@ def test_flag_combination_occupancy_per_skill_histogram():
         }
     )
     cpf = ego_obs_channels_per_frame()
-    # Mixed radix: los (2) × weapon_state (3) = 6 cells.
-    # DESTROY: los=0, weapon_state=+1 (ready) → digit0=0, digit1=2 → combo=0+2*2=4
-    # COLLECT: los=1, weapon_state=-1 (wasted) → digit0=1, digit1=0 → combo=1+0*2=1
-    ego0 = jnp.zeros((cpf,), dtype=jnp.float32).at[3].set(0.0).at[4].set(1.0)
-    ego1 = jnp.zeros((cpf,), dtype=jnp.float32).at[3].set(1.0).at[4].set(-1.0)
+    # Mixed radix: los (2) × can_fire (2) × facing_enemy (2) = 8 cells.
+    # DESTROY: los=0, can_fire=+1, facing_enemy=+1
+    #   → digits (0, 1, 1) → combo = 0 + 1*2 + 1*2*2 = 6
+    # COLLECT: los=1, can_fire=-1, facing_enemy=-1
+    #   → digits (1, 0, 0) → combo = 1
+    ego0 = jnp.zeros((cpf,), dtype=jnp.float32).at[3].set(0.0).at[4].set(1.0).at[5].set(1.0)
+    ego1 = jnp.zeros((cpf,), dtype=jnp.float32).at[3].set(1.0).at[4].set(-1.0).at[5].set(-1.0)
     ego_obs = jnp.stack([ego0, ego1], axis=0)[:, None, :]  # [T=2, E=1, dim]
     active_skill = jnp.array([[0], [1]], dtype=jnp.int32)
 
     metrics = flag_combination_occupancy_metrics(
         ego_obs, active_skill, ["DESTROY", "COLLECT"]
     )
-    assert float(metrics["skill/flag_combo_n_combos"]) == 6.0
+    assert float(metrics["skill/flag_combo_n_combos"]) == 8.0
     destroy_counts = np.asarray(metrics["skill_DESTROY/flag_combo_counts"])
     collect_counts = np.asarray(metrics["skill_COLLECT/flag_combo_counts"])
     overall = np.asarray(metrics["skill/flag_combo_counts"])
-    assert destroy_counts.tolist() == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    assert collect_counts.tolist() == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-    assert overall.tolist() == [0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
-    assert abs(float(metrics["skill/flag_combo_explored_frac"]) - (2.0 / 6.0)) < 1e-5
-    assert abs(float(metrics["skill_DESTROY/flag_combo_explored_frac"]) - (1.0 / 6.0)) < 1e-5
-    assert flag_combo_label(4, ["los_blocked", "weapon_state"], [2, 3]) == (
-        "los_blocked=0|weapon_state=1"
+    assert destroy_counts.tolist() == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert collect_counts.tolist() == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert overall.tolist() == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    assert abs(float(metrics["skill/flag_combo_explored_frac"]) - (2.0 / 8.0)) < 1e-5
+    assert abs(float(metrics["skill_DESTROY/flag_combo_explored_frac"]) - (1.0 / 8.0)) < 1e-5
+    assert flag_combo_label(6, ["los_blocked", "can_fire", "facing_enemy"], [2, 2, 2]) == (
+        "los_blocked=0|can_fire=1|facing_enemy=1"
     )
-    assert flag_combo_label(1, ["los_blocked", "weapon_state"], [2, 3]) == (
-        "los_blocked=1|weapon_state=-1"
+    assert flag_combo_label(1, ["los_blocked", "can_fire", "facing_enemy"], [2, 2, 2]) == (
+        "los_blocked=1|can_fire=-1|facing_enemy=-1"
     )
 
 

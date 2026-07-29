@@ -1,17 +1,17 @@
 """
 Heuristic meta-policy for Seaquest.
 
-Restored layered-distance targeting (pre-gameplay-plan refactor), with a
-small tweak: DESTROY and AVOID share one threat tier.
-
-- Threat tier: nearest of AVOID ∪ DESTROY (closer = more urgent).
-- Else sticky / nearest COLLECT (sticky DESTROY/COLLECT while active and
-  no threat on screen).
-- Close AVOID/DESTROY within ``CLOSE_DANGER_RANGE`` overrides, but never
-  interrupts an active surfacing commit (low O₂ / full divers).
-- Surface waypoint (slot 34, LABEL_NAVIGATE) when oxygen is low *underwater*,
-  while refilling at the surface with divers on board, or when divers ≥ 6.
+Priority (low → high):
+- Default: nearest COLLECT (diver), with sticky COLLECT/DESTROY while active
+  and no close threat.
+- Close AVOID ∪ DESTROY within ``CLOSE_DANGER_RANGE`` (30px) interrupts.
+- Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
+  at the surface with divers on board, or when divers ≥ 6 — but only if the
+  surface sub is inactive / left of the player, or oxygen is critical.
   (Does not force surface during life-start oxygen fill at y≈46.)
+
+Surface sub (slot 29, AVOID) is ignored unless the player is near the surface
+and within ``SURFACE_SUB_NEAR_RANGE``.
 
 Object slots after meta-NOOP:
   divers 1–4, sharks 5–16, subs 17–28, surface sub 29,
@@ -40,57 +40,97 @@ SURFACE_DUMMY_IDX = 34
 SURFACE_SUB_IDX = 29
 
 OXYGEN_LOW_THRESHOLD = 15.0
-CRITICAL_OXYGEN_THRESHOLD = 5.0  # retained for callers / future use
-SURFACE_SUB_NEAR_RANGE = 40.0  # retained for callers / future use
-CLOSE_DANGER_RANGE = 25.0
+CRITICAL_OXYGEN_THRESHOLD = 5.0
+SURFACE_SUB_NEAR_RANGE = 15.0
+CLOSE_DANGER_RANGE = 30.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 X_AXIS_WEIGHT = 1.0  # NOTE: deactivated for now (weight == 1 → Euclidean)
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
 PLAYER_UNDERWATER_Y = 52.0
+# Same band used by ascent-block / near-surface checks in label.py.
+SURFACE_Y_THRESHOLD = 52.0
 
 
-def _surface_required_from_raw(raw_observation):
-    """True when surfacing is required (low O2 underwater, refill, or six divers).
+def _latest_leaf(x):
+    """Take the last stack frame from an array leaf (or return scalars)."""
+    x = jnp.asarray(x)
+    return x[..., -1] if x.ndim > 0 else x
+
+
+def _surface_approach_clear(raw_observation, objects=None):
+    """True if surfacing is safe enough: sub gone/left, or O₂ critical."""
+    oxygen = _latest_leaf(raw_observation.oxygen_level)
+    oxygen_critical = oxygen < CRITICAL_OXYGEN_THRESHOLD
+    player = raw_observation.player
+    px = _latest_leaf(player.x) + _latest_leaf(player.width) / 2.0
+
+    if objects is not None:
+        ox = objects.x[-1]
+        ow = objects.width[-1]
+        active = objects.active[-1] > 0.5
+        sub_active = active[SURFACE_SUB_IDX]
+        sub_cx = ox[SURFACE_SUB_IDX] + ow[SURFACE_SUB_IDX] / 2.0
+    else:
+        # enemies layout: [12 sharks, 12 subs, 1 surface sub]
+        enemies = raw_observation.enemies
+        ex = jnp.asarray(enemies.x)
+        ew = jnp.asarray(enemies.width)
+        ea = jnp.asarray(enemies.active)
+        # [stack, 25] or [B, stack, 25] → drop stack axis.
+        if ex.ndim >= 3:
+            ex, ew, ea = ex[:, -1, ...], ew[:, -1, ...], ea[:, -1, ...]
+        elif ex.ndim == 2:
+            ex, ew, ea = ex[-1], ew[-1], ea[-1]
+        sub_active = ea[..., 24] > 0.5
+        sub_cx = ex[..., 24] + ew[..., 24] / 2.0
+
+    sub_left_or_gone = jnp.logical_or(jnp.logical_not(sub_active), sub_cx < px)
+    return jnp.logical_or(oxygen_critical, sub_left_or_gone)
+
+
+def _surface_required_from_raw(raw_observation, objects=None):
+    """True when surfacing is required and the approach is clear enough.
 
     Life start sits at y≈46 while oxygen fills 0→64. Treating that as
     ``oxygen_low`` would force the surface NAVIGATE waypoint every life and
     trap skills on an already-reached target. Low O2 only forces surface once
     underwater, or while refilling at the surface with divers on board.
+
+    Surface WP is gated on surface-sub left/gone unless oxygen is critical.
     """
-    last = jax.tree_util.tree_map(
-        lambda x: x[..., -1] if jnp.ndim(x) > 0 else x, raw_observation
-    )
-    oxygen_low = last.oxygen_level < OXYGEN_LOW_THRESHOLD
-    full_divers = last.collected_divers >= 6
-    py = last.player.y
+    oxygen = _latest_leaf(raw_observation.oxygen_level)
+    collected_divers = _latest_leaf(raw_observation.collected_divers)
+    py = _latest_leaf(raw_observation.player.y)
+    oxygen_low = oxygen < OXYGEN_LOW_THRESHOLD
+    full_divers = collected_divers >= 6
     underwater = py > PLAYER_UNDERWATER_Y
     oxygen_low_underwater = jnp.logical_and(oxygen_low, underwater)
     # Stay on the WP while refilling after a real rescue (divers still held).
     refilling = jnp.logical_and(
         jnp.logical_not(underwater),
-        jnp.logical_and(oxygen_low, last.collected_divers > 0),
+        jnp.logical_and(oxygen_low, collected_divers > 0),
     )
-    return jnp.logical_or(
+    want_surface = jnp.logical_or(
         full_divers,
         jnp.logical_or(oxygen_low_underwater, refilling),
     )
+    return jnp.logical_and(want_surface, _surface_approach_clear(raw_observation, objects))
 
 
 def _surface_needed_pred(raw_observation, objects, ctx):
-    del objects, ctx
-    return _surface_required_from_raw(raw_observation)
+    del ctx
+    return _surface_required_from_raw(raw_observation, objects)
 
 
 register_predicate("seaquest.surface_needed", _surface_needed_pred)
 
 
 def apply_meta_mask_overrides(raw_obs, active_masks, config, objects=None):
-    del objects
     if active_masks.shape[-1] <= SURFACE_DUMMY_IDX:
         return active_masks
 
     always_active = bool(config.get("ALWAYS_ACTIVE_SURFACE_TARGET", False))
-    force_surface = _surface_required_from_raw(raw_obs)
+    force_surface = _surface_required_from_raw(raw_obs, objects)
     if active_masks.ndim == 1:
         force_surface = jnp.reshape(force_surface, ())
         if always_active:
@@ -106,11 +146,11 @@ def apply_meta_mask_overrides(raw_obs, active_masks, config, objects=None):
     )
 
 
-def get_forced_target_override(raw_obs, current_targets, config, rng=None):
+def get_forced_target_override(raw_obs, current_targets, config, rng=None, objects=None):
     if current_targets.ndim == 0:
         return current_targets
 
-    force_surface = _surface_required_from_raw(raw_obs)
+    force_surface = _surface_required_from_raw(raw_obs, objects)
 
     surface_pick_prob = float(config.get("SURFACE_PICK_PROB", 0.0))
     if rng is not None and surface_pick_prob > 0.0:
@@ -136,7 +176,7 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None):
 
 
 def _select_target(raw_observation, objects, prev_target_idx):
-    """Core threat-by-distance then COLLECT selection (+ surfacing)."""
+    """Diver-first selection; close AVOID/DESTROY interrupt; gated surfacing."""
     px = raw_observation.player.x[-1]
     py = raw_observation.player.y[-1]
 
@@ -164,14 +204,28 @@ def _select_target(raw_observation, objects, prev_target_idx):
     destroy_mask = jnp.logical_and(normal_active_mask, labels == LABEL_DESTROY)
     collect_mask = jnp.logical_and(normal_active_mask, labels == LABEL_COLLECT)
 
-    # Same tier: pick whichever threat (AVOID or DESTROY) is closer.
+    # Surface sub: only a threat when near surface and within a tight range.
+    is_surface_sub = idxs == SURFACE_SUB_IDX
+    near_surface = py <= SURFACE_Y_THRESHOLD
+    surface_sub_close = jnp.logical_and(
+        distances <= SURFACE_SUB_NEAR_RANGE,
+        near_surface,
+    )
+    surface_sub_eligible = jnp.logical_and(is_surface_sub, surface_sub_close)
+    avoid_mask = jnp.logical_and(
+        avoid_mask,
+        jnp.logical_or(jnp.logical_not(is_surface_sub), surface_sub_eligible),
+    )
+
     threat_mask = jnp.logical_or(avoid_mask, destroy_mask)
-    threat_dist = jnp.where(threat_mask, weighted_distances, jnp.inf)
+    close_threat_mask = jnp.logical_and(threat_mask, distances <= CLOSE_DANGER_RANGE)
+    threat_dist = jnp.where(close_threat_mask, weighted_distances, jnp.inf)
     best_threat_idx = jnp.argmin(threat_dist).astype(jnp.int32)
-    any_threat = jnp.any(threat_mask)
+    any_close_threat = jnp.any(close_threat_mask)
 
     collect_dist = jnp.where(collect_mask, weighted_distances, jnp.inf)
     best_collect_idx = jnp.argmin(collect_dist).astype(jnp.int32)
+    any_collect = jnp.any(collect_mask)
 
     # Sticky mission: keep prev DESTROY/COLLECT while it stays active.
     prev_valid = jnp.logical_and(
@@ -185,39 +239,25 @@ def _select_target(raw_observation, objects, prev_target_idx):
     )
     keep_prev = jnp.logical_and(prev_active, prev_is_mission)
 
-    # Threats always re-pick nearest; stickiness only when the screen is clear.
+    # Default: nearest diver (or sticky mission); close threats interrupt.
     collect_or_sticky = jnp.where(keep_prev, prev_target_idx, best_collect_idx)
-    best_normal_idx = jnp.where(any_threat, best_threat_idx, collect_or_sticky)
-
-    oxygen = raw_observation.oxygen_level[-1]
-    oxygen_low = oxygen < OXYGEN_LOW_THRESHOLD
-    collected_divers = raw_observation.collected_divers[-1]
-    have_full_divers = collected_divers >= 6
-    py = raw_observation.player.y[-1]
-    underwater = py > PLAYER_UNDERWATER_Y
-    oxygen_low_underwater = jnp.logical_and(oxygen_low, underwater)
-    refilling = jnp.logical_and(
-        jnp.logical_not(underwater),
-        jnp.logical_and(oxygen_low, collected_divers > 0),
-    )
-    force_surface = jnp.logical_or(
-        have_full_divers,
-        jnp.logical_or(oxygen_low_underwater, refilling),
+    # If sticky was DESTROY far away and no collect, still OK; if no collect and
+    # no sticky, fall through via any_collect check below.
+    best_normal_idx = jnp.where(any_close_threat, best_threat_idx, collect_or_sticky)
+    best_normal_idx = jnp.where(
+        jnp.logical_or(any_close_threat, jnp.logical_or(keep_prev, any_collect)),
+        best_normal_idx,
+        # No diver / sticky / close threat: nearest any remaining threat (far).
+        jnp.where(
+            jnp.any(threat_mask),
+            jnp.argmin(jnp.where(threat_mask, weighted_distances, jnp.inf)).astype(
+                jnp.int32
+            ),
+            best_normal_idx,
+        ),
     )
 
-    is_threat = jnp.logical_or(labels == LABEL_AVOID, labels == LABEL_DESTROY)
-    is_close_danger = jnp.logical_and(distances <= CLOSE_DANGER_RANGE, is_threat)
-    is_close_danger = jnp.logical_and(is_close_danger, normal_active_mask)
-
-    # While surfacing, ignore the surface sub as a "danger" interrupt.
-    is_surface_sub = idxs == SURFACE_SUB_IDX
-    ignore_danger = jnp.logical_and(force_surface, is_surface_sub)
-    valid_close_danger = jnp.logical_and(
-        is_close_danger, jnp.logical_not(ignore_danger)
-    )
-    have_valid_danger = jnp.any(valid_close_danger)
-    danger_dist = jnp.where(valid_close_danger, distances, jnp.inf)
-    best_danger_idx = jnp.argmin(danger_dist).astype(jnp.int32)
+    force_surface = _surface_required_from_raw(raw_observation, objects)
 
     target_idx = best_normal_idx
     target_idx = jnp.where(
@@ -226,11 +266,11 @@ def _select_target(raw_observation, objects, prev_target_idx):
         target_idx,
     )
 
-    # Close danger overrides — but never interrupt an active surfacing commit.
-    suppress_danger = force_surface
+    # Close danger still overrides non-surface picks (same as any_close_threat
+    # above when not surfacing). While surfacing, never interrupt.
     target_idx = jnp.where(
-        jnp.logical_and(have_valid_danger, jnp.logical_not(suppress_danger)),
-        best_danger_idx,
+        jnp.logical_and(any_close_threat, jnp.logical_not(force_surface)),
+        best_threat_idx,
         target_idx,
     )
 

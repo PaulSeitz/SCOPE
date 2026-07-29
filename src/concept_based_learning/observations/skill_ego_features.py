@@ -1,42 +1,46 @@
-"""Optional weapon-state channel appended to egocentric skill observations.
+"""Optional weapon ego channels appended to skill observations.
 
-When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains exactly one
-extra channel — ternary *weapon_state*:
+When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains two channels:
 
-  +1  weapon ready (can fire)
-   0  shot in flight, aimed at the target when fired
-  -1  shot in flight, aimed away when fired
+  can_fire       +1 weapon ready / -1 shot in flight
+  facing_enemy   +1 facing the target's L/R side / -1 not
+                 (always +1 on envs whose shot direction is not L/R-gated)
 
-Aim quality is latched on the can_fire 1→0 edge (within the frame stack) so
-bobbing / mid-flight geometry changes cannot flicker the value.
-
-Occupancy histograms list this channel in ``DISCRETE_SKILL_EGO_FLAGS``.
+``facing_enemy`` is pure geometry (player ori + player/target centres). It is
+always visible — not latched on fire — so skills can turn before shooting.
+Occupancy histograms list both channels in ``DISCRETE_SKILL_EGO_FLAGS``.
 """
 
 from __future__ import annotations
 
 from typing import Any, NamedTuple
 
-import jax
 import jax.numpy as jnp
 
 _USE_EGO_WEAPON_FEATURES = False
 _ENV_NAME = ""
 
-# Weapon-state channel values.
-WEAPON_READY = 1.0
-WEAPON_IN_FLIGHT_AIMED = 0.0
-WEAPON_IN_FLIGHT_WASTED = -1.0
+# Channel values (±1 binaries).
+CAN_FIRE_READY = 1.0
+CAN_FIRE_IN_FLIGHT = -1.0
+FACING_ENEMY_YES = 1.0
+FACING_ENEMY_NO = -1.0
 
-# Single channel when weapon features are enabled.
-WEAPON_CHANNELS_PER_FRAME = 1
+# Backward-compat aliases for older tests / imports.
+WEAPON_READY = CAN_FIRE_READY
+WEAPON_IN_FLIGHT_AIMED = 0.0  # legacy ternary mid value
+WEAPON_IN_FLIGHT_WASTED = CAN_FIRE_IN_FLIGHT
+
+# Two channels when weapon features are enabled.
+WEAPON_CHANNELS_PER_FRAME = 2
 
 
 class DiscreteSkillEgoFlag(NamedTuple):
     """A discrete channel in the weapon extras block (offset within extras).
 
-    ``n_levels`` is the occupancy alphabet size. The ternary weapon_state uses
-    3 with values encoded as ``round(value + 1)`` so {-1, 0, +1} → {0, 1, 2}.
+    ``n_levels`` is the occupancy alphabet size. ±1 binaries use
+    ``level_offset=1`` so ``round(value + 1)`` maps {-1,+1} → {0,2}, then
+    clamped to {0,1}.
     """
 
     offset: int
@@ -48,14 +52,19 @@ class DiscreteSkillEgoFlag(NamedTuple):
 DISCRETE_SKILL_EGO_FLAGS: tuple[DiscreteSkillEgoFlag, ...] = (
     DiscreteSkillEgoFlag(
         offset=0,
-        name="weapon_state",
-        n_levels=3,
-        level_offset=1.0,  # {-1,0,+1} → {0,1,2}
+        name="can_fire",
+        n_levels=2,
+        level_offset=1.0,  # {-1,+1} → {0,1} after clamp
+    ),
+    DiscreteSkillEgoFlag(
+        offset=1,
+        name="facing_enemy",
+        n_levels=2,
+        level_offset=1.0,
     ),
 )
 
 # Envs where shot direction follows left/right player facing (Seaquest-style).
-# Others default to always-aimed (in-flight → 0), since fire direction is fixed.
 _FACING_LR_AIM_ENVS = frozenset({"seaquest", "choppercommand"})
 
 
@@ -66,7 +75,7 @@ def configure_ego_weapon_features(
     num_skills: int | None = None,
     extra_dim_per_skill: int | None = None,
 ) -> None:
-    """Enable/disable the shared weapon_state ego channel.
+    """Enable/disable the shared can_fire + facing_enemy ego channels.
 
     ``num_skills`` / ``extra_dim_per_skill`` are ignored (kept for call-site
     compatibility with older configs that passed a padded per-skill dim).
@@ -103,12 +112,12 @@ def using_skill_ego_features() -> bool:
 
 
 def skill_ego_extra_channels_per_frame() -> int:
-    """Extra ego channels/frame from weapon features (0 or 1)."""
+    """Extra ego channels/frame from weapon features (0 or 2)."""
     return WEAPON_CHANNELS_PER_FRAME if _USE_EGO_WEAPON_FEATURES else 0
 
 
 def skill_ego_extra_dim_per_skill() -> int:
-    """Backward-compatible alias: weapon extras are a single shared channel."""
+    """Backward-compatible alias: weapon extras are shared channels."""
     return WEAPON_CHANNELS_PER_FRAME if _USE_EGO_WEAPON_FEATURES else 0
 
 
@@ -151,8 +160,8 @@ def _facing_toward_target_lr(
     """
     True when left/right facing matches the target's horizontal side.
 
-    Seaquest convention (also used by the Seaquest action mapper):
-    ``orientation < 180`` → facing right.
+    Raw-geometry only. Works for jaxatari L/R oris (90=right, 270=left) and
+    for 0/180: ``orientation < 180`` → facing right.
     """
     facing_right = player_ori < 180.0
     p_cx = player_x.astype(jnp.float32) + player_w.astype(jnp.float32) / 2.0
@@ -161,41 +170,37 @@ def _facing_toward_target_lr(
     return jnp.logical_not(jnp.logical_xor(facing_right, target_right))
 
 
-def _aim_ok_per_frame(
+def _facing_enemy_per_frame(
     raw_observation,
     objects: Any | None,
     target_idx: jnp.ndarray | int | None,
     stack_len: int,
 ) -> jnp.ndarray:
-    """Per-frame bool: facing aimed at the target (or always True)."""
+    """Per-frame ±1 facing_enemy (always +1 when L/R aim does not apply)."""
     if _ENV_NAME not in _FACING_LR_AIM_ENVS or objects is None or target_idx is None:
-        return jnp.ones((stack_len,), dtype=jnp.bool_)
+        return jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32)
 
     player = _get_player(raw_observation)
     if not hasattr(player, "orientation"):
-        return jnp.ones((stack_len,), dtype=jnp.bool_)
+        return jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32)
 
     idx = jnp.asarray(target_idx, dtype=jnp.int32)
-    return _facing_toward_target_lr(
+    aimed = _facing_toward_target_lr(
         player.orientation.astype(jnp.float32),
         player.x,
         player.width,
         objects.x[:, idx],
         objects.width[:, idx],
     )
+    return jnp.where(aimed, FACING_ENEMY_YES, FACING_ENEMY_NO).astype(jnp.float32)
 
 
 def latch_weapon_state(
     can_fire: jnp.ndarray, aim_ok: jnp.ndarray
 ) -> jnp.ndarray:
-    """
-    Ternary weapon_state over a frame stack with fire-time aim latching.
+    """Legacy ternary latch kept for unit tests; not used in ego extras."""
+    import jax
 
-    On each can_fire 1→0 edge, latch 0 (aimed) or -1 (wasted) from ``aim_ok``
-    at that frame and hold until the weapon is ready again. Scan init treats a
-    stack that begins already in-flight as a fire edge on frame 0, so the
-    oldest in-flight frame supplies the latch when the true fire left the window.
-    """
     can_fire = can_fire.astype(jnp.float32)
     aim_ok = aim_ok.astype(jnp.bool_)
 
@@ -209,13 +214,12 @@ def latch_weapon_state(
         out = jnp.where(cf > 0.5, WEAPON_READY, latch)
         return (cf, latch), out
 
-    # prev_can_fire=1 makes an already-in-flight frame 0 count as just_fired.
     init = (jnp.float32(1.0), jnp.float32(WEAPON_IN_FLIGHT_AIMED))
     _, weapon_state = jax.lax.scan(_step, init, (can_fire, aim_ok))
     return weapon_state.astype(jnp.float32)
 
 
-def _weapon_state_channel_stacked(
+def _weapon_channels_stacked(
     raw_observation,
     objects: Any | None,
     target_idx: jnp.ndarray | int | None,
@@ -223,19 +227,25 @@ def _weapon_state_channel_stacked(
     projectile_attr: str,
     projectile_slot: int | None = None,
 ) -> jnp.ndarray:
-    """Per-frame weapon_state, shape [stack_len, 1]."""
+    """Per-frame [can_fire, facing_enemy], shape [stack_len, 2]."""
     stack_len = _stack_len(raw_observation)
     if not hasattr(raw_observation, projectile_attr):
-        return jnp.full((stack_len, 1), WEAPON_READY, dtype=jnp.float32)
+        can_fire = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
+    else:
+        projectiles = getattr(raw_observation, projectile_attr)
+        player_proj_active = _player_projectile_active_per_frame(
+            projectiles.active, projectile_slot
+        )
+        can_fire = jnp.where(
+            player_proj_active > 0.5,
+            CAN_FIRE_IN_FLIGHT,
+            CAN_FIRE_READY,
+        ).astype(jnp.float32)
 
-    projectiles = getattr(raw_observation, projectile_attr)
-    player_proj_active = _player_projectile_active_per_frame(
-        projectiles.active, projectile_slot
+    facing = _facing_enemy_per_frame(
+        raw_observation, objects, target_idx, stack_len
     )
-    can_fire = 1.0 - player_proj_active
-    aim_ok = _aim_ok_per_frame(raw_observation, objects, target_idx, stack_len)
-    weapon_state = latch_weapon_state(can_fire, aim_ok)
-    return weapon_state[:, None]
+    return jnp.stack([can_fire, facing], axis=-1)
 
 
 def build_skill_ego_extras_stacked(
@@ -244,11 +254,11 @@ def build_skill_ego_extras_stacked(
     target_idx: jnp.ndarray | int | None = None,
 ) -> jnp.ndarray:
     """
-    Per-frame weapon extras. Shape ``[stack_len, 1]`` when enabled, else
+    Per-frame weapon extras. Shape ``[stack_len, 2]`` when enabled, else
     ``[stack_len, 0]``.
 
-    ``objects`` / ``target_idx`` are required for fire-time aim latching on
-    facing-dependent envs (Seaquest, Chopper Command); other envs ignore them.
+    ``objects`` / ``target_idx`` drive ``facing_enemy`` on L/R envs
+    (Seaquest, Chopper Command); other envs keep ``facing_enemy=+1``.
     """
     stack_len = _stack_len(raw_observation)
     if not _USE_EGO_WEAPON_FEATURES:
@@ -257,40 +267,46 @@ def build_skill_ego_extras_stacked(
     common = dict(objects=objects, target_idx=target_idx)
 
     if _ENV_NAME == "seaquest":
-        return _weapon_state_channel_stacked(
+        return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="projectiles",
             projectile_slot=0,
             **common,
         )
     if _ENV_NAME == "phoenix":
-        return _weapon_state_channel_stacked(
+        return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="player_projectile",
             **common,
         )
     if _ENV_NAME == "spaceinvaders":
-        return _weapon_state_channel_stacked(
+        return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="player_bullet",
             **common,
         )
     if _ENV_NAME == "choppercommand":
-        return _weapon_state_channel_stacked(
+        return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="player_missiles",
             projectile_slot=0,
             **common,
         )
     if _ENV_NAME == "beamrider":
-        return _weapon_state_channel_stacked(
+        return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="player_shots",
             projectile_slot=0,
             **common,
         )
 
-    return jnp.full((stack_len, 1), WEAPON_READY, dtype=jnp.float32)
+    return jnp.stack(
+        [
+            jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32),
+            jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32),
+        ],
+        axis=-1,
+    )
 
 
 def _latest_can_fire(

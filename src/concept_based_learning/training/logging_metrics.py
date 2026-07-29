@@ -172,15 +172,16 @@ def selected_skill_outcome_metrics(
 
 
 def flag_combo_label(combo_id: int, flag_names: Sequence[str], n_levels: Sequence[int]) -> str:
-    """Human-readable combo label, e.g. ``los_blocked=1|weapon_state=-1``."""
+    """Human-readable combo label, e.g. ``los_blocked=1|facing_enemy=-1``."""
     parts = []
     remaining = int(combo_id)
+    _pm1 = frozenset({"can_fire", "facing_enemy", "weapon_state"})
     for name, levels in zip(flag_names, n_levels):
         digit = remaining % int(levels)
         remaining //= int(levels)
-        # Ternary weapon_state is stored as {0,1,2} ↔ {-1,0,+1}.
-        if name == "weapon_state" and int(levels) == 3:
-            parts.append(f"{name}={digit - 1}")
+        # ±1 binaries (and legacy ternary weapon_state) use offset encoding.
+        if name in _pm1 and int(levels) in (2, 3):
+            parts.append(f"{name}={digit - 1}" if int(levels) == 3 else f"{name}={digit * 2 - 1}")
         else:
             parts.append(f"{name}={digit}")
     return "|".join(parts) if parts else "none"

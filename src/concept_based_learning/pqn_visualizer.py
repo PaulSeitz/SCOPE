@@ -1202,12 +1202,20 @@ def run_live_visualization(
     meta_params=None,
     max_frames=None,
     fps: int | None = None,
+    display_backend: str = "opencv",
 ):
     """
-    Run a live, interactive visualization loop using pygame.
-    The agent acts in the environment step-by-step and the current frame is
-    rendered to a window, with the skill input (distance, angle) shown at the bottom.
+    Run a live, interactive visualization loop.
+
+    Default display backend is OpenCV (``cv2.imshow``). Pygame+SDL often
+    deadlocks or fails to map a window once JAX has worker threads on this
+    machine; OpenCV is much more reliable for live viz.
     """
+    import cv2
+
+    def _log(msg: str) -> None:
+        print(f"[live-viz] {msg}", flush=True)
+
     configure_ego_obs_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
@@ -1222,10 +1230,124 @@ def run_live_visualization(
     meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
     meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
     meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
-    # VIDEO_MAX_FRAMES is for recorded rollouts; live pygame runs until quit unless capped.
+    # VIDEO_MAX_FRAMES is for recorded rollouts; live mode runs until quit unless capped.
     frame_limit = max_frames
     display_fps = int(fps if fps is not None else config.get("VISUALIZER_FPS", 15))
+    display_backend = str(display_backend or "opencv").lower().strip()
+    if display_backend not in ("opencv", "pygame"):
+        raise ValueError(f"Unknown display_backend={display_backend!r} (use opencv|pygame)")
 
+    _log(f"JAX backend={jax.default_backend()} devices={jax.devices()}")
+    _log(f"display_backend={display_backend}")
+
+    window_name = "Hierarchical PQN Live Visualization"
+    scale = 2
+    window_size = (160 * scale, 210 * scale)
+    screen = None
+    font = None
+    clock = None
+    wait_ms = max(1, int(round(1000.0 / max(display_fps, 1))))
+
+    if display_backend == "pygame":
+        # Avoid fcitx/IME hooks that can wedge SDL event delivery.
+        for key in ("SDL_IM_MODULE", "XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"):
+            os.environ.pop(key, None)
+        os.environ.setdefault("SDL_VIDEODRIVER", "x11")
+        pygame.init()
+        pygame.display.set_caption(window_name)
+        font = pygame.font.Font(None, 28)
+        screen = pygame.display.set_mode(window_size)
+    else:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, window_size[0], window_size[1])
+
+    def _show_status(text: str) -> None:
+        if display_backend == "pygame":
+            screen.fill((20, 20, 20))
+            surf = font.render(text, True, (240, 240, 240))
+            screen.blit(surf, (16, window_size[1] // 2 - 10))
+            pygame.display.flip()
+            pygame.event.pump()
+            return
+        canvas = np.zeros((window_size[1], window_size[0], 3), dtype=np.uint8)
+        canvas[:] = (20, 20, 20)
+        cv2.putText(
+            canvas,
+            text[:90],
+            (16, window_size[1] // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (240, 240, 240),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.imshow(window_name, canvas)
+        cv2.waitKey(1)
+
+    def _show_rgb_frame(frame_rgb: np.ndarray, overlay: str | None = None) -> None:
+        """Show an HxWx3 RGB uint8 frame scaled to window_size."""
+        if frame_rgb.dtype != np.uint8:
+            frame_rgb = frame_rgb.astype(np.uint8)
+        if not frame_rgb.flags["C_CONTIGUOUS"]:
+            frame_rgb = np.ascontiguousarray(frame_rgb)
+        if display_backend == "pygame":
+            surf = pygame.surfarray.make_surface(
+                np.ascontiguousarray(frame_rgb.transpose(1, 0, 2))
+            )
+            surf = pygame.transform.scale(surf, window_size)
+            screen.blit(surf, (0, 0))
+            if overlay:
+                text_surface = font.render(overlay, True, (255, 255, 255))
+                tx = (window_size[0] - text_surface.get_width()) // 2
+                ty = window_size[1] - text_surface.get_height() - 10
+                screen.blit(text_surface, (tx, ty))
+            pygame.display.flip()
+            return
+        bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        bgr = cv2.resize(bgr, window_size, interpolation=cv2.INTER_NEAREST)
+        if overlay:
+            cv2.putText(
+                bgr,
+                overlay,
+                (8, window_size[1] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        cv2.imshow(window_name, bgr)
+        cv2.waitKey(1)
+
+    def _poll_input() -> str | None:
+        """Poll UI input. Returns 'quit', 'reset', or None."""
+        if display_backend == "pygame":
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return "quit"
+                if event.type == pygame.KEYDOWN and event.key in (
+                    pygame.K_q,
+                    pygame.K_ESCAPE,
+                ):
+                    return "quit"
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                    return "reset"
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_s:
+                    debug_heuristic_snapshot(
+                        obs.raw_observation,
+                        obs.objects,
+                        jnp.array(prev_target_idx, dtype=jnp.int32),
+                    )
+            return None
+        key = cv2.waitKey(wait_ms) & 0xFF
+        if key in (ord("q"), ord("Q"), 27):
+            return "quit"
+        if key in (ord("r"), ord("R")):
+            return "reset"
+        return None
+
+    _show_status("Creating environment...")
+    _log("Creating eval env...")
     env, renderer = create_eval_env(config)
 
     # Environment-specific hooks (meta-policy, action mapping, NO_TARGET sentinel)
@@ -1257,7 +1379,11 @@ def run_live_visualization(
 
     rng = jax.random.PRNGKey(seed)
     rng, rng_reset = jax.random.split(rng)
+    _show_status("Compiling env.reset (first call can take a while)...")
+    _log("Resetting env (compiling)...")
     obs, state = env.reset(rng_reset)
+    obs, state = jax.device_get((obs, state))
+    _log("env.reset ready")
 
     dummy_ego = get_ego_obs(
         obs.raw_observation,
@@ -1278,23 +1404,41 @@ def run_live_visualization(
             base_params,
         )
 
-    # Pygame setup
-    pygame.init()
-    pygame.display.set_caption("Hierarchical PQN Live Visualization")
-    font = pygame.font.Font(None, 20)
+    # JIT skill Q eval once (same fix as record-mode eval rollouts).
+    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch):
+        def apply_one(params_for_skill):
+            return skill_network.apply(
+                {"params": params_for_skill},
+                ego_batch,
+                train=False,
+                target_idx=target_idx_arr,
+                pixel_obs=pixel_batch,
+            )
 
-    # Get one rendered frame to determine window size
+        return jax.vmap(apply_one)(params_stack)
+
+    apply_all_skills = jax.jit(_apply_all_skills)
+
+    _show_status("Compiling renderer...")
+    _log("Rendering first frame (compiling)...")
     base_state = unwrap_base_env_state(state.atari_state)
     sample_frame = renderer.render(base_state)
     sample_frame = np.array(jax.device_get(sample_frame), dtype=np.uint8)
     if sample_frame.ndim == 2:
         sample_frame = np.stack([sample_frame] * 3, axis=-1)
     H, W, _ = sample_frame.shape
-    scale = 2
     window_size = (W * scale, H * scale)
-    screen = pygame.display.set_mode(window_size)
+    if display_backend == "pygame":
+        if screen.get_size() != window_size:
+            screen = pygame.display.set_mode(window_size)
+        font = pygame.font.Font(None, 20)
+        clock = pygame.time.Clock()
+    else:
+        cv2.resizeWindow(window_name, window_size[0], window_size[1])
 
-    clock = pygame.time.Clock()
+    _show_rgb_frame(sample_frame, overlay="Warming up first step compiles...")
+    _log("First frame shown in window")
+
     running = True
     prev_target_idx = no_target_idx
     mission_target_idx = no_target_idx
@@ -1314,27 +1458,8 @@ def run_live_visualization(
         persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
         suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
-    while running and (frame_limit is None or frame_count < frame_limit):
-        # Handle quit events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key in (pygame.K_q, pygame.K_ESCAPE):
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-                reset_env_episode()
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_s:
-                # Snapshot the current heuristic view of the scene.
-                # This is especially useful for ChopperCommand debugging, but will run
-                # for any env that provides compatible observations.
-                snap = debug_heuristic_snapshot(
-                    obs.raw_observation,
-                    obs.objects,
-                    jnp.array(prev_target_idx, dtype=jnp.int32),
-                )
-
-        rng, step_key = jax.random.split(rng)
-
+    def _select_target(step_key):
+        nonlocal mission_target_idx, persist_steps_remaining, suspended_mission_idx
         if meta_network is None:
             if heuristic_with_mission is not None:
                 target_obj_idx, mission_target_idx = heuristic_with_mission(
@@ -1350,7 +1475,7 @@ def run_live_visualization(
                 target_obj_idx = heuristic_target(
                     obs.raw_observation,
                     obs.objects,
-                    prev_target_idx,
+                    jnp.asarray(prev_target_idx, dtype=jnp.int32),
                     step_key,
                 )
                 target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
@@ -1363,115 +1488,135 @@ def run_live_visualization(
                     config,
                 )[0]
             )
-        else:
-            target_obj_idx, persist_steps_remaining, suspended_mission_idx = _select_target_with_meta(
-                obs,
-                config,
-                meta_network,
-                meta_params,
-                meta_mask_hook,
-                forced_target_hook,
-                no_target_idx,
-                last_target_idx=prev_target_idx,
-                persist_steps_remaining=persist_steps_remaining,
-                suspended_mission_idx=suspended_mission_idx,
-            )
-            target_obj_idx = int(target_obj_idx)
-        prev_target_idx = target_obj_idx
+            return target_obj_idx
+        target_obj_idx, persist_steps_remaining, suspended_mission_idx = _select_target_with_meta(
+            obs,
+            config,
+            meta_network,
+            meta_params,
+            meta_mask_hook,
+            forced_target_hook,
+            no_target_idx,
+            last_target_idx=prev_target_idx,
+            persist_steps_remaining=persist_steps_remaining,
+            suspended_mission_idx=suspended_mission_idx,
+        )
+        return int(target_obj_idx)
 
+    def _policy_action(target_obj_idx):
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
-            global_action = 0
-            active_skill_idx = 0
-            distance = np.nan
-            angle = np.nan
-        elif is_meta_fire:
-            global_action = meta_fire_game_action
-            active_skill_idx = 0
-            distance = np.nan
-            angle = np.nan
+            return 0, 0, np.nan, np.nan
+        if is_meta_fire:
+            return meta_fire_game_action, 0, np.nan, np.nan
+
+        raw_label = obs.objects.semantic_label[-1, target_obj_idx]
+        active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
+
+        ego_obs = _skill_input_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            jnp.array(target_obj_idx, dtype=jnp.int32),
+        )
+        ego_obs_batch = ego_obs[jnp.newaxis, ...]
+        pixel_obs = _skill_pixel_obs_from_obs(config, obs)
+
+        channels_per_frame = ego_obs_channels_per_frame()
+        last_frame_ego = ego_obs[-channels_per_frame:]
+        if using_legacy_ego_obs():
+            dx_pix = float(last_frame_ego[0] * SCREEN_WIDTH)
+            dy_pix = float(last_frame_ego[1] * SCREEN_HEIGHT)
+            distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
+            angle = float(jnp.arctan2(dy_pix, dx_pix))
         else:
-            raw_label = obs.objects.semantic_label[-1, target_obj_idx]
-            active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
+            distance = distance_pixels_from_feature(float(last_frame_ego[0]))
+            player = _get_player(obs.raw_observation)
+            y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+            p_cx = float(player.x[-1] + player.width[-1] / 2.0)
+            p_cy = float(
+                _center_y(
+                    player.y[-1],
+                    player.height[-1],
+                    y_is_bottom_edge=y_is_bottom_edge,
+                )
+            )
+            t_cx = float(
+                obs.objects.x[-1, target_obj_idx]
+                + obs.objects.width[-1, target_obj_idx] / 2.0
+            )
+            t_cy = float(
+                _center_y(
+                    obs.objects.y[-1, target_obj_idx],
+                    obs.objects.height[-1, target_obj_idx],
+                    y_is_bottom_edge=y_is_bottom_edge,
+                )
+            )
+            angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
-            ego_obs = _skill_input_from_obs(
-                config,
+        pixel_batch = jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
+        q_vals = apply_all_skills(
+            params_tree,
+            ego_obs_batch,
+            jnp.asarray([target_obj_idx], dtype=jnp.int32),
+            pixel_batch,
+        )
+        q_vals = jnp.squeeze(q_vals, axis=1)
+
+        fire_indices = fire_ego_action_indices(ego_action_dim)
+        q_active = q_vals[active_skill_idx]
+        if restrict_fire_for_non_destroy and active_skill_idx != 0:
+            q_active = q_active.at[fire_indices].set(-jnp.inf)
+
+        chosen_ego = int(jnp.argmax(q_active))
+        global_action = int(
+            action_mapper(
+                chosen_ego,
                 obs.raw_observation,
-                obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
+                obs.objects,
             )
-            ego_obs_batch = ego_obs[jnp.newaxis, ...]
-            pixel_obs = _skill_pixel_obs_from_obs(config, obs)
+        )
+        return global_action, active_skill_idx, distance, angle
 
-            channels_per_frame = ego_obs_channels_per_frame()
-            last_frame_ego = ego_obs[-channels_per_frame:]
-            if using_legacy_ego_obs():
-                dx_pix = float(last_frame_ego[0] * SCREEN_WIDTH)
-                dy_pix = float(last_frame_ego[1] * SCREEN_HEIGHT)
-                distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
-                angle = float(jnp.arctan2(dy_pix, dx_pix))
-            else:
-                distance = distance_pixels_from_feature(float(last_frame_ego[0]))
-                player = _get_player(obs.raw_observation)
-                y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
-                p_cx = float(
-                    player.x[-1]
-                    + player.width[-1] / 2.0
-                )
-                p_cy = float(
-                    _center_y(
-                        player.y[-1],
-                        player.height[-1],
-                        y_is_bottom_edge=y_is_bottom_edge,
-                    )
-                )
-                t_cx = float(
-                    obs.objects.x[-1, target_obj_idx]
-                    + obs.objects.width[-1, target_obj_idx] / 2.0
-                )
-                t_cy = float(
-                    _center_y(
-                        obs.objects.y[-1, target_obj_idx],
-                        obs.objects.height[-1, target_obj_idx],
-                        y_is_bottom_edge=y_is_bottom_edge,
-                    )
-                )
-                angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
+    # Warm first-frame compiles while the window stays responsive/visible.
+    _show_status("Compiling heuristic / policy / env.step...")
+    _log("Warmup: heuristic + policy + env.step (can take a bit)...")
+    rng, warm_key = jax.random.split(rng)
+    warm_target = _select_target(warm_key)
+    warm_action, _, _, _ = _policy_action(warm_target)
+    obs, state, _reward, _done, _info = env.step(state, int(warm_action))
+    obs, state = jax.device_get((obs, state))
+    prev_target_idx = warm_target
+    _log("Warmup done — entering live loop")
+    _log(f"Ready — live loop at {display_fps} FPS (q/esc quit, r reset)")
 
-            def apply_one(params_for_skill):
-                return skill_network.apply(
-                    {"params": params_for_skill},
-                    ego_obs_batch,
-                    train=False,
-                    target_idx=jnp.asarray([target_obj_idx], dtype=jnp.int32),
-                    pixel_obs=(
-                        jnp.expand_dims(pixel_obs, 0)
-                        if pixel_obs is not None
-                        else None
-                    ),
-                )
+    while running and (frame_limit is None or frame_count < frame_limit):
+        action = _poll_input()
+        if action == "quit":
+            running = False
+            break
+        if action == "reset":
+            reset_env_episode()
 
-            q_vals = jax.vmap(apply_one)(params_tree)
-            q_vals = jnp.squeeze(q_vals, axis=1)
+        if frame_count < 5:
+            _log(f"frame {frame_count}: select target...")
+        rng, step_key = jax.random.split(rng)
+        target_obj_idx = _select_target(step_key)
+        prev_target_idx = target_obj_idx
 
-            fire_indices = fire_ego_action_indices(ego_action_dim)
-            q_active = q_vals[active_skill_idx]
-            if restrict_fire_for_non_destroy and active_skill_idx != 0:
-                q_active = q_active.at[fire_indices].set(-jnp.inf)
+        if frame_count < 5:
+            _log(f"frame {frame_count}: policy action (target={target_obj_idx})...")
+        global_action, active_skill_idx, distance, angle = _policy_action(target_obj_idx)
 
-            chosen_ego = int(jnp.argmax(q_active))
-            global_action = int(
-                action_mapper(
-                    chosen_ego,
-                    obs.raw_observation,
-                    jnp.array(target_obj_idx, dtype=jnp.int32),
-                    obs.objects,
-                )
-            )
+        if frame_count < 5:
+            _log(f"frame {frame_count}: env.step(action={global_action})...")
         # Step env
         obs, state, _reward, done, _info = env.step(state, global_action)
 
+        if frame_count < 5:
+            _log(f"frame {frame_count}: render...")
         # Render current frame
         base_state = unwrap_base_env_state(state.atari_state)
         frame = renderer.render(base_state)
@@ -1499,21 +1644,17 @@ def run_live_visualization(
             )
             frame = np.transpose(frame_chw, (1, 2, 0))
 
-        surf = pygame.surfarray.make_surface(frame.transpose(1, 0, 2))
-        surf = pygame.transform.scale(surf, window_size)
-        screen.blit(surf, (0, 0))
-
-        # Draw distance/angle text at bottom-center (if a valid target exists)
+        overlay = None
         if not np.isnan(distance):
-            text = f"skill: d={distance:.1f}px, a={angle:.2f} rad"
-            text_surface = font.render(text, True, (255, 255, 255))
-            tx = (window_size[0] - text_surface.get_width()) // 2
-            ty = window_size[1] - text_surface.get_height() - 10
-            screen.blit(text_surface, (tx, ty))
-
-        pygame.display.flip()
-        clock.tick(display_fps)
+            overlay = f"skill: d={distance:.1f}px, a={angle:.2f} rad"
+        if frame_count < 5:
+            _log(f"frame {frame_count}: display...")
+        _show_rgb_frame(frame, overlay=overlay)
+        if display_backend == "pygame":
+            clock.tick(display_fps)
         frame_count += 1
+        if frame_count < 5:
+            _log(f"frame {frame_count - 1}: done")
 
         if done:
             rng, rng_reset = jax.random.split(rng)
@@ -1523,7 +1664,11 @@ def run_live_visualization(
 
     if frame_limit is not None and frame_count >= frame_limit:
         print(f"Live visualization stopped after {frame_count} frames (--max-frames={frame_limit}).")
-    pygame.quit()
+    if display_backend == "pygame":
+        pygame.quit()
+    else:
+        cv2.destroyWindow(window_name)
+        cv2.waitKey(1)
 
 
 def main():
@@ -1601,6 +1746,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--display",
+        type=str,
+        choices=["opencv", "pygame"],
+        default="opencv",
+        help=(
+            "Live window backend. Default opencv (reliable with JAX). "
+            "pygame often fails to map a window once JAX threads are running."
+        ),
+    )
+    parser.add_argument(
         "--experiment",
         type=str,
         default=None,
@@ -1648,6 +1803,11 @@ def main():
             base_config, _ = load_config_for_checkpoint(meta_path, base_config)
         meta_params = load_params_from_file(meta_path)
 
+    # Checkpoint *_config.yaml may set WANDB_MODE=online; keep the CLI default
+    # (disabled) authoritative for local visualization.
+    if args.wandb_mode is not None:
+        base_config["WANDB_MODE"] = args.wandb_mode
+
     # Keep explicit CLI env override authoritative for cross-env transfer runs,
     # even when checkpoint-side *_config.yaml is present.
     if args.env_name is not None:
@@ -1661,6 +1821,7 @@ def main():
             meta_params=meta_params,
             max_frames=args.max_frames,
             fps=args.fps,
+            display_backend=args.display,
         )
         return
 
