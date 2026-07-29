@@ -4,18 +4,19 @@ Heuristic meta-policy for Seaquest.
 Priority (low → high):
 - Default: nearest COLLECT (diver), with sticky COLLECT/DESTROY while active
   and no close threat.
-- Close threats interrupt:
+- Close threats interrupt inside an axis-aligned ellipse: ``|dy| ≤ R`` and
+  ``|dx| ≤ X_RANGE_SCALE·R`` (same vertical reach as before, ~50% more
+  horizontal). Among those, prefer same-lane / soonest horizontal contact
+  (time-to-contact from frame-diff ``vx`` when closing).
     * missiles (AVOID): ``AVOID_RANGE``, or ``AVOID_CLOSING_RANGE`` when
-      closing on the player (frame-diff vx); closing AVOID is preferred.
+      closing on the player; closing AVOID is preferred.
     * sharks (DESTROY): ``CLOSE_DANGER_RANGE`` (tight — allow divers behind).
-    * underwater subs (DESTROY): ``SUB_DESTROY_RANGE`` (looser — engage
-      before sitting on the nose).
+    * underwater subs (DESTROY): ``SUB_DESTROY_RANGE`` (looser).
   DESTROY targets nearly vertically aligned (|dx| small, |dy| dominant) are
   skipped so FORWARD≠dive-into-enemy.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
   at the surface with divers on board, or when divers ≥ 6 — but only if the
   surface sub is inactive / left of the player, or oxygen is critical.
-  (Does not force surface during life-start oxygen fill at y≈46.)
 
 Surface sub (slot 29, AVOID) is ignored unless the player is near the surface
 and within ``SURFACE_SUB_NEAR_RANGE``.
@@ -55,20 +56,23 @@ OXYGEN_LOW_THRESHOLD = 15.0
 CRITICAL_OXYGEN_THRESHOLD = 5.0
 SURFACE_SUB_NEAR_RANGE = 15.0
 # Sharks / default DESTROY interrupt — tight so divers with enemies behind
-# stay collectable.
+# stay collectable. Vertical half-axis of the interrupt ellipse.
 CLOSE_DANGER_RANGE = 18.0
+# Horizontal half-axis = X_RANGE_SCALE * vertical (prefer same-lane / ahead).
+X_RANGE_SCALE = 1.5
 # Underwater subs: engage from farther so DESTROY isn't forced nose-on.
 SUB_DESTROY_RANGE = 42.0
 # Enemy missiles.
 AVOID_RANGE = 22.0
 AVOID_CLOSING_RANGE = 40.0
 AVOID_Y_BAND = 14.0  # closing missiles must share a loose y-band
-# Prefer closing AVOID over equally distant DESTROY when scoring.
+# Prefer closing AVOID over equally urgent DESTROY when scoring.
 CLOSING_AVOID_SCORE_BONUS = 8.0
+# Weight |dy| in urgency so same-lane beats objects above/below.
+LANE_URGENCY_WEIGHT = 2.0
 # Skip DESTROY when nearly stacked vertically (|dx| small, |dy| larger).
 VERTICAL_ALIGN_MAX_DX = 8.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
-X_AXIS_WEIGHT = 1.0  # NOTE: deactivated for now (weight == 1 → Euclidean)
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
 PLAYER_UNDERWATER_Y = 52.0
 # Same band used by ascent-block / near-surface checks in label.py.
@@ -89,6 +93,12 @@ def _latest_object_frame(field):
     if field.ndim == 2:
         return field[-1]
     return field
+
+
+def _in_interrupt_ellipse(abs_dx, abs_dy, range_y):
+    """True when inside axis-aligned ellipse with vertical radius ``range_y``."""
+    range_x = range_y * X_RANGE_SCALE
+    return jnp.logical_and(abs_dy <= range_y, abs_dx <= range_x)
 
 
 def _surface_approach_clear(raw_observation, objects=None):
@@ -212,6 +222,17 @@ def _object_vx(objects):
     return (x[-1] - x[-2]).astype(jnp.float32)
 
 
+def _horizontal_urgency(abs_dx, dx, vx):
+    """Sooner horizontal contact → lower score. Uses TTC when closing."""
+    # dx = player_cx - object_cx. Closing when object moves toward player:
+    # approach_rate > 0 shrinks |dx|.
+    approach_rate = jnp.sign(dx) * vx
+    closing_fast = approach_rate > 0.5
+    ttc = abs_dx / jnp.maximum(approach_rate, 0.5)
+    # Non-closing: fall back to |dx| (farther sideways = less urgent).
+    return jnp.where(closing_fast, ttc, abs_dx)
+
+
 def _select_target(raw_observation, objects, prev_target_idx):
     """Diver-first selection; close AVOID/DESTROY interrupt; gated surfacing."""
     px = raw_observation.player.x[-1]
@@ -235,7 +256,6 @@ def _select_target(raw_observation, objects, prev_target_idx):
     abs_dx = jnp.abs(dx)
     abs_dy = jnp.abs(dy)
     distances = jnp.sqrt(dx ** 2 + dy ** 2)
-    weighted_distances = jnp.sqrt((X_AXIS_WEIGHT * dx) ** 2 + dy ** 2)
 
     labels = objects.semantic_label[-1]
 
@@ -243,7 +263,6 @@ def _select_target(raw_observation, objects, prev_target_idx):
     destroy_mask = jnp.logical_and(normal_active_mask, labels == LABEL_DESTROY)
     collect_mask = jnp.logical_and(normal_active_mask, labels == LABEL_COLLECT)
 
-    is_shark = jnp.logical_and(idxs >= SHARK_LO, idxs <= SHARK_HI)
     is_sub = jnp.logical_and(idxs >= SUB_LO, idxs <= SUB_HI)
     is_missile = jnp.logical_and(idxs >= MISSILE_LO, idxs <= MISSILE_HI)
 
@@ -267,9 +286,12 @@ def _select_target(raw_observation, objects, prev_target_idx):
     )
     destroy_aimable = jnp.logical_and(destroy_mask, jnp.logical_not(nearly_vertical))
 
-    # Per-slot DESTROY range: subs farther, sharks tight.
-    destroy_range = jnp.where(is_sub, SUB_DESTROY_RANGE, CLOSE_DANGER_RANGE)
-    destroy_close = jnp.logical_and(destroy_aimable, distances <= destroy_range)
+    # Per-slot DESTROY range: subs farther, sharks tight (ellipse: y=R, x=1.5R).
+    destroy_range_y = jnp.where(is_sub, SUB_DESTROY_RANGE, CLOSE_DANGER_RANGE)
+    destroy_close = jnp.logical_and(
+        destroy_aimable,
+        _in_interrupt_ellipse(abs_dx, abs_dy, destroy_range_y),
+    )
 
     # AVOID: closing missiles get a longer interrupt range.
     vx = _object_vx(objects)
@@ -279,16 +301,22 @@ def _select_target(raw_observation, objects, prev_target_idx):
     )
     same_lane = abs_dy <= AVOID_Y_BAND
     closing_threat = jnp.logical_and(closing, same_lane)
-    avoid_range = jnp.where(
+    avoid_range_y = jnp.where(
         jnp.logical_and(is_missile, closing_threat),
         AVOID_CLOSING_RANGE,
         AVOID_RANGE,
     )
-    avoid_close = jnp.logical_and(avoid_mask, distances <= avoid_range)
+    avoid_close = jnp.logical_and(
+        avoid_mask,
+        _in_interrupt_ellipse(abs_dx, abs_dy, avoid_range_y),
+    )
 
     close_threat_mask = jnp.logical_or(destroy_close, avoid_close)
-    # Score: prefer closing AVOID slightly over same-distance DESTROY.
-    threat_score = weighted_distances - jnp.where(
+    # Urgency: same-lane (low |dy|) + soon horizontal contact (TTC when closing).
+    threat_score = (
+        LANE_URGENCY_WEIGHT * abs_dy + _horizontal_urgency(abs_dx, dx, vx)
+    )
+    threat_score = threat_score - jnp.where(
         jnp.logical_and(avoid_close, closing_threat),
         CLOSING_AVOID_SCORE_BONUS,
         0.0,
@@ -297,7 +325,7 @@ def _select_target(raw_observation, objects, prev_target_idx):
     best_threat_idx = jnp.argmin(threat_dist).astype(jnp.int32)
     any_close_threat = jnp.any(close_threat_mask)
 
-    collect_dist = jnp.where(collect_mask, weighted_distances, jnp.inf)
+    collect_dist = jnp.where(collect_mask, distances, jnp.inf)
     best_collect_idx = jnp.argmin(collect_dist).astype(jnp.int32)
     any_collect = jnp.any(collect_mask)
 
@@ -323,9 +351,9 @@ def _select_target(raw_observation, objects, prev_target_idx):
         best_normal_idx,
         jnp.where(
             jnp.any(fallback_threat),
-            jnp.argmin(
-                jnp.where(fallback_threat, weighted_distances, jnp.inf)
-            ).astype(jnp.int32),
+            jnp.argmin(jnp.where(fallback_threat, distances, jnp.inf)).astype(
+                jnp.int32
+            ),
             best_normal_idx,
         ),
     )

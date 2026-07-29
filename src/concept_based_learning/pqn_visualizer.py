@@ -359,7 +359,7 @@ def label_to_skill_idx(label, num_skills: int):
 
 def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
-    if mode == "ego":
+    if mode in ("ego", "ego_embed"):
         return get_ego_obs(raw_obs, objects, target_idx)
     if mode == "oc_embed":
         return flatten_raw_observation(raw_obs)
@@ -367,7 +367,7 @@ def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
         return get_ego_obs(raw_obs, objects, target_idx)
     raise ValueError(
         f"Unknown SKILL_INPUT_MODE={mode!r}. "
-        "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
+        "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
     )
 
 

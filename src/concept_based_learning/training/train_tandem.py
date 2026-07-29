@@ -222,7 +222,7 @@ def make_tandem_train(
         )
 
     def _skill_inputs(raw_obs, objects, target_idxs):
-        if skill_input_mode == "ego":
+        if skill_input_mode in ("ego", "ego_embed"):
             return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
@@ -230,11 +230,11 @@ def make_tandem_train(
             return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
+            "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
     def _skill_input_single(raw_obs, objects, target_idx):
-        if skill_input_mode == "ego":
+        if skill_input_mode in ("ego", "ego_embed"):
             return get_ego_obs(raw_obs, objects, target_idx)
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
@@ -242,7 +242,7 @@ def make_tandem_train(
             return get_ego_obs(raw_obs, objects, target_idx)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
+            "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
     def preprocess_transition(x, rng_perm):
@@ -1648,7 +1648,7 @@ def make_tandem_train(
                 skill_reward_lambda=skill_reward_lambda,
             )
         )
-        if skill_input_mode == "ego" or skill_input_mode in PIXEL_SKILL_INPUT_MODES:
+        if skill_input_mode in ("ego", "ego_embed") or skill_input_mode in PIXEL_SKILL_INPUT_MODES:
             metrics.update(
                 flag_combination_occupancy_metrics(
                     transitions.ego_obs,

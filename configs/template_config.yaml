@@ -88,8 +88,8 @@ META_PIXEL_SMOOTH_IMAGE: false      # Apply smoothing in pixel wrapper. Options:
 META_PIXEL_MAX_POOLING: true        # Max-pool stacked frames in pixel wrapper. Options: true/false.
 
 # Skill input encoding (System 1), independent from meta-policy settings.
-SKILL_INPUT_MODE: "ego"             # Skill input format. Options: "ego","oc_embed","pixel_embed".
-SKILL_EMBED_DIM: 256                # Embedding dim for oc/pixel skill inputs. Options: int >= 1.
+SKILL_INPUT_MODE: "ego"             # Skill input format. Options: "ego","ego_embed","oc_embed","pixel_embed".
+SKILL_EMBED_DIM: 256                # Embedding dim for ego_embed/oc/pixel skill inputs. Options: int >= 1.
 SKILL_PIXEL_CNN_CHANNELS: [32, 64]  # CNN channels for skill pixel_embed. Options: list[int].
 SKILL_PIXEL_CNN_KERNEL_SIZE: [5, 5] # CNN kernel size for skill pixel_embed. Options: [int,int].
 DEBUG_INPUTS: false                  # Log/check rollout + train input shapes/finite/mask invariants. Options: true/false.

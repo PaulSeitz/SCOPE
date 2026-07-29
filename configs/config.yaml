@@ -71,6 +71,7 @@ META_INPUT_MODE: "flat"
 # META_PIXEL_MAX_POOLING: true
 # Skill-policy input mode (System 1), independent from meta:
 #   ego        - current egocentric features (default)
+#   ego_embed  - same ego features, Dense(SKILL_EMBED_DIM)+ReLU before the Q MLP
 #   oc_embed   - full object-centric observation embedding + target-index conditioning
 #   pixel_embed- CNN over stacked pixels + target-index conditioning
 SKILL_INPUT_MODE: "ego"

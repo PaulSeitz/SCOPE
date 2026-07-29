@@ -19,6 +19,7 @@ from concept_based_learning.environments.seaquest.heuristic_policy import (
     SURFACE_DUMMY_IDX,
     SURFACE_SUB_IDX,
     SURFACE_SUB_NEAR_RANGE,
+    X_RANGE_SCALE,
     apply_meta_mask_overrides,
     get_heuristic_target,
 )
@@ -69,6 +70,7 @@ def _make_objects(
     *,
     diver_xy=None,
     shark_xy=None,
+    shark2_xy=None,
     sub_xy=None,
     surface_sub_xy=None,
     surface_sub_active=False,
@@ -105,6 +107,12 @@ def _make_objects(
         y = y.at[:, 5].set(sy)
         active = active.at[:, 5].set(1.0)
 
+    if shark2_xy is not None:
+        sx, sy = shark2_xy
+        x = x.at[:, 6].set(sx)
+        y = y.at[:, 6].set(sy)
+        active = active.at[:, 6].set(1.0)
+
     if sub_xy is not None:
         sx, sy = sub_xy
         x = x.at[:, 17].set(sx)
@@ -134,6 +142,7 @@ def test_close_danger_range_matches_plan():
     assert CLOSE_DANGER_RANGE == 18.0
     assert SUB_DESTROY_RANGE == 42.0
     assert SURFACE_SUB_NEAR_RANGE == 15.0
+    assert X_RANGE_SCALE == 1.5
 
 
 def test_prefers_diver_when_threat_is_far():
@@ -145,7 +154,7 @@ def test_prefers_diver_when_threat_is_far():
 
 
 def test_diver_preferred_when_shark_behind_but_outside_tight_range():
-    # Shark ~25px away (was interrupt at 30, now 18) — stay on diver.
+    # Shark ~25px away vertically (was interrupt at 30, now 18) — stay on diver.
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(diver_xy=(100.0, 100.0), shark_xy=(80.0, 125.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
@@ -158,6 +167,44 @@ def test_close_threat_overrides_diver():
     objs = _make_objects(diver_xy=(120.0, 100.0), shark_xy=(95.0, 105.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 5  # shark
+
+
+def test_same_lane_shark_preferred_over_closer_above():
+    # Slot 6 above but Euclidean-closer; slot 5 same lane farther in x — pick lane.
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(
+        diver_xy=(140.0, 100.0),
+        shark_xy=(110.0, 100.0),  # same lane, farther
+        shark2_xy=(88.0, 112.0),  # above, nearer Euclidean
+    )
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
+
+
+def test_horizontal_range_wider_than_vertical():
+    # |dx| ≈ 24 (>18 circle, < 18*1.5=27 ellipse x) → still interrupts.
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(140.0, 100.0), shark_xy=(104.0, 100.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
+
+
+def test_faster_closing_shark_preferred():
+    # Same lane: nearer fleeing shark vs farther closing shark (still in ellipse).
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(
+        diver_xy=(140.0, 100.0),
+        shark_xy=(100.0, 100.0),
+        shark2_xy=(108.0, 100.0),
+        stack_len=2,
+    )
+    # Slot 5: fleeing right. Slot 6: closing left (centers ~104 vs ~112).
+    objs.x = objs.x.at[0, 5].set(98.0)
+    objs.x = objs.x.at[1, 5].set(100.0)
+    objs.x = objs.x.at[0, 6].set(111.0)
+    objs.x = objs.x.at[1, 6].set(108.0)
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 6
 
 
 def test_vertical_shark_does_not_interrupt_diver():

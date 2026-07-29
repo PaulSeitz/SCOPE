@@ -139,11 +139,11 @@ def host_check_probe_inputs(
                 f"got shape {np.asarray(meta_pixel).shape}."
             )
 
-    if skill_mode == "ego":
+    if skill_mode in ("ego", "ego_embed"):
         ego_dim = int(np.asarray(probe_ego).shape[-1])
         if ego_dim > 64:
             print(
-                f"[DEBUG_INPUTS] warning: SKILL_INPUT_MODE=ego but probe_ego dim={ego_dim} "
+                f"[DEBUG_INPUTS] warning: SKILL_INPUT_MODE={skill_mode} but probe_ego dim={ego_dim} "
                 "(expected small egocentric feature vector).",
                 flush=True,
             )

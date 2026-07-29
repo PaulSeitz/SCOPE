@@ -58,6 +58,12 @@ class QNetwork(nn.Module):
 
         if mode == "ego":
             pass
+        elif mode in ("ego_embed", "ego_embedding"):
+            # Same relative ego features as ``ego``, but with a learned projection
+            # before the Q MLP (tests whether an embed helps beyond raw ego).
+            x = x.astype(jnp.float32)
+            x = nn.Dense(self.embed_dim, name="ego_embed")(x)
+            x = nn.relu(x)
         elif mode in ("oc_embed", "object_embed", "object_embedding"):
             x = x.astype(jnp.float32)
             x = nn.Dense(self.embed_dim, name="oc_embed")(x)
@@ -149,7 +155,7 @@ class QNetwork(nn.Module):
         else:
             raise ValueError(
                 f"Unknown SKILL_INPUT_MODE={self.input_mode!r}. "
-                "Expected one of: ego, oc_embed, pixel_embed, pixel_embed_cond."
+                "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
             )
 
         if self.norm_type == "layer_norm":
