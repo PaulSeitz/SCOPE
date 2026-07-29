@@ -209,6 +209,7 @@ alg:
 
   # Environment/label specific shaping knobs (only used in specific env wrappers).
   AVOID_SURVIVAL_BONUS: 0.0         # Per-step survival bonus for avoid reward branch. Options: float.
+  SKILL_DEATH_PENALIZE_COLLECT: false # Also −1 COLLECT on life loss (default: AVOID/DESTROY only). Options: true/false.
   ALWAYS_ACTIVE_SURFACE_TARGET: false # Seaquest: keep surface waypoint target always available. Options: true/false.
   SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
   FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.

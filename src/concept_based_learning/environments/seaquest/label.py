@@ -15,7 +15,10 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     SURFACE_DUMMY_IDX,
 )
-from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.environments.skill_rewards import (
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 from concept_based_learning.observations.action_space import (
     make_ego_action_mapper,
     make_inverse_ego_action_mapper,
@@ -337,11 +340,12 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     DESTROY success reads `next_target.was_killed` — stamped on the post-step
     observation from raw env-state kill detection (substeps OR-merged across frame_skip).
     """
-    del info, config
+    del info
     return extract_skill_rewards(
         prev_raw_obs,
         next_raw_obs,
         prev_target,
         next_target,
         life_lost,
+        penalize_collect_death=penalize_collect_death_from_config(config),
     )

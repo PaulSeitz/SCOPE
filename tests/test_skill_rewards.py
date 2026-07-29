@@ -117,6 +117,46 @@ def test_death_does_not_penalize_navigate_or_collect():
     assert not bool(dc[1])
 
 
+def test_death_penalizes_collect_when_opted_in():
+    prev_c, prev_tc = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_c, next_tc = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    rc, dc = extract_skill_rewards(
+        prev_c,
+        next_c,
+        prev_tc,
+        next_tc,
+        jnp.int32(1),
+        penalize_collect_death=True,
+    )
+    assert float(rc[1]) == SKILL_DEATH_PENALTY
+    assert bool(dc[1])
+
+    # NAVIGATE stays exempt even when COLLECT death is on.
+    prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_NAVIGATE)
+    next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(1),
+        penalize_collect_death=True,
+    )
+    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    assert not bool(d[3])
+
+
+def test_penalize_collect_death_from_config():
+    from concept_based_learning.environments.skill_rewards import (
+        penalize_collect_death_from_config,
+    )
+
+    assert penalize_collect_death_from_config(None) is False
+    assert penalize_collect_death_from_config({}) is False
+    assert penalize_collect_death_from_config({"SKILL_DEATH_PENALIZE_COLLECT": True}) is True
+    assert penalize_collect_death_from_config({"SKILL_DEATH_PENALIZE_COLLECT": False}) is False
+
+
 def test_death_penalizes_avoid_and_destroy():
     prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
     next_r, next_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)

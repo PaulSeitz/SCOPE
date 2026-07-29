@@ -18,9 +18,10 @@ Reward magnitudes and trigger conditions:
 
   All skills: success/failure as above. Additionally, AVOID and DESTROY receive
   ``SKILL_DEATH_PENALTY`` (-1) and a skill-done when ``life_lost > 0`` (overrides
-  a same-step success). COLLECT / NAVIGATE / JUMP_OVER do **not** get the death
-  penalty — dying while collecting is usually caused by threats those skills
-  cannot see or control.
+  a same-step success). COLLECT / NAVIGATE / JUMP_OVER do **not** by default —
+  dying while collecting is often caused by threats those skills cannot see.
+  Set ``penalize_collect_death=True`` (config ``SKILL_DEATH_PENALIZE_COLLECT``)
+  to also stamp the death penalty on COLLECT (ablation / pre-7b4348d behavior).
 
 All rewards fire on transition edges so sustained overlap cannot be farmed.
 DESTROY relies on was_killed rather than position-based disappearance detection
@@ -68,8 +69,8 @@ NAVIGATE_PROGRESS_REWARD = 0.01  # distance-to-waypoint decreased this step
 JUMP_SUCCESS_REWARD    =  1.0
 JUMP_FAILURE_REWARD    = -1.0
 # Applied to AVOID / DESTROY on life loss (see extract_skill_rewards).
-# COLLECT / NAVIGATE / JUMP_OVER are exempt — death is usually from threats
-# outside those skills' control.
+# COLLECT is optional via ``penalize_collect_death`` / SKILL_DEATH_PENALIZE_COLLECT.
+# NAVIGATE / JUMP_OVER stay exempt.
 SKILL_DEATH_PENALTY    = -1.0
 
 # Shrink interaction hitboxes for edge-triggered overlap rewards.
@@ -375,6 +376,7 @@ def extract_skill_rewards(
     life_lost,
     *,
     avoid_survival_reward: float = AVOID_SURVIVAL_REWARD,
+    penalize_collect_death: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all skills against a single target.
@@ -388,6 +390,9 @@ def extract_skill_rewards(
         prev_target  : LabeledObjectObservation at t  (stacked or last-frame)
         next_target  : LabeledObjectObservation at t+1 (stacked or last-frame)
         life_lost    : scalar int — number of lives lost this step
+        avoid_survival_reward: per-step AVOID shaping magnitude
+        penalize_collect_death: if True, COLLECT also gets SKILL_DEATH_PENALTY
+            on life loss (default False; AVOID/DESTROY always do)
 
     Returns:
         rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
@@ -418,13 +423,18 @@ def extract_skill_rewards(
     for spec in SKILL_REGISTRY:
         is_label = prev_target.semantic_label == spec.label
         reward, done = spec.compute(ctx)
-        # Death penalty only for combat skills (AVOID / DESTROY).
+        # Death: AVOID/DESTROY always; COLLECT only if opted in.
+        is_combat = jnp.logical_or(
+            spec.label == LABEL_AVOID,
+            spec.label == LABEL_DESTROY,
+        )
+        is_collect_opt_in = jnp.logical_and(
+            penalize_collect_death,
+            spec.label == LABEL_COLLECT,
+        )
         death_applies = jnp.logical_and(
             died,
-            jnp.logical_or(
-                spec.label == LABEL_AVOID,
-                spec.label == LABEL_DESTROY,
-            ),
+            jnp.logical_or(is_combat, is_collect_opt_in),
         )
         reward = jnp.where(death_applies, SKILL_DEATH_PENALTY, reward)
         done = jnp.logical_or(done, death_applies)
@@ -446,3 +456,10 @@ def avoid_survival_reward_from_config(config) -> float:
     if config is None:
         return AVOID_SURVIVAL_REWARD
     return float(config.get("AVOID_SURVIVAL_BONUS", AVOID_SURVIVAL_REWARD))
+
+
+def penalize_collect_death_from_config(config) -> bool:
+    """Whether COLLECT receives the life-loss death penalty (default False)."""
+    if config is None:
+        return False
+    return bool(config.get("SKILL_DEATH_PENALIZE_COLLECT", False))

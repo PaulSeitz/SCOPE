@@ -78,6 +78,8 @@ SKILL_INPUT_MODE: "ego"
 # SKILL_EMBED_DIM: 256
 # SKILL_PIXEL_CNN_CHANNELS: [32, 64]
 # SKILL_PIXEL_CNN_KERNEL_SIZE: [5, 5]
+# If true, COLLECT also gets −1 / skill-done on life loss (default: only AVOID/DESTROY).
+# SKILL_DEATH_PENALIZE_COLLECT: false
 # Input sanity checks (shape/finite/mask invariants); logs on host via callback.
 DEBUG_INPUTS: false
 # DEBUG_INPUTS_ASSERT: true

@@ -280,7 +280,8 @@ def make_train(
                 meta_eps_finish,
                 eps_decay_transition_steps(meta_eps_decay_cfg, config["NUM_UPDATES"]),
             )
-        lr = config["LR"]
+        # Prefer SKILL_LR (same as tandem); fall back to LR for older configs.
+        lr = float(config.get("SKILL_LR", config["LR"]))
 
         tx = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
