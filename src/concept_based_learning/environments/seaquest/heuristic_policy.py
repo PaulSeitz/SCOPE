@@ -12,8 +12,6 @@ Priority (low → high):
       closing on the player; closing AVOID is preferred.
     * sharks (DESTROY): ``CLOSE_DANGER_RANGE`` (tight — allow divers behind).
     * underwater subs (DESTROY): ``SUB_DESTROY_RANGE`` (looser).
-  DESTROY targets nearly vertically aligned (|dx| small, |dy| dominant) are
-  skipped so FORWARD≠dive-into-enemy.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
   at the surface with divers on board, or when divers ≥ 6 — but only if the
   surface sub is inactive / left of the player, or oxygen is critical.
@@ -70,8 +68,6 @@ AVOID_Y_BAND = 14.0  # closing missiles must share a loose y-band
 CLOSING_AVOID_SCORE_BONUS = 8.0
 # Weight |dy| in urgency so same-lane beats objects above/below.
 LANE_URGENCY_WEIGHT = 2.0
-# Skip DESTROY when nearly stacked vertically (|dx| small, |dy| larger).
-VERTICAL_ALIGN_MAX_DX = 8.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
 PLAYER_UNDERWATER_Y = 52.0
@@ -215,11 +211,17 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None, objec
 
 
 def _object_vx(objects):
-    """Per-slot horizontal velocity from the frame stack (0 if stack size < 2)."""
+    """Per-slot horizontal velocity from the frame stack.
+
+    ``objects.x`` can be either ``[stack, slots]`` or ``[batch, stack, slots]``.
+    Always difference along the stack axis (second-to-last), never across batch.
+    """
     x = objects.x
-    if x.shape[0] < 2:
-        return jnp.zeros(x.shape[-1], dtype=jnp.float32)
-    return (x[-1] - x[-2]).astype(jnp.float32)
+    if x.ndim < 2:
+        return jnp.zeros(x.shape[-1:], dtype=jnp.float32)
+    if x.shape[-2] < 2:
+        return jnp.zeros(x.shape[:-2] + (x.shape[-1],), dtype=jnp.float32)
+    return (x[..., -1, :] - x[..., -2, :]).astype(jnp.float32)
 
 
 def _horizontal_urgency(abs_dx, dx, vx):
@@ -279,12 +281,9 @@ def _select_target(raw_observation, objects, prev_target_idx):
         jnp.logical_or(jnp.logical_not(is_surface_sub), surface_sub_eligible),
     )
 
-    # DESTROY: skip nearly vertical alignments (FORWARD would dive into them).
-    nearly_vertical = jnp.logical_and(
-        abs_dx <= VERTICAL_ALIGN_MAX_DX,
-        abs_dy > abs_dx,
-    )
-    destroy_aimable = jnp.logical_and(destroy_mask, jnp.logical_not(nearly_vertical))
+    # DESTROY threats are always aimable; vertical gating removed because sharks
+    # cannot trigger AVOID and were being ignored in lethal top/down approaches.
+    destroy_aimable = destroy_mask
 
     # Per-slot DESTROY range: subs farther, sharks tight (ellipse: y=R, x=1.5R).
     destroy_range_y = jnp.where(is_sub, SUB_DESTROY_RANGE, CLOSE_DANGER_RANGE)
