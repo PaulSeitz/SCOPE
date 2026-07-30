@@ -215,4 +215,5 @@ alg:
   ALWAYS_ACTIVE_SURFACE_TARGET: false # Seaquest: keep surface waypoint target always available. Options: true/false.
   SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
   FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.
+  SURFACE_DANGER_CLOSE_RANGE: 25.0  # Seaquest: while forced to surface, AVOID/DESTROY within this Euclidean px override the WP. <=0 disables. Options: float.
   FREEWAY_THREAT_DIST_THRESH: null  # Freeway threat gating threshold. Options: float > 0 or null.

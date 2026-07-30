@@ -3,6 +3,9 @@ import functools
 import jax.numpy as jnp
 
 from concept_based_learning.environments.manual_policy.state import PolicyState
+from concept_based_learning.environments.seaquest.heuristic_policy import (
+    SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
+)
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
     get_heuristic_target as spaceinvaders_sweep_heuristic_target,
     get_heuristic_target_with_mission as spaceinvaders_sweep_heuristic_with_mission,
@@ -25,6 +28,13 @@ def get_nearest_object_target(raw_obs, objects, last_target, rng, *, no_target_i
     return jnp.where(jnp.any(active), nearest_idx, jnp.int32(no_target_idx))
 
 
+def _seaquest_danger_close_range(config) -> float:
+    """Euclidean px for surface danger override; ``<=0`` disables."""
+    return float(
+        config.get("SURFACE_DANGER_CLOSE_RANGE", SEAQUEST_SURFACE_DANGER_CLOSE_RANGE)
+    )
+
+
 def resolve_heuristic_target_fn(config, env_name: str, components):
     """Pick heuristic meta-policy from HEURISTIC_MODE and environment."""
     heuristic_mode = config.get("HEURISTIC_MODE", "env_specific")
@@ -34,7 +44,12 @@ def resolve_heuristic_target_fn(config, env_name: str, components):
         )
     if heuristic_mode == "sweep" and str(env_name).lower() == "spaceinvaders":
         return spaceinvaders_sweep_heuristic_target
-    return components.get_heuristic_target
+    fn = components.get_heuristic_target
+    if str(env_name).lower() == "seaquest":
+        fn = functools.partial(
+            fn, danger_close_range=_seaquest_danger_close_range(config)
+        )
+    return fn
 
 
 def uses_sweep_mission_state(config, env_name: str) -> bool:
@@ -62,7 +77,12 @@ def resolve_heuristic_with_state_fn(config, env_name: str, components):
     """Return ``(raw, objects, prev, PolicyState, rng) -> (target, PolicyState)`` or None."""
     if uses_sweep_mission_state(config, env_name):
         return _sweep_as_policy_state
-    return getattr(components, "get_heuristic_with_state", None)
+    fn = getattr(components, "get_heuristic_with_state", None)
+    if fn is not None and str(env_name).lower() == "seaquest":
+        return functools.partial(
+            fn, danger_close_range=_seaquest_danger_close_range(config)
+        )
+    return fn
 
 
 def uses_heuristic_policy_state(config, env_name: str, components) -> bool:
