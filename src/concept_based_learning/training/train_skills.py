@@ -52,6 +52,7 @@ from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_FINISH,
     DEFAULT_SKILL_EPS_START,
     eps_decay_transition_steps,
+    skill_learning_rate_schedule,
 )
 from concept_based_learning.training.trajectory_cuts import (
     DEFAULT_SKILL_TARGET_CUT,
@@ -280,8 +281,8 @@ def make_train(
                 meta_eps_finish,
                 eps_decay_transition_steps(meta_eps_decay_cfg, config["NUM_UPDATES"]),
             )
-        # Prefer SKILL_LR (same as tandem); fall back to LR for older configs.
-        lr = float(config.get("SKILL_LR", config["LR"]))
+        # Prefer SKILL_LR (same as tandem); optional linear decay via SKILL_LR_FINISH.
+        lr = skill_learning_rate_schedule(config, config["NUM_UPDATES"])
 
         tx = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),

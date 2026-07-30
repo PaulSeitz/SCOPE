@@ -139,6 +139,8 @@ alg:
 
   # Skill-specific optimization and returns.
   SKILL_LR: 0.0005                  # Skill optimizer LR override. Options: float > 0.
+  # SKILL_LR_FINISH: null            # If set, linear-decay SKILL_LR → this over SKILL_LR_DECAY.
+  # SKILL_LR_DECAY: 1.0              # Ratio of updates (≤1) or absolute update count.
   SKILL_GAMMA: 0.99                 # Skill discount override. Options: float in (0,1].
   SKILL_LAMBDA: 0.65                # Skill lambda override. Options: float in [0,1].
   SKILL_BOOTSTRAP: "q_lambda"       # Skill target style. Options: "q_lambda","one_step".

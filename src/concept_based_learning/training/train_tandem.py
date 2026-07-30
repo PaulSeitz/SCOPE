@@ -41,6 +41,7 @@ from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_FINISH,
     DEFAULT_SKILL_EPS_START,
     eps_decay_transition_steps,
+    skill_learning_rate_schedule,
 )
 from concept_based_learning.training.trajectory_cuts import (
     DEFAULT_SKILL_TARGET_CUT,
@@ -310,7 +311,7 @@ def make_tandem_train(
 
     def init_runner(rng, init_meta_params=None, init_skill_params=None):
         """R0 — initialize meta/skill train states and env carry for one seed."""
-        lr_skill = config.get("SKILL_LR", config["LR"])
+        lr_skill = skill_learning_rate_schedule(config, config["NUM_UPDATES"])
         lr_meta = config.get("META_LR", config["LR"] * 0.1)
 
         tx_skill = optax.chain(
