@@ -63,6 +63,8 @@ alg:
   STICKY_ACTIONS: false
   EPISODIC_LIFE: true
   FRAME_STACK_SIZE: 4
+  # No Atari action-repeat: react every env frame (velocity is in ego feats).
+  FRAME_SKIP: 1
   TOTAL_TIMESTEPS: 49938432
   NUM_ENVS: 256
   NUM_STEPS: 128

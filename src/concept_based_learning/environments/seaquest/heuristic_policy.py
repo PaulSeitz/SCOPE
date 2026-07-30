@@ -2,7 +2,8 @@
 Heuristic meta-policy for Seaquest.
 
 Simple nearest-object targeting:
-- Always pick the nearest active game object (Euclidean, object centers).
+- Always pick the nearest active game object using the same AABB surface-gap
+  distance as skill ego features (edge/corner gap along the centre→centre ray).
 - Surface sub (slot 29) is ignored unless the player is near the surface and
   within ``SURFACE_SUB_NEAR_RANGE``.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
@@ -31,6 +32,7 @@ from concept_based_learning.environments.manual_policy.state import (
     NO_TARGET_IDX,
     PolicyState,
 )
+from concept_based_learning.observations.egocentric import aabb_surface_gap_px
 
 # Last game-object slot (index 0 is reserved meta NOOP).
 SURFACE_DUMMY_IDX = 34
@@ -40,7 +42,7 @@ SURFACE_SUB_IDX = 29
 OXYGEN_LOW_THRESHOLD = 15.0
 CRITICAL_OXYGEN_THRESHOLD = 5.0
 SURFACE_SUB_NEAR_RANGE = 15.0
-# While forced to surface, AVOID/DESTROY within this Euclidean radius interrupt.
+# While forced to surface, AVOID/DESTROY within this surface-gap radius interrupt.
 # Overridable via config ``SURFACE_DANGER_CLOSE_RANGE`` (see resolve_heuristic_*).
 SURFACE_DANGER_CLOSE_RANGE = 25.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
@@ -180,7 +182,7 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None, objec
 
 
 def _select_target(raw_observation, objects, prev_target_idx, *, danger_close_range=None):
-    """Nearest object; surface WP with danger-close override."""
+    """Nearest object by AABB surface gap; surface WP with danger-close override."""
     del prev_target_idx
     if danger_close_range is None:
         danger_close_range = SURFACE_DANGER_CLOSE_RANGE
@@ -188,18 +190,21 @@ def _select_target(raw_observation, objects, prev_target_idx, *, danger_close_ra
 
     px = raw_observation.player.x[-1]
     py = raw_observation.player.y[-1]
+    pw = raw_observation.player.width[-1]
+    ph = raw_observation.player.height[-1]
 
     ox = objects.x[-1]
     oy = objects.y[-1]
+    ow = objects.width[-1]
+    oh = objects.height[-1]
     active_mask = objects.active[-1] > 0.5
     idxs = jnp.arange(active_mask.shape[0])
     labels = objects.semantic_label[-1]
 
-    px_center = px + (raw_observation.player.width[-1] / 2.0)
-    py_center = py + (raw_observation.player.height[-1] / 2.0)
-    ox_center = ox + (objects.width[-1] / 2.0)
-    oy_center = oy + (objects.height[-1] / 2.0)
-    distances = jnp.sqrt((px_center - ox_center) ** 2 + (py_center - oy_center) ** 2)
+    # Same edge/surface-gap metric as skill ego distance features.
+    distances = aabb_surface_gap_px(
+        px, py, pw, ph, ox, oy, ow, oh, y_is_bottom_edge=False
+    )
 
     # Exclude surface waypoint from normal nearest scoring.
     selectable = jnp.logical_and(active_mask, idxs != SURFACE_DUMMY_IDX)

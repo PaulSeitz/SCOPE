@@ -270,6 +270,40 @@ def _box_surface_extent(half_w: jnp.ndarray, half_h: jnp.ndarray, cos_t: jnp.nda
     return jnp.sqrt((t_exit * cos_t) ** 2 + (t_exit * sin_t) ** 2)
 
 
+def aabb_surface_gap_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Nearest-surface gap between two AABBs (same geometry as skill ego distance).
+
+    Centre→centre ray, minus each box's surface extent along that ray; clamped
+    at 0 when boxes overlap/touch. All args broadcast (scalars vs per-object).
+    """
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    center_dist = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
+    theta = jnp.arctan2(dy, dx)
+    cos_t = jnp.cos(theta)
+    sin_t = jnp.sin(theta)
+    p_extent = _box_surface_extent(p_w / 2.0, p_h / 2.0, cos_t, sin_t)
+    t_extent = _box_surface_extent(t_w / 2.0, t_h / 2.0, cos_t, sin_t)
+    return jnp.maximum(center_dist - p_extent - t_extent, 0.0)
+
+
 def _frame_geometry_target_aligned(
     p_x,
     p_y,
@@ -300,27 +334,24 @@ def _frame_geometry_target_aligned(
     """
     # IMPORTANT: centre computation must match the environment's y convention.
     # If this drifts from action mapping/reward geometry, transfer can silently fail.
+    distance = aabb_surface_gap_px(
+        p_x,
+        p_y,
+        p_w,
+        p_h,
+        t_x,
+        t_y,
+        t_w,
+        t_h,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
     p_cx = p_x + p_w / 2.0
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-
     dx = t_cx - p_cx
     dy = t_cy - p_cy
-    center_dist = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
-
-    # θ_target: angle of the centre→centre vector in screen-Y-down coordinates.
-    # Kept centre-based so "which direction is the target?" is stable and continuous.
     theta_target = jnp.arctan2(dy, dx)
-    cos_t = jnp.cos(theta_target)
-    sin_t = jnp.sin(theta_target)
-
-    # Subtract the surface extent of each box along the line of sight so that
-    # distance reflects the actual gap between the nearest surfaces / corners.
-    p_extent = _box_surface_extent(p_w / 2.0, p_h / 2.0, cos_t, sin_t)
-    t_extent = _box_surface_extent(t_w / 2.0, t_h / 2.0, cos_t, sin_t)
-    # Clamp to zero: overlapping / touching boxes should report distance = 0.
-    distance = jnp.maximum(center_dist - p_extent - t_extent, 0.0)
 
     # ψ: player physical facing relative to θ_target.
     # Wrap to [-π, π] so sin/cos encoding is smooth and unambiguous.
