@@ -4,16 +4,26 @@ from concept_based_learning.environments.labeling_wrapper import JaxatariSemanti
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
-    LABEL_COLLECT,
     LABEL_AVOID,
     LABEL_NOOP,
 )
-from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    del info
     return extract_skill_rewards(
-        prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
     )
 
 
@@ -106,7 +116,8 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         is_on_screen = (final_x_unpadded + final_w_unpadded > 0) & (final_x_unpadded < 160)
 
         # Snap one off-screen DESTROY target to the screen edge so the meta-policy
-        # can navigate toward incoming threats (label stays DESTROY — no COLLECT reward).
+        # can navigate toward incoming threats (label stays DESTROY — no
+        # NAVIGATE/COLLECT reward on arrival).
         is_enemy = final_labels_unpadded == LABEL_DESTROY
         is_offscreen_enemy = jnp.logical_and(
             is_enemy,
@@ -136,7 +147,8 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         final_y_unpadded = final_y_unpadded.at[virtual_idx].set(
             jnp.where(has_virtual_waypoint, virtual_y, final_y_unpadded[virtual_idx])
         )
-        # Keep DESTROY label so COLLECT rewards cannot fire at the screen-edge waypoint.
+        # Keep DESTROY label so NAVIGATE/COLLECT rewards cannot fire at the
+        # screen-edge proxy — only a real kill stamps DESTROY success.
         final_labels_unpadded = final_labels_unpadded.at[virtual_idx].set(
             jnp.where(has_virtual_waypoint, LABEL_DESTROY, final_labels_unpadded[virtual_idx])
         )

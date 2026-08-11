@@ -304,6 +304,34 @@ def aabb_surface_gap_px(
     return jnp.maximum(center_dist - p_extent - t_extent, 0.0)
 
 
+def player_object_aabb_gaps(raw_observation, objects, *, y_is_bottom_edge=None):
+    """
+    Per-object AABB surface gaps from the controllable agent to ``objects``.
+
+    Returns ``(distances, p_cx, p_cy, o_cx, o_cy)`` using the last stacked frame.
+    ``y_is_bottom_edge`` defaults to :func:`_uses_bottom_edge_y`.
+    """
+    if y_is_bottom_edge is None:
+        y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    player = _get_player(raw_observation)
+    px = player.x[-1]
+    py = player.y[-1]
+    pw = player.width[-1]
+    ph = player.height[-1]
+    ox = objects.x[-1]
+    oy = objects.y[-1]
+    ow = objects.width[-1]
+    oh = objects.height[-1]
+    distances = aabb_surface_gap_px(
+        px, py, pw, ph, ox, oy, ow, oh, y_is_bottom_edge=y_is_bottom_edge
+    )
+    p_cx = px + pw / 2.0
+    p_cy = _center_y(py, ph, y_is_bottom_edge=y_is_bottom_edge)
+    o_cx = ox + ow / 2.0
+    o_cy = _center_y(oy, oh, y_is_bottom_edge=y_is_bottom_edge)
+    return distances, p_cx, p_cy, o_cx, o_cy
+
+
 def _frame_geometry_target_aligned(
     p_x,
     p_y,

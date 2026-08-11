@@ -288,8 +288,8 @@ def _interrupt_metric(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Return (score, in_range) for interrupt selection.
 
-    Isotropic: score = Euclidean distance, in_range = dist <= within.
-    Axis-weighted: score = elliptical radius, in_range = ellipse <= 1.
+    Isotropic: score = AABB surface gap, in_range = dist <= within.
+    Axis-weighted: score = elliptical radius on centre offsets, in_range = ellipse <= 1.
     """
     if within_x is not None or within_y is not None:
         rx = float(within_x if within_x is not None else within)

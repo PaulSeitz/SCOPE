@@ -23,8 +23,8 @@ alg:
   # Filled in by orchestrator at runtime from Phase 1 output path
   INIT_MODEL_PATH: "./outputs/models/sequential_eval/phase1_skills/seaquest/hierarchical_pqn_seaquest_seed44.safetensors"
 
-  NUM_SKILLS: 3
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
+  NUM_SKILLS: 4
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"]
   MAX_OBJECTS: 35
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128

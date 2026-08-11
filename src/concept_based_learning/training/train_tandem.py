@@ -9,6 +9,7 @@ import optax
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.networks.skill_network import (
+    OBJECT_CONDITIONED_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
     QNetwork as SkillQNetwork,
     CustomTrainState,
@@ -132,6 +133,8 @@ def make_tandem_train(
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
     skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
+    use_object_skill = skill_input_mode in OBJECT_CONDITIONED_SKILL_INPUT_MODES
     meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
     debug_inputs = input_debug_enabled(config)
     skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
@@ -371,6 +374,7 @@ def make_tandem_train(
                 train=False,
                 target_idx=probe_target,
                 pixel_obs=probe_pixel,
+                objects=probe_obs.objects,
             )
             return CustomTrainState.create(
                 apply_fn=skill_network.apply,
@@ -571,7 +575,8 @@ def make_tandem_train(
                     ego_obses,
                     train=False,
                     target_idx=safe_target_idxs,
-                    pixel_obs=pixel_obses,
+                    pixel_obs=pixel_obses if use_pixel_skill else None,
+                    objects=last_obs.objects if use_object_skill else None,
                 )
                 eps_skill = jnp.full(
                     config["NUM_ENVS"],
@@ -911,6 +916,7 @@ def make_tandem_train(
                     skill_rewards_all = _gather_objects(skill_rewards_all_full)
                     skill_done_all = _gather_objects(skill_done_all_full)
                     relabel_mask = _gather_objects(relabel_mask_full)
+                    object_idx_all = gather_idx
                 else:
                     ego_obs_all = ego_obs_all_full
                     next_ego_obs_all = next_ego_obs_all_full
@@ -918,6 +924,10 @@ def make_tandem_train(
                     skill_rewards_all = skill_rewards_all_full
                     skill_done_all = skill_done_all_full
                     relabel_mask = relabel_mask_full
+                    object_idx_all = jnp.broadcast_to(
+                        obj_ids[None, :],
+                        (config["NUM_ENVS"], max_objects),
+                    )
             else:
                 base_valid = target_obj_idxs != no_target_idx
                 if meta_noop_enabled:
@@ -930,6 +940,7 @@ def make_tandem_train(
                 skill_rewards_all = skill_rewards_for_training[:, jnp.newaxis, :]
                 skill_done_all = skill_done[:, jnp.newaxis, :]
                 relabel_mask = base_valid[:, jnp.newaxis]
+                object_idx_all = safe_target_idxs[:, jnp.newaxis]
 
             transition = TandemTransition(
                 done=new_done,
@@ -966,6 +977,7 @@ def make_tandem_train(
                 skill_rewards_all=skill_rewards_all,
                 skill_done_all=skill_done_all,
                 relabel_mask=relabel_mask,
+                object_idx_all=object_idx_all,
                 env_reward=base_env_reward,
             )
             return (
@@ -1242,21 +1254,16 @@ def make_tandem_train(
                 timesteps=s_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
             )
             use_one_step_td = skill_bootstrap == "one_step"
-            use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
 
             if relabel_all_objects:
                 # Match train_skills: per-object λ targets with per-slot switch cuts.
-                obj_ids = jnp.arange(
-                    transitions.next_ego_obs_all.shape[2], dtype=jnp.int32
+                target_idx_all = transitions.object_idx_all
+                next_pixel_obs_all = (
+                    transitions.next_pixel_obs if use_pixel_skill else None
                 )
-                target_idx_all = jnp.broadcast_to(
-                    obj_ids[None, None, :],
-                    transitions.next_ego_obs_all.shape[:3],
+                next_objects_all = (
+                    transitions.next_objects if use_object_skill else None
                 )
-                if use_pixel_skill:
-                    next_pixel_obs_all = transitions.next_pixel_obs
-                else:
-                    next_pixel_obs_all = None
                 next_q_max_all = chunked_skill_network_q_max(
                     skill_network.apply,
                     s_state.params,
@@ -1264,6 +1271,7 @@ def make_tandem_train(
                     transitions.next_ego_obs_all,
                     target_idx=target_idx_all,
                     pixel_obs=next_pixel_obs_all,
+                    objects=next_objects_all,
                     chunk_steps=skill_bootstrap_chunk_steps,
                     train=False,
                 )
@@ -1326,8 +1334,9 @@ def make_tandem_train(
                     {"params": s_state.params, "batch_stats": s_state.batch_stats},
                     transitions.next_ego_obs_all,
                     train=False,
-                    target_idx=transitions.target_idx,
+                    target_idx=transitions.object_idx_all,
                     pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
+                    objects=transitions.next_objects if use_object_skill else None,
                 )
                 next_q_max_single = jnp.max(next_q_single, axis=-1)
                 target_switch_cut_padded = skill_target_switch_cut_env_padded(
@@ -1350,8 +1359,9 @@ def make_tandem_train(
                     {"params": s_state.params, "batch_stats": s_state.batch_stats},
                     transitions.next_ego_obs_all,
                     train=False,
-                    target_idx=transitions.target_idx,
+                    target_idx=transitions.object_idx_all,
                     pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
+                    objects=transitions.next_objects if use_object_skill else None,
                 )
                 next_q_max_single = jnp.max(next_q_single_all, axis=-1)
 
@@ -1408,9 +1418,12 @@ def make_tandem_train(
                     "ego_action_all": transitions.ego_action_all,
                     "active_skill": transitions.active_skill,
                     "target_idx": transitions.target_idx,
+                    "object_idx_all": transitions.object_idx_all,
                 }
                 if use_pixel_skill:
                     train_batch["pixel_obs"] = transitions.pixel_obs
+                if use_object_skill:
+                    train_batch["objects"] = transitions.objects
                 minibatches = jax.tree.map(
                     lambda x: preprocess_transition(x, rng_perm),
                     train_batch,
@@ -1422,31 +1435,14 @@ def make_tandem_train(
                     minibatch, target = minibatch_and_target
 
                     def _loss_fn(params):
-                        if minibatch["ego_obs_all"].ndim == 3:
-                            n_objects = minibatch["ego_obs_all"].shape[1]
-                            if n_objects == 1:
-                                mb_target_idx = minibatch["target_idx"]
-                            else:
-                                obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
-                                mb_target_idx = jnp.broadcast_to(
-                                    obj_ids_local[None, :],
-                                    minibatch["ego_obs_all"].shape[:2],
-                                )
-                            if use_pixel_skill:
-                                mb_pixel_obs = minibatch["pixel_obs"]
-                            else:
-                                mb_pixel_obs = None
-                        else:
-                            n_objects = minibatch["ego_obs_all"].shape[1]
-                            obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
-                            mb_target_idx = jnp.broadcast_to(
-                                obj_ids_local[None, :],
-                                minibatch["ego_obs_all"].shape[:2],
-                            )
-                            if use_pixel_skill:
-                                mb_pixel_obs = minibatch["pixel_obs"]
-                            else:
-                                mb_pixel_obs = None
+                        n_objects = minibatch["ego_obs_all"].shape[1]
+                        mb_target_idx = minibatch["object_idx_all"]
+                        mb_pixel_obs = (
+                            minibatch["pixel_obs"] if use_pixel_skill else None
+                        )
+                        mb_objects = (
+                            minibatch["objects"] if use_object_skill else None
+                        )
                         if debug_inputs:
                             maybe_jax_check_skill_minibatch(
                                 config,
@@ -1467,6 +1463,7 @@ def make_tandem_train(
                             mutable=["batch_stats"],
                             target_idx=mb_target_idx,
                             pixel_obs=mb_pixel_obs,
+                            objects=mb_objects,
                         )
                         chosen_q = jnp.take_along_axis(
                             q_vals,
@@ -1476,7 +1473,6 @@ def make_tandem_train(
                         if config.get("OFF_POLICY", True):
                             valid = minibatch["relabel_mask"]
                         else:
-                            n_objects = minibatch["ego_obs_all"].shape[1]
                             if n_objects == 1:
                                 on_policy = (
                                     minibatch["active_skill"][:, jnp.newaxis]
@@ -1484,7 +1480,7 @@ def make_tandem_train(
                                 )
                             else:
                                 chosen_obj_mask = (
-                                    jnp.arange(n_objects)[jnp.newaxis, :]
+                                    minibatch["object_idx_all"]
                                     == minibatch["target_idx"][:, jnp.newaxis]
                                 )
                                 on_policy = jnp.logical_and(

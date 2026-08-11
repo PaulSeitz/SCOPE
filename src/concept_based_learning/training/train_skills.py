@@ -10,13 +10,14 @@ Implements:
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 import optax
+from pathlib import Path
 
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.observations.egocentric import _get_player as _get_player_entity
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import (
+    OBJECT_CONDITIONED_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
     QNetwork,
     CustomTrainState,
@@ -46,6 +47,13 @@ from concept_based_learning.training.logging_metrics import (
     reset_flag_combo_cumulative,
     resolve_skill_names,
     selected_skill_outcome_metrics,
+)
+from concept_based_learning.paper_eval.env_metrics import (
+    append_training_metrics_csv,
+    init_metric_matrix,
+    latch_and_reset_metric_matrix,
+    make_vmapped_metric_update,
+    metric_matrix_to_log_dict,
 )
 from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_DECAY,
@@ -148,6 +156,17 @@ def make_train(
     skill_names = resolve_skill_names(config, NUM_SKILLS)
 
     log_freeway_car_hits = str(config.get("ENV_NAME", "")).lower() == "freeway"
+    update_env_metrics_vmap = make_vmapped_metric_update(
+        str(config.get("ENV_NAME", "Seaquest")),
+        has_semantic_obs=True,
+    )
+    _save_root = config.get("SAVE_PATH") or "./outputs/models"
+    _env_for_csv = str(config.get("ENV_NAME", "seaquest")).lower()
+    training_metrics_csv = (
+        Path(_save_root) / _env_for_csv / "training_metrics.csv"
+        if not str(_save_root).startswith("gs://")
+        else None
+    )
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]
     meta_noop_enabled = meta_noop_target_enabled(config)
     meta_noop_idx = meta_noop_target_idx(config)
@@ -180,6 +199,8 @@ def make_train(
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
     skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
+    use_object_skill = skill_input_mode in OBJECT_CONDITIONED_SKILL_INPUT_MODES
     debug_inputs = input_debug_enabled(config)
     skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
     skill_pixel_channels = config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))
@@ -298,6 +319,7 @@ def make_train(
                     train=False,
                     target_idx=probe_target,
                     pixel_obs=probe_pixel,
+                    objects=probe_objects,
                 )
                 params_local = network_variables["params"]
                 batch_stats_local = network_variables.get("batch_stats", {})
@@ -332,6 +354,7 @@ def make_train(
             if probe_obs.pixel_observation is not None
             else probe_obs.raw_observation
         )
+        probe_objects = probe_obs.objects
         if debug_inputs:
             maybe_jax_check_probe_inputs(
                 config,
@@ -340,7 +363,11 @@ def make_train(
                 probe_target=probe_target,
                 meta_pixel=probe_obs.pixel_observation,
             )
-        ego_feat_dim = int(probe_ego.shape[-1])
+        if skill_input_mode in ("oc_embed", "object_embed", "object_embedding"):
+            # Dummy init width; real OC input is built from objects inside the net.
+            ego_feat_dim = skill_embed_dim
+        else:
+            ego_feat_dim = int(probe_ego.shape[-1])
 
         if params is None:
             train_states = jax.vmap(create_agent, in_axes=(0, None, None, None))(
@@ -363,6 +390,8 @@ def make_train(
                 returned_game_returns,
                 returned_game_lengths,
                 game_lengths,
+                running_env_metrics,
+                returned_env_metrics,
                 rng,
             ) = runner_state
 
@@ -383,6 +412,8 @@ def make_train(
                     returned_game_returns,
                     returned_game_lengths,
                     game_lengths,
+                    running_env_metrics,
+                    returned_env_metrics,
                 ) = carry
 
                 rng, rng_rest = jax.random.split(rng)
@@ -506,7 +537,8 @@ def make_train(
                         ego_obses,
                         train=False,
                         target_idx=safe_target_idxs,
-                        pixel_obs=pixel_obses,
+                        pixel_obs=pixel_obses if use_pixel_skill else None,
+                        objects=last_obs.objects if use_object_skill else None,
                     )
                     _rngs = jax.random.split(rng_skill, config["NUM_ENVS"])
                     eps = jnp.full(config["NUM_ENVS"], eps_scheduler(train_state.n_updates))
@@ -765,6 +797,7 @@ def make_train(
                         rewards_all = _gather_objects(rewards_all_full)
                         skill_done_all = _gather_objects(skill_done_all_full)
                         relabel_mask = _gather_objects(relabel_mask_full)
+                        object_idx_all = gather_idx
                     else:
                         ego_obs_all = ego_obs_all_full
                         next_ego_obs_all = next_ego_obs_all_full
@@ -772,6 +805,10 @@ def make_train(
                         rewards_all = rewards_all_full
                         skill_done_all = skill_done_all_full
                         relabel_mask = relabel_mask_full
+                        object_idx_all = jnp.broadcast_to(
+                            obj_ids[None, :],
+                            (config["NUM_ENVS"], MAX_OBJECTS),
+                        )
                 else:
                     base_valid = jnp.logical_not(force_noop | meta_fire)
                     ego_obs_all = ego_obses[:, jnp.newaxis, :]
@@ -780,10 +817,22 @@ def make_train(
                     rewards_all = skill_rewards[:, jnp.newaxis, :]
                     skill_done_all = skill_done[:, jnp.newaxis, :]
                     relabel_mask = base_valid[:, jnp.newaxis]
+                    object_idx_all = safe_target_idxs[:, jnp.newaxis]
 
 
                 # Prefer info["env_reward"] so CLIP_REWARD does not distort logged returns.
                 log_rewards = logging_env_reward(info, raw_rewards)
+                # Env-aligned counters from pre-reset state (autoreset would wipe scores).
+                running_env_metrics = update_env_metrics_vmap(
+                    running_env_metrics,
+                    env_state,
+                    step_env_state,
+                    step_obs,
+                    log_rewards,
+                )
+                running_env_metrics, returned_env_metrics = latch_and_reset_metric_matrix(
+                    running_env_metrics, returned_env_metrics, game_over
+                )
                 (
                     running_returns,
                     returned_episode_returns,
@@ -825,6 +874,9 @@ def make_train(
                         if new_obs.pixel_observation is not None
                         else new_obs.raw_observation
                     ),
+                    objects=last_obs.objects,
+                    next_objects=new_obs.objects,
+                    object_idx_all=object_idx_all,
                     ego_action=chosen_ego_actions,
                     active_skill=active_skills,
                     q_val=all_skill_q_vals,
@@ -856,6 +908,8 @@ def make_train(
                     returned_game_returns,
                     returned_game_lengths,
                     game_lengths,
+                    running_env_metrics,
+                    returned_env_metrics,
                 ), (transition, info)
 
             rng, _rng = jax.random.split(rng)
@@ -888,6 +942,8 @@ def make_train(
                     returned_game_returns,
                     returned_game_lengths,
                     game_lengths,
+                    running_env_metrics,
+                    returned_env_metrics,
                 ),
                 None,
                 config["NUM_STEPS"],
@@ -919,6 +975,8 @@ def make_train(
                 returned_game_returns,
                 returned_game_lengths,
                 game_lengths,
+                running_env_metrics,
+                returned_env_metrics,
             ) = carry_final
             expl_state = (last_obs, env_state)
 
@@ -927,23 +985,19 @@ def make_train(
                     timesteps=train_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
                 use_one_step_td = skill_bootstrap == "one_step"
-                use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
 
                 if relabel_all_objects:
                     # Lambda returns over [NUM_STEPS, NUM_ENVS, MAX_OBJECTS].
                     # Bootstrap Q-values come from the online network applied to
                     # next_ego_obs_all (all steps, all objects at once).
-                    obj_ids = jnp.arange(
-                        transitions.next_ego_obs_all.shape[2], dtype=jnp.int32
+                    # Prefer stored global object indices (needed for outline / is_target).
+                    target_idx_all = transitions.object_idx_all
+                    next_pixel_obs_all = (
+                        transitions.next_pixel_obs if use_pixel_skill else None
                     )
-                    target_idx_all = jnp.broadcast_to(
-                        obj_ids[None, None, :],
-                        transitions.next_ego_obs_all.shape[:3],
+                    next_objects_all = (
+                        transitions.next_objects if use_object_skill else None
                     )
-                    if use_pixel_skill:
-                        next_pixel_obs_all = transitions.next_pixel_obs
-                    else:
-                        next_pixel_obs_all = None
                     next_q_max_all = chunked_skill_network_q_max(
                         skill_network.apply,
                         train_state.params,
@@ -951,6 +1005,7 @@ def make_train(
                         transitions.next_ego_obs_all,
                         target_idx=target_idx_all,
                         pixel_obs=next_pixel_obs_all,
+                        objects=next_objects_all,
                         chunk_steps=skill_bootstrap_chunk_steps,
                         train=False,
                     )
@@ -1014,6 +1069,7 @@ def make_train(
                         train=False,
                         target_idx=transitions.target_idx,
                         pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
+                        objects=transitions.next_objects if use_object_skill else None,
                     )
                     next_q_max_single = jnp.max(next_q_single, axis=-1)
                     target_switch_cut_padded = skill_target_switch_cut_env_padded(
@@ -1039,6 +1095,7 @@ def make_train(
                         train=False,
                         target_idx=transitions.target_idx,
                         pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
+                        objects=transitions.next_objects if use_object_skill else None,
                     )
                     next_q_max_single = jnp.max(next_q_single_all, axis=-1)  # [T, E]
 
@@ -1089,31 +1146,14 @@ def make_train(
                         minibatch, target = minibatch_and_target
 
                         def _loss_fn(params):
-                            if minibatch["ego_obs_all"].ndim == 3:
-                                n_objects = minibatch["ego_obs_all"].shape[1]
-                                if n_objects == 1:
-                                    mb_target_idx = minibatch["target_idx"]
-                                else:
-                                    obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
-                                    mb_target_idx = jnp.broadcast_to(
-                                        obj_ids_local[None, :],
-                                        minibatch["ego_obs_all"].shape[:2],
-                                    )
-                                if use_pixel_skill:
-                                    mb_pixel_obs = minibatch["pixel_obs"]
-                                else:
-                                    mb_pixel_obs = None
-                            else:
-                                n_objects = minibatch["ego_obs_all"].shape[1]
-                                obj_ids_local = jnp.arange(n_objects, dtype=jnp.int32)
-                                mb_target_idx = jnp.broadcast_to(
-                                    obj_ids_local[None, :],
-                                    minibatch["ego_obs_all"].shape[:2],
-                                )
-                                if use_pixel_skill:
-                                    mb_pixel_obs = minibatch["pixel_obs"]
-                                else:
-                                    mb_pixel_obs = None
+                            n_objects = minibatch["ego_obs_all"].shape[1]
+                            mb_target_idx = minibatch["object_idx_all"]
+                            mb_pixel_obs = (
+                                minibatch["pixel_obs"] if use_pixel_skill else None
+                            )
+                            mb_objects = (
+                                minibatch["objects"] if use_object_skill else None
+                            )
                             if debug_inputs:
                                 maybe_jax_check_skill_minibatch(
                                     config,
@@ -1131,6 +1171,7 @@ def make_train(
                                 mutable=["batch_stats"],
                                 target_idx=mb_target_idx,
                                 pixel_obs=mb_pixel_obs,
+                                objects=mb_objects,
                             )
                             chosen_action_qvals = jnp.take_along_axis(
                                 q_vals,
@@ -1141,7 +1182,6 @@ def make_train(
                             if config.get("OFF_POLICY", True):
                                 valid = minibatch["relabel_mask"]
                             else:
-                                n_objects = minibatch["ego_obs_all"].shape[1]
                                 # Single-object batches store the chosen target at slot 0;
                                 # do not compare global target_idx to that lone slot.
                                 if n_objects == 1:
@@ -1151,7 +1191,7 @@ def make_train(
                                     )
                                 else:
                                     chosen_obj_mask = (
-                                        jnp.arange(n_objects)[jnp.newaxis, :]
+                                        minibatch["object_idx_all"]
                                         == minibatch["target_idx"][:, jnp.newaxis]
                                     )
                                     on_policy = jnp.logical_and(
@@ -1195,9 +1235,12 @@ def make_train(
                         "ego_action_all": transitions.ego_action_all,
                         "active_skill": transitions.active_skill,
                         "target_idx": transitions.target_idx,
+                        "object_idx_all": transitions.object_idx_all,
                     }
                     if use_pixel_skill:
                         train_batch["pixel_obs"] = transitions.pixel_obs
+                    if use_object_skill:
+                        train_batch["objects"] = transitions.objects
                     minibatches = jax.tree.map(
                         lambda x: preprocess_transition(x, _rng), train_batch
                     )
@@ -1283,6 +1326,7 @@ def make_train(
                     returned_game_lengths=returned_game_lengths,
                 )
             )
+            metrics.update(metric_matrix_to_log_dict(returned_env_metrics))
 
             if log_freeway_car_hits:
                 metrics["freeway/car_hit_rate"] = (
@@ -1294,15 +1338,25 @@ def make_train(
             metrics["global/update_steps"] = step_offset_updates + train_states.n_updates[0]
             metrics["env/step"] = step_offset_timesteps + train_states.timesteps[0]
 
-            if config.get("WANDB_MODE", "disabled") != "disabled":
+            if config.get("WANDB_MODE", "disabled") != "disabled" or training_metrics_csv is not None:
                 def _wandb_log_cb(m):
+                    try:
+                        log_dict = metrics_to_wandb_log_dict(m)
+                    except Exception:
+                        return
+                    if training_metrics_csv is not None:
+                        try:
+                            append_training_metrics_csv(training_metrics_csv, log_dict)
+                        except Exception:
+                            pass
+                    if config.get("WANDB_MODE", "disabled") == "disabled":
+                        return
                     try:
                         import wandb
                     except ImportError:
                         return
                     if wandb.run is None:
                         return
-                    log_dict = metrics_to_wandb_log_dict(m)
                     local_step = int(log_dict.get("update_steps", 0))
                     step = int(
                         log_dict.get(
@@ -1329,6 +1383,8 @@ def make_train(
                 returned_game_returns,
                 returned_game_lengths,
                 game_lengths,
+                running_env_metrics,
+                returned_env_metrics,
                 rng,
             )
             return runner_state, metrics
@@ -1349,6 +1405,8 @@ def make_train(
             returned_game_lengths,
             game_lengths,
         ) = init_full_game_episode_stats(config["NUM_ENVS"])
+        running_env_metrics = init_metric_matrix(config["NUM_ENVS"])
+        returned_env_metrics = init_metric_matrix(config["NUM_ENVS"])
         runner_state = (
             train_states,
             expl_state,
@@ -1360,6 +1418,8 @@ def make_train(
             returned_game_returns,
             returned_game_lengths,
             game_lengths,
+            running_env_metrics,
+            returned_env_metrics,
             _rng,
         )
 
@@ -1371,6 +1431,8 @@ def make_train(
     def eval_rollout(runner_state, eval_rng, step_number, max_frames=None):
         """Run one greedy evaluation episode; returns rollout data for video recording."""
         max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
+        frame_stride = max(1, int(config.get("VIDEO_FRAME_STRIDE", 1)))
+        max_env_steps = int(max_frames) * frame_stride
         (
             train_states,
             _expl_state,
@@ -1382,6 +1444,8 @@ def make_train(
             _returned_game_returns,
             _returned_game_lengths,
             _game_lengths,
+            _running_env_metrics,
+            _returned_env_metrics,
             _train_rng,
         ) = runner_state
 
@@ -1411,7 +1475,7 @@ def make_train(
         prev_target_idx = no_target_idx
         policy_state = initial_policy_state(no_target_idx)
 
-        for _ in range(max_frames):
+        for step_i in range(max_env_steps):
             rng, step_key = jax.random.split(rng)
             if fixed_target_idx is not None:
                 target_obj_idxs = fixed_target_idx
@@ -1477,6 +1541,7 @@ def make_train(
                         train=False,
                         target_idx=jnp.array(target_obj_idxs, dtype=jnp.int32),
                         pixel_obs=eval_pixel_obs,
+                        objects=obs.objects if use_object_skill else None,
                     )
                 )(train_states)
                 q_vals = jnp.squeeze(q_vals, axis=1)
@@ -1501,16 +1566,18 @@ def make_train(
 
             obs, state, _reward, done, _info = test_env.step(state, global_action)
 
-            states_list.append(state)
-            active_list.append(active_skills)
-            combined_qs_list.append(np.array(combined_q))
-            dones_list.append(float(done))
-            target_obj_idxs_list.append(target_obj_idxs)
-            obj_x_list.append(np.array(obs.objects.x[-1]))
-            obj_y_list.append(np.array(obs.objects.y[-1]))
-            obj_w_list.append(np.array(obs.objects.width[-1]))
-            obj_h_list.append(np.array(obs.objects.height[-1]))
-            obj_active_list.append(np.array(obs.objects.active[-1]))
+            log_frame = (step_i % frame_stride == 0) or bool(done)
+            if log_frame:
+                states_list.append(state)
+                active_list.append(active_skills)
+                combined_qs_list.append(np.array(combined_q))
+                dones_list.append(float(done))
+                target_obj_idxs_list.append(target_obj_idxs)
+                obj_x_list.append(np.array(obs.objects.x[-1]))
+                obj_y_list.append(np.array(obs.objects.y[-1]))
+                obj_w_list.append(np.array(obs.objects.width[-1]))
+                obj_h_list.append(np.array(obs.objects.height[-1]))
+                obj_active_list.append(np.array(obs.objects.active[-1]))
 
             if done:
                 break

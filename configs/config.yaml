@@ -55,11 +55,11 @@ META_FLAT_NUM_LAYERS: 3         # flat_mlp only
 META_Q_STICKINESS_ENABLED: false
 META_Q_STICKINESS_THRESHOLD: 0.0
 # Meta-policy encoder input mode:
-#   flat       - flatten raw object-centric obs (current default)
-#   oc_embed   - embed object-centric obs first, then meta MLP
+#   flat       - flatten raw obs + full objects (current default)
+#   oc_embed   - same as flat for global raw (no Dense); still gets full objects
 #   pixel_embed- CNN over stacked pixels, then meta MLP (uses Jaxtari PixelAndObjectObsWrapper)
 META_INPUT_MODE: "flat"
-# META_EMBED_DIM: 256
+# META_EMBED_DIM: 256  # used by pixel_embed proj (not meta oc_embed)
 # META_PIXEL_CNN_CHANNELS: [32, 64]
 # META_PIXEL_CNN_KERNEL_SIZE: [5, 5]
 # Optional pixel-preprocessing knobs used when META_INPUT_MODE=pixel_embed:
@@ -70,10 +70,11 @@ META_INPUT_MODE: "flat"
 # META_PIXEL_SMOOTH_IMAGE: false
 # META_PIXEL_MAX_POOLING: true
 # Skill-policy input mode (System 1), independent from meta:
-#   ego        - current egocentric features (default)
-#   ego_embed  - same ego features, Dense(SKILL_EMBED_DIM)+ReLU before the Q MLP
-#   oc_embed   - full object-centric observation embedding + target-index conditioning
-#   pixel_embed- CNN over stacked pixels + target-index conditioning
+#   ego         - egocentric features (default); index is gather-only
+#   ego_embed   - same ego features, Dense(SKILL_EMBED_DIM)+ReLU before the Q MLP
+#   oc_embed    - per-object Dense(F→D) + gather target (see docs/skill_input_modes.md)
+#   pixel_embed - CNN over pixels with painted target outline (not slot one-hot)
+#   pixel_embed_cond - alias of pixel_embed (legacy name)
 SKILL_INPUT_MODE: "ego"
 # SKILL_EMBED_DIM: 256
 # SKILL_PIXEL_CNN_CHANNELS: [32, 64]
@@ -98,4 +99,5 @@ EVAL_GAME_MODS: null
 # --- Video recording during/every training ---
 RECORD_VIDEO: True           # If true, record rollout videos (e.g. to wandb)
 VIDEO_AT_END: True            # Always record one video at the end of training when RECORD_VIDEO is true
-VIDEO_MAX_FRAMES: 600        # Cap episode length for recording (avoid huge files)
+VIDEO_MAX_FRAMES: 600        # Cap recorded video frames (file length)
+VIDEO_FRAME_STRIDE: 1        # Keep every Nth env step in the video (1=all). Env steps ≈ VIDEO_MAX_FRAMES * stride.

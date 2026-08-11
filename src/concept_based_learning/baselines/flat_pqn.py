@@ -30,6 +30,12 @@ from jaxatari.wrappers import (
 )
 
 from concept_based_learning.pqn_visualizer import resolve_config_path
+from concept_based_learning.paper_eval.env_metrics import (
+    aggregate_episode_metrics,
+    init_episode_metrics,
+    make_metric_fns,
+    metrics_to_python,
+)
 
 
 class CNN(nn.Module):
@@ -262,10 +268,12 @@ def make_flat_pqn_eval_env(
     object_centric: bool,
     game_mods: list[str],
     config: dict[str, Any],
+    env_name: str | None = None,
 ):
     cfg = normalize_flat_pqn_config(config)
     mods = list(game_mods) if game_mods else None
-    env = jaxatari.make("seaquest", mods=mods)
+    game = str(env_name or cfg.get("ENV_NAME", "seaquest")).lower()
+    env = jaxatari.make(game, mods=mods)
     env = AtariWrapper(
         env,
         sticky_actions=0.0,
@@ -307,14 +315,22 @@ def _make_jitted_flat_pqn_episode_runner(
     batch_stats,
     *,
     max_frames: int,
+    env_name: str,
 ):
+    update_metrics, _finalize_unused = make_metric_fns(
+        env_name, has_semantic_obs=False
+    )
+
     @jax.jit
     def run_episode(rng):
         obs, state = env.reset(rng)
-        total_return = jnp.float32(0.0)
 
-        def body(carry, _):
-            obs_c, state_c, total_c = carry
+        def cond(carry):
+            _obs, _state, _total, done, step, _metrics = carry
+            return jnp.logical_and(step < max_frames, jnp.logical_not(done))
+
+        def body(carry):
+            obs_c, state_c, total_c, done, step, metrics = carry
             policy_obs = obs_c
             if not network.object_centric:
                 policy_obs = _prepare_pixel_policy_obs(policy_obs)
@@ -324,18 +340,56 @@ def _make_jitted_flat_pqn_episode_runner(
                 train=False,
             )
             action = jnp.argmax(q_vals, axis=-1)[0]
-            obs_n, state_n, reward, terminated, truncated, _info = env.step(state_c, action)
-            done = jnp.logical_or(terminated, truncated)
-            total_n = total_c + reward
-            return (obs_n, state_n, total_n), done
+            obs_n, state_n, reward, terminated, truncated, _info = env.step(
+                state_c, action
+            )
+            step_done = jnp.logical_or(terminated, truncated)
 
-        (_, _, total_return), _dones = jax.lax.scan(
-            body,
-            (obs, state, total_return),
-            None,
-            length=max_frames,
+            def _reward_only():
+                # Terminal OC/pixel wrappers autoreset; state deltas vs reset are junk.
+                pos = jnp.where(
+                    jnp.asarray(reward, dtype=jnp.float32) > 0,
+                    jnp.float32(1.0),
+                    jnp.float32(0.0),
+                )
+                return {
+                    **metrics,
+                    "env_positive_reward_steps": metrics["env_positive_reward_steps"]
+                    + pos,
+                    "env_steps": metrics["env_steps"] + jnp.float32(1.0),
+                }
+
+            metrics = jax.lax.cond(
+                done,
+                lambda: metrics,
+                lambda: jax.lax.cond(
+                    step_done,
+                    _reward_only,
+                    lambda: update_metrics(metrics, state_c, state_n, obs_n, reward),
+                ),
+            )
+            new_done = jnp.logical_or(done, step_done)
+            return (
+                obs_n,
+                state_n,
+                total_c + reward,
+                new_done,
+                step + 1,
+                metrics,
+            )
+
+        init = (
+            obs,
+            state,
+            jnp.float32(0.0),
+            jnp.bool_(False),
+            jnp.int32(0),
+            init_episode_metrics(),
         )
-        return total_return
+        final = jax.lax.while_loop(cond, body, init)
+        # Prefer last pre-done metrics; finalize may see autoreset state.
+        metrics = final[5]
+        return final[2], metrics
 
     return run_episode
 
@@ -361,10 +415,12 @@ def run_flat_pqn_greedy_eval(
     bs_path = resolved.replace(".safetensors", "_bs.safetensors")
     batch_stats = load_flat_pqn_params(bs_path) if Path(bs_path).is_file() else {}
 
+    env_name = str(config.get("ENV_NAME", "seaquest"))
     env = make_flat_pqn_eval_env(
         object_centric=object_centric,
         game_mods=game_mods,
         config=config,
+        env_name=env_name,
     )
     action_dim = env.action_space().n
     network = QNetwork(
@@ -382,13 +438,15 @@ def run_flat_pqn_greedy_eval(
         params,
         batch_stats,
         max_frames=max_frames,
+        env_name=env_name,
     )
     if progress:
         label = "oc" if object_centric else "pixel"
         print(f"  Compiling flat PQN ({label}) greedy eval...", flush=True)
-    _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999)))
+    _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
 
     returns: list[float] = []
+    episode_metrics: list[dict[str, float]] = []
     total_runs = num_seeds * num_episodes
     run_idx = 0
     for seed_idx in range(num_seeds):
@@ -401,8 +459,11 @@ def run_flat_pqn_greedy_eval(
                     flush=True,
                 )
             ep_seed = base_seed + seed_idx * 10_000 + ep_idx * 997
-            ep_return = float(jax.device_get(run_episode(jax.random.PRNGKey(ep_seed))))
+            ep_return_j, ep_metrics_j = run_episode(jax.random.PRNGKey(ep_seed))
+            ep_return = float(jax.device_get(ep_return_j))
+            ep_metrics = metrics_to_python(jax.device_get(ep_metrics_j))
             returns.append(ep_return)
+            episode_metrics.append(ep_metrics)
             if on_episode_done is not None:
                 on_episode_done()
             if progress:
@@ -415,11 +476,13 @@ def run_flat_pqn_greedy_eval(
         "min": float(arr.min()) if arr.size else float("nan"),
         "max": float(arr.max()) if arr.size else float("nan"),
         "returns": returns,
+        "episode_metrics": episode_metrics,
         "num_episodes": int(arr.size),
         "num_seeds": int(num_seeds),
         "episodes_per_seed": int(num_episodes),
         "max_frames_per_episode": int(max_frames),
         "object_centric": bool(object_centric),
+        **aggregate_episode_metrics(episode_metrics),
     }
 
 

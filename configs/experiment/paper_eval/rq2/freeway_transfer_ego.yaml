@@ -1,0 +1,79 @@
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: transfer
+PAPER_EVAL_MODS: freeway
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_ego
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: freeway
+SAVE_PATH: ./outputs/models/paper_eval/rq2/freeway_transfer_ego
+WANDB_RUN_NAME: fr_paper_rq2_transfer_ego
+WANDB_TAGS:
+- suite:paper_eval
+- rq:2
+- env:freeway
+- phase:zero_shot
+- skill_input:ego
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: true
+USE_EGO_WEAPON_FEATURES: true
+EGO_DISTANCE_CLIP_MAX_PX: 30
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 12
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  SKILL_LR: 0.0005
+  SKILL_LR_FINISH: 0.0001
+  SKILL_LR_DECAY: 0.5
+  SKILL_REWARD_LAMBDA: 0.0
+  CLIP_REWARD: true
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
+  FIRST_FIRE: false
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: false
+  FRAME_STACK_SIZE: 4
+  FRAME_SKIP: 4
+  TOTAL_TIMESTEPS: 4997120
+  NUM_ENVS: 128
+  NUM_STEPS: 128
+  NUM_EPOCHS: 4
+  NUM_MINIBATCHES: 64
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: false
+  RELABEL_K_OBJECTS: null
+  SKILL_BOOTSTRAP: q_lambda
+  EPS_START: 0.2
+  EPS_FINISH: 0.01
+  EPS_DECAY: 0.2
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: ego
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  SKILL_PIXEL_CNN_CHANNELS:
+  - 16
+  - 32

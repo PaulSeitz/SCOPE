@@ -1,0 +1,51 @@
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: skills
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_oc
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_oc/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_oc
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: seaquest
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_oc
+WANDB_RUN_NAME: sq_paper_rq1_eval_oc
+WANDB_TAGS:
+- suite:paper_eval
+- rq:1
+- env:seaquest
+- phase:mod_eval
+- skill_input:oc_embed
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: true
+USE_EGO_WEAPON_FEATURES: true
+EGO_DISTANCE_CLIP_MAX_PX: 30
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+GAME_MODS: null
+SKILL_INPUT_MODE: oc_embed
+HEURISTIC_MODE: env_specific
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 35
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: oc_embed
+  SKILL_PIXEL_CNN_CHANNELS:
+  - 16
+  - 32

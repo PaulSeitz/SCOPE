@@ -22,8 +22,8 @@ SAVE_PATH: "./outputs/models/freeway_fewshot_relabel"
 alg:
   INIT_MODEL_PATH: "./outputs/models/cluster/hierarchical_pqn_seaquest_seed44.safetensors"
 
-  NUM_SKILLS: 3
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
+  NUM_SKILLS: 4
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"]
   MAX_OBJECTS: 12
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128

@@ -1,0 +1,53 @@
+# Freeway mod allowlists for paper_eval RQ2.
+env: freeway
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: stop_all_cars
+    mods: [stop_all_cars]
+    category: dynamics
+  - key: static_cars
+    mods: [static_cars]
+    category: dynamics
+  - key: slow_cars
+    mods: [slow_cars]
+    category: dynamics
+  - key: invert_speed
+    mods: [invert_speed]
+    category: dynamics
+  - key: center_cars_on_reset
+    mods: [center_cars_on_reset]
+    category: dynamics
+  - key: black_cars
+    mods: [black_cars]
+    category: visual
+  - key: bikes
+    mods: [bikes]
+    category: visual
+  - key: frog
+    mods: [frog]
+    category: visual
+  - key: new_lane_colors
+    mods: [new_lane_colors]
+    category: visual
+  - key: green_score
+    mods: [green_score]
+    category: visual
+  - key: change_sprites
+    mods: [change_sprites]
+    category: visual
+  - key: hall_of_fame
+    mods: [hall_of_fame]
+    category: pack
+
+paper_core:
+  - base
+  - stop_all_cars
+  - static_cars
+  - slow_cars
+  - invert_speed
+  - center_cars_on_reset
+  - bikes  # one visual / sprite swap

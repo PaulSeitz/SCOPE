@@ -9,13 +9,24 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NAVIGATE,
     LABEL_NOOP,
 )
-from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    del info
     return extract_skill_rewards(
-        prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
     )
 
 

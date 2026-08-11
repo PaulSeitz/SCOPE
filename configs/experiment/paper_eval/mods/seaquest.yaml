@@ -1,0 +1,92 @@
+# Seaquest mod allowlists for paper_eval (RQ1 / RQ3).
+# Requires JAXAtari branch: feat/seaquest-robustness-mods
+#   /home/paul/Documents/JAXAtari-seaquest-robustness
+#
+# Train on base (GAME_MODS: null). Eval harness iterates `eval_mods`.
+
+env: seaquest
+status: ready  # registry present on robustness-mods fork
+
+# Single visual kept for the paper table; other visuals stay in registry_extra.
+visual_one: random_color_enemies
+
+eval_mods:
+  # control
+  - key: base
+    mods: []
+    category: control
+  # semantic / task
+  - key: disable_enemies
+    mods: [disable_enemies]
+    category: semantic
+  - key: no_enemies
+    mods: [no_enemies]
+    category: semantic
+  - key: no_divers
+    mods: [no_divers]
+    category: semantic
+  - key: unlimited_oxygen
+    mods: [unlimited_oxygen]
+    category: semantic
+  - key: peaceful_enemies
+    mods: [peaceful_enemies]
+    category: semantic
+  - key: lethal_divers
+    mods: [lethal_divers]
+    category: semantic
+  - key: only_submarines
+    mods: [only_submarines]
+    category: semantic
+  - key: only_sharks
+    mods: [only_sharks]
+    category: semantic
+  - key: no_enemy_torpedoes
+    mods: [no_enemy_torpedoes]
+    category: semantic
+  - key: surface_sub_always
+    mods: [surface_sub_always]
+    category: semantic
+  # dynamics (expect ego to struggle more here)
+  - key: gravity
+    mods: [gravity]
+    category: dynamics
+  - key: faster_enemies
+    mods: [faster_enemies]
+    category: dynamics
+  - key: slower_enemies
+    mods: [slower_enemies]
+    category: dynamics
+  - key: shift_lanes
+    mods: [shift_lanes]
+    category: dynamics
+  - key: vertical_oscillation
+    mods: [vertical_oscillation]
+    category: dynamics
+  - key: dense_spawns
+    mods: [dense_spawns]
+    category: dynamics
+  - key: fast_oxygen_drain
+    mods: [fast_oxygen_drain]
+    category: dynamics
+  - key: slow_oxygen_drain
+    mods: [slow_oxygen_drain]
+    category: dynamics
+  - key: inverted_lanes
+    mods: [inverted_lanes]
+    category: dynamics
+  # one visual
+  - key: random_color_enemies
+    mods: [random_color_enemies]
+    category: visual
+
+# Present on fork but excluded from the main paper table (extra visuals).
+registry_extra:
+  - mines
+  - fireballs
+
+# Planned additions (implement on the robustness-mods fork when ready).
+planned:
+  - collectable_sharks
+  - swap_diver_enemy_labels
+  - extra_enemy_type
+  - penalize_diver_shooting

@@ -7,13 +7,24 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NAVIGATE,
     LABEL_NOOP,
 )
-from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
 
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    del info
     return extract_skill_rewards(
-        prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
     )
 
 
@@ -32,7 +43,7 @@ _FLAG_DISTANCE = jnp.int32(32)
 # Object layout (game_max_objects=12, +1 NOOP prepended by wrapper):
 #   [0-1]  left poles  (AVOID)
 #   [2-3]  right poles (AVOID, synthetic)
-#   [4-5]  gate centers (COLLECT, synthetic, full 32px wide)
+#   [4-5]  gate centers (NAVIGATE, synthetic, full 32px wide)
 #   [6-9]  trees       (AVOID)
 #   [10-11] moguls     (AVOID)
 _N_FLAG_PAIRS = 2
@@ -84,7 +95,7 @@ class SkiingSemanticWrapper(JaxatariSemanticBaseWrapper):
         return jnp.concatenate([pole_mask, center_mask, tree_mask, mogul_mask])  # (12,)
 
     def _substep_collect_events(self, prev_env_state, next_env_state):
-        """Gate passage from JAXAtari flags_passed rising edges → center slot COLLECT."""
+        """Gate passage from JAXAtari flags_passed rising edges → center slot was_collected."""
         gate_pass = jnp.logical_and(
             next_env_state.flags_passed,
             jnp.logical_not(prev_env_state.flags_passed),

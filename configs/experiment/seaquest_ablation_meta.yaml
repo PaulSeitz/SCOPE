@@ -11,8 +11,8 @@ INIT_MODEL_PATH: "./outputs/models/seaquest/hierarchical_pqn_step1_skills_seaque
 
 alg:
   # Architecture — must be identical to step 1 so checkpointed params load cleanly
-  NUM_SKILLS: 3
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
+  NUM_SKILLS: 4
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"]
   MAX_OBJECTS: 35
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128

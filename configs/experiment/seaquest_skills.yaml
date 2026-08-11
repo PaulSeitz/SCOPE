@@ -22,8 +22,8 @@ EVAL_GAME_MODS: null
 
 alg:
   # --- Custom Architecture Dimensions ---
-  NUM_SKILLS: 3               # DESTROY, COLLECT, AVOID
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]  # wandb keys: skill_DESTROY/td_loss, etc.
+  NUM_SKILLS: 4               # DESTROY, COLLECT, AVOID, NAVIGATE
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"]  # wandb keys: skill_DESTROY/td_loss, etc.
   MAX_OBJECTS: 35             # slot 0 = meta NOOP; 33 game + 1 surface waypoint
   EGO_ACTION_DIM: 18          # The 18 translated egocentric actions
   HIDDEN_SIZE: 128            # Slightly wider since it relies purely on distance/angle

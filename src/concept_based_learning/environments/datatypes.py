@@ -276,6 +276,8 @@ class TandemTransition:
     skill_rewards_all: chex.Array
     skill_done_all: chex.Array
     relabel_mask: chex.Array
+    # Global object indices aligned with ego_obs_all's object axis (for outline / is_target).
+    object_idx_all: chex.Array
 
     # Raw environment reward (sign-clipped, before blending/penalties) — logged to wandb
     # so episodic env performance is always visible regardless of META_REWARD_LAMBDA

@@ -25,8 +25,8 @@ EVAL_GAME_MODS: null
 
 alg:
   # --- Custom Architecture Dimensions ---
-  NUM_SKILLS: 3               # DESTROY (unused), COLLECT, AVOID
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]  # wandb keys: skill_DESTROY/td_loss, etc.
+  NUM_SKILLS: 4               # DESTROY (unused), COLLECT, AVOID, NAVIGATE
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"]  # wandb keys: skill_DESTROY/td_loss, etc.
   # slot 0 = meta NOOP; slots 1-10 = 10 cars (AVOID); slot 11 = fixed top goal (COLLECT)
   MAX_OBJECTS: 12
   EGO_ACTION_DIM: 18          # The 18 translated egocentric actions

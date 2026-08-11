@@ -22,6 +22,7 @@ from jaxatari.games.jax_beamrider import BeamriderRenderer
 from jaxatari.games.jax_kangaroo import KangarooRenderer
 from jaxatari.games.jax_skiing import SkiingRenderer
 from jaxatari.games.jax_tennis import TennisRenderer
+from jaxatari.games.jax_asterix import AsterixRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -108,6 +109,10 @@ from concept_based_learning.environments.beamrider.beamrider_label import (
     beamrider_inverse_action_mapper,
     extract_all_skills_rewards as beamrider_extract_all_skills_rewards,
 )
+from concept_based_learning.environments.beamrider.beamrider_policy import (
+    get_heuristic_target as beamrider_get_heuristic_target,
+    NO_TARGET_IDX as beamrider_NO_TARGET_IDX,
+)
 from concept_based_learning.environments.kangaroo.kangaroo_label import (
     KangarooSemanticWrapper,
     kangaroo_action_mapper,
@@ -130,6 +135,16 @@ from concept_based_learning.environments.tennis.tennis_label import (
     tennis_action_mapper,
     tennis_inverse_action_mapper,
     extract_all_skills_rewards as tennis_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.asterix.asterix_label import (
+    AsterixSemanticWrapper,
+    asterix_action_mapper,
+    asterix_inverse_action_mapper,
+    extract_all_skills_rewards as asterix_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.asterix.asterix_policy import (
+    get_heuristic_target as asterix_get_heuristic_target,
+    NO_TARGET_IDX as asterix_NO_TARGET_IDX,
 )
 from concept_based_learning.environments.generic_heuristic import (
     get_heuristic_target as generic_get_heuristic_target,
@@ -498,8 +513,8 @@ class EnvManager:
             jax_game_id="beamrider",
             semantic_wrapper_cls=BeamriderSemanticWrapper,
             renderer_cls=BeamriderRenderer,
-            get_heuristic_target=generic_get_heuristic_target,
-            no_target_idx=generic_NO_TARGET_IDX,
+            get_heuristic_target=beamrider_get_heuristic_target,
+            no_target_idx=beamrider_NO_TARGET_IDX,
             action_mapper=beamrider_action_mapper,
             inverse_action_mapper=beamrider_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(beamrider_extract_all_skills_rewards),
@@ -558,6 +573,23 @@ class EnvManager:
             reward_extractor=_wrap_reward_extractor_5arg(tennis_extract_all_skills_rewards),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_tennis_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["asterix"] = EnvComponents(
+            name="Asterix",
+            jax_game_id="asterix",
+            semantic_wrapper_cls=AsterixSemanticWrapper,
+            renderer_cls=AsterixRenderer,
+            get_heuristic_target=asterix_get_heuristic_target,
+            no_target_idx=asterix_NO_TARGET_IDX,
+            action_mapper=asterix_action_mapper,
+            inverse_action_mapper=asterix_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(asterix_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,

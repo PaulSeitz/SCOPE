@@ -8,17 +8,19 @@ Mission pattern:
   4. When the row is cleared, repeat from the leftmost enemy on the new bottom row.
 
 Reactive dodge:
-  - Very close bullets (AVOID) within CLOSE_DANGER_RANGE temporarily override the mission.
+  - Very close bullets (AVOID) within CLOSE_DANGER_RANGE (AABB surface gap)
+    temporarily override the mission.
   - After the dodge, resume the locked sweep mission target (not nearest-in-x).
 """
 
 import jax.numpy as jnp
 
 from concept_based_learning.environments.datatypes import LABEL_AVOID, LABEL_DESTROY
+from concept_based_learning.observations.egocentric import player_object_aabb_gaps
 
 NO_TARGET_IDX = -1
 
-# Only dodge when a bullet is extremely close to the player.
+# Only dodge when a bullet is extremely close (AABB surface gap).
 CLOSE_DANGER_RANGE = 40.0
 
 NUM_ENEMIES = 36
@@ -125,19 +127,10 @@ def get_heuristic_target_with_mission(
     """
     del prev_target_idx, rng
 
-    ox = objects.x[-1]
-    oy = objects.y[-1]
     active_mask = objects.active[-1] > 0.5
     labels = objects.semantic_label[-1]
 
-    px_center = raw_observation.player.x[-1] + raw_observation.player.width[-1] / 2.0
-    py_center = raw_observation.player.y[-1] + raw_observation.player.height[-1] / 2.0
-    ox_center = ox + objects.width[-1] / 2.0
-    oy_center = oy + objects.height[-1] / 2.0
-
-    dx = px_center - ox_center
-    dy = py_center - oy_center
-    distances = jnp.sqrt(dx**2 + dy**2)
+    distances, _, _, ox_center, _ = player_object_aabb_gaps(raw_observation, objects)
 
     mission_idx = _select_sweep_mission(
         ox_center, active_mask, labels, mission_target_idx
@@ -160,7 +153,7 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
         raw_observation,
         objects,
         prev_target_idx,
-        prev_target_idx,
+        jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
         rng,
     )
     return target_idx

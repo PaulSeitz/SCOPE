@@ -9,7 +9,11 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_NAVIGATE,
 )
-from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 from concept_based_learning.observations.action_space import (
     EGO_MOVE_DELTAS_DEG,
     make_inverse_ego_action_mapper,
@@ -19,12 +23,14 @@ from concept_based_learning.observations.action_space import (
 FREEWAY_CHICKEN_X = 44
 FREEWAY_NUM_LANES = 10
 FREEWAY_TOP_BORDER = 15     # player scores when chicken_y (bottom edge) ≤ this (JAXAtari FreewayConstants.top_border)
-# Nudge the fixed COLLECT goal toward the top (smaller y in Freeway coords).
+# Nudge the fixed NAVIGATE goal toward the top (smaller y in Freeway coords).
 # Must ensure goal band bottom > top_border so the rising-edge fires before the game resets
 # the chicken (scoring at chicken_y=top_border immediately spawns chicken at y≈187).
 # goal_y = top_border + chicken_hit_h - offset → 15 + 10 - 14 = 11 (top-left y).
 # With goal_h=10 and 1px reward inset, effective band y∈[12,20]; chicken scores at bottom y≤15.
-FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = 14
+FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX = 14
+# Back-compat alias for older imports / configs.
+FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX
 
 # Effective hitbox sizes derived from JAXAtari insets (jax_freeway.FreewayConstants):
 #   chicken: sprite 6×8, inset x=1 each side → effective width=4
@@ -37,8 +43,9 @@ FREEWAY_CHICKEN_HIT_H = 10
 FREEWAY_CAR_HIT_W = 8
 FREEWAY_CAR_HIT_H = 8
 
-# Fixed collect goal sits at the last slot after meta NOOP + 10 cars.
-COLLECT_GOAL_IDX = FREEWAY_NUM_LANES + 1  # slot 11 in stacked objects
+# Fixed NAVIGATE goal sits at the last slot after meta NOOP + 10 cars.
+NAVIGATE_GOAL_IDX = FREEWAY_NUM_LANES + 1  # slot 11 in stacked objects
+COLLECT_GOAL_IDX = NAVIGATE_GOAL_IDX  # back-compat alias
 
 # World direction angle table (RIGHT=0°, DOWNRIGHT=45°, …, UPRIGHT=-45°)
 _WORLD_DIR_ANGLES = jnp.array(
@@ -112,7 +119,7 @@ freeway_inverse_action_mapper = make_inverse_ego_action_mapper(
 
 class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
-        # 1 meta NOOP + 10 cars + 1 fixed top collect goal = 12 total slots
+        # 1 meta NOOP + 10 cars + 1 fixed top NAVIGATE goal = 12 total slots
         super().__init__(env, max_objects=12)
 
     def _patch_raw_observation(self, obs):
@@ -138,7 +145,7 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
         and reduce height by 2 to match.
 
         The chicken's effective hitbox expands 2px upward (chicken_hit_inset_y_top=-2),
-        so the collect goal is placed to match that extended reach.
+        so the NAVIGATE goal is placed to match that extended reach.
         """
         car_labels = jnp.full(FREEWAY_NUM_LANES, LABEL_AVOID, dtype=jnp.int32)
         car_offscreen = jnp.zeros(FREEWAY_NUM_LANES, dtype=jnp.int32)  # cars wrap, never scroll off
@@ -150,13 +157,12 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
         car_w = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_W, dtype=jnp.int32)
         car_h = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_H, dtype=jnp.int32)
 
-        # Fixed collect goal: placed so the chicken's effective hitbox (which extends
+        # Fixed NAVIGATE goal: placed so the chicken's effective hitbox (which extends
         # 2px above sprite top due to chicken_hit_inset_y_top=-2) overlaps it exactly
         # when the chicken reaches the scoring line.
-        # Bottom-edge y convention: goal bottom aligned with scoring-line overlap, shifted up.
         goal_x      = jnp.array([FREEWAY_CHICKEN_X + 1], dtype=jnp.int32)   # match chicken x-inset
         goal_y      = jnp.array(
-            [FREEWAY_TOP_BORDER + FREEWAY_CHICKEN_HIT_H - FREEWAY_COLLECT_GOAL_UP_OFFSET_PX],
+            [FREEWAY_TOP_BORDER + FREEWAY_CHICKEN_HIT_H - FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX],
             dtype=jnp.int32,
         )
         goal_w      = jnp.array([FREEWAY_CHICKEN_HIT_W], dtype=jnp.int32)
@@ -198,11 +204,13 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     Freeway cars wrap horizontally and never scroll off-screen, so no screen-edge
     bounds are needed (can_go_offscreen=0 for all objects).
     """
-    del info, config
+    del info
     return extract_skill_rewards(
         prev_raw_obs,
         next_raw_obs,
         prev_target,
         next_target,
         life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
     )

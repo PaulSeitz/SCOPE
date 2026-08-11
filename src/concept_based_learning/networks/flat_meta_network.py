@@ -6,7 +6,6 @@ from typing import Any
 
 from concept_based_learning.networks.meta_network import (
     append_target_locked_feature,
-    _flatten_last_frame,
     flatten_raw_observation,
 )
 
@@ -45,7 +44,7 @@ class FlatMetaQNetwork(nn.Module):
         if mode in ("flat", "flatten"):
             x = flatten_raw_observation(raw_obs)
         elif mode in ("oc_embed", "object_embed", "object_embedding"):
-            x = _flatten_last_frame(raw_obs)
+            x = flatten_raw_observation(raw_obs)
             x = nn.Dense(self.meta_embed_dim, name="oc_embed")(x)
             x = nn.relu(x)
         elif mode in ("pixel_embed", "pixel_embedding", "cnn"):

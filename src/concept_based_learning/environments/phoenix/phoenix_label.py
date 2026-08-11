@@ -8,7 +8,11 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_NOOP,
 )
-from concept_based_learning.environments.skill_rewards import extract_skill_rewards
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 
 # jax_phoenix observation encoding: base state 0..3, +4 while death animation plays.
 # We set active=0 the moment state >= DYING_STATE_THRESHOLD so meta-policy
@@ -18,9 +22,18 @@ DYING_STATE_THRESHOLD = 4
 # Playfield is 160px wide; ignore kills whose previous x was at the scroll edge.
 _SCROLL_X_MIN = 5
 _SCROLL_X_MAX = 155
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
+
+
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    del info
     return extract_skill_rewards(
-        prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
     )
 
 

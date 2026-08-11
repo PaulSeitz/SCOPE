@@ -1,0 +1,52 @@
+# paper_eval/rq1/seaquest_heuristic_random.yaml
+# Eval-only: env heuristic + randomly initialized skills (architecture lower bound).
+
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: heuristic_random
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego
+PAPER_EVAL_REQUIRES_RQ1: []
+NUM_SEEDS: 1
+
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: seaquest
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_heuristic_random
+WANDB_RUN_NAME: sq_paper_rq1_heuristic_random
+WANDB_TAGS:
+- suite:paper_eval
+- rq:1
+- env:seaquest
+- train_mode:eval_only
+- skill_input:ego
+- variant:heuristic_random_skills
+
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: true
+USE_EGO_WEAPON_FEATURES: true
+EGO_DISTANCE_CLIP_MAX_PX: 30
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: env_specific
+GAME_MODS: null
+EVAL_GAME_MODS: null
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 35
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: ego

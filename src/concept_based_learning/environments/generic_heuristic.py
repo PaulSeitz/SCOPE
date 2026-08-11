@@ -28,7 +28,7 @@ from concept_based_learning.environments.manual_policy.state import (
     NO_TARGET_IDX,
 )
 
-# Proximity thresholds (pixels, player centre → object centre).
+# Proximity thresholds (pixels, AABB surface gap — same as skill ego distance).
 DESTROY_RANGE = 25.0
 AVOID_RANGE = 15.0
 

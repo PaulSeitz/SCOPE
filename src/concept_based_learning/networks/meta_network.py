@@ -31,15 +31,6 @@ def flatten_raw_observation(raw_obs):
     return jnp.concatenate(flat_arrays).astype(jnp.float32)
 
 
-def _flatten_last_frame(tree):
-    last_frame = jax.tree_util.tree_map(
-        lambda x: x[-1] if jnp.ndim(x) > 0 else x, tree
-    )
-    leaves, _ = jax.tree_util.tree_flatten(last_frame)
-    flat_arrays = [jnp.atleast_1d(leaf).flatten() for leaf in leaves]
-    return jnp.concatenate(flat_arrays).astype(jnp.float32)
-
-
 class MetaQNetwork(nn.Module):
     """
     System 2 MLP: evaluates the raw environment state and outputs Q-values
@@ -70,9 +61,9 @@ class MetaQNetwork(nn.Module):
         if mode in ("flat", "flatten"):
             global_features = flatten_raw_observation(raw_obs)
         elif mode in ("oc_embed", "object_embed", "object_embedding"):
-            global_features = _flatten_last_frame(raw_obs)
-            global_features = nn.Dense(self.meta_embed_dim, name="oc_embed")(global_features)
-            global_features = nn.relu(global_features)
+            # Same as flat for the global stream (no Dense). Full objects are still
+            # concatenated below; skill OC is where the transfer embed lives.
+            global_features = flatten_raw_observation(raw_obs)
         elif mode in ("pixel_embed", "pixel_embedding", "cnn"):
             if pixel_obs is None:
                 raise ValueError(

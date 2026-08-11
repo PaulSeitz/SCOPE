@@ -14,11 +14,12 @@ GAME_MODS: null
 EVAL_GAME_MODS: null
 alg:
   INIT_MODEL_PATH: ./outputs/models/sequential_eval/phase1_skills/freeway/hierarchical_pqn_freeway_seed44.safetensors
-  NUM_SKILLS: 3
+  NUM_SKILLS: 4
   SKILL_NAMES:
   - DESTROY
   - COLLECT
   - AVOID
+  - NAVIGATE
   MAX_OBJECTS: 12
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128

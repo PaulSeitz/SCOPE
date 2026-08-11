@@ -38,6 +38,12 @@ from concept_based_learning.environments.choppercommand.choppercommand_policy im
 )
 from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
+from concept_based_learning.paper_eval.env_metrics import (
+    aggregate_episode_metrics,
+    init_episode_metrics,
+    make_metric_fns,
+    metrics_to_python,
+)
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
     is_meta_fire_target,
@@ -591,6 +597,7 @@ def _make_jitted_greedy_episode_runner(
     no_target = jnp.int32(no_target_idx)
     fire_indices = fire_ego_action_indices(ego_action_dim)
     use_meta = meta_network is not None
+    update_metrics, finalize_metrics = make_metric_fns(env_name, has_semantic_obs=True)
 
     def _skill_game_action(obs, target):
         is_noop = is_meta_noop_target(
@@ -613,6 +620,7 @@ def _make_jitted_greedy_episode_runner(
                 train=False,
                 target_idx=safe_target,
                 pixel_obs=pixel_obs,
+                objects=obs.objects,
             )
 
         q_all = jax.vmap(apply_one)(skill_params)
@@ -638,11 +646,35 @@ def _make_jitted_greedy_episode_runner(
         suspended_mission = jnp.array(no_target, dtype=jnp.int32)
 
         def cond(carry):
-            _state, _obs, _rng, _ret, done, _prev, _mission, _steps, _suspended, step = carry
+            (
+                _state,
+                _obs,
+                _rng,
+                _ret,
+                done,
+                _prev,
+                _mission,
+                _steps,
+                _suspended,
+                step,
+                _metrics,
+            ) = carry
             return jnp.logical_and(step < max_frames, jnp.logical_not(done))
 
         def body(carry):
-            state, obs, rng, ret, done, prev_target, mission_target, persist_steps, suspended_mission, step = carry
+            (
+                state,
+                obs,
+                rng,
+                ret,
+                done,
+                prev_target,
+                mission_target,
+                persist_steps,
+                suspended_mission,
+                step,
+                metrics,
+            ) = carry
             rng, step_key = jax.random.split(rng)
 
             if use_meta:
@@ -694,6 +726,7 @@ def _make_jitted_greedy_episode_runner(
 
             game_a = _skill_game_action(obs, target)
             new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
+            metrics = update_metrics(metrics, state, new_state, new_obs, reward)
             new_done = jnp.logical_or(done, step_done)
             target = jnp.where(new_done, no_target, target)
             mission_target = jnp.where(new_done, no_target, mission_target)
@@ -712,6 +745,7 @@ def _make_jitted_greedy_episode_runner(
                 persist_steps,
                 suspended_mission,
                 step + 1,
+                metrics,
             )
 
         init = (
@@ -725,9 +759,11 @@ def _make_jitted_greedy_episode_runner(
             persist_steps,
             suspended_mission,
             0,
+            init_episode_metrics(),
         )
         final = jax.lax.while_loop(cond, body, init)
-        return final[3]
+        metrics = finalize_metrics(final[10], final[0])
+        return final[3], metrics
 
     return jax.jit(run_episode)
 
@@ -818,10 +854,11 @@ def run_greedy_eval_episodes(
 
     if progress:
         print(f"  Compiling greedy eval (max {max_frames} steps/episode)...", flush=True)
-    _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999)))
+    _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
 
     total_runs = num_seeds * num_episodes
     episode_returns: list[float] = []
+    episode_metrics: list[dict[str, float]] = []
     run_idx = 0
     for seed_idx in range(num_seeds):
         for ep_idx in range(num_episodes):
@@ -833,14 +870,22 @@ def run_greedy_eval_episodes(
                     flush=True,
                 )
             ep_seed = base_seed + seed_idx * 10_000 + ep_idx * 997
-            ep_return = float(
-                jax.device_get(run_episode(jax.random.PRNGKey(ep_seed)))
-            )
+            ep_return_j, ep_metrics_j = run_episode(jax.random.PRNGKey(ep_seed))
+            ep_return = float(jax.device_get(ep_return_j))
+            ep_metrics = metrics_to_python(jax.device_get(ep_metrics_j))
             episode_returns.append(ep_return)
+            episode_metrics.append(ep_metrics)
             if on_episode_done is not None:
                 on_episode_done()
             if progress:
-                print(f"    return={ep_return:.2f}", flush=True)
+                extra = ""
+                if "seaquest" in str(env_name).lower():
+                    extra = (
+                        f" kills={ep_metrics.get('env_kills', 0):.0f}"
+                        f" rescues={ep_metrics.get('env_rescues', 0):.0f}"
+                        f" divers_max={ep_metrics.get('env_divers_max', 0):.0f}"
+                    )
+                print(f"    return={ep_return:.2f}{extra}", flush=True)
 
     arr = np.asarray(episode_returns, dtype=np.float64)
     return {
@@ -849,10 +894,12 @@ def run_greedy_eval_episodes(
         "min": float(arr.min()) if arr.size else float("nan"),
         "max": float(arr.max()) if arr.size else float("nan"),
         "returns": episode_returns,
+        "episode_metrics": episode_metrics,
         "num_episodes": int(arr.size),
         "num_seeds": int(num_seeds),
         "episodes_per_seed": int(num_episodes),
         "max_frames_per_episode": max_frames,
+        **aggregate_episode_metrics(episode_metrics),
     }
 
 
@@ -883,6 +930,8 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
+    frame_stride = max(1, int(config.get("VIDEO_FRAME_STRIDE", 1)))
+    max_env_steps = int(max_frames) * frame_stride
 
     env, renderer = create_eval_env(config)
 
@@ -943,6 +992,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             train=False,
             target_idx=jnp.array(0, dtype=jnp.int32),
             pixel_obs=init_pixel,
+            objects=obs.objects,
         )
         base_params = network_vars["params"]
 
@@ -954,7 +1004,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     # JIT skill Q eval once — the old per-step jax.vmap.apply was the reason
     # skills_only end videos appeared to hang after "Recording...".
-    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch):
+    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch, objects_batch):
         def apply_one(params_for_skill):
             return skill_network.apply(
                 {"params": params_for_skill},
@@ -962,6 +1012,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 train=False,
                 target_idx=target_idx_arr,
                 pixel_obs=pixel_batch,
+                objects=objects_batch,
             )
 
         return jax.vmap(apply_one)(params_stack)
@@ -988,10 +1039,16 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     policy_state = initial_policy_state(no_target_idx)
     persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
-    print(f"Eval rollout: collecting up to {max_frames} frames...")
-    for frame_i in range(max_frames):
-        if frame_i > 0 and frame_i % 100 == 0:
-            print(f"  eval frame {frame_i}/{max_frames}...")
+    print(
+        f"Eval rollout: up to {max_env_steps} env steps, "
+        f"log every {frame_stride} → ≤{max_frames} video frames..."
+    )
+    for step_i in range(max_env_steps):
+        if step_i > 0 and step_i % max(100 * frame_stride, 100) == 0:
+            print(
+                f"  eval step {step_i}/{max_env_steps} "
+                f"(logged {len(states_list)}/{max_frames})..."
+            )
         rng, step_key = jax.random.split(rng)
 
         if meta_network is None:
@@ -1119,7 +1176,11 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
             )
             q_vals = apply_all_skills(
-                params_tree, ego_obs_batch, target_idx_arr, pixel_batch
+                params_tree,
+                ego_obs_batch,
+                target_idx_arr,
+                pixel_batch,
+                obs.objects,
             )  # [num_skills, 1, ego_action_dim]
             q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, ego_action_dim]
 
@@ -1142,26 +1203,31 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         # Step the environment
         obs, state, _reward, done, _info = env.step(state, global_action)
 
-        # Record state & debug info
-        states_list.append(state)
-        active_list.append(active_skill_idx)
-        combined_qs_list.append(combined_q.astype(np.float32))
-        dones_list.append(float(done))
-        distances_list.append(distance)
-        angles_list.append(angle)
-        target_obj_idxs_list.append(target_obj_idx)
+        # Keep video length = VIDEO_MAX_FRAMES; subsample env steps via stride.
+        log_frame = (step_i % frame_stride == 0) or bool(done)
+        if log_frame:
+            states_list.append(state)
+            active_list.append(active_skill_idx)
+            combined_qs_list.append(combined_q.astype(np.float32))
+            dones_list.append(float(done))
+            distances_list.append(distance)
+            angles_list.append(angle)
+            target_obj_idxs_list.append(target_obj_idx)
 
-        # Object bounding boxes after the step
-        obj_x_list.append(np.array(obs.objects.x[-1]))
-        obj_y_list.append(np.array(obs.objects.y[-1]))
-        obj_w_list.append(np.array(obs.objects.width[-1]))
-        obj_h_list.append(np.array(obs.objects.height[-1]))
-        obj_active_list.append(np.array(obs.objects.active[-1]))
+            # Object bounding boxes after the step
+            obj_x_list.append(np.array(obs.objects.x[-1]))
+            obj_y_list.append(np.array(obs.objects.y[-1]))
+            obj_w_list.append(np.array(obs.objects.width[-1]))
+            obj_h_list.append(np.array(obs.objects.height[-1]))
+            obj_active_list.append(np.array(obs.objects.active[-1]))
 
         if done:
             break
 
-    print(f"Eval rollout done ({len(states_list)} frames).")
+    print(
+        f"Eval rollout done ({len(states_list)} video frames "
+        f"from ≤{max_env_steps} env steps, stride={frame_stride})."
+    )
     if not states_list:
         raise RuntimeError("No frames collected during evaluation rollout.")
 
@@ -1397,7 +1463,17 @@ def run_live_visualization(
 
     if params_tree is None:
         init_x = jnp.zeros(ego_feat_dim)
-        network_vars = skill_network.init(jax.random.PRNGKey(seed + 1), init_x, train=False)
+        init_pixel = _skill_pixel_obs_from_obs(config, obs)
+        if init_pixel is not None:
+            init_pixel = jnp.expand_dims(init_pixel, 0)
+        network_vars = skill_network.init(
+            jax.random.PRNGKey(seed + 1),
+            init_x,
+            train=False,
+            target_idx=jnp.array(0, dtype=jnp.int32),
+            pixel_obs=init_pixel,
+            objects=obs.objects,
+        )
         base_params = network_vars["params"]
         params_tree = jax.tree_util.tree_map(
             lambda p: jnp.stack([p] * num_skills, axis=0),
@@ -1405,7 +1481,7 @@ def run_live_visualization(
         )
 
     # JIT skill Q eval once (same fix as record-mode eval rollouts).
-    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch):
+    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch, objects_batch):
         def apply_one(params_for_skill):
             return skill_network.apply(
                 {"params": params_for_skill},
@@ -1413,6 +1489,7 @@ def run_live_visualization(
                 train=False,
                 target_idx=target_idx_arr,
                 pixel_obs=pixel_batch,
+                objects=objects_batch,
             )
 
         return jax.vmap(apply_one)(params_stack)
@@ -1561,6 +1638,7 @@ def run_live_visualization(
             ego_obs_batch,
             jnp.asarray([target_obj_idx], dtype=jnp.int32),
             pixel_batch,
+            obs.objects,
         )
         q_vals = jnp.squeeze(q_vals, axis=1)
 
