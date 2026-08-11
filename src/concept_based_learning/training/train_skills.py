@@ -1370,7 +1370,8 @@ def make_train(
                 jax.debug.callback(_wandb_log_cb, metrics)
 
             if is_rtpt_enabled(config):
-                jax.debug.callback(rtpt_step_callback)
+                # Pass a scan-dependent value so JAX cannot hoist this callback.
+                jax.debug.callback(rtpt_step_callback, train_states.n_updates[0])
 
             runner_state = (
                 train_states,

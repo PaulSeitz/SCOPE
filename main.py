@@ -2,6 +2,18 @@ import os
 import time
 import copy
 import warnings
+
+# Must run before jax init: disable Triton GEMM to avoid XLA CHECK failures
+# (triton_tiling_propagation.cc dst_remaining_size) on some jaxlib builds.
+_xla = os.environ.get("XLA_FLAGS", "").strip()
+_triton_off = "--xla_gpu_enable_triton_gemm=false"
+if not _xla:
+    os.environ["XLA_FLAGS"] = (
+        f"--xla_gpu_strict_conv_algorithm_picker=false {_triton_off}"
+    )
+elif "--xla_gpu_enable_triton_gemm" not in _xla:
+    os.environ["XLA_FLAGS"] = f"{_xla} {_triton_off}"
+
 import jax
 import jax.numpy as jnp
 import wandb

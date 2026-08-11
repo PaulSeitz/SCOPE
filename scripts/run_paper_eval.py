@@ -10,6 +10,9 @@ Usage:
   python scripts/run_paper_eval.py --rq 2   # gated on RQ1 skill ckpts
   python scripts/run_paper_eval.py --smoke --trial   # full wiring smoke test
   python scripts/materialize_paper_eval_configs.py   # regenerate RQ2/RQ3 YAMLs
+
+  # One-shot overnight on two GPUs (workers poll for RQ1 ckpts before gated jobs):
+  python scripts/run_paper_eval.py --gpus 0,1 --wait-deps
 """
 
 from __future__ import annotations
@@ -18,12 +21,26 @@ import argparse
 import copy
 import gc
 import os
+import subprocess
 import sys
+import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("XLA_FLAGS", "--xla_gpu_strict_conv_algorithm_picker=false")
+# Avoid XLA:GPU Triton GEMM fusion CHECK failures
+# (triton_tiling_propagation.cc: dst_remaining_size == 1) seen on some
+# jaxlib/CUDA stacks during first compile of large train graphs.
+_DEFAULT_XLA_FLAGS = (
+    "--xla_gpu_strict_conv_algorithm_picker=false "
+    "--xla_gpu_enable_triton_gemm=false"
+)
+_existing = os.environ.get("XLA_FLAGS", "").strip()
+if not _existing:
+    os.environ["XLA_FLAGS"] = _DEFAULT_XLA_FLAGS
+elif "--xla_gpu_enable_triton_gemm" not in _existing:
+    os.environ["XLA_FLAGS"] = f"{_existing} --xla_gpu_enable_triton_gemm=false"
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 
 import yaml
@@ -37,6 +54,32 @@ MODS_DIR = CONFIG_DIR / "mods"
 RTPT_BASE = "HRL_paper_eval"
 DEFAULT_SEED = 44
 TRIAL_STEPS_DEFAULT = 16384  # one update at 128×128
+
+
+def _default_batch_tag() -> str:
+    """Dated suite id so W&B filters don't mix overnight batches."""
+    return datetime.now().strftime("paper_eval_%Y%m%d_%H%M")
+
+
+def _resolve_batch_tag(cli_value: str | None) -> str:
+    if cli_value and str(cli_value).strip():
+        return str(cli_value).strip()
+    env = os.environ.get("PAPER_EVAL_BATCH_TAG", "").strip()
+    if env:
+        return env
+    return _default_batch_tag()
+
+
+def _attach_batch_wandb_tag(cfg: dict[str, Any], batch_tag: str) -> None:
+    tags = list(cfg.get("WANDB_TAGS") or [])
+    # Keep suite:paper_eval; add dated batch for grouping this overnight.
+    if "suite:paper_eval" not in tags:
+        tags.append("suite:paper_eval")
+    batch_key = f"batch:{batch_tag}"
+    if batch_key not in tags:
+        tags.append(batch_key)
+    cfg["WANDB_TAGS"] = tags
+    cfg["PAPER_EVAL_BATCH_TAG"] = batch_tag
 
 # Representative smoke matrix (every KIND / PHASE exercised once).
 SMOKE_STEMS = (
@@ -158,6 +201,7 @@ def _apply_run_defaults(
     trial_steps: int | None,
     record_video: bool,
     seed: int | None,
+    batch_tag: str | None = None,
 ) -> None:
     if wandb_mode is not None:
         cfg["WANDB_MODE"] = wandb_mode
@@ -175,6 +219,8 @@ def _apply_run_defaults(
     cfg.setdefault("NUM_SEEDS", 1)
     cfg["RECORD_VIDEO"] = record_video
     cfg["VIDEO_AT_END"] = record_video
+    if batch_tag:
+        _attach_batch_wandb_tag(cfg, batch_tag)
 
 
 def _skill_ckpt_from_save(save_path: str | Path, env_name: str, seed: int) -> Path:
@@ -220,6 +266,122 @@ def _check_rq_gate(paths: list[Path], *, seed: int) -> None:
             "RQ gate failed (train RQ1 first, or pass --skip-rq-gate):\n  - "
             + "\n  - ".join(missing)
         )
+
+
+def _required_rq1_stems(path: Path) -> list[str]:
+    raw = _load_yaml(path)
+    requires = list(raw.get("PAPER_EVAL_REQUIRES_RQ1") or [])
+    rq = int(raw.get("PAPER_EVAL_RQ", 1))
+    kind = str(raw.get("PAPER_EVAL_KIND", "")).lower()
+    phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
+    if not requires and rq >= 2 and phase != "train":
+        requires = list(RQ1_SKILL_STEMS[:1])
+    if kind in {"meta", "tandem"} and not requires:
+        requires = ["seaquest_skills_ego"]
+    return [str(s) for s in requires]
+
+
+def _wait_for_path_deps(
+    path: Path,
+    *,
+    seed: int,
+    poll_s: float = 60.0,
+    timeout_h: float = 36.0,
+) -> None:
+    """Block until PAPER_EVAL_REQUIRES_RQ1 checkpoints exist (multi-GPU overnight)."""
+    requires = _required_rq1_stems(path)
+    if not requires:
+        return
+    deadline = time.time() + max(60.0, timeout_h * 3600.0)
+    last_msg = ""
+    while True:
+        missing: list[str] = []
+        for stem in requires:
+            ok, ckpt = _rq1_checkpoint_ready(stem, seed=seed)
+            if not ok:
+                missing.append(f"{stem} → {ckpt}")
+        if not missing:
+            print(f"  Deps ready for {path.stem}", flush=True)
+            return
+        msg = f"  Waiting on deps for {path.stem}: {', '.join(missing)}"
+        if msg != last_msg:
+            print(msg, flush=True)
+            last_msg = msg
+        if time.time() >= deadline:
+            raise SystemExit(
+                f"Timed out after {timeout_h}h waiting for deps of {path.stem}:\n  - "
+                + "\n  - ".join(missing)
+            )
+        time.sleep(poll_s)
+
+
+_PHASE_SORT = {"train": 0, "finetune": 1, "eval": 2}
+
+
+def _schedule_key(path: Path) -> tuple:
+    """Prefer ungated RQ1 trains first so other GPUs can unblock sooner."""
+    raw = _load_yaml(path)
+    requires = _required_rq1_stems(path)
+    rq = int(raw.get("PAPER_EVAL_RQ", 1))
+    phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
+    return (1 if requires else 0, rq, _PHASE_SORT.get(phase, 9), path.stem)
+
+
+def _launch_multi_gpu(argv: list[str], gpu_ids: list[str]) -> int:
+    """
+    Re-exec this script once per GPU with ``--shard i/N --wait-deps``.
+
+    Parent blocks until all workers exit. Returns max worker return code.
+    """
+    n = len(gpu_ids)
+    cleaned: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--gpus":
+            i += 2  # skip flag + value
+            continue
+        if a.startswith("--gpus="):
+            i += 1
+            continue
+        # Workers get their own --shard; drop a parent-provided one if any.
+        if a == "--shard":
+            i += 2
+            continue
+        if a.startswith("--shard="):
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+
+    if "--wait-deps" not in cleaned:
+        cleaned.append("--wait-deps")
+
+    procs: list[subprocess.Popen] = []
+    for wi, gpu in enumerate(gpu_ids):
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            *cleaned,
+            "--shard",
+            f"{wi + 1}/{n}",
+        ]
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu
+        # Share one batch tag across workers (parent sets PAPER_EVAL_BATCH_TAG).
+        if "PAPER_EVAL_BATCH_TAG" not in env:
+            env["PAPER_EVAL_BATCH_TAG"] = _default_batch_tag()
+        print(f"\n=== multi-GPU worker {wi + 1}/{n}  CUDA_VISIBLE_DEVICES={gpu} ===")
+        print(" ", " ".join(cmd), flush=True)
+        procs.append(subprocess.Popen(cmd, env=env, cwd=str(PROJECT_ROOT)))
+
+    codes = [p.wait() for p in procs]
+    worst = max(codes) if codes else 1
+    if worst != 0:
+        print(f"\nmulti-GPU: worker exit codes {codes}", flush=True)
+    else:
+        print("\nmulti-GPU: all workers finished successfully.", flush=True)
+    return int(worst)
 
 
 def _updates_for_config_path(path: Path, *, trial_steps: int | None) -> int:
@@ -446,6 +608,7 @@ def _run_experiment(
     eval_max_frames: int,
     enforce_rq_gate: bool,
     post_eval: bool,
+    batch_tag: str | None = None,
 ) -> None:
     raw = _load_yaml(path)
     kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
@@ -467,6 +630,7 @@ def _run_experiment(
         trial_steps=trial_steps,
         record_video=record_video,
         seed=seed,
+        batch_tag=batch_tag,
     )
 
     if phase == "eval" or kind == "heuristic_random":
@@ -585,6 +749,44 @@ def main() -> None:
     parser.add_argument("--phase", choices=["train", "eval", "finetune"], default=None)
     parser.add_argument("--only", nargs="*", metavar="NAME")
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
+    parser.add_argument(
+        "--gpus",
+        default=None,
+        metavar="IDS",
+        help=(
+            "Comma-separated GPU ids for a one-shot multi-GPU launch "
+            "(e.g. 0,1). Spawns one worker per GPU with --shard i/N --wait-deps "
+            "and blocks until all finish."
+        ),
+    )
+    parser.add_argument(
+        "--wait-deps",
+        action="store_true",
+        help=(
+            "If RQ1 ckpts required by a run are missing, poll until they appear "
+            "instead of failing the RQ gate (for multi-GPU overnight)."
+        ),
+    )
+    parser.add_argument(
+        "--wait-deps-poll",
+        type=float,
+        default=60.0,
+        help="Seconds between dependency polls when --wait-deps is set (default: 60).",
+    )
+    parser.add_argument(
+        "--wait-deps-timeout-h",
+        type=float,
+        default=36.0,
+        help="Hours to wait for deps before failing (default: 36).",
+    )
+    parser.add_argument(
+        "--batch-tag",
+        default=None,
+        help=(
+            "W&B batch tag (default: paper_eval_YYYYMMDD_HHMM). "
+            "Also set via PAPER_EVAL_BATCH_TAG. Added as batch:<tag> alongside suite:paper_eval."
+        ),
+    )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--list-mods", nargs="?", const="*", metavar="ENV")
     parser.add_argument("--trial", action="store_true")
@@ -624,6 +826,18 @@ def main() -> None:
         mod.main()
         return
 
+    if args.gpus:
+        gpu_ids = [g.strip() for g in str(args.gpus).split(",") if g.strip() != ""]
+        if len(gpu_ids) < 1:
+            raise SystemExit("--gpus needs at least one id (e.g. --gpus 0,1)")
+        if args.shard:
+            raise SystemExit("Use either --gpus or --shard, not both ( --gpus adds --shard )")
+        batch_tag = _resolve_batch_tag(args.batch_tag)
+        os.environ["PAPER_EVAL_BATCH_TAG"] = batch_tag
+        print(f"paper_eval batch tag: batch:{batch_tag}", flush=True)
+        # Parent only orchestrates; workers set jaxatari / CUDA themselves.
+        raise SystemExit(_launch_multi_gpu(sys.argv[1:], gpu_ids))
+
     if not CONFIG_DIR.is_dir():
         raise SystemExit(f"Missing {CONFIG_DIR}")
 
@@ -649,6 +863,9 @@ def main() -> None:
         if missing:
             raise SystemExit(f"Config(s) not found: {missing}")
         paths = ordered
+    else:
+        # Overnight / multi-GPU: ungated RQ1 trains before gated eval/RQ2/RQ3.
+        paths = sorted(paths, key=_schedule_key)
 
     if args.shard:
         idx, n = _parse_shard(args.shard)
@@ -662,7 +879,8 @@ def main() -> None:
 
     seed = args.seed if args.seed is not None else DEFAULT_SEED
     # Smoke trains RQ1 first in-order; gate per-run instead of upfront.
-    skip_gate = bool(args.skip_rq_gate or args.smoke)
+    # --wait-deps: skip the upfront fail; each run polls instead.
+    skip_gate = bool(args.skip_rq_gate or args.smoke or args.wait_deps)
     if not skip_gate:
         gated = [
             p
@@ -684,6 +902,9 @@ def main() -> None:
     eval_max_frames = (
         args.eval_max_frames if args.eval_max_frames is not None else (400 if trial else 800)
     )
+    batch_tag = _resolve_batch_tag(args.batch_tag)
+    os.environ["PAPER_EVAL_BATCH_TAG"] = batch_tag
+    print(f"paper_eval batch tag: batch:{batch_tag}")
 
     print(f"paper_eval: {len(paths)} run(s)")
     for p in paths:
@@ -697,6 +918,13 @@ def main() -> None:
     failures: list[tuple[str, str]] = []
     for path in paths:
         try:
+            if args.wait_deps:
+                _wait_for_path_deps(
+                    path,
+                    seed=seed,
+                    poll_s=float(args.wait_deps_poll),
+                    timeout_h=float(args.wait_deps_timeout_h),
+                )
             _run_experiment(
                 path,
                 wandb_mode=wandb_mode,
@@ -708,6 +936,7 @@ def main() -> None:
                 eval_max_frames=eval_max_frames,
                 enforce_rq_gate=bool(args.smoke) and not args.skip_rq_gate,
                 post_eval=bool(args.post_eval or args.smoke),
+                batch_tag=batch_tag,
             )
         except Exception as exc:
             traceback.print_exc()

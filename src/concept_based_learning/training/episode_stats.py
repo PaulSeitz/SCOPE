@@ -173,25 +173,36 @@ def episodic_log_metrics(
     """
     Metrics dict: PPO-style per-life mean and full-game mean.
 
-    ``returned_episode_returns`` is comparable to CleanRL PPO with ``episodic_life=True``.
-    ``returned_game_returns`` matches eval videos / ``episodic_life=False`` rollouts
-    when fed unclipped ``info["env_reward"]`` (not sign-clipped step rewards).
+    **Canonical full-game score (shared with flat PQN LogWrapper):**
+    ``returned_episode_returns`` — unclipped score until true game over.
+    Flat PQN already logs this name from ``LogWrapper``; hierarchical trainers
+    write the same key so W&B paper_eval overlays share one chart.
+
+    Per-life (``EPISODIC_LIFE=true``) lives under ``charts/avg_episodic_return``.
     """
     ppo_mean_return = jnp.mean(returned_episode_returns)
     ppo_mean_length = jnp.mean(returned_episode_lengths)
     metrics = {
         # Per-life (training wrapper with EPISODIC_LIFE=true).
-        "returned_episode_returns": ppo_mean_return,
         "charts/avg_episodic_return": ppo_mean_return,
+        "charts/avg_episode_return": ppo_mean_return,  # alias
         "env/episodic_return": ppo_mean_return,
         "charts/avg_episodic_length": ppo_mean_length,
         "env/per_life_return": ppo_mean_return,
     }
     if returned_game_returns is not None:
         game_mean_return = jnp.mean(returned_game_returns)
+        # Shared W&B key with flat PQN (LogWrapper full-game / unclipped).
+        metrics["returned_episode_returns"] = game_mean_return
         metrics["returned_game_returns"] = game_mean_return
         metrics["charts/avg_game_return"] = game_mean_return
         metrics["env/game_return"] = game_mean_return
+    else:
+        # No full-game tracker (e.g. EPISODIC_LIFE=false envs): fall back to
+        # the only available return so the shared key is always populated.
+        metrics["returned_episode_returns"] = ppo_mean_return
+        metrics["charts/avg_game_return"] = ppo_mean_return
+        metrics["env/game_return"] = ppo_mean_return
     if returned_game_lengths is not None:
         metrics["charts/avg_game_length"] = jnp.mean(returned_game_lengths)
     return metrics

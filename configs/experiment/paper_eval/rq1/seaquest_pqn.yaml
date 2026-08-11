@@ -1,5 +1,7 @@
 # paper_eval/rq1/seaquest_pqn.yaml
 # Flat PQN pixel baseline — matched frame budget to RQ1 skill arms.
+# W&B: compare ``charts/avg_game_return`` to hierarchical skills (full-game,
+# unclipped). Do NOT compare to charts/avg_episodic_return (per-life).
 
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: train
@@ -19,13 +21,13 @@ NORM_TYPE: layer_norm
 NORM_INPUT: false
 LR_LINEAR_DECAY: false
 SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_pqn
-WANDB_RUN_NAME: sq_paper_rq1_pqn
+WANDB_RUN_NAME: sq_paper_rq1_pqn_pixel
 WANDB_TAGS:
 - suite:paper_eval
 - rq:1
 - env:seaquest
 - train_mode:flat_pqn
-- variant:pqn_matched_skip4
+- variant:pqn_pixel_matched_skip4
 
 TOTAL_TIMESTEPS: 24985600
 TOTAL_TIMESTEPS_DECAY: 24985600

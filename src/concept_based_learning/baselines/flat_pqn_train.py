@@ -36,6 +36,11 @@ from jaxatari.wrappers import (
 
 from concept_based_learning.baselines.flat_pqn import QNetwork, normalize_flat_pqn_config
 from concept_based_learning.pqn_visualizer import resolve_config_path
+from concept_based_learning.paper_eval.env_metrics import append_training_metrics_csv
+from concept_based_learning.training.rtpt_progress import (
+    is_rtpt_enabled,
+    rtpt_step_callback,
+)
 
 
 @chex.dataclass(frozen=True)
@@ -135,6 +140,13 @@ def make_train(config: dict[str, Any]):
 
     def train(rng):
         original_rng = rng[0]
+        save_root = cfg.get("SAVE_PATH") or "./outputs/models/flat_pqn"
+        env_for_csv = str(cfg.get("ENV_NAME", "seaquest")).lower()
+        training_metrics_csv = (
+            Path(save_root) / env_for_csv / "training_metrics.csv"
+            if not str(save_root).startswith("gs://")
+            else None
+        )
         eps_scheduler = optax.linear_schedule(
             cfg["EPS_START"],
             cfg["EPS_FINISH"],
@@ -301,19 +313,52 @@ def make_train(config: dict[str, Any]):
 
             metrics = {
                 "env_step": train_state.timesteps,
+                "env/step": train_state.timesteps,
                 "update_steps": train_state.n_updates,
                 "grad_steps": train_state.grad_steps,
                 "td_loss": loss.mean(),
                 "qvals": qvals.mean(),
             }
             metrics.update({k: v.mean() for k, v in infos.items()})
+            # LogWrapper latches on env_done + env_reward → full-game unclipped score.
+            # Alias to the same charts/* keys as hierarchical skills so W&B overlays match.
+            game_ret = metrics.get("returned_episode_returns")
+            if game_ret is not None:
+                metrics["charts/avg_game_return"] = game_ret
+                metrics["env/game_return"] = game_ret
+                metrics["returned_game_returns"] = game_ret
+            game_len = metrics.get("returned_episode_lengths")
+            if game_len is not None:
+                metrics["charts/avg_game_length"] = game_len
 
-            if cfg.get("WANDB_MODE", "disabled") != "disabled":
+            def _log_cb(m, _rng):
+                log_dict = {
+                    k: (float(v) if hasattr(v, "shape") else v)
+                    for k, v in m.items()
+                }
+                # Flatten any remaining JAX scalars.
+                clean = {}
+                for k, v in log_dict.items():
+                    try:
+                        clean[k] = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                if training_metrics_csv is not None:
+                    try:
+                        append_training_metrics_csv(training_metrics_csv, clean)
+                    except Exception:
+                        pass
+                if cfg.get("WANDB_MODE", "disabled") == "disabled":
+                    return
+                try:
+                    wandb.log(clean, step=int(clean.get("env/step", clean.get("env_step", 0))))
+                except Exception:
+                    pass
 
-                def callback(metrics, original_rng):
-                    wandb.log(metrics, step=int(metrics["env_step"]))
+            jax.debug.callback(_log_cb, metrics, original_rng)
 
-                jax.debug.callback(callback, metrics, original_rng)
+            if is_rtpt_enabled(cfg):
+                jax.debug.callback(rtpt_step_callback, train_state.n_updates)
 
             return (train_state, expl_state, rng), metrics
 

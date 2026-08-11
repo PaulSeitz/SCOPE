@@ -336,14 +336,38 @@ def append_training_metrics_csv(
     fieldnames = [
         "env/step",
         "update_steps",
-        "charts/avg_episode_return",
+        "returned_episode_returns",  # canonical full-game (PQN + skills)
+        "charts/avg_episodic_return",
         "charts/avg_game_return",
+        "charts/avg_episodic_length",
+        "charts/avg_game_length",
         *[
             f"env/{(k[4:] if k.startswith('env_') else k)}"
             for k in EPISODE_METRIC_KEYS
         ],
     ]
-    row = {k: log_dict[k] for k in fieldnames if isinstance(log_dict.get(k), (int, float))}
+    # Alias legacy / PQN-only names into the shared schema.
+    aliases = {
+        "charts/avg_episode_return": "charts/avg_episodic_return",
+        "returned_game_returns": "returned_episode_returns",
+        "charts/avg_game_return": "returned_episode_returns",
+        "env/game_return": "returned_episode_returns",
+        "env/episodic_return": "charts/avg_episodic_return",
+        "env_step": "env/step",
+    }
+    normalized = dict(log_dict)
+    for src, dst in aliases.items():
+        if dst not in normalized and src in normalized:
+            normalized[dst] = normalized[src]
+    # Keep charts/avg_game_return populated when we only have the canonical key.
+    if "charts/avg_game_return" not in normalized and "returned_episode_returns" in normalized:
+        normalized["charts/avg_game_return"] = normalized["returned_episode_returns"]
+
+    row = {
+        k: normalized[k]
+        for k in fieldnames
+        if isinstance(normalized.get(k), (int, float))
+    }
     if not row:
         return
 

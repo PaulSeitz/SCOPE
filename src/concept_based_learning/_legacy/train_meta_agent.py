@@ -649,7 +649,8 @@ def make_meta_train(
                 jax.debug.callback(_wandb_log_cb, metrics)
 
             if is_rtpt_enabled(config):
-                jax.debug.callback(rtpt_step_callback)
+                # Pass a scan-dependent value so JAX cannot hoist this callback.
+                jax.debug.callback(rtpt_step_callback, train_state.n_updates)
 
             runner_state = (train_state, tuple(expl_state), running_returns, rng)
             return runner_state, metrics

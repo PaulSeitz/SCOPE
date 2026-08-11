@@ -80,13 +80,37 @@ def paint_outline_on_hwc(frame_hwc: jnp.ndarray, x, y, w, h, *, thickness: int, 
 
 
 def _gather_target_bbox(objects, target_idx, max_objects: int):
+    """Gather bbox fields for ``target_idx`` without ``jnp.take`` batch pitfalls.
+
+    ``jnp.take(arr, idx, axis=-1)`` with ``arr=[B,M]`` and ``idx=[B]`` yields
+    ``[B,B]`` (indices applied independently of the batch axis). Use one-hot
+    gather so shapes stay ``[B]`` / ``[B,K]`` aligned with ``target_idx``.
+    """
     objs = _last_frame_objects(objects)
     idx = jnp.clip(jnp.asarray(target_idx, dtype=jnp.int32), 0, max_objects - 1)
-    x = jnp.take(objs.x, idx, axis=-1)
-    y = jnp.take(objs.y, idx, axis=-1)
-    w = jnp.take(objs.width, idx, axis=-1)
-    h = jnp.take(objs.height, idx, axis=-1)
-    active = jnp.take(objs.active, idx, axis=-1) > 0.5
+    ref = jnp.asarray(objs.x)
+    m = ref.shape[-1]
+    obj_lead = ref.shape[:-1]
+    extra = len(idx.shape) - len(obj_lead)
+    if extra < 0:
+        raise ValueError(
+            f"target_idx rank {len(idx.shape)} must be >= object lead rank {len(obj_lead)}."
+        )
+    is_target = jax.nn.one_hot(idx, m, dtype=jnp.float32)
+
+    def _sel(arr):
+        arr_f = jnp.asarray(arr, dtype=jnp.float32)
+        if extra == 0:
+            # is_target [..., M] ; arr [..., M] → [...]
+            return jnp.sum(arr_f * is_target, axis=-1)
+        # is_target [..., K, M] ; arr [..., M] → [..., K]
+        return jnp.einsum("...m,...km->...k", arr_f, is_target)
+
+    x = _sel(objs.x)
+    y = _sel(objs.y)
+    w = _sel(objs.width)
+    h = _sel(objs.height)
+    active = _sel(objs.active) > 0.5
     valid = jnp.logical_and(active, jnp.logical_and(w > 0, h > 0))
     return x, y, w, h, valid
 

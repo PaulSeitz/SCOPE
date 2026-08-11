@@ -121,8 +121,12 @@ def rtpt_host_step() -> None:
         _RTPT.step()
 
 
-def rtpt_step_callback() -> None:
-    """Count completed training updates; call RTPT.step() every RTPT_STEP_EVERY updates."""
+def rtpt_step_callback(*_ignored) -> None:
+    """Count completed training updates; call RTPT.step() every RTPT_STEP_EVERY updates.
+
+    Accepts optional ignored args so callers can pass a JAX value into
+    ``jax.debug.callback`` (a no-arg callback can be hoisted / run once).
+    """
     global _RTPT, _NUM_SEEDS, _SEED_ACCUM, _LOGICAL_UPDATES, _STEP_EVERY
 
     if _RTPT is None:

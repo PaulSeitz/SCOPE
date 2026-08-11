@@ -3,6 +3,9 @@
 # Same outer loop as seaquest_skills_ego (25M, 128×128, skip 4, no vel).
 # Ego flags below are unused by the pixel CNN but kept identical to the ego arm
 # so logging / sidecar configs stay consistent (do not enable velocity).
+#
+# NOTE: If GPU OOM at 128 envs, drop NUM_ENVS to 64 and keep TOTAL_TIMESTEPS
+# aligned (24985600 is divisible by 64*128).
 
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: train
