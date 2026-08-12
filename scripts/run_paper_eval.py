@@ -22,6 +22,14 @@ Fail-fast guards (avoid burning hours / idling forever):
 Disk-lean overnight (shared /home nearly full):
   python scripts/run_paper_eval.py --gpus 0,1 --wait-deps --lean
   # --lean: no videos, no training_metrics.csv, wandb local dirs under $TMPDIR
+
+Resume remaining work on 3 GPUs (skip finished trains+evals; drop cancelled pixel RQ1):
+  python scripts/run_paper_eval.py --gpus 0,1,2 --wait-deps --lean --resume \\
+    --exclude seaquest_skills_pixel seaquest_skills_pixel_eval
+
+  # Preview what is still missing (includes incomplete/missing *_mods.json evals):
+  python scripts/run_paper_eval.py --resume --list \\
+    --exclude seaquest_skills_pixel seaquest_skills_pixel_eval
 """
 
 from __future__ import annotations
@@ -269,6 +277,175 @@ def _skill_ckpt_from_save(save_path: str | Path, env_name: str, seed: int) -> Pa
     if not root.is_absolute():
         root = PROJECT_ROOT / root
     return root / env_name / f"hierarchical_pqn_{env_name}_seed{seed}.safetensors"
+
+
+def _eval_json_path(stem: str) -> Path:
+    return (
+        PROJECT_ROOT
+        / "outputs"
+        / "models"
+        / "paper_eval"
+        / "eval"
+        / f"{stem}_mods.json"
+    )
+
+
+def _flat_pqn_ckpt_from_cfg(cfg: dict[str, Any], *, seed: int) -> Path:
+    from concept_based_learning.paper_eval.checkpoints import resolve_flat_pqn_checkpoint
+
+    return resolve_flat_pqn_checkpoint(
+        object_centric=bool(cfg.get("OBJECT_CENTRIC", True)),
+        env_name=str(cfg.get("ENV_NAME", "seaquest")).lower(),
+        seed=int(cfg.get("SEED", seed)),
+        save_root=cfg.get("SAVE_PATH"),
+        vmap_index=0,
+    )
+
+
+def _skills_train_artifacts(cfg: dict[str, Any], *, seed: int, kind: str) -> list[Path]:
+    """Expected checkpoint files produced by a skills / meta / tandem train."""
+    env_name = str(cfg.get("ENV_NAME", "seaquest")).lower()
+    seed_i = int(cfg.get("SEED", seed))
+    save_root = cfg.get("SAVE_PATH", "./outputs/models")
+    root = Path(save_root)
+    if not root.is_absolute():
+        root = PROJECT_ROOT / root
+    env_dir = root / env_name
+    alg = str(cfg.get("ALG_NAME", "hierarchical_pqn"))
+    if kind in {"meta", "tandem"}:
+        return [
+            env_dir / f"{alg}_{env_name}_seed{seed_i}_skills.safetensors",
+            env_dir / f"{alg}_{env_name}_seed{seed_i}_meta.safetensors",
+        ]
+    # skills_only / finetune: single stacked skill ckpt (no _skills suffix)
+    return [env_dir / f"{alg}_{env_name}_seed{seed_i}.safetensors"]
+
+
+def _eval_json_complete(
+    path: Path,
+    *,
+    env_name: str | None = None,
+    expected_mod_keys: list[str] | None = None,
+) -> tuple[bool, str]:
+    """
+    True only if the mods JSON exists, parses, and has a non-empty ``results``
+    map that covers expected mod keys (at least ``base``).
+
+    Partial writes from earlier disk-full failures are treated as incomplete.
+    """
+    if not path.is_file() or path.stat().st_size < 8:
+        return False, f"missing {path}"
+    try:
+        import json
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"unreadable {path.name}: {exc}"
+    results = payload.get("results")
+    if not isinstance(results, dict) or not results:
+        return False, f"empty results in {path.name}"
+    if "base" not in results:
+        return False, f"{path.name} missing results['base']"
+
+    keys = expected_mod_keys
+    if keys is None and env_name:
+        try:
+            from concept_based_learning.paper_eval.mods import mod_specs_for_env
+
+            keys = [m.key for m in mod_specs_for_env(env_name)]
+        except Exception:
+            keys = None
+    if keys:
+        missing = [k for k in keys if k not in results]
+        if missing:
+            return (
+                False,
+                f"{path.name} incomplete ({len(results)}/{len(keys)} mods; "
+                f"missing e.g. {missing[:3]})",
+            )
+    return True, f"{path.name} ({len(results)} mods)"
+
+
+def experiment_done(path: Path, *, seed: int) -> tuple[bool, str]:
+    """
+    Return (done, reason) based on on-disk artifacts.
+
+    Train → checkpoint(s) present.
+    Eval / transfer / heuristic → complete mods JSON (all allowlisted mods).
+    """
+    raw = _load_yaml(path)
+    kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
+    phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
+    status = str(raw.get("PAPER_EVAL_STATUS", "ready")).lower()
+    if status in {"stub", "planned"}:
+        return True, f"status={status} (skipped)"
+
+    if phase == "eval" or kind in {"heuristic_random", "transfer"}:
+        env_name = str(raw.get("ENV_NAME") or raw.get("PAPER_EVAL_MODS") or "seaquest")
+        if isinstance(env_name, list):
+            env_name = env_name[0] if env_name else "seaquest"
+        env_name = str(env_name).lower()
+        out = _eval_json_path(path.stem)
+        ok, detail = _eval_json_complete(out, env_name=env_name)
+        if ok:
+            return True, f"eval {detail}"
+        return False, f"eval incomplete: {detail}"
+
+    cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
+    if kind == "flat_pqn":
+        ckpt = _flat_pqn_ckpt_from_cfg(cfg, seed=seed)
+        if ckpt.is_file():
+            return True, f"ckpt {ckpt.name}"
+        return False, f"missing {ckpt}"
+
+    arts = _skills_train_artifacts(cfg, seed=seed, kind=kind)
+    missing = [p for p in arts if not p.is_file()]
+    if not missing:
+        return True, "ckpt " + ", ".join(p.name for p in arts)
+    return False, "missing " + ", ".join(str(p) for p in missing)
+
+
+def _filter_remaining_paths(
+    paths: list[Path],
+    *,
+    seed: int,
+    exclude: set[str],
+    skip_done: bool,
+) -> list[Path]:
+    """Drop completed runs and explicitly excluded stems (+ dependents)."""
+    exclude_l = {s.removesuffix(".yaml") for s in exclude}
+    remaining: list[Path] = []
+    skipped_done = 0
+    skipped_excl = 0
+    skipped_dep = 0
+    for path in paths:
+        stem = path.stem
+        if stem in exclude_l:
+            print(f"  SKIP (excluded): {stem}", flush=True)
+            skipped_excl += 1
+            continue
+        requires = _required_rq1_stems(path)
+        blocked = [r for r in requires if r in exclude_l]
+        if blocked:
+            print(
+                f"  SKIP (depends on excluded {', '.join(blocked)}): {stem}",
+                flush=True,
+            )
+            skipped_dep += 1
+            continue
+        if skip_done:
+            done, reason = experiment_done(path, seed=seed)
+            if done:
+                print(f"  SKIP (done: {reason}): {stem}", flush=True)
+                skipped_done += 1
+                continue
+        remaining.append(path)
+    print(
+        f"resume filter: keep {len(remaining)} / {len(paths)} "
+        f"(done={skipped_done}, excluded={skipped_excl}, dep-excluded={skipped_dep})",
+        flush=True,
+    )
+    return remaining
 
 
 def _rq1_checkpoint_ready(stem: str, *, seed: int) -> tuple[bool, Path]:
@@ -531,18 +708,67 @@ def _init_rtpt_for_paths(paths: list[Path], *, experiment_name: str, trial_steps
         print(f"RTPT initialized: {total:,} updates across {len(paths)} run(s)\n")
 
 
+def _gpu_mem_brief() -> str:
+    """One-line nvidia-smi free/used if available."""
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=5,
+        )
+        parts = []
+        for line in out.strip().splitlines():
+            idx, used, total = [p.strip() for p in line.split(",")]
+            parts.append(f"gpu{idx}:{used}/{total}MiB")
+        return " ".join(parts) if parts else "(no gpu)"
+    except Exception:
+        return "(nvidia-smi unavailable)"
+
+
 def _clear_jax_memory() -> None:
+    """Drop compile caches and delete any remaining live device buffers."""
     try:
         import jax
 
         jax.clear_caches()
+        # clear_caches alone keeps arrays still referenced from the last train.
+        try:
+            from jax.lib import xla_bridge
+
+            backend = xla_bridge.get_backend()
+            live_fn = getattr(backend, "live_buffers", None)
+            if callable(live_fn):
+                for buf in list(live_fn()):
+                    try:
+                        buf.delete()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Newer JAX: also drop backend client state when available.
+        clear_backends = getattr(jax, "clear_backends", None)
+        if callable(clear_backends):
+            try:
+                clear_backends()
+            except Exception:
+                pass
     except Exception:
         pass
 
 
-def _release() -> None:
+def _release(*, label: str = "") -> None:
+    """Best-effort VRAM reclaim between paper_eval jobs in the same process."""
+    before = _gpu_mem_brief()
     gc.collect()
     _clear_jax_memory()
+    gc.collect()
+    after = _gpu_mem_brief()
+    tag = f" after {label}" if label else ""
+    print(f"  GPU release{tag}: {before} → {after}", flush=True)
 
 
 def _print_mods(env: str | None) -> None:
@@ -603,7 +829,7 @@ def _run_skills_train(path: Path, **kwargs) -> None:
     try:
         train_main.single_run(cfg)
     finally:
-        _release()
+        _release(label=path.stem)
 
 
 def _run_flat_pqn_train(path: Path, **kwargs) -> None:
@@ -620,7 +846,7 @@ def _run_flat_pqn_train(path: Path, **kwargs) -> None:
     try:
         train_flat_pqn(cfg)
     finally:
-        _release()
+        _release(label=path.stem)
 
 
 def _run_mod_eval(
@@ -701,7 +927,7 @@ def _run_mod_eval(
             },
         )
     finally:
-        _release()
+        _release(label=f"eval:{path.stem}")
 
 
 def _run_experiment(
@@ -815,7 +1041,7 @@ def _run_experiment(
                         },
                     )
                 finally:
-                    _release()
+                    _release(label=f"post_eval:{path.stem}")
             else:
                 print(f"  WARN: expected checkpoint missing after train under {env_dir}")
         return
@@ -940,6 +1166,26 @@ def main() -> None:
             "wandb local dirs under $TMPDIR/$USER/cbl_paper_eval."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip experiments that already have their checkpoint OR a complete "
+            "mod-eval JSON on disk (all allowlisted mods present, including base). "
+            "Missing/partial evals from disk-full failures are re-queued. "
+            "Filter runs before sharding so GPUs only share remaining work."
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        metavar="STEM",
+        help=(
+            "Force-skip these config stems and any run that requires them as an RQ1 dep "
+            "(e.g. --exclude seaquest_skills_pixel also drops pixel transfer/finetune)."
+        ),
+    )
     parser.add_argument("--abort-on-failure", action="store_true")
     parser.add_argument("--skip-rq-gate", action="store_true")
     parser.add_argument("--jaxatari-root", default=None)
@@ -1004,6 +1250,18 @@ def main() -> None:
         # Overnight / multi-GPU: ungated RQ1 trains before gated eval/RQ2/RQ3.
         paths = sorted(paths, key=_schedule_key)
 
+    seed = args.seed if args.seed is not None else DEFAULT_SEED
+    exclude = {str(s).removesuffix(".yaml") for s in (args.exclude or [])}
+    if args.resume or exclude:
+        paths = _filter_remaining_paths(
+            paths,
+            seed=seed,
+            exclude=exclude,
+            skip_done=bool(args.resume),
+        )
+        if not paths:
+            raise SystemExit("Nothing left to run (all done or excluded).")
+
     if args.shard:
         idx, n = _parse_shard(args.shard)
         paths = _shard_paths(paths, shard_idx=idx, num_shards=n)
@@ -1012,9 +1270,10 @@ def main() -> None:
 
     if args.list:
         _print_matrix(paths)
+        if args.resume or exclude:
+            print("\n(status with --resume / --exclude applied above)")
         return
 
-    seed = args.seed if args.seed is not None else DEFAULT_SEED
     # Smoke trains RQ1 first in-order; gate per-run instead of upfront.
     # --wait-deps: skip the upfront fail; each run polls instead.
     skip_gate = bool(args.skip_rq_gate or args.smoke or args.wait_deps)
@@ -1085,6 +1344,8 @@ def main() -> None:
                     min_free_gb=min_free_gb,
                     failed_local_stems=failed_stems,
                 )
+            # Reclaim VRAM left by the previous JAX train/eval before compiling again.
+            _release(label=f"before:{path.stem}")
             _run_experiment(
                 path,
                 wandb_mode=wandb_mode,
