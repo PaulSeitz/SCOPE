@@ -144,7 +144,10 @@ def make_train(config: dict[str, Any]):
         env_for_csv = str(cfg.get("ENV_NAME", "seaquest")).lower()
         training_metrics_csv = (
             Path(save_root) / env_for_csv / "training_metrics.csv"
-            if not str(save_root).startswith("gs://")
+            if (
+                bool(cfg.get("SAVE_TRAINING_METRICS_CSV", True))
+                and not str(save_root).startswith("gs://")
+            )
             else None
         )
         eps_scheduler = optax.linear_schedule(

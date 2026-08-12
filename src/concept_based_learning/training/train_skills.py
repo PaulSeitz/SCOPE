@@ -164,7 +164,10 @@ def make_train(
     _env_for_csv = str(config.get("ENV_NAME", "seaquest")).lower()
     training_metrics_csv = (
         Path(_save_root) / _env_for_csv / "training_metrics.csv"
-        if not str(_save_root).startswith("gs://")
+        if (
+            bool(config.get("SAVE_TRAINING_METRICS_CSV", True))
+            and not str(_save_root).startswith("gs://")
+        )
         else None
     )
     freeway_env_steps_per_update = config["NUM_STEPS"] * config["NUM_ENVS"]

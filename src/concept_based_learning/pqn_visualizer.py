@@ -246,11 +246,19 @@ def _unwrap_stacked_skill_params(params_tree):
     return params_tree, 1
 
 
-def infer_skill_hparams_from_params(params_tree) -> dict:
+def infer_skill_hparams_from_params(
+    params_tree,
+    *,
+    skill_input_mode: str = "ego",
+) -> dict:
     """
     Infer skill Q-network hyperparameters from a checkpoint parameter tree.
 
     Expects Flax ``QNetwork`` param keys ``Dense_0`` … ``Dense_{NUM_LAYERS}``.
+
+    ``Dense_0`` input size is egocentric length only for ``ego`` / ``ego_embed``.
+    For ``oc_embed`` / ``pixel_embed`` it is the embedding width — do **not**
+    treat it as ``channels × FRAME_STACK_SIZE``.
     """
     sample, num_skills = _unwrap_stacked_skill_params(params_tree)
     dense_indices = sorted(
@@ -263,15 +271,19 @@ def infer_skill_hparams_from_params(params_tree) -> dict:
 
     first = sample[f"Dense_{dense_indices[0]}"]["kernel"]
     last = sample[f"Dense_{dense_indices[-1]}"]["kernel"]
-    ego_in = int(first.shape[0])
+    first_in = int(first.shape[0])
     hidden_size = int(first.shape[1])
     ego_action_dim = int(last.shape[1])
     num_layers = len(dense_indices) - 1
 
-    channels_per_frame = ego_obs_channels_per_frame()
-    frame_stack_size = (
-        ego_in // channels_per_frame if ego_in % channels_per_frame == 0 else None
-    )
+    mode = str(skill_input_mode or "ego").lower().strip()
+    frame_stack_size = None
+    ckpt_ego_in = None
+    if mode in ("ego", "ego_embed"):
+        channels_per_frame = ego_obs_channels_per_frame()
+        if channels_per_frame > 0 and first_in % channels_per_frame == 0:
+            frame_stack_size = first_in // channels_per_frame
+        ckpt_ego_in = first_in
 
     return {
         "HIDDEN_SIZE": hidden_size,
@@ -279,7 +291,8 @@ def infer_skill_hparams_from_params(params_tree) -> dict:
         "EGO_ACTION_DIM": ego_action_dim,
         "NUM_SKILLS": num_skills,
         "FRAME_STACK_SIZE": frame_stack_size,
-        "_ckpt_ego_in": ego_in,
+        "_ckpt_ego_in": ckpt_ego_in,
+        "_ckpt_dense0_in": first_in,
     }
 
 
@@ -296,29 +309,47 @@ def ensure_skill_params_stack(params_tree, num_skills: int):
 
 def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
     """Override skill architecture fields so the network matches the checkpoint."""
-    inferred = infer_skill_hparams_from_params(params_tree)
-    ckpt_in = inferred.pop("_ckpt_ego_in")
+    # Sync ego channel globals before inferring stack size from Dense_0.
+    configure_ego_obs_from_config(config)
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    inferred = infer_skill_hparams_from_params(params_tree, skill_input_mode=mode)
+    ckpt_ego_in = inferred.pop("_ckpt_ego_in", None)
+    inferred.pop("_ckpt_dense0_in", None)
     frame_stack_size = inferred.get("FRAME_STACK_SIZE")
-    updated = {**config, **{k: v for k, v in inferred.items() if v is not None}}
+    # Never clobber FRAME_STACK_SIZE with a bogus embed_dim / channel quotient.
+    updated = {
+        **config,
+        **{
+            k: v
+            for k, v in inferred.items()
+            if v is not None and k != "FRAME_STACK_SIZE"
+        },
+    }
+    if frame_stack_size is not None:
+        prev = int(config.get("FRAME_STACK_SIZE", frame_stack_size))
+        if prev != int(frame_stack_size):
+            print(
+                f"Using checkpoint FRAME_STACK_SIZE={frame_stack_size} "
+                f"(default config had {config.get('FRAME_STACK_SIZE')})."
+            )
+        updated["FRAME_STACK_SIZE"] = int(frame_stack_size)
     if int(config.get("HIDDEN_SIZE", -1)) != int(updated["HIDDEN_SIZE"]):
         print(
             f"Using checkpoint HIDDEN_SIZE={updated['HIDDEN_SIZE']} "
             f"(default config had {config.get('HIDDEN_SIZE')})."
         )
-    if frame_stack_size is not None and int(
-        config.get("FRAME_STACK_SIZE", frame_stack_size)
-    ) != int(frame_stack_size):
-        print(
-            f"Using checkpoint FRAME_STACK_SIZE={frame_stack_size} "
-            f"(default config had {config.get('FRAME_STACK_SIZE')})."
-        )
-    updated["_ckpt_ego_in"] = ckpt_in
+    if ckpt_ego_in is not None:
+        updated["_ckpt_ego_in"] = ckpt_ego_in
     return updated
 
 
 def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
     """Fail fast when the eval env's ego observation length does not match the checkpoint."""
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     ckpt_in = config.pop("_ckpt_ego_in", None)
+    # oc/pixel Dense_0 is embed width — not comparable to ego feat length.
+    if mode not in ("ego", "ego_embed"):
+        return
     if ckpt_in is None:
         return
     if int(ego_feat_dim) == int(ckpt_in):

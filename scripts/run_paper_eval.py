@@ -13,14 +13,25 @@ Usage:
 
   # One-shot overnight on two GPUs (workers poll for RQ1 ckpts before gated jobs):
   python scripts/run_paper_eval.py --gpus 0,1 --wait-deps
+
+Fail-fast guards (avoid burning hours / idling forever):
+  - Abort if free disk on the project volume drops below --min-free-gb (default 2).
+  - Treat ENOSPC / "No space left on device" as fatal for the whole suite.
+  - With --wait-deps, do not wait for stems this worker already failed to produce.
+
+Disk-lean overnight (shared /home nearly full):
+  python scripts/run_paper_eval.py --gpus 0,1 --wait-deps --lean
+  # --lean: no videos, no training_metrics.csv, wandb local dirs under $TMPDIR
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import errno
 import gc
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,6 +39,10 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Abort when free space on the project volume drops below this.
+# Modest default: shared /home is often nearly full; ckpts << videos/wandb.
+DEFAULT_MIN_FREE_GB = 2.0
 
 # Avoid XLA:GPU Triton GEMM fusion CHECK failures
 # (triton_tiling_propagation.cc: dst_remaining_size == 1) seen on some
@@ -194,6 +209,30 @@ def _align_trial_timesteps(cfg: dict[str, Any]) -> None:
         cfg["TOTAL_TIMESTEPS_DECAY"] = cfg["TOTAL_TIMESTEPS"]
 
 
+def _configure_lean_disk() -> Path:
+    """Put wandb local files on $TMPDIR (often a separate volume from /home)."""
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
+    tmp_root = Path(os.environ.get("TMPDIR") or "/tmp") / user / "cbl_paper_eval"
+    wandb_dir = tmp_root / "wandb"
+    cache_dir = tmp_root / "wandb_cache"
+    wandb_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["WANDB_DIR"] = str(wandb_dir)
+    os.environ["WANDB_CACHE_DIR"] = str(cache_dir)
+    # Avoid large local artifact media if anything slips through.
+    os.environ.setdefault("WANDB_DISABLE_CODE", "true")
+    try:
+        tmp_free = shutil.disk_usage(tmp_root).free / (1024.0**3)
+        tmp_note = f"{tmp_free:.1f} GiB free on tmp"
+    except OSError:
+        tmp_note = "tmp free unknown"
+    print(
+        f"lean disk: WANDB_DIR={wandb_dir}  WANDB_CACHE_DIR={cache_dir}  ({tmp_note})",
+        flush=True,
+    )
+    return tmp_root
+
+
 def _apply_run_defaults(
     cfg: dict[str, Any],
     *,
@@ -202,6 +241,7 @@ def _apply_run_defaults(
     record_video: bool,
     seed: int | None,
     batch_tag: str | None = None,
+    save_training_metrics_csv: bool = True,
 ) -> None:
     if wandb_mode is not None:
         cfg["WANDB_MODE"] = wandb_mode
@@ -219,6 +259,7 @@ def _apply_run_defaults(
     cfg.setdefault("NUM_SEEDS", 1)
     cfg["RECORD_VIDEO"] = record_video
     cfg["VIDEO_AT_END"] = record_video
+    cfg["SAVE_TRAINING_METRICS_CSV"] = bool(save_training_metrics_csv)
     if batch_tag:
         _attach_batch_wandb_tag(cfg, batch_tag)
 
@@ -281,22 +322,89 @@ def _required_rq1_stems(path: Path) -> list[str]:
     return [str(s) for s in requires]
 
 
+def _is_no_space_error(exc: BaseException) -> bool:
+    """True for ENOSPC and common chained / string forms of disk-full failures."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, OSError) and cur.errno == errno.ENOSPC:
+            return True
+        msg = str(cur).lower()
+        if "no space left on device" in msg or "[errno 28]" in msg:
+            return True
+        if cur.__cause__ is not None:
+            stack.append(cur.__cause__)
+        if cur.__context__ is not None and cur.__context__ is not cur.__cause__:
+            stack.append(cur.__context__)
+    return False
+
+
+def _free_gb(path: Path | None = None) -> float:
+    """Free space (GiB) on the filesystem that holds ``path`` (default: project root)."""
+    target = path if path is not None else PROJECT_ROOT
+    try:
+        usage = shutil.disk_usage(target)
+    except FileNotFoundError:
+        usage = shutil.disk_usage(PROJECT_ROOT)
+    return float(usage.free) / (1024.0**3)
+
+
+def _assert_disk_space(
+    *,
+    min_free_gb: float,
+    where: str,
+    path: Path | None = None,
+) -> None:
+    """Crash immediately if the project volume is too full to continue safely."""
+    if min_free_gb <= 0:
+        return
+    free = _free_gb(path)
+    if free < float(min_free_gb):
+        raise SystemExit(
+            f"Aborting ({where}): only {free:.2f} GiB free on "
+            f"{path or PROJECT_ROOT} (need >= {min_free_gb:.2f} GiB). "
+            "Free disk space (e.g. wandb/run-* , old outputs) and rerun."
+        )
+
+
 def _wait_for_path_deps(
     path: Path,
     *,
     seed: int,
     poll_s: float = 60.0,
     timeout_h: float = 36.0,
+    min_free_gb: float = DEFAULT_MIN_FREE_GB,
+    failed_local_stems: set[str] | None = None,
 ) -> None:
     """Block until PAPER_EVAL_REQUIRES_RQ1 checkpoints exist (multi-GPU overnight)."""
     requires = _required_rq1_stems(path)
     if not requires:
         return
+    failed_local = failed_local_stems or set()
+    already_failed = [s for s in requires if s in failed_local]
+    if already_failed:
+        raise SystemExit(
+            f"Aborting wait for {path.stem}: required dep(s) already failed in "
+            f"this worker (will never appear): {', '.join(already_failed)}"
+        )
     deadline = time.time() + max(60.0, timeout_h * 3600.0)
     last_msg = ""
     while True:
+        _assert_disk_space(
+            min_free_gb=min_free_gb,
+            where=f"wait-deps for {path.stem}",
+        )
         missing: list[str] = []
         for stem in requires:
+            if stem in failed_local:
+                raise SystemExit(
+                    f"Aborting wait for {path.stem}: required dep {stem} failed "
+                    "in this worker while waiting."
+                )
             ok, ckpt = _rq1_checkpoint_ready(stem, seed=seed)
             if not ok:
                 missing.append(f"{stem} → {ckpt}")
@@ -609,6 +717,7 @@ def _run_experiment(
     enforce_rq_gate: bool,
     post_eval: bool,
     batch_tag: str | None = None,
+    save_training_metrics_csv: bool = True,
 ) -> None:
     raw = _load_yaml(path)
     kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
@@ -631,6 +740,7 @@ def _run_experiment(
         record_video=record_video,
         seed=seed,
         batch_tag=batch_tag,
+        save_training_metrics_csv=save_training_metrics_csv,
     )
 
     if phase == "eval" or kind == "heuristic_random":
@@ -780,6 +890,16 @@ def main() -> None:
         help="Hours to wait for deps before failing (default: 36).",
     )
     parser.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=DEFAULT_MIN_FREE_GB,
+        help=(
+            f"Abort immediately if free space on the project volume drops below "
+            f"this many GiB (default: {DEFAULT_MIN_FREE_GB}). Checked at suite "
+            "start, before each run, and during --wait-deps polls. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--batch-tag",
         default=None,
         help=(
@@ -802,7 +922,24 @@ def main() -> None:
     )
     parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--no-video", action="store_true")
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Record end-of-train videos (default: off; videos burn disk).",
+    )
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Deprecated alias: videos are off by default.",
+    )
+    parser.add_argument(
+        "--lean",
+        action="store_true",
+        help=(
+            "Minimize local disk writes: no videos, no training_metrics.csv, "
+            "wandb local dirs under $TMPDIR/$USER/cbl_paper_eval."
+        ),
+    )
     parser.add_argument("--abort-on-failure", action="store_true")
     parser.add_argument("--skip-rq-gate", action="store_true")
     parser.add_argument("--jaxatari-root", default=None)
@@ -835,7 +972,7 @@ def main() -> None:
         batch_tag = _resolve_batch_tag(args.batch_tag)
         os.environ["PAPER_EVAL_BATCH_TAG"] = batch_tag
         print(f"paper_eval batch tag: batch:{batch_tag}", flush=True)
-        # Parent only orchestrates; workers set jaxatari / CUDA themselves.
+        # Parent only orchestrates; workers set jaxatari / CUDA / --lean themselves.
         raise SystemExit(_launch_multi_gpu(sys.argv[1:], gpu_ids))
 
     if not CONFIG_DIR.is_dir():
@@ -906,6 +1043,22 @@ def main() -> None:
     os.environ["PAPER_EVAL_BATCH_TAG"] = batch_tag
     print(f"paper_eval batch tag: batch:{batch_tag}")
 
+    lean = bool(args.lean)
+    if lean:
+        _configure_lean_disk()
+
+    # Videos off by default; --video opts in. --lean always disables videos.
+    record_video = bool(args.video) and not lean and not trial and not args.no_video
+    save_training_metrics_csv = not lean
+
+    min_free_gb = float(args.min_free_gb)
+    _assert_disk_space(min_free_gb=min_free_gb, where="suite start")
+    print(
+        f"disk: {_free_gb():.2f} GiB free (abort below {min_free_gb:.2f} GiB); "
+        f"videos={'on' if record_video else 'off'}; "
+        f"training_csv={'on' if save_training_metrics_csv else 'off'}"
+    )
+
     print(f"paper_eval: {len(paths)} run(s)")
     for p in paths:
         print(f"  - {p.relative_to(CONFIG_DIR)}")
@@ -916,20 +1069,27 @@ def main() -> None:
     )
 
     failures: list[tuple[str, str]] = []
+    failed_stems: set[str] = set()
     for path in paths:
         try:
+            _assert_disk_space(
+                min_free_gb=min_free_gb,
+                where=f"before {path.stem}",
+            )
             if args.wait_deps:
                 _wait_for_path_deps(
                     path,
                     seed=seed,
                     poll_s=float(args.wait_deps_poll),
                     timeout_h=float(args.wait_deps_timeout_h),
+                    min_free_gb=min_free_gb,
+                    failed_local_stems=failed_stems,
                 )
             _run_experiment(
                 path,
                 wandb_mode=wandb_mode,
                 trial_steps=trial_steps,
-                record_video=not args.no_video and not trial,
+                record_video=record_video,
                 seed=args.seed,
                 trial=trial,
                 eval_episodes=eval_episodes,
@@ -937,10 +1097,21 @@ def main() -> None:
                 enforce_rq_gate=bool(args.smoke) and not args.skip_rq_gate,
                 post_eval=bool(args.post_eval or args.smoke),
                 batch_tag=batch_tag,
+                save_training_metrics_csv=save_training_metrics_csv,
             )
+        except SystemExit:
+            raise
         except Exception as exc:
             traceback.print_exc()
             failures.append((path.name, str(exc)))
+            failed_stems.add(path.stem)
+            if _is_no_space_error(exc):
+                print(
+                    f"\n  FATAL disk full during {path.name}; aborting suite "
+                    f"(not waiting on further deps).\n",
+                    flush=True,
+                )
+                break
             if args.abort_on_failure:
                 break
             print(f"\n  FAILED (continuing): {path.name}: {exc}\n")

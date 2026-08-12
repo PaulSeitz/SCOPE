@@ -290,23 +290,27 @@ def single_run(config):
         _configure_ego_obs_format(base_config)
         print(f"Initializing skills from pre-trained model: {init_model_path}")
         prev_params = load_params_from_file(init_model_path)
-        inferred = infer_skill_hparams_from_params(prev_params)
-        ckpt_ego_in = int(inferred.get("_ckpt_ego_in", -1))
-        expected_ego_in = int(ego_obs_channels_per_frame()) * int(
-            base_config.get("FRAME_STACK_SIZE", 4)
+        skill_mode = str(base_config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+        inferred = infer_skill_hparams_from_params(
+            prev_params, skill_input_mode=skill_mode
         )
-        if ckpt_ego_in != expected_ego_in:
-            warnings.warn(
-                "Checkpoint ego feature length mismatch: "
-                f"checkpoint expects {ckpt_ego_in}, current config expects "
-                f"{expected_ego_in} (channels/frame={ego_obs_channels_per_frame()}, "
-                f"FRAME_STACK_SIZE={base_config.get('FRAME_STACK_SIZE', 4)}). "
-                "This commonly happens when USE_EGO_SIZE_FEATURES / "
-                "USE_EGO_VELOCITY_FEATURES / USE_LEGACY_EGO_OBS differ between "
-                "checkpoint training and current run.",
-                UserWarning,
-                stacklevel=2,
+        ckpt_ego_in = inferred.get("_ckpt_ego_in")
+        if skill_mode in ("ego", "ego_embed") and ckpt_ego_in is not None:
+            expected_ego_in = int(ego_obs_channels_per_frame()) * int(
+                base_config.get("FRAME_STACK_SIZE", 4)
             )
+            if int(ckpt_ego_in) != expected_ego_in:
+                warnings.warn(
+                    "Checkpoint ego feature length mismatch: "
+                    f"checkpoint expects {ckpt_ego_in}, current config expects "
+                    f"{expected_ego_in} (channels/frame={ego_obs_channels_per_frame()}, "
+                    f"FRAME_STACK_SIZE={base_config.get('FRAME_STACK_SIZE', 4)}). "
+                    "This commonly happens when USE_EGO_SIZE_FEATURES / "
+                    "USE_EGO_VELOCITY_FEATURES / USE_LEGACY_EGO_OBS differ between "
+                    "checkpoint training and current run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     def run_skill_curriculum(params_to_start_with, steps_to_run):
         """Runs System 1 training with optional curriculum phases."""
