@@ -7,6 +7,10 @@ from typing import Any, Callable
 import jax
 import jax.numpy as jnp
 
+# Peak CNN batch ≈ chunk_steps * NUM_ENVS. 1024 frames is ~16× smaller than a
+# 128×128 rollout while still a healthy GPU batch.
+PIXEL_CNN_TARGET_FRAMES = 1024
+
 
 def _pad_time_axis(x: jnp.ndarray, pad_steps: int) -> jnp.ndarray:
     if pad_steps <= 0:
@@ -19,6 +23,82 @@ def _pad_time_tree(tree, pad_steps: int):
     if tree is None:
         return None
     return jax.tree_util.tree_map(lambda x: _pad_time_axis(x, pad_steps), tree)
+
+
+def resolve_skill_chunk_steps(
+    *,
+    num_steps: int,
+    num_envs: int,
+    configured: int,
+    use_pixel: bool,
+) -> int:
+    """Time-chunk size for skill Q bootstrap.
+
+    Ego/OC keep the historical default (full ``NUM_STEPS`` when unset).
+    Pixel skills default to a ~1024-frame CNN batch so a 128×128 rollout is
+    not pushed through the convs in one shot (and not 4× via ``vmap``).
+    """
+    num_steps = max(1, int(num_steps))
+    configured = int(configured)
+    if configured > 0:
+        return max(1, min(configured, num_steps))
+    if not use_pixel:
+        return num_steps
+    per = max(1, PIXEL_CNN_TARGET_FRAMES // max(1, int(num_envs)))
+    return max(1, min(num_steps, per))
+
+
+def map_over_skills(fn, *xs, sequential: bool):
+    """``vmap`` over skill heads, or ``scan`` them one-at-a-time.
+
+    Pixel skill CNNs must not be ``vmap``'d: that broadcasts the same image
+    batch through 4 independent convs and peaks at ~4× activations. Scan is
+    the same math (independent params) with a single CNN live at a time.
+    """
+    if sequential:
+        def _body(_carry, args):
+            return None, fn(*args)
+
+        _, out = jax.lax.scan(_body, None, xs)
+        return out
+    return jax.vmap(fn)(*xs)
+
+
+def skill_network_q_max(
+    apply_fn: Callable[..., jnp.ndarray],
+    params: Any,
+    batch_stats: Any,
+    ego_obs: jnp.ndarray,
+    *,
+    target_idx: jnp.ndarray,
+    pixel_obs: jnp.ndarray | None,
+    objects=None,
+    chunk_steps: int,
+    train: bool = False,
+    chunk: bool = False,
+) -> jnp.ndarray:
+    """Max-Q over actions for a ``[T, ...]`` rollout, optionally time-chunked."""
+    if chunk:
+        return chunked_skill_network_q_max(
+            apply_fn,
+            params,
+            batch_stats,
+            ego_obs,
+            target_idx=target_idx,
+            pixel_obs=pixel_obs,
+            objects=objects,
+            chunk_steps=chunk_steps,
+            train=train,
+        )
+    q = apply_fn(
+        {"params": params, "batch_stats": batch_stats},
+        ego_obs,
+        train=train,
+        target_idx=target_idx,
+        pixel_obs=pixel_obs,
+        objects=objects,
+    )
+    return jnp.max(q, axis=-1)
 
 
 def chunked_skill_network_q_max(

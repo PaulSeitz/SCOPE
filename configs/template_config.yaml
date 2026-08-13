@@ -147,6 +147,7 @@ alg:
   SKILL_GAMMA: 0.99                 # Skill discount override. Options: float in (0,1].
   SKILL_LAMBDA: 0.65                # Skill lambda override. Options: float in [0,1].
   SKILL_BOOTSTRAP: "q_lambda"       # Skill target style. Options: "q_lambda","one_step".
+  SKILL_BOOTSTRAP_CHUNK_STEPS: 0    # Time-chunks for skill Q bootstrap (0 = full horizon; pixel skills default to ~1024 frames). Options: int >= 0.
   SKILL_REWARD_LAMBDA: 0.0          # Blend env reward into skill reward. Options: float (commonly 0..1).
   SKILL_TARGET_CUT: "global"        # Cut strategy at meta target switch. Options: "global","involved","lifetime" (+ aliases: "all","involved_only","her","her_lifetime","none","off").
 

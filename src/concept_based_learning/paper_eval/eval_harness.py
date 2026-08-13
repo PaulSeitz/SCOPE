@@ -12,11 +12,20 @@ import yaml
 
 from concept_based_learning.baselines.flat_pqn import run_flat_pqn_greedy_eval
 from concept_based_learning.paper_eval.mods import ModSpec, mod_specs_for_env
+from concept_based_learning.training.rtpt_progress import (
+    RTPT_EVAL_UNITS_PER_MOD,
+    rtpt_add_units,
+)
 from concept_based_learning.pqn_visualizer import (
     align_config_with_skill_checkpoint,
     load_params_from_file,
     run_greedy_eval_episodes,
 )
+
+
+def _rtpt_tick_eval_mod() -> None:
+    """Count one completed greedy-mod eval toward the suite RTPT bar."""
+    rtpt_add_units(RTPT_EVAL_UNITS_PER_MOD)
 
 
 def _attach_drop_from_base(results: dict[str, dict[str, Any]]) -> None:
@@ -64,6 +73,7 @@ def run_hierarchical_mod_eval(
         stats["mods"] = list(mod.mods)
         stats["category"] = mod.category
         results[mod.key] = stats
+        _rtpt_tick_eval_mod()
     _attach_drop_from_base(results)
     return results
 
@@ -217,6 +227,7 @@ def run_mod_eval(
             stats["mods"] = list(mod.mods)
             stats["category"] = mod.category
             results[mod.key] = stats
+            _rtpt_tick_eval_mod()
         _attach_drop_from_base(results)
         payload["results"] = results
     else:

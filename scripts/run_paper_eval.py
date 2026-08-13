@@ -669,31 +669,79 @@ def _launch_multi_gpu(argv: list[str], gpu_ids: list[str]) -> int:
     return int(worst)
 
 
-def _updates_for_config_path(path: Path, *, trial_steps: int | None) -> int:
+def _n_eval_mods(raw: dict[str, Any], *, trial: bool) -> int:
+    env = str(raw.get("ENV_NAME", "seaquest"))
+    try:
+        from concept_based_learning.paper_eval.mods import mod_specs_for_env
+
+        return max(1, len(mod_specs_for_env(env, trial=trial)))
+    except Exception:
+        return 1
+
+
+def _updates_for_config_path(
+    path: Path, *, trial_steps: int | None, trial: bool = False
+) -> int:
+    """Weighted RTPT units for one config (pixel train ≫ ego; evals are non-zero)."""
+    from concept_based_learning.training.rtpt_progress import (
+        RTPT_EVAL_UNITS_PER_MOD,
+        num_updates_from_timesteps,
+        rtpt_weight_for_config,
+    )
+
     raw = _load_yaml(path)
     phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
     kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
-    if phase == "eval" or kind == "heuristic_random":
-        return 0
-    if phase == "eval":
-        return 0
     cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
+    if phase == "eval" or kind == "heuristic_random":
+        return _n_eval_mods(raw, trial=trial) * RTPT_EVAL_UNITS_PER_MOD
     if trial_steps is not None:
         cfg["TOTAL_TIMESTEPS"] = int(trial_steps)
         _align_trial_timesteps(cfg)
-    from concept_based_learning.training.rtpt_progress import num_updates_from_timesteps
-
-    return num_updates_from_timesteps(
+    updates = num_updates_from_timesteps(
         int(cfg.get("TOTAL_TIMESTEPS", 0)),
         num_steps=int(cfg.get("NUM_STEPS", 128)),
         num_envs=int(cfg.get("NUM_ENVS", 128)),
     )
+    return updates * rtpt_weight_for_config(cfg, kind=kind)
 
 
-def _init_rtpt_for_paths(paths: list[Path], *, experiment_name: str, trial_steps: int | None) -> None:
+def _bind_rtpt_job(path: Path) -> None:
+    """Scale jax.debug.callback ticks for the job about to run (evals tick per mod)."""
+    from concept_based_learning.training.rtpt_progress import (
+        rtpt_weight_for_config,
+        set_rtpt_job_weight,
+    )
+
+    raw = _load_yaml(path)
+    kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
+    phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
+    if phase == "eval" or kind == "heuristic_random":
+        set_rtpt_job_weight(1)
+        return
+    cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
+    weight = rtpt_weight_for_config(cfg, kind=kind)
+    set_rtpt_job_weight(weight)
+    if weight > 1:
+        print(f"  RTPT job weight={weight} (pixel/oc wall-time scaling)", flush=True)
+
+
+def _init_rtpt_for_paths(
+    paths: list[Path],
+    *,
+    experiment_name: str,
+    trial_steps: int | None,
+    trial: bool = False,
+) -> None:
     from concept_based_learning.training.rtpt_progress import start_rtpt
 
-    total = max(1, sum(_updates_for_config_path(p, trial_steps=trial_steps) for p in paths))
+    total = max(
+        1,
+        sum(
+            _updates_for_config_path(p, trial_steps=trial_steps, trial=trial)
+            for p in paths
+        ),
+    )
     if start_rtpt(
         {
             "RTPT_ENABLED": True,
@@ -705,7 +753,10 @@ def _init_rtpt_for_paths(paths: list[Path], *, experiment_name: str, trial_steps
             "NUM_ENVS": 1,
         }
     ):
-        print(f"RTPT initialized: {total:,} updates across {len(paths)} run(s)\n")
+        print(
+            f"RTPT initialized: {total:,} weighted units across {len(paths)} run(s) "
+            f"(evals included; pixel×10, oc×2)\n"
+        )
 
 
 def _gpu_mem_brief() -> str:
@@ -952,6 +1003,8 @@ def _run_experiment(
     if status in {"stub", "planned"}:
         print(f"\n  SKIP (status={status}): {path.stem}")
         return
+
+    _bind_rtpt_job(path)
 
     if enforce_rq_gate and (
         raw.get("PAPER_EVAL_REQUIRES_RQ1")
@@ -1324,7 +1377,10 @@ def main() -> None:
     print()
 
     _init_rtpt_for_paths(
-        paths, experiment_name=_rtpt_name(args.shard, args.rq), trial_steps=trial_steps
+        paths,
+        experiment_name=_rtpt_name(args.shard, args.rq),
+        trial_steps=trial_steps,
+        trial=trial,
     )
 
     failures: list[tuple[str, str]] = []

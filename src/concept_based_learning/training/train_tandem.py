@@ -52,7 +52,11 @@ from concept_based_learning.training.trajectory_cuts import (
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
-from concept_based_learning.training.skill_bootstrap import chunked_skill_network_q_max
+from concept_based_learning.training.skill_bootstrap import (
+    map_over_skills,
+    resolve_skill_chunk_steps,
+    skill_network_q_max,
+)
 from concept_based_learning.training.input_debug import (
     input_debug_enabled,
     maybe_jax_check_probe_inputs,
@@ -125,9 +129,7 @@ def make_tandem_train(
         if relabel_k_objects is None
         else int(max(1, min(max_objects, int(relabel_k_objects))))
     )
-    skill_bootstrap_chunk_steps = int(config.get("SKILL_BOOTSTRAP_CHUNK_STEPS", 0))
-    if skill_bootstrap_chunk_steps <= 0:
-        skill_bootstrap_chunk_steps = int(config["NUM_STEPS"])
+    _skill_chunk_configured = int(config.get("SKILL_BOOTSTRAP_CHUNK_STEPS", 0))
     skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
     symbolic_collect_enabled = bool(config.get("SYMBOLIC_COLLECT_FORCE_UP", False))
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
@@ -135,6 +137,19 @@ def make_tandem_train(
     skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
     use_object_skill = skill_input_mode in OBJECT_CONDITIONED_SKILL_INPUT_MODES
+    skill_bootstrap_chunk_steps = resolve_skill_chunk_steps(
+        num_steps=int(config["NUM_STEPS"]),
+        num_envs=int(config["NUM_ENVS"]),
+        configured=_skill_chunk_configured,
+        use_pixel=use_pixel_skill,
+    )
+    if use_pixel_skill:
+        print(
+            f"pixel skill CNN: chunk_steps={skill_bootstrap_chunk_steps} "
+            f"(~{skill_bootstrap_chunk_steps * int(config['NUM_ENVS'])} frames/chunk); "
+            "skill heads sequential (not vmapped)",
+            flush=True,
+        )
     meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
     debug_inputs = input_debug_enabled(config)
     skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
@@ -628,8 +643,11 @@ def make_tandem_train(
                 )
                 return ego_action, q_vals
 
-            all_ego_actions, all_skill_q_vals = jax.vmap(compute_skill_actions)(
-                skill_states, jnp.arange(num_skills, dtype=jnp.int32)
+            all_ego_actions, all_skill_q_vals = map_over_skills(
+                compute_skill_actions,
+                skill_states,
+                jnp.arange(num_skills, dtype=jnp.int32),
+                sequential=use_pixel_skill,
             )
             chosen_ego_actions = all_ego_actions[
                 active_skills, jnp.arange(config["NUM_ENVS"])
@@ -1264,7 +1282,7 @@ def make_tandem_train(
                 next_objects_all = (
                     transitions.next_objects if use_object_skill else None
                 )
-                next_q_max_all = chunked_skill_network_q_max(
+                next_q_max_all = skill_network_q_max(
                     skill_network.apply,
                     s_state.params,
                     s_state.batch_stats,
@@ -1274,6 +1292,7 @@ def make_tandem_train(
                     objects=next_objects_all,
                     chunk_steps=skill_bootstrap_chunk_steps,
                     train=False,
+                    chunk=True,
                 )
 
                 last_step_done_all = jnp.logical_or(
@@ -1330,15 +1349,18 @@ def make_tandem_train(
                     (targets_all, last_lambda[jnp.newaxis]), axis=0
                 )
             elif use_one_step_td:
-                next_q_single = skill_network.apply(
-                    {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                next_q_max_single = skill_network_q_max(
+                    skill_network.apply,
+                    s_state.params,
+                    s_state.batch_stats,
                     transitions.next_ego_obs_all,
-                    train=False,
                     target_idx=transitions.object_idx_all,
                     pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                     objects=transitions.next_objects if use_object_skill else None,
+                    chunk_steps=skill_bootstrap_chunk_steps,
+                    train=False,
+                    chunk=use_pixel_skill,
                 )
-                next_q_max_single = jnp.max(next_q_single, axis=-1)
                 target_switch_cut_padded = skill_target_switch_cut_env_padded(
                     transitions.target_idx, skill_target_cut
                 )
@@ -1355,15 +1377,18 @@ def make_tandem_train(
                     + skill_gamma * (1.0 - step_done_single) * next_q_max_single.squeeze(-1)
                 )[..., jnp.newaxis]
             else:
-                next_q_single_all = skill_network.apply(
-                    {"params": s_state.params, "batch_stats": s_state.batch_stats},
+                next_q_max_single = skill_network_q_max(
+                    skill_network.apply,
+                    s_state.params,
+                    s_state.batch_stats,
                     transitions.next_ego_obs_all,
-                    train=False,
                     target_idx=transitions.object_idx_all,
                     pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                     objects=transitions.next_objects if use_object_skill else None,
+                    chunk_steps=skill_bootstrap_chunk_steps,
+                    train=False,
+                    chunk=use_pixel_skill,
                 )
-                next_q_max_single = jnp.max(next_q_single_all, axis=-1)
 
                 last_step_done = jnp.logical_or(
                     transitions.skill_done[-1, :, skill_idx],
@@ -1535,10 +1560,13 @@ def make_tandem_train(
         )
 
         rngs = jax.random.split(rng, num_skills)
-        skill_states, skill_metrics = jax.vmap(
+        skill_states, skill_metrics = map_over_skills(
             _update_single_skill,
-            in_axes=(0, 0, 0),
-        )(skill_states, jnp.arange(num_skills), rngs)
+            skill_states,
+            jnp.arange(num_skills),
+            rngs,
+            sequential=use_pixel_skill,
+        )
 
         return skill_states, skill_metrics, skills_frozen
 
