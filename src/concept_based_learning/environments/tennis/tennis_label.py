@@ -66,7 +66,10 @@ class TennisSemanticWrapper(JaxatariSemanticBaseWrapper):
         super().__init__(env, max_objects=2)
 
     def _patch_and_reprocess(self, obs, env_state):
-        ball_z = env_state.atari_state.env_state.ball_state.ball_z
+        # Pixel wrappers nest AtariState under PixelAndObjectCentricState.atari_state
+        # (no .env_state on that object). Unwrap to the JAXAtari Tennis env_state.
+        game_state = self._unwrap_env_state(env_state.atari_state)
+        ball_z = game_state.ball_state.ball_z
         obs = _apply_visual_ball_y(obs, ball_z)
         # Re-run object extraction on patched raw obs so objects.y uses visual y.
         semantic = self._process_stack(obs.raw_observation)
