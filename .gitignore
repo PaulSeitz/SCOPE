@@ -3,6 +3,7 @@ results/
 wandb/
 models/
 outputs/
+paper_eval/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

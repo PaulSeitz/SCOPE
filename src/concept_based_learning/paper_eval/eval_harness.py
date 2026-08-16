@@ -28,7 +28,64 @@ def _rtpt_tick_eval_mod() -> None:
     rtpt_add_units(RTPT_EVAL_UNITS_PER_MOD)
 
 
+def _promote_unclipped_score(stats: dict[str, Any]) -> None:
+    """
+    Prefer ALE ``env_score_final`` over the sum of step rewards.
+
+    Training often uses CLIP_REWARD; hierarchical greedy eval used to inherit
+    that, so ``mean`` became a count of +1 events while flat PQN reported raw
+    score. Paper metrics always want unclipped game score.
+    """
+    score_mean = stats.get("mean_env_score_final")
+    try:
+        score_mean_f = float(score_mean)
+    except (TypeError, ValueError):
+        return
+    if score_mean_f != score_mean_f:  # NaN
+        return
+    # Pixel / some wrappers leave env_score_final at 0 while ``mean`` already
+    # holds the unclipped return — keep that return.
+    try:
+        reward_mean_f = float(stats.get("mean"))
+    except (TypeError, ValueError):
+        reward_mean_f = float("nan")
+    if abs(score_mean_f) <= 1e-8 and reward_mean_f == reward_mean_f and abs(reward_mean_f) > 1e-8:
+        return
+
+    if "mean" in stats:
+        stats["mean_reward_sum"] = stats["mean"]
+    stats["mean"] = score_mean_f
+
+    score_std = stats.get("std_env_score_final")
+    try:
+        score_std_f = float(score_std)
+    except (TypeError, ValueError):
+        score_std_f = float("nan")
+    if score_std_f == score_std_f:
+        stats["std"] = score_std_f
+
+    episode_metrics = stats.get("episode_metrics")
+    if isinstance(episode_metrics, list) and episode_metrics:
+        scores: list[float] = []
+        for m in episode_metrics:
+            if not isinstance(m, dict):
+                continue
+            try:
+                s = float(m.get("env_score_final"))
+            except (TypeError, ValueError):
+                continue
+            if s == s:
+                scores.append(s)
+        if scores:
+            stats["returns"] = scores
+            stats["min"] = float(min(scores))
+            stats["max"] = float(max(scores))
+
+
 def _attach_drop_from_base(results: dict[str, dict[str, Any]]) -> None:
+    for stats in results.values():
+        _promote_unclipped_score(stats)
+
     base = results.get("base")
     if not base or "mean" not in base:
         return

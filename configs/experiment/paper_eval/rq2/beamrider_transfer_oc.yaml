@@ -27,6 +27,7 @@ GAME_MODS: null
 EVAL_GAME_MODS: null
 SKILL_INPUT_MODE: oc_embed
 HEURISTIC_MODE: env_specific
+NO_TARGET_GAME_ACTION: 1  # FIRE when idle (advance level / no target)
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false
 VIDEO_AT_END: false

@@ -58,7 +58,7 @@ def plot_base_returns(
     ax.bar(x, means, yerr=stds, capsize=3, color="#3d5a80", ecolor="#293241")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=25, ha="right")
-    ax.set_ylabel("Mean episode return")
+    ax.set_ylabel("Mean episode return (unclipped score)")
     ax.set_title(title)
     _style(ax)
     if created:
@@ -203,6 +203,79 @@ def plot_return_vs_retention_scatter(
     ax.set_xlabel("Base return")
     ax.set_ylabel("Mean retention")
     ax.set_title(title)
+    _style(ax)
+    if created:
+        ax.figure.tight_layout()
+    return ax.figure if created else ax
+
+
+def plot_train_peak_vs_eval(
+    pairs: list[dict[str, Any]],
+    *,
+    title: str = "Train peak vs greedy eval (base)",
+    ylabel: str = "Unclipped game return",
+    ax=None,
+):
+    """
+    Grouped bars: highest logged training ``avg_game_return`` vs eval base mean.
+
+    Large train≫eval gaps are a robustness / overfitting signal (different
+    protocols: train = rolling mean over parallel envs; eval = few greedy eps).
+    """
+    plt = _require_matplotlib()
+    created = ax is None
+    if created:
+        _, ax = plt.subplots(figsize=(9, 4.5))
+    usable = [
+        p
+        for p in pairs
+        if (p.get("train_peak") == p.get("train_peak"))
+        or (p.get("eval_mean") == p.get("eval_mean"))
+    ]
+    if not usable:
+        ax.text(0.5, 0.5, "No train/eval pairs", ha="center", va="center")
+        ax.set_axis_off()
+        return ax.figure if created else ax
+
+    labels = [str(p["agent_label"]) for p in usable]
+    train_vals = [
+        float(p["train_peak"]) if p.get("train_peak") == p.get("train_peak") else 0.0
+        for p in usable
+    ]
+    eval_vals = [
+        float(p["eval_mean"]) if p.get("eval_mean") == p.get("eval_mean") else 0.0
+        for p in usable
+    ]
+    eval_err = [
+        float(p["eval_std"]) if p.get("eval_std") == p.get("eval_std") else 0.0
+        for p in usable
+    ]
+    x = list(range(len(labels)))
+    w = 0.38
+    ax.bar(
+        [i - w / 2 for i in x],
+        train_vals,
+        width=w,
+        color="#457b9d",
+        label="Train peak (logged)",
+        zorder=2,
+    )
+    ax.bar(
+        [i + w / 2 for i in x],
+        eval_vals,
+        width=w,
+        yerr=eval_err,
+        color="#e76f51",
+        label="Eval base mean",
+        capsize=3,
+        zorder=2,
+        error_kw={"elinewidth": 1},
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=25, ha="right")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False, loc="best")
     _style(ax)
     if created:
         ax.figure.tight_layout()

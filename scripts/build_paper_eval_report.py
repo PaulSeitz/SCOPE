@@ -54,6 +54,15 @@ def main() -> None:
         default=None,
         help="Only build pages for this research question (default: all present).",
     )
+    parser.add_argument(
+        "--train-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory tree with **/training_metrics.csv (e.g. paper_eval/). "
+            "Adds RQ1 train-peak vs eval bars when present."
+        ),
+    )
     args = parser.parse_args()
 
     from concept_based_learning.paper_eval.report import build_paper_eval_report
@@ -63,6 +72,7 @@ def main() -> None:
         output_pdf=args.output,
         fig_dir=args.fig_dir,
         rq=args.rq,
+        train_root=args.train_root,
     )
 
 

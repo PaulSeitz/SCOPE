@@ -11,11 +11,16 @@ from concept_based_learning.paper_eval.report.figures import (
     plot_overall_retention_bars,
     plot_retention_heatmap,
     plot_return_vs_retention_scatter,
+    plot_train_peak_vs_eval,
     save_figure,
     _require_matplotlib,
 )
 from concept_based_learning.paper_eval.report.load import load_mod_eval_summary
 from concept_based_learning.paper_eval.report.metrics import envs_in_rows, filter_rows
+from concept_based_learning.paper_eval.report.training_metrics import (
+    discover_training_peaks,
+    train_eval_pairs,
+)
 
 
 def _title_page(pdf, *, title: str, subtitle: str, lines: list[str]) -> None:
@@ -44,6 +49,7 @@ def build_rq1_pages(
     rows: list[dict[str, Any]],
     *,
     fig_dir: Path | None = None,
+    train_root: Path | None = None,
 ) -> int:
     rq1 = filter_rows(rows, rq=1)
     if not rq1:
@@ -58,9 +64,26 @@ def build_rq1_pages(
         return 0
 
     n = 0
-    fig = plot_base_returns(rq1, title="RQ1 — Base return (Seaquest greedy eval)")
+    fig = plot_base_returns(
+        rq1, title="RQ1 — Base return (Seaquest greedy eval, unclipped score)"
+    )
     _add_fig(pdf, fig, png_path=(fig_dir / "rq1_base_returns.png") if fig_dir else None)
     n += 1
+
+    if train_root is not None and Path(train_root).is_dir():
+        peaks = discover_training_peaks(train_root)
+        pairs = train_eval_pairs(rq1, peaks, env="seaquest", rq=1)
+        if any(p.get("train_peak") == p.get("train_peak") for p in pairs):
+            fig = plot_train_peak_vs_eval(
+                pairs,
+                title="RQ1 — Train peak vs greedy eval (overfit / protocol gap)",
+            )
+            _add_fig(
+                pdf,
+                fig,
+                png_path=(fig_dir / "rq1_train_vs_eval.png") if fig_dir else None,
+            )
+            n += 1
 
     fig = plot_category_retention(
         rq1, title="RQ1 — Mean retention by mod category (TLDR)"
@@ -202,11 +225,14 @@ def build_paper_eval_report(
     output_pdf: str | Path,
     fig_dir: str | Path | None = None,
     rq: int | None = None,
+    train_root: str | Path | None = None,
 ) -> Path:
     """
     Build a multi-page PDF (+ optional PNG dumps) from mod-eval summary data.
 
     ``source`` is a CSV, JSON, or the ``outputs/.../eval`` directory.
+    ``train_root`` (optional) is scanned for ``**/training_metrics.csv`` to
+    add train-peak vs eval bars on RQ1.
     """
     plt = _require_matplotlib()
     from matplotlib.backends.backend_pdf import PdfPages
@@ -222,8 +248,14 @@ def build_paper_eval_report(
     )
     figures.mkdir(parents=True, exist_ok=True)
 
+    train_path = Path(train_root) if train_root is not None else None
     agents = sorted({r["agent_label"] for r in rows})
     envs = envs_in_rows(rows)
+    train_note = (
+        f"Train metrics root: {train_path}"
+        if train_path is not None and train_path.is_dir()
+        else "Train metrics: (not provided; pass --train-root for train-vs-eval)"
+    )
     with PdfPages(out) as pdf:
         _title_page(
             pdf,
@@ -232,13 +264,18 @@ def build_paper_eval_report(
             lines=[
                 f"rows={len(rows)}  agents={len(agents)}  envs={', '.join(envs) or '(none)'}",
                 f"agents: {', '.join(agents)}",
-                "Metrics: retention = mod_mean / |base_mean|  (1.0 = no change)",
+                "Metrics: unclipped ALE score (env_score_final); "
+                "retention = mod_score / |base_score|  (1.0 = no change)",
                 "Primary evidence: frozen greedy mod-eval (not training curves).",
+                train_note,
+                "Train peak = max logged avg_game_return / returned_episode_returns.",
             ],
         )
         n_pages = 1
         if rq in (None, 1):
-            n_pages += build_rq1_pages(pdf, rows, fig_dir=figures)
+            n_pages += build_rq1_pages(
+                pdf, rows, fig_dir=figures, train_root=train_path
+            )
         if rq in (None, 2):
             n_pages += build_rq2_pages(pdf, rows, fig_dir=figures)
         if rq in (None, 3):

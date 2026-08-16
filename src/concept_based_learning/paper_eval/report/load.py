@@ -80,18 +80,43 @@ def _infer_protocol(row: dict[str, Any]) -> str:
 
 def normalize_summary_row(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
-    out["mean"] = _to_float(row.get("mean"))
-    out["std"] = _to_float(row.get("std"), 0.0)
-    out["drop_from_base"] = _to_float(row.get("drop_from_base"))
-    out["drop_frac_from_base"] = _to_float(row.get("drop_frac_from_base"))
+    reward_mean = _to_float(row.get("mean"))
+    reward_std = _to_float(row.get("std"), 0.0)
+    score_mean = _to_float(row.get("mean_env_score_final"))
+    score_std = _to_float(row.get("std_env_score_final"))
+
+    # Prefer unclipped ALE score when present and non-zero. Hierarchical CSVs
+    # often store clipped ``mean`` (~count of +1 events) with a real
+    # ``mean_env_score_final``. Pixel / some wrappers report score=0 while
+    # ``mean`` already holds the unclipped return — do not overwrite that.
+    use_score = score_mean == score_mean and (
+        abs(score_mean) > 1e-8
+        or (reward_mean != reward_mean or abs(reward_mean) <= 1e-8)
+    )
+    if use_score:
+        out["mean"] = score_mean
+        out["std"] = score_std if score_std == score_std else reward_std
+        out["mean_reward_sum"] = reward_mean
+        out["score_source"] = "env_score_final"
+        # Drop/retention from clipped reward sums are invalid — recompute later.
+        out["drop_from_base"] = float("nan")
+        out["drop_frac_from_base"] = float("nan")
+        out["retention"] = float("nan")
+    else:
+        out["mean"] = reward_mean
+        out["std"] = reward_std
+        out["score_source"] = "episode_return"
+        out["drop_from_base"] = _to_float(row.get("drop_from_base"))
+        out["drop_frac_from_base"] = _to_float(row.get("drop_frac_from_base"))
+        ret = _to_float(row.get("retention"), default=float("nan"))
+        if ret != ret:  # NaN
+            dfrac = out["drop_frac_from_base"]
+            if dfrac == dfrac:
+                ret = 1.0 + dfrac
+        out["retention"] = ret
+    out["max_frames"] = _to_float(row.get("max_frames") or row.get("max_frames_per_episode"))
+
     base_mean = _to_float(row.get("base_mean"))
-    # Retention: prefer explicit; else derive from drop_frac; else nan until joined.
-    ret = _to_float(row.get("retention"), default=float("nan"))
-    if ret != ret:  # NaN
-        dfrac = out["drop_frac_from_base"]
-        if dfrac == dfrac:
-            ret = 1.0 + dfrac
-    out["retention"] = ret
     out["base_mean"] = base_mean
     try:
         out["paper_eval_rq"] = int(float(row.get("paper_eval_rq") or 0))
@@ -107,7 +132,7 @@ def normalize_summary_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _attach_base_and_retention(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Join each row to its same-run base mean and fill retention if missing."""
+    """Join each row to its same-run base mean and (re)fill retention."""
     base_by_run: dict[tuple[str, str, str], float] = {}
     for row in rows:
         if row["mod_key"] != "base":
@@ -126,11 +151,19 @@ def _attach_base_and_retention(rows: list[dict[str, Any]]) -> list[dict[str, Any
             row["retention"] = 1.0
             row["drop_frac_from_base"] = 0.0
             row["drop_from_base"] = 0.0
-        elif row["retention"] != row["retention"]:
+        else:
+            # Always recompute from the (possibly score-promoted) means so
+            # clipped drop_frac in old CSVs cannot poison the report.
             if row["base_mean"] == row["base_mean"] and abs(row["base_mean"]) > 1e-8:
-                row["retention"] = float(row["mean"]) / abs(float(row["base_mean"]))
-            elif row["drop_frac_from_base"] == row["drop_frac_from_base"]:
-                row["retention"] = 1.0 + float(row["drop_frac_from_base"])
+                if row["mean"] == row["mean"]:
+                    row["drop_from_base"] = float(row["mean"]) - float(row["base_mean"])
+                    row["drop_frac_from_base"] = row["drop_from_base"] / abs(
+                        float(row["base_mean"])
+                    )
+                    row["retention"] = float(row["mean"]) / abs(float(row["base_mean"]))
+            elif row["retention"] != row["retention"]:
+                if row["drop_frac_from_base"] == row["drop_frac_from_base"]:
+                    row["retention"] = 1.0 + float(row["drop_frac_from_base"])
         out.append(row)
     return out
 
@@ -151,6 +184,36 @@ def load_summary_json(path: Path) -> list[dict[str, Any]]:
     return _attach_base_and_retention(rows)
 
 
+def _dedupe_longest_horizon(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Keep one row per (config_stem, env, agent_label, mod_key).
+
+    When 800-frame and 27000-frame evals share a master CSV, prefer the longer
+    horizon so truncated runs do not dilute the report.
+    """
+    best: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("config_stem") or ""),
+            str(row.get("env") or ""),
+            str(row.get("agent_label") or ""),
+            str(row.get("mod_key") or ""),
+        )
+        frames = _to_float(row.get("max_frames"), default=0.0)
+        if frames != frames:
+            frames = 0.0
+        prev = best.get(key)
+        if prev is None:
+            best[key] = row
+            continue
+        prev_frames = _to_float(prev.get("max_frames"), default=0.0)
+        if prev_frames != prev_frames:
+            prev_frames = 0.0
+        if frames >= prev_frames:
+            best[key] = row
+    return list(best.values())
+
+
 def load_mod_eval_summary(
     source: str | Path,
     *,
@@ -163,6 +226,8 @@ def load_mod_eval_summary(
       - a single ``*_summary.csv``
       - a single ``*_mods.json``
       - a directory (prefers master CSV, else globs ``*_summary.csv`` / ``*_mods.json``)
+
+    Mixed-horizon master CSVs are deduped to the longest ``max_frames`` per run.
     """
     path = Path(source)
     rows: list[dict[str, Any]] = []
@@ -172,20 +237,26 @@ def load_mod_eval_summary(
         else:
             rows = load_summary_csv(path)
     elif path.is_dir():
-        master = path / "all_mod_eval_summary.csv"
-        if master.is_file() and master.stat().st_size > 0:
-            rows = load_summary_csv(master)
+        # Prefer per-run JSON payloads when present (always one horizon each).
+        jsons = sorted(path.glob("*_mods.json"))
+        if jsons:
+            for p in jsons:
+                rows.extend(load_summary_json(p))
+            rows = _attach_base_and_retention(rows)
         else:
-            summaries = sorted(path.glob("*_summary.csv"))
-            if summaries:
+            master = path / "all_mod_eval_summary.csv"
+            if master.is_file() and master.stat().st_size > 0:
+                rows = load_summary_csv(master)
+            else:
+                summaries = sorted(path.glob("*_summary.csv"))
                 for p in summaries:
                     rows.extend(load_summary_csv(p))
-            else:
-                for p in sorted(path.glob("*_mods.json")):
-                    rows.extend(load_summary_json(p))
-            rows = _attach_base_and_retention(rows)
+                rows = _attach_base_and_retention(rows)
     else:
         raise FileNotFoundError(f"No mod-eval summary at {path}")
+
+    rows = _dedupe_longest_horizon(rows)
+    rows = _attach_base_and_retention(rows)
 
     if rq is not None:
         rows = [r for r in rows if int(r.get("paper_eval_rq") or 0) == int(rq)]

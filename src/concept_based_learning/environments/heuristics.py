@@ -24,6 +24,20 @@ def get_nearest_object_target(raw_obs, objects, last_target, rng, *, no_target_i
     return jnp.where(jnp.any(active), nearest_idx, jnp.int32(no_target_idx))
 
 
+def get_avoid_only_target(raw_obs, objects, last_target, rng, *, no_target_idx=-1):
+    """Nearest active AVOID-labeled object (AVOID skill probe / oversampling)."""
+    del last_target, rng
+    from concept_based_learning.environments.datatypes import LABEL_AVOID
+
+    distances, _, _, _, _ = player_object_aabb_gaps(raw_obs, objects)
+    active = objects.active[-1] > 0.5
+    is_avoid = objects.semantic_label[-1] == LABEL_AVOID
+    mask = jnp.logical_and(active, is_avoid)
+    dist_masked = jnp.where(mask, distances, jnp.inf)
+    nearest_idx = jnp.argmin(dist_masked)
+    return jnp.where(jnp.any(mask), nearest_idx, jnp.int32(no_target_idx))
+
+
 def _seaquest_danger_close_range(config) -> float:
     """AABB surface-gap px for surface danger override; ``<=0`` disables."""
     return float(
@@ -33,10 +47,14 @@ def _seaquest_danger_close_range(config) -> float:
 
 def resolve_heuristic_target_fn(config, env_name: str, components):
     """Pick heuristic meta-policy from HEURISTIC_MODE and environment."""
-    heuristic_mode = config.get("HEURISTIC_MODE", "env_specific")
+    heuristic_mode = str(config.get("HEURISTIC_MODE", "env_specific")).lower().strip()
     if heuristic_mode == "nearest":
         return functools.partial(
             get_nearest_object_target, no_target_idx=components.no_target_idx
+        )
+    if heuristic_mode in {"avoid_only", "avoid"}:
+        return functools.partial(
+            get_avoid_only_target, no_target_idx=components.no_target_idx
         )
     if heuristic_mode == "sweep" and str(env_name).lower() == "spaceinvaders":
         return spaceinvaders_sweep_heuristic_target

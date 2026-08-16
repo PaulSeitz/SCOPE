@@ -378,10 +378,15 @@ def create_eval_env(config):
 
     The choice of environment (Seaquest vs others) is driven by
     `config["ENV_NAME"]`, which can be overridden on the command line.
+
+    Paper / greedy metrics always use **unclipped** env rewards so hierarchical
+    skill evals are comparable to flat PQN and to ``avg_game_return``.
     """
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
-    env, renderer = manager.make_env(env_name, config, train=False)
+    eval_cfg = dict(config)
+    eval_cfg["CLIP_REWARD"] = False
+    env, renderer = manager.make_env(env_name, eval_cfg, train=False)
     return env, renderer
 
 
@@ -637,7 +642,7 @@ def _make_jitted_greedy_episode_runner(
         is_fire = is_meta_fire_target(
             target, config, fire_idx=int(fire_idx), enabled=fire_enabled
         )
-        force_noop = jnp.logical_or(target == no_target, is_noop)
+        idle_action = jnp.int32(int(config.get("NO_TARGET_GAME_ACTION", 0)))
         safe_target = jnp.where(target == no_target, 0, target)
         raw_label = obs.objects.semantic_label[-1, safe_target]
         sk_idx = label_to_skill_idx(raw_label, num_skills)
@@ -666,7 +671,10 @@ def _make_jitted_greedy_episode_runner(
         ego_a = jnp.argmax(q_skill)
         game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
         game_a = jnp.where(is_fire, fire_action, game_a)
-        return jnp.where(force_noop, 0, game_a).astype(jnp.int32)
+        # Idle / no-target: BeamRider needs FIRE to advance levels; default NOOP.
+        game_a = jnp.where(target == no_target, idle_action, game_a)
+        game_a = jnp.where(is_noop, 0, game_a)
+        return game_a.astype(jnp.int32)
 
     def run_episode(rng):
         rng, reset_key = jax.random.split(rng)
@@ -1137,8 +1145,14 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
-        if target_obj_idx == no_target_idx or is_meta_noop:
+        if is_meta_noop:
             global_action = 0
+            active_skill_idx = 0
+            combined_q = np.zeros(num_skills, dtype=np.float32)
+            distance = np.nan
+            angle = np.nan
+        elif target_obj_idx == no_target_idx:
+            global_action = int(config.get("NO_TARGET_GAME_ACTION", 0))
             active_skill_idx = 0
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan

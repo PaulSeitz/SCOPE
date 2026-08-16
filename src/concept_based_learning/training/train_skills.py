@@ -531,6 +531,7 @@ def make_train(
                     enabled=meta_fire_enabled,
                 )
                 force_noop = jnp.logical_or(no_target, meta_noop)
+                idle_action = jnp.int32(int(config.get("NO_TARGET_GAME_ACTION", 0)))
 
                 raw_labels = jax.vmap(
                     lambda labels, idx: labels[-1, idx]
@@ -631,7 +632,9 @@ def make_train(
                         jnp.full_like(global_actions, symbolic_collect_up_action),
                         global_actions,
                     )
-                global_actions = jnp.where(force_noop, 0, global_actions)
+                # Explicit meta-NOOP stays 0; bare no-target may FIRE (BeamRider).
+                global_actions = jnp.where(no_target, idle_action, global_actions)
+                global_actions = jnp.where(meta_noop, 0, global_actions)
 
                 step_obs, step_env_state, raw_rewards, new_done, info = vmap_step(
                     env_state, global_actions
@@ -1540,8 +1543,12 @@ def make_train(
                 and target_obj_idxs == meta_fire_idx
             )
 
-            if target_obj_idxs == no_target_idx or eval_meta_noop:
+            if eval_meta_noop:
                 global_action = 0
+                active_skills = 0
+                combined_q = np.array([0.0, 0.0, 0.0])
+            elif target_obj_idxs == no_target_idx:
+                global_action = int(config.get("NO_TARGET_GAME_ACTION", 0))
                 active_skills = 0
                 combined_q = np.array([0.0, 0.0, 0.0])
             elif eval_meta_fire:

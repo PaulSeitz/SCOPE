@@ -2,14 +2,18 @@
 Global skill reward contract — env-independent.
 
 Reward magnitudes and trigger conditions:
-  AVOID    : +0.01 per frame while tracking an active AVOID target without collision
-             -1  on rising edge of AABB overlap (player enters object hitbox)
-  COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1
+  AVOID    : +0.01 when centre-distance to an active AVOID target *increases*
+             (escape progress). No per-frame survival farm.
+             -1  on rising edge of AABB overlap / was_killed (contact fail).
+             No sparse “cleared” success terminal (escape shaping only).
+  COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1;
+             +0.01 when centre-distance to the (still active) collectible decreases
+             (approach shaping — same magnitude as NAVIGATE progress).
   DESTROY  : +1  when next_target.was_killed == 1 (set by env wrapper from raw state)
   NAVIGATE : +1  on rising-edge overlap / was_collected (arrive at waypoint);
              +0.01 when centre-distance to the (still active) waypoint decreases
              between t and t+1 (progress shaping for long-horizon ladders /
-             surface runs). COLLECT stays sparse — no per-step progress term.
+             surface runs).
   JUMP_OVER: +1  when the relative horizontal offset (player center - target
              center) changes side between t and t+1 while the player is fully
              above the target at both frames and never touches it (covers both
@@ -59,19 +63,21 @@ from concept_based_learning.environments.datatypes import (
 )
 
 # Unified reward magnitudes — single source of truth.
-AVOID_SURVIVAL_REWARD  =  0.01
-AVOID_FAILURE_REWARD   = -1.0
-COLLECT_SUCCESS_REWARD =  1.0
-DESTROY_SUCCESS_REWARD =  1.0
+AVOID_ESCAPE_REWARD = 0.01  # distance-to-threat increased this step
+AVOID_SURVIVAL_REWARD = AVOID_ESCAPE_REWARD  # back-compat alias (old survival farm removed)
+AVOID_FAILURE_REWARD = -1.0
+COLLECT_SUCCESS_REWARD = 1.0
+COLLECT_PROGRESS_REWARD = 0.01  # distance-to-collectible decreased this step
+DESTROY_SUCCESS_REWARD = 1.0
 DESTROY_FAILURE_REWARD = -1.0  # retained for contact-conditioned destroy fails
 NAVIGATE_SUCCESS_REWARD = 1.0
 NAVIGATE_PROGRESS_REWARD = 0.01  # distance-to-waypoint decreased this step
-JUMP_SUCCESS_REWARD    =  1.0
-JUMP_FAILURE_REWARD    = -1.0
+JUMP_SUCCESS_REWARD = 1.0
+JUMP_FAILURE_REWARD = -1.0
 # Applied to AVOID / DESTROY on life loss (see extract_skill_rewards).
 # COLLECT is optional via ``penalize_collect_death`` / SKILL_DEATH_PENALIZE_COLLECT.
 # NAVIGATE / JUMP_OVER stay exempt.
-SKILL_DEATH_PENALTY    = -1.0
+SKILL_DEATH_PENALTY = -1.0
 
 # Shrink interaction hitboxes for edge-triggered overlap rewards.
 # This reduces reward farming from grazing at object borders.
@@ -95,7 +101,7 @@ class RewardContext:
     next_overlap: jnp.ndarray
     overlap_rising_edge: jnp.ndarray
     life_lost: jnp.ndarray
-    avoid_survival_reward: float
+    avoid_escape_reward: float
 
 
 @dataclass(frozen=True)
@@ -242,6 +248,21 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
 # ---------------------------------------------------------------------------
 
 
+def _centre_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Centre-to-centre distances at t and t+1."""
+    prev_px = ctx.prev_player.x + ctx.prev_player.width / 2.0
+    prev_py = ctx.prev_player.y + ctx.prev_player.height / 2.0
+    next_px = ctx.next_player.x + ctx.next_player.width / 2.0
+    next_py = ctx.next_player.y + ctx.next_player.height / 2.0
+    prev_tx = ctx.prev_target.x + ctx.prev_target.width / 2.0
+    prev_ty = ctx.prev_target.y + ctx.prev_target.height / 2.0
+    next_tx = ctx.next_target.x + ctx.next_target.width / 2.0
+    next_ty = ctx.next_target.y + ctx.next_target.height / 2.0
+    prev_dist = jnp.sqrt((prev_px - prev_tx) ** 2 + (prev_py - prev_ty) ** 2)
+    next_dist = jnp.sqrt((next_px - next_tx) ** 2 + (next_py - next_ty) ** 2)
+    return prev_dist, next_dist
+
+
 def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # was_killed is stamped on next_target by the env wrapper from raw game state —
     # the only reliable kill signal when the env zeros position for both kills and
@@ -252,26 +273,44 @@ def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
 
 
 def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # Sparse contact success + approach progress (same idea as NAVIGATE).
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
-    return jnp.where(success, COLLECT_SUCCESS_REWARD, 0.0), success
+    prev_dist, next_dist = _centre_distances(ctx)
+    both_active = jnp.logical_and(
+        ctx.prev_target.active > 0, ctx.next_target.active > 0
+    )
+    progressed = jnp.logical_and(both_active, next_dist < prev_dist)
+    reward = jnp.where(
+        success,
+        COLLECT_SUCCESS_REWARD,
+        jnp.where(progressed, COLLECT_PROGRESS_REWARD, 0.0),
+    )
+    return reward, success
 
 
 def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
     # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
+    # Escape shaping: reward *increasing* distance (mirror of NAVIGATE/COLLECT
+    # approach). Idle near the threat earns 0 — no survival farm.
     # Life-loss penalty is applied uniformly in extract_skill_rewards.
     failure = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
     )
-    survival = jnp.logical_and(
-        ctx.prev_target.active > 0, jnp.logical_not(failure)
+    prev_dist, next_dist = _centre_distances(ctx)
+    both_active = jnp.logical_and(
+        ctx.prev_target.active > 0, ctx.next_target.active > 0
+    )
+    escaped = jnp.logical_and(
+        both_active,
+        jnp.logical_and(jnp.logical_not(failure), next_dist > prev_dist),
     )
     reward = jnp.where(
         failure,
         AVOID_FAILURE_REWARD,
-        jnp.where(survival, ctx.avoid_survival_reward, 0.0),
+        jnp.where(escaped, ctx.avoid_escape_reward, 0.0),
     )
     return reward, failure
 
@@ -284,16 +323,7 @@ def _navigate_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
-    prev_px = ctx.prev_player.x + ctx.prev_player.width / 2.0
-    prev_py = ctx.prev_player.y + ctx.prev_player.height / 2.0
-    next_px = ctx.next_player.x + ctx.next_player.width / 2.0
-    next_py = ctx.next_player.y + ctx.next_player.height / 2.0
-    prev_tx = ctx.prev_target.x + ctx.prev_target.width / 2.0
-    prev_ty = ctx.prev_target.y + ctx.prev_target.height / 2.0
-    next_tx = ctx.next_target.x + ctx.next_target.width / 2.0
-    next_ty = ctx.next_target.y + ctx.next_target.height / 2.0
-    prev_dist = jnp.sqrt((prev_px - prev_tx) ** 2 + (prev_py - prev_ty) ** 2)
-    next_dist = jnp.sqrt((next_px - next_tx) ** 2 + (next_py - next_ty) ** 2)
+    prev_dist, next_dist = _centre_distances(ctx)
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
@@ -375,7 +405,8 @@ def extract_skill_rewards(
     next_target,
     life_lost,
     *,
-    avoid_survival_reward: float = AVOID_SURVIVAL_REWARD,
+    avoid_escape_reward: float = AVOID_ESCAPE_REWARD,
+    avoid_survival_reward: float | None = None,
     penalize_collect_death: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
@@ -390,7 +421,8 @@ def extract_skill_rewards(
         prev_target  : LabeledObjectObservation at t  (stacked or last-frame)
         next_target  : LabeledObjectObservation at t+1 (stacked or last-frame)
         life_lost    : scalar int — number of lives lost this step
-        avoid_survival_reward: per-step AVOID shaping magnitude
+        avoid_escape_reward: per-step AVOID escape-shaping magnitude
+        avoid_survival_reward: deprecated alias for ``avoid_escape_reward``
         penalize_collect_death: if True, COLLECT also gets SKILL_DEATH_PENALTY
             on life loss (default False; AVOID/DESTROY always do)
 
@@ -398,6 +430,9 @@ def extract_skill_rewards(
         rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
         skill_done: bool    [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
     """
+    if avoid_survival_reward is not None:
+        avoid_escape_reward = float(avoid_survival_reward)
+
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
 
@@ -413,7 +448,7 @@ def extract_skill_rewards(
             jnp.logical_not(prev_overlap), next_overlap
         ),
         life_lost=life_lost,
-        avoid_survival_reward=avoid_survival_reward,
+        avoid_escape_reward=avoid_escape_reward,
     )
 
     died = ctx.life_lost > 0
@@ -451,12 +486,19 @@ def extract_skill_rewards(
     return rewards, skill_done
 
 
-def avoid_survival_reward_from_config(config) -> float:
-    """Per-run avoid shaping; default matches ``AVOID_SURVIVAL_REWARD``."""
+def avoid_escape_reward_from_config(config) -> float:
+    """Per-run AVOID escape shaping; default matches ``AVOID_ESCAPE_REWARD``."""
     if config is None:
-        return AVOID_SURVIVAL_REWARD
-    return float(config.get("AVOID_SURVIVAL_BONUS", AVOID_SURVIVAL_REWARD))
+        return AVOID_ESCAPE_REWARD
+    if "AVOID_ESCAPE_BONUS" in config:
+        return float(config["AVOID_ESCAPE_BONUS"])
+    # Older configs used AVOID_SURVIVAL_BONUS for the dense AVOID term.
+    return float(config.get("AVOID_SURVIVAL_BONUS", AVOID_ESCAPE_REWARD))
 
+
+def avoid_survival_reward_from_config(config) -> float:
+    """Deprecated alias for ``avoid_escape_reward_from_config``."""
+    return avoid_escape_reward_from_config(config)
 
 def penalize_collect_death_from_config(config) -> bool:
     """Whether COLLECT receives the life-loss death penalty (default False)."""

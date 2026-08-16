@@ -759,18 +759,35 @@ def _init_rtpt_for_paths(
         )
 
 
+def _visible_gpu_indices() -> list[int] | None:
+    """Physical GPU ids this process may use, or None if unrestricted."""
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not raw:
+        return None
+    if raw == "-1":
+        return []
+    ids: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
 def _gpu_mem_brief() -> str:
-    """One-line nvidia-smi free/used if available."""
+    """One-line nvidia-smi used/total for *this process's* visible GPUs."""
     try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-            timeout=5,
-        )
+        cmd = [
+            "nvidia-smi",
+            "--query-gpu=index,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ]
+        visible = _visible_gpu_indices()
+        if visible is not None:
+            if not visible:
+                return "(cpu / no visible gpu)"
+            cmd.extend(["-i", ",".join(str(i) for i in visible)])
+        out = subprocess.check_output(cmd, text=True, timeout=5)
         parts = []
         for line in out.strip().splitlines():
             idx, used, total = [p.strip() for p in line.split(",")]
@@ -780,33 +797,64 @@ def _gpu_mem_brief() -> str:
         return "(nvidia-smi unavailable)"
 
 
+def _pin_jaxatari_action_sets_to_host() -> None:
+    """
+    Copy JAXAtari ``ACTION_SET`` class attrs to host numpy.
+
+    Those sets are module-level ``jnp.array``s. Deleting live device buffers
+    (or ``jax.clear_backends``) tombstones them, and the next ``AtariWrapper``
+    then fails with ``Array has been deleted with shape=int32[18]``.
+    """
+    try:
+        import inspect
+
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        from jaxatari.core import GAME_MODULES
+        from jaxatari.environment import JaxEnvironment
+    except Exception:
+        return
+
+    for module_path in GAME_MODULES.values():
+        try:
+            module = __import__(module_path, fromlist=["*"])
+        except Exception:
+            continue
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if not issubclass(obj, JaxEnvironment) or obj is JaxEnvironment:
+                continue
+            arr = getattr(obj, "ACTION_SET", None)
+            if arr is None:
+                continue
+            try:
+                if isinstance(arr, jax.Array) and getattr(arr, "is_deleted", lambda: False)():
+                    continue
+                host = np.asarray(arr, dtype=np.int32)
+            except Exception:
+                continue
+            # Numpy stays off-device; jnp.take / np.array still accept it.
+            try:
+                obj.ACTION_SET = host
+            except Exception:
+                try:
+                    obj.ACTION_SET = jnp.asarray(host, dtype=jnp.int32)
+                except Exception:
+                    pass
+
+
 def _clear_jax_memory() -> None:
-    """Drop compile caches and delete any remaining live device buffers."""
+    """Drop compile caches. Do not delete live buffers or the JAX backend.
+
+    Overnight trains used ``live_buffers().delete()`` / ``clear_backends()`` to
+    reclaim VRAM. That also tombstones JAXAtari class constants (``ACTION_SET``),
+    so the next eval in the same process crashes in ``AtariWrapper.__init__``.
+    ``clear_caches`` + GC is enough for eval→eval; the CUDA pool is reused.
+    """
     try:
         import jax
 
         jax.clear_caches()
-        # clear_caches alone keeps arrays still referenced from the last train.
-        try:
-            from jax.lib import xla_bridge
-
-            backend = xla_bridge.get_backend()
-            live_fn = getattr(backend, "live_buffers", None)
-            if callable(live_fn):
-                for buf in list(live_fn()):
-                    try:
-                        buf.delete()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        # Newer JAX: also drop backend client state when available.
-        clear_backends = getattr(jax, "clear_backends", None)
-        if callable(clear_backends):
-            try:
-                clear_backends()
-            except Exception:
-                pass
     except Exception:
         pass
 
@@ -814,9 +862,11 @@ def _clear_jax_memory() -> None:
 def _release(*, label: str = "") -> None:
     """Best-effort VRAM reclaim between paper_eval jobs in the same process."""
     before = _gpu_mem_brief()
+    _pin_jaxatari_action_sets_to_host()
     gc.collect()
     _clear_jax_memory()
     gc.collect()
+    _pin_jaxatari_action_sets_to_host()
     after = _gpu_mem_brief()
     tag = f" after {label}" if label else ""
     print(f"  GPU release{tag}: {before} → {after}", flush=True)
@@ -850,8 +900,24 @@ def _print_matrix(paths: list[Path]) -> None:
     print(f"\n{len(paths)} configs. W&B filter: suite:paper_eval")
 
 
+# Eval YAMLs may set PAPER_EVAL_ARCHITECTURE_OF to pin network/obs shape to a
+# train config while still overriding policy/eval knobs locally.
+_EVAL_OVERRIDE_KEYS = (
+    "HEURISTIC_MODE",
+    "NO_TARGET_GAME_ACTION",
+    "SKILL_DEATH_PENALIZE_COLLECT",
+    "EVAL_GAME_MODS",
+    "GAME_MODS",
+    "SURFACE_DANGER_CLOSE_RANGE",
+)
+
+
 def _architecture_config(raw: dict[str, Any]) -> dict[str, Any]:
-    """Load arch YAML referenced by PAPER_EVAL_ARCHITECTURE_OF if present."""
+    """Load arch YAML referenced by PAPER_EVAL_ARCHITECTURE_OF if present.
+
+    When an architecture ref is used, still apply eval-local overrides from
+    ``raw`` (e.g. ``HEURISTIC_MODE: avoid_only`` on an AVOID probe).
+    """
     ref = raw.get("PAPER_EVAL_ARCHITECTURE_OF")
     if not ref:
         return _flatten_experiment_cfg(copy.deepcopy(raw))
@@ -862,7 +928,12 @@ def _architecture_config(raw: dict[str, Any]) -> dict[str, Any]:
         if not matches:
             raise FileNotFoundError(f"Architecture config not found: {ref}")
         ref_path = matches[0]
-    return _flatten_experiment_cfg(copy.deepcopy(_load_yaml(ref_path)))
+    cfg = _flatten_experiment_cfg(copy.deepcopy(_load_yaml(ref_path)))
+    eval_flat = _flatten_experiment_cfg(copy.deepcopy(raw))
+    for key in _EVAL_OVERRIDE_KEYS:
+        if key in eval_flat:
+            cfg[key] = eval_flat[key]
+    return cfg
 
 
 def _run_skills_train(path: Path, **kwargs) -> None:
@@ -954,6 +1025,7 @@ def _run_mod_eval(
         / f"{path.stem}_mods.json"
     )
     print(f"\n{'=' * 70}\n  EVAL mods: {path.relative_to(CONFIG_DIR)} kind={kind}\n{'=' * 70}")
+    _pin_jaxatari_action_sets_to_host()
     try:
         run_mod_eval(
             agent_kind=agent_kind,
@@ -975,6 +1047,8 @@ def _run_mod_eval(
                 "paper_eval_rq": raw.get("PAPER_EVAL_RQ", ""),
                 "paper_eval_phase": raw.get("PAPER_EVAL_PHASE", "eval"),
                 "paper_eval_kind": kind,
+                "heuristic_mode": cfg.get("HEURISTIC_MODE"),
+                "no_target_game_action": cfg.get("NO_TARGET_GAME_ACTION"),
             },
         )
     finally:

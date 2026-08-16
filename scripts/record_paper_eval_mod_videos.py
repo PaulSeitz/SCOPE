@@ -138,6 +138,11 @@ def main() -> None:
     )
     parser.add_argument("--jaxatari-root", default=None)
     parser.add_argument(
+        "--heuristic-mode",
+        default=None,
+        help="Override HEURISTIC_MODE (e.g. nearest / env_specific) to match transfer eval",
+    )
+    parser.add_argument(
         "--list-mods",
         action="store_true",
         help="Print selected mods and exit",
@@ -176,6 +181,9 @@ def main() -> None:
     )
     cfg["SEED"] = int(args.seed)
     cfg["VIDEO_MAX_FRAMES"] = int(args.max_frames)
+    if args.heuristic_mode:
+        cfg["HEURISTIC_MODE"] = str(args.heuristic_mode)
+        print(f"HEURISTIC_MODE override → {cfg['HEURISTIC_MODE']}")
 
     meta_params = None
     meta_path = args.meta
