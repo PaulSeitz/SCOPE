@@ -3,7 +3,9 @@ results/
 wandb/
 models/
 outputs/
-paper_eval/
+# Root-only artifact dump (do NOT use bare paper_eval/ — that also ignores
+# configs/experiment/paper_eval/*.yaml and blocks new suite configs from git).
+/paper_eval/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
