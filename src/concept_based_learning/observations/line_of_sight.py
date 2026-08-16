@@ -12,6 +12,10 @@ knowledge lives entirely in the label files.
 Semantics: a *thin* ray (line of fire / direct sight), not a body-width sweep.
 The target slot itself never blocks; an occluder overlapping the player center
 counts as blocking (you are in contact with something).
+
+The ego ``los_blocked`` channel only surfaces this signal when the *current*
+target is ``LABEL_DESTROY`` (see ``_los_blocked_stacked``); other skills keep
+the channel at 0 so ascent/collect paths are not treated as "blocked fire".
 """
 
 from __future__ import annotations

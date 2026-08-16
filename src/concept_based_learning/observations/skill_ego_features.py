@@ -8,6 +8,8 @@ When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains two channels:
 
 ``facing_enemy`` is pure geometry (player ori + player/target centres). It is
 always visible — not latched on fire — so skills can turn before shooting.
+When centres nearly share an x (``|Δx| < 2px``), aim is treated as N/A (+1)
+so vertical NAVIGATE waypoints do not invent a rightward bias.
 Occupancy histograms list both channels in ``DISCRETE_SKILL_EGO_FLAGS``.
 """
 
@@ -150,6 +152,13 @@ def _player_projectile_active_per_frame(
     return jnp.max(active, axis=-1)
 
 
+# When |Δx| is below this, L/R aim is undefined (pure vertical / co-located).
+# Seaquest's surface NAVIGATE waypoint shares the player x every frame; without
+# a deadzone, ``t_cx >= p_cx`` falsely marks it "to the right" and biases
+# facing_enemy toward rightward facing.
+_FACING_LR_DEADZONE_PX = 2.0
+
+
 def _facing_toward_target_lr(
     player_ori: jnp.ndarray,
     player_x: jnp.ndarray,
@@ -162,12 +171,18 @@ def _facing_toward_target_lr(
 
     Raw-geometry only. Works for jaxatari L/R oris (90=right, 270=left) and
     for 0/180: ``orientation < 180`` → facing right.
+
+    Horizontally overlapping / near-coincident centres (``|Δx| < deadzone``)
+    return True (aim N/A) so vertical NAVIGATE targets do not invent an L/R bias.
     """
     facing_right = player_ori < 180.0
     p_cx = player_x.astype(jnp.float32) + player_w.astype(jnp.float32) / 2.0
     t_cx = target_x.astype(jnp.float32) + target_w.astype(jnp.float32) / 2.0
-    target_right = t_cx >= p_cx
-    return jnp.logical_not(jnp.logical_xor(facing_right, target_right))
+    dx = t_cx - p_cx
+    no_lr = jnp.abs(dx) < jnp.float32(_FACING_LR_DEADZONE_PX)
+    target_right = dx > 0.0
+    aimed = jnp.logical_not(jnp.logical_xor(facing_right, target_right))
+    return jnp.where(no_lr, True, aimed)
 
 
 def _facing_enemy_per_frame(

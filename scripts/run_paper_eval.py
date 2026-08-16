@@ -86,12 +86,11 @@ TRIAL_STEPS_DEFAULT = 16384  # one update at 128×128
 SUITE_EVAL_MAX_FRAMES = 27000
 
 # After COLLECT approach + AVOID escape reshaping: train ego Seaquest, then
-# standard mod eval, forced-AVOID probe, Pong transfer, BeamRider (idle FIRE).
+# standard mod eval, Pong transfer, BeamRider (idle FIRE).
 SKILL_RESHAPE_SUITE = "skill_reshape"
 SKILL_RESHAPE_STEMS = (
     "seaquest_skills_ego",
     "seaquest_skills_ego_eval",
-    "seaquest_skills_ego_avoid_probe",
     "pong_transfer_ego",
     "beamrider_transfer_ego",
 )
@@ -1251,7 +1250,7 @@ def main() -> None:
         default=None,
         help=(
             "Curated multi-phase run list (ignores --phase). "
-            f"{SKILL_RESHAPE_SUITE}: ego Seaquest train + mod eval + AVOID probe "
+            f"{SKILL_RESHAPE_SUITE}: ego Seaquest train + mod eval "
             "+ Pong/BeamRider transfer (default --eval-max-frames "
             f"{SUITE_EVAL_MAX_FRAMES})."
         ),

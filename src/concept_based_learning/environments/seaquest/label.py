@@ -30,7 +30,10 @@ from concept_based_learning.observations.action_space import (
 _SCROLL_X_MIN = 5
 _SCROLL_X_MAX = 155
 
-# Surface waypoint: player-aligned in x/width, fixed y at surfacing threshold.
+# Surface waypoint: fixed y at surfacing threshold; x prefers "behind" the
+# surface sub (10px opposite its travel) so NAVIGATE practices horizontal
+# approach, not only pure vertical climbs. When the sub is inactive, x is a
+# deterministic pseudo-random slot from player/diver state (JAX-safe).
 # JAXAtari Seaquest begins surfacing when player_y == 46 (see update_oxygen()).
 # Reward overlap globally applies a 1px inward inset, so we place this band at y=44
 # with h=1; after inset that yields an effective [45, 46] band and a clean
@@ -38,6 +41,12 @@ _SCROLL_X_MAX = 155
 _SURFACE_TRIGGER_PLAYER_Y = 46
 _SURFACE_WAYPOINT_Y = _SURFACE_TRIGGER_PLAYER_Y - 2
 _SURFACE_WAYPOINT_H = 1
+_SURFACE_WP_BEHIND_SUB_PX = 10
+_SURFACE_WP_SCREEN_W = 160
+_SURFACE_WP_FALLBACK_SLOTS = 5
+_SURFACE_WP_FALLBACK_MARGIN = 16
+# Surface sub is the last of the 25 enemy slots (12 sharks + 12 subs + 1).
+_SURFACE_SUB_ENEMY_SLOT = 24
 
 _SEAQUEST_MOVE_TABLE = [3, 8, 5, 9, 4, 7, 2, 6]
 _SEAQUEST_MOVE_FIRE_TABLE = [11, 16, 13, 17, 12, 15, 10, 14]
@@ -235,16 +244,43 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_labels     = jnp.concatenate([diver_labels,  enemy_labels,   enemy_missile_labels])
         all_offscreen  = jnp.concatenate([diver_offscreen, enemy_offscreen, enemy_missile_offscreen])
 
-        # Surface waypoint: always active/selectable; x/width follow player while
-        # y is fixed to the surfacing trigger band.
-        player_x = jnp.reshape(obs.player.x, (1,))
-        player_w = jnp.reshape(obs.player.width, (1,))
-        surface_x      = player_x
-        surface_y      = jnp.array([_SURFACE_WAYPOINT_Y], dtype=jnp.int32)
-        surface_w      = player_w
-        surface_h      = jnp.array([_SURFACE_WAYPOINT_H], dtype=jnp.int32)
+        # Surface waypoint: y fixed to surfacing band; x behind surface sub
+        # when it is on-screen, else a deterministic pseudo-random surface slot
+        # (so NAVIGATE learns lateral approach, not only vertical climbs).
+        player_x = jnp.reshape(obs.player.x, ())
+        player_w = jnp.reshape(obs.player.width, ())
+        divers_n = jnp.reshape(obs.collected_divers, ()).astype(jnp.int32)
+
+        sub_x = enemies.x[_SURFACE_SUB_ENEMY_SLOT]
+        sub_w = enemies.width[_SURFACE_SUB_ENEMY_SLOT]
+        sub_active = enemies.active[_SURFACE_SUB_ENEMY_SLOT] > 0.5
+        # jaxatari: orientation < 180 → facing/moving right; behind = opposite.
+        sub_ori = enemies.orientation[_SURFACE_SUB_ENEMY_SLOT].astype(jnp.float32)
+        facing_right = sub_ori < 180.0
+        behind_sign = jnp.where(facing_right, jnp.float32(-1.0), jnp.float32(1.0))
+        sub_cx = sub_x.astype(jnp.float32) + sub_w.astype(jnp.float32) / 2.0
+        behind_x = sub_cx + behind_sign * jnp.float32(_SURFACE_WP_BEHIND_SUB_PX) - (
+            player_w.astype(jnp.float32) / 2.0
+        )
+
+        # Deterministic fallback slots across the playable width.
+        usable = _SURFACE_WP_SCREEN_W - 2 * _SURFACE_WP_FALLBACK_MARGIN - 1
+        slot = (player_x.astype(jnp.int32) * 17 + divers_n * 31) % _SURFACE_WP_FALLBACK_SLOTS
+        fallback_x = (
+            jnp.int32(_SURFACE_WP_FALLBACK_MARGIN)
+            + (slot * usable) // jnp.int32(_SURFACE_WP_FALLBACK_SLOTS)
+        ).astype(jnp.float32)
+
+        surface_x_f = jnp.where(sub_active, behind_x, fallback_x)
+        max_x = jnp.float32(_SURFACE_WP_SCREEN_W) - player_w.astype(jnp.float32)
+        surface_x_f = jnp.clip(surface_x_f, 0.0, jnp.maximum(max_x, 0.0))
+
+        surface_x = jnp.reshape(surface_x_f.astype(jnp.int32), (1,))
+        surface_y = jnp.array([_SURFACE_WAYPOINT_Y], dtype=jnp.int32)
+        surface_w = jnp.reshape(player_w.astype(jnp.int32), (1,))
+        surface_h = jnp.array([_SURFACE_WAYPOINT_H], dtype=jnp.int32)
         surface_active = jnp.array([1], dtype=jnp.int32)
-        surface_label  = jnp.array([LABEL_NAVIGATE], dtype=jnp.int32)
+        surface_label = jnp.array([LABEL_NAVIGATE], dtype=jnp.int32)
         surface_offscreen = jnp.array([0], dtype=jnp.int32)
 
         final_x         = jnp.concatenate([all_x,         surface_x])

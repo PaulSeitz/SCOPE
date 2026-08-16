@@ -400,8 +400,15 @@ def _los_blocked_stacked(
     *,
     y_is_bottom_edge: bool,
 ) -> jnp.ndarray:
-    """Per-frame line-of-sight blocked flags (float32 [stack]) for the target."""
-    return jax.vmap(
+    """Per-frame LOS blocked flags (float32 [stack]) for DESTROY targets only.
+
+    Occlusion is a shooting cue: COLLECT / AVOID / NAVIGATE keep ``los_blocked=0``
+    even when objects sit on the player→target segment (ascent under sharks must
+    not look "blocked" for NAVIGATE).
+    """
+    from concept_based_learning.environments.datatypes import LABEL_DESTROY
+
+    raw = jax.vmap(
         lambda pcx, pcy, tcx, tcy, ox, oy, ow, oh, oact, olab: line_of_sight_blocked(
             pcx,
             pcy,
@@ -428,6 +435,12 @@ def _los_blocked_stacked(
         objects.active,
         objects.semantic_label,
     ).astype(jnp.float32)
+    # semantic_label: [stack, max_objects] → per-frame target label
+    tgt_labels = objects.semantic_label[
+        jnp.arange(objects.semantic_label.shape[0]), target_idx
+    ]
+    is_destroy = tgt_labels == LABEL_DESTROY
+    return jnp.where(is_destroy, raw, jnp.float32(0.0))
 
 
 # ---------------------------------------------------------------------------
