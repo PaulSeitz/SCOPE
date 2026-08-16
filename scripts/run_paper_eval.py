@@ -11,6 +11,11 @@ Usage:
   python scripts/run_paper_eval.py --smoke --trial   # full wiring smoke test
   python scripts/materialize_paper_eval_configs.py   # regenerate RQ2/RQ3 YAMLs
 
+  # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --trial --lean
+
   # One-shot overnight on two GPUs (workers poll for RQ1 ckpts before gated jobs):
   python scripts/run_paper_eval.py --gpus 0,1 --wait-deps
 
@@ -77,6 +82,25 @@ MODS_DIR = CONFIG_DIR / "mods"
 RTPT_BASE = "HRL_paper_eval"
 DEFAULT_SEED = 44
 TRIAL_STEPS_DEFAULT = 16384  # one update at 128×128
+# Full-game horizon for paper / skill-reshape evals (CLI default remains 800).
+SUITE_EVAL_MAX_FRAMES = 27000
+
+# After COLLECT approach + AVOID escape reshaping: train ego Seaquest, then
+# standard mod eval, forced-AVOID probe, Pong transfer, BeamRider (idle FIRE).
+SKILL_RESHAPE_SUITE = "skill_reshape"
+SKILL_RESHAPE_STEMS = (
+    "seaquest_skills_ego",
+    "seaquest_skills_ego_eval",
+    "seaquest_skills_ego_avoid_probe",
+    "pong_transfer_ego",
+    "beamrider_transfer_ego",
+)
+SKILL_RESHAPE_EVAL_STEMS = tuple(
+    s for s in SKILL_RESHAPE_STEMS if s != "seaquest_skills_ego"
+)
+SUITE_STEMS = {
+    SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
+}
 
 
 def _default_batch_tag() -> str:
@@ -200,8 +224,18 @@ def _shard_paths(paths: list[Path], *, shard_idx: int, num_shards: int) -> list[
     return [p for i, p in enumerate(paths) if i % num_shards == shard_idx]
 
 
-def _rtpt_name(shard: str | None, rq: int | None) -> str:
-    base = RTPT_BASE if rq is None else f"{RTPT_BASE}_rq{rq}"
+def _rtpt_name(
+    shard: str | None,
+    rq: int | None,
+    *,
+    suite: str | None = None,
+) -> str:
+    if suite:
+        base = f"{RTPT_BASE}_{suite}"
+    elif rq is not None:
+        base = f"{RTPT_BASE}_rq{rq}"
+    else:
+        base = RTPT_BASE
     if shard is None:
         return base
     return f"{base}_s{_parse_shard(shard)[0] + 1}"
@@ -1211,6 +1245,25 @@ def main() -> None:
     parser.add_argument("--rq", type=int, choices=[1, 2, 3], default=None)
     parser.add_argument("--phase", choices=["train", "eval", "finetune"], default=None)
     parser.add_argument("--only", nargs="*", metavar="NAME")
+    parser.add_argument(
+        "--suite",
+        choices=sorted(SUITE_STEMS),
+        default=None,
+        help=(
+            "Curated multi-phase run list (ignores --phase). "
+            f"{SKILL_RESHAPE_SUITE}: ego Seaquest train + mod eval + AVOID probe "
+            "+ Pong/BeamRider transfer (default --eval-max-frames "
+            f"{SUITE_EVAL_MAX_FRAMES})."
+        ),
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help=(
+            "With --suite skill_reshape: skip seaquest_skills_ego train "
+            "(requires existing RQ1 ego ckpt)."
+        ),
+    )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
     parser.add_argument(
         "--gpus",
@@ -1358,14 +1411,30 @@ def main() -> None:
     _prepend_jaxatari_root(_resolve_jaxatari_root(args.jaxatari_root))
 
     only = list(args.only) if args.only else None
+    suite = str(args.suite).strip() if args.suite else None
+    phase_filter = args.phase
     if args.smoke:
         only = list(SMOKE_STEMS)
+    elif suite:
+        if args.only:
+            raise SystemExit("Use either --suite or --only, not both")
+        if args.eval_only and suite != SKILL_RESHAPE_SUITE:
+            raise SystemExit("--eval-only is only valid with --suite skill_reshape")
+        if suite == SKILL_RESHAPE_SUITE and args.eval_only:
+            only = list(SKILL_RESHAPE_EVAL_STEMS)
+        else:
+            only = list(SUITE_STEMS[suite])
+        # Suites span train+eval; do not filter by --phase.
+        phase_filter = None
+        print(f"paper_eval suite={suite} ({len(only)} run(s))", flush=True)
+    elif args.eval_only:
+        raise SystemExit("--eval-only requires --suite skill_reshape")
 
-    paths = _discover_configs(rq=args.rq, only=only, phase=args.phase)
+    paths = _discover_configs(rq=args.rq, only=only, phase=phase_filter)
     if not paths:
         raise SystemExit("No matching configs (run --materialize if RQ2/RQ3 missing)")
 
-    # Preserve smoke / --only order (discovery is alphabetical).
+    # Preserve smoke / suite / --only order (discovery is alphabetical).
     if only:
         by_stem = {p.stem: p for p in paths}
         ordered = [by_stem[s] for s in only if s in by_stem]
@@ -1401,9 +1470,14 @@ def main() -> None:
             print("\n(status with --resume / --exclude applied above)")
         return
 
-    # Smoke trains RQ1 first in-order; gate per-run instead of upfront.
+    # Smoke / skill-reshape train first in-order; gate per-run instead of upfront.
     # --wait-deps: skip the upfront fail; each run polls instead.
-    skip_gate = bool(args.skip_rq_gate or args.smoke or args.wait_deps)
+    suite_will_train = bool(
+        suite == SKILL_RESHAPE_SUITE and not args.eval_only
+    )
+    skip_gate = bool(
+        args.skip_rq_gate or args.smoke or args.wait_deps or suite_will_train
+    )
     if not skip_gate:
         gated = [
             p
@@ -1422,12 +1496,19 @@ def main() -> None:
     trial_steps = args.trial_steps if (args.trial or args.smoke) else None
     trial = bool(args.trial or args.smoke)
     eval_episodes = args.eval_episodes if args.eval_episodes is not None else (1 if trial else 3)
-    eval_max_frames = (
-        args.eval_max_frames if args.eval_max_frames is not None else (400 if trial else 800)
-    )
+    if args.eval_max_frames is not None:
+        eval_max_frames = int(args.eval_max_frames)
+    elif trial:
+        eval_max_frames = 400
+    elif suite == SKILL_RESHAPE_SUITE:
+        eval_max_frames = SUITE_EVAL_MAX_FRAMES
+    else:
+        eval_max_frames = 800
     batch_tag = _resolve_batch_tag(args.batch_tag)
     os.environ["PAPER_EVAL_BATCH_TAG"] = batch_tag
     print(f"paper_eval batch tag: batch:{batch_tag}")
+    if suite:
+        print(f"paper_eval eval_max_frames={eval_max_frames}", flush=True)
 
     lean = bool(args.lean)
     if lean:
@@ -1452,7 +1533,7 @@ def main() -> None:
 
     _init_rtpt_for_paths(
         paths,
-        experiment_name=_rtpt_name(args.shard, args.rq),
+        experiment_name=_rtpt_name(args.shard, args.rq, suite=suite),
         trial_steps=trial_steps,
         trial=trial,
     )
