@@ -12,6 +12,14 @@ When centres nearly share an x (``|Δx| < 2px``), aim is treated as N/A (+1)
 so vertical NAVIGATE waypoints do not invent a rightward bias.
 Occupancy histograms list both channels in ``DISCRETE_SKILL_EGO_FLAGS``.
 
+``USE_EGO_SHOT_BETWEEN`` (requires weapon features) appends one *binary*
+channel: the player projectile currently sits on the open player→target
+segment (same occupancy idea as ``los_blocked`` / blockers). +1 when the
+missile centre projects onto that open segment within a missile-width
+corridor; 0 when there is no bullet, the shot is off the corridor (including
+the wrong way), or the target is not DESTROY. Zeros on games without
+bullets (Pong / Freeway). Current geometry only — not a fire-time latch.
+
 ``USE_EGO_SHOT_FEATURES`` (requires weapon features) appends two *continuous*
 channels that locate the player projectile relative to the skill target:
 
@@ -31,8 +39,12 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 
+from concept_based_learning.environments.datatypes import LABEL_DESTROY
+from concept_based_learning.observations.line_of_sight import missile_on_open_segment
+
 _USE_EGO_WEAPON_FEATURES = False
 _USE_EGO_SHOT_FEATURES = False
+_USE_EGO_SHOT_BETWEEN = False
 _ENV_NAME = ""
 
 # Channel values (±1 binaries).
@@ -48,6 +60,7 @@ WEAPON_IN_FLIGHT_WASTED = CAN_FIRE_IN_FLIGHT
 
 # Base weapon extras (can_fire, facing_enemy). Shot geometry is optional.
 WEAPON_BASE_CHANNELS_PER_FRAME = 2
+SHOT_BETWEEN_CHANNELS_PER_FRAME = 1
 SHOT_CHANNELS_PER_FRAME = 2
 # Backward-compat alias: base extras only (shot flag off).
 WEAPON_CHANNELS_PER_FRAME = WEAPON_BASE_CHANNELS_PER_FRAME
@@ -86,6 +99,20 @@ DISCRETE_SKILL_EGO_FLAGS: tuple[DiscreteSkillEgoFlag, ...] = (
         level_offset=1.0,
     ),
 )
+_SHOT_BETWEEN_FLAG = DiscreteSkillEgoFlag(
+    offset=WEAPON_BASE_CHANNELS_PER_FRAME,
+    name="shot_between",
+    n_levels=2,
+    level_offset=0.0,  # {0,1}
+)
+
+
+def discrete_skill_ego_flags() -> tuple[DiscreteSkillEgoFlag, ...]:
+    """Active discrete weapon extras (can_fire, facing, optional shot_between)."""
+    flags = DISCRETE_SKILL_EGO_FLAGS
+    if _USE_EGO_SHOT_BETWEEN:
+        return flags + (_SHOT_BETWEEN_FLAG,)
+    return flags
 
 # Envs where shot direction follows left/right player facing (Seaquest-style).
 _FACING_LR_AIM_ENVS = frozenset({"seaquest", "choppercommand"})
@@ -98,17 +125,21 @@ def configure_ego_weapon_features(
     num_skills: int | None = None,
     extra_dim_per_skill: int | None = None,
     shot_features: bool = False,
+    shot_between: bool = False,
 ) -> None:
     """Enable/disable the shared can_fire + facing_enemy ego channels.
 
     ``shot_features`` adds shot-to-target Δx/Δy (zeros when no bullet).
+    ``shot_between`` adds a DESTROY-only 0/1 occupancy bit (missile on the
+    open player→target segment).
     ``num_skills`` / ``extra_dim_per_skill`` are ignored (kept for call-site
     compatibility with older configs that passed a padded per-skill dim).
     """
     del num_skills, extra_dim_per_skill
-    global _USE_EGO_WEAPON_FEATURES, _USE_EGO_SHOT_FEATURES, _ENV_NAME
+    global _USE_EGO_WEAPON_FEATURES, _USE_EGO_SHOT_FEATURES, _USE_EGO_SHOT_BETWEEN, _ENV_NAME
     _USE_EGO_WEAPON_FEATURES = bool(enabled)
     _USE_EGO_SHOT_FEATURES = bool(enabled) and bool(shot_features)
+    _USE_EGO_SHOT_BETWEEN = bool(enabled) and bool(shot_between)
     _ENV_NAME = str(env_name).lower()
 
 
@@ -119,6 +150,7 @@ def configure_skill_ego_features(
     extra_dim_per_skill: int = 1,
     env_name: str = "",
     shot_features: bool = False,
+    shot_between: bool = False,
 ) -> None:
     """Backward-compatible alias for ``configure_ego_weapon_features``."""
     configure_ego_weapon_features(
@@ -127,6 +159,7 @@ def configure_skill_ego_features(
         num_skills=num_skills,
         extra_dim_per_skill=extra_dim_per_skill,
         shot_features=shot_features,
+        shot_between=shot_between,
     )
 
 
@@ -138,16 +171,22 @@ def using_ego_shot_features() -> bool:
     return _USE_EGO_SHOT_FEATURES
 
 
+def using_ego_shot_between() -> bool:
+    return _USE_EGO_SHOT_BETWEEN
+
+
 def using_skill_ego_features() -> bool:
     """Backward-compatible alias for ``using_ego_weapon_features``."""
     return using_ego_weapon_features()
 
 
 def skill_ego_extra_channels_per_frame() -> int:
-    """Extra ego channels/frame from weapon features (0, 2, or 4)."""
+    """Extra ego channels/frame from weapon features (0, 2, 3, 4, or 6)."""
     if not _USE_EGO_WEAPON_FEATURES:
         return 0
     extra = WEAPON_BASE_CHANNELS_PER_FRAME
+    if _USE_EGO_SHOT_BETWEEN:
+        extra += SHOT_BETWEEN_CHANNELS_PER_FRAME
     if _USE_EGO_SHOT_FEATURES:
         extra += SHOT_CHANNELS_PER_FRAME
     return extra
@@ -246,6 +285,58 @@ def _shot_to_target_xy(
     return jnp.where(flying, dx, zeros), jnp.where(flying, dy, zeros)
 
 
+def _shot_between_per_frame(
+    raw_observation,
+    objects: Any | None,
+    target_idx: jnp.ndarray | int | None,
+    *,
+    projectile_attr: str,
+    projectile_slot: int | None,
+    stack_len: int,
+    in_flight: jnp.ndarray,
+) -> jnp.ndarray:
+    """Per-frame 0/1: missile centre on the open player→target segment."""
+    zeros = jnp.zeros((stack_len,), dtype=jnp.float32)
+    if not _USE_EGO_SHOT_BETWEEN:
+        return zeros
+    if objects is None or target_idx is None:
+        return zeros
+    if not hasattr(raw_observation, projectile_attr):
+        return zeros
+    projectiles = getattr(raw_observation, projectile_attr)
+    if not hasattr(projectiles, "x") or not hasattr(projectiles, "y"):
+        return zeros
+    player = _get_player(raw_observation)
+    if not hasattr(player, "y") or not hasattr(player, "height"):
+        return zeros
+
+    mx = _leaf_per_frame(projectiles.x, projectile_slot, stack_len)
+    my = _leaf_per_frame(projectiles.y, projectile_slot, stack_len)
+    mw = _leaf_per_frame(getattr(projectiles, "width", 0.0), projectile_slot, stack_len)
+    mh = _leaf_per_frame(getattr(projectiles, "height", 0.0), projectile_slot, stack_len)
+    m_cx = mx + mw / 2.0
+    m_cy = my + mh / 2.0
+
+    p_cx = player.x.astype(jnp.float32) + player.width.astype(jnp.float32) / 2.0
+    p_cy = player.y.astype(jnp.float32) + player.height.astype(jnp.float32) / 2.0
+
+    idx = jnp.asarray(target_idx, dtype=jnp.int32)
+    t_cx = objects.x.astype(jnp.float32)[:, idx] + objects.width.astype(jnp.float32)[:, idx] / 2.0
+    t_cy = objects.y.astype(jnp.float32)[:, idx] + objects.height.astype(jnp.float32)[:, idx] / 2.0
+
+    on_seg = missile_on_open_segment(
+        p_cx, p_cy, t_cx, t_cy, m_cx, m_cy, mw, mh
+    )
+    flying = in_flight > 0.5
+    bit = jnp.where(jnp.logical_and(flying, on_seg), jnp.float32(1.0), zeros)
+    if hasattr(objects, "semantic_label"):
+        tgt_labels = objects.semantic_label[
+            jnp.arange(objects.semantic_label.shape[0]), idx
+        ]
+        bit = jnp.where(tgt_labels == LABEL_DESTROY, bit, zeros)
+    return bit
+
+
 # When |Δx| is below this, L/R aim is undefined (pure vertical / co-located).
 # Seaquest's surface NAVIGATE waypoint shares the player x every frame; without
 # a deadzone, ``t_cx >= p_cx`` falsely marks it "to the right" and biases
@@ -336,7 +427,7 @@ def _weapon_channels_stacked(
     projectile_attr: str,
     projectile_slot: int | None = None,
 ) -> jnp.ndarray:
-    """Per-frame weapon extras: [can_fire, facing_enemy] (+ shot_dx, shot_dy)."""
+    """Per-frame weapon extras: [can_fire, facing_enemy] (+ shot_between) (+ shot_dx, shot_dy)."""
     stack_len = _stack_len(raw_observation)
     if not hasattr(raw_observation, projectile_attr):
         can_fire = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
@@ -357,6 +448,18 @@ def _weapon_channels_stacked(
         raw_observation, objects, target_idx, stack_len
     )
     channels = [can_fire, facing]
+    if _USE_EGO_SHOT_BETWEEN:
+        channels.append(
+            _shot_between_per_frame(
+                raw_observation,
+                objects,
+                target_idx,
+                projectile_attr=projectile_attr,
+                projectile_slot=projectile_slot,
+                stack_len=stack_len,
+                in_flight=in_flight,
+            )
+        )
     if _USE_EGO_SHOT_FEATURES:
         shot_dx, shot_dy = _shot_to_target_xy(
             raw_observation,
@@ -377,8 +480,9 @@ def build_skill_ego_extras_stacked(
     target_idx: jnp.ndarray | int | None = None,
 ) -> jnp.ndarray:
     """
-    Per-frame weapon extras. Shape ``[stack_len, 2]`` when enabled, or
-    ``[stack_len, 4]`` with shot features, else ``[stack_len, 0]``.
+    Per-frame weapon extras. Shape ``[stack_len, 2]`` when enabled, plus
+    ``shot_between`` and/or ``shot_dx/dy`` when those flags are on, else
+    ``[stack_len, 0]``.
 
     ``objects`` / ``target_idx`` drive ``facing_enemy`` on L/R envs
     (Seaquest, Chopper Command) and shot-to-target Δx/Δy when the shot
@@ -428,6 +532,8 @@ def build_skill_ego_extras_stacked(
     ready = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
     facing = jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32)
     channels = [ready, facing]
+    if _USE_EGO_SHOT_BETWEEN:
+        channels.append(jnp.zeros((stack_len,), dtype=jnp.float32))
     if _USE_EGO_SHOT_FEATURES:
         zeros = jnp.zeros((stack_len,), dtype=jnp.float32)
         channels.extend([zeros, zeros])

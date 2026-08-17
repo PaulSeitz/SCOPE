@@ -62,6 +62,41 @@ def segment_intersects_box(p_x, p_y, q_x, q_y, box_x_min, box_y_min, box_x_max, 
     )
 
 
+def missile_on_open_segment(
+    p_cx,
+    p_cy,
+    t_cx,
+    t_cy,
+    m_cx,
+    m_cy,
+    m_w,
+    m_h,
+):
+    """True when the missile centre sits on the open player→target segment.
+
+    Image-extractable occupancy: the projectile is *between* the two sprites
+    (projection ``t ∈ (0, 1)``) and within a corridor as wide as the missile
+    AABB. A shot going the other way has ``t < 0``. Degenerate player/target
+    coincidence returns False. This is current geometry, not a fire-time latch.
+    """
+    seg_x = t_cx - p_cx
+    seg_y = t_cy - p_cy
+    seg_len2 = seg_x * seg_x + seg_y * seg_y
+    rel_x = m_cx - p_cx
+    rel_y = m_cy - p_cy
+    safe_len2 = jnp.maximum(seg_len2, jnp.float32(1e-6))
+    t_param = (rel_x * seg_x + rel_y * seg_y) / safe_len2
+    cross = rel_x * seg_y - rel_y * seg_x
+    perp = jnp.abs(cross) / jnp.sqrt(safe_len2)
+    half = 0.5 * jnp.maximum(m_w, m_h)
+    on_segment = jnp.logical_and(t_param > 0.0, t_param < 1.0)
+    on_corridor = perp <= half
+    return jnp.logical_and(
+        seg_len2 > jnp.float32(1e-6),
+        jnp.logical_and(on_segment, on_corridor),
+    )
+
+
 def line_of_sight_blocked(
     p_cx,
     p_cy,

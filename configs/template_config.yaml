@@ -61,6 +61,7 @@ USE_EGO_BLOCKING_FEATURES: false  # Append line-of-sight blocked flag (1 channel
 # DESTROY-oriented weapon extras: can_fire (±1) + facing_enemy (±1).
 USE_EGO_WEAPON_FEATURES: false    # Append can_fire + facing_enemy (2 channels/frame). Options: true/false.
 USE_EGO_SHOT_FEATURES: false      # Append shot_dx/shot_dy to target (zeros if no bullet). Requires weapon features. Options: true/false.
+USE_EGO_SHOT_BETWEEN: false       # Append 0/1: player missile on the open player→target segment (DESTROY only). Requires weapon features. Options: true/false.
 EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization. Options: null or number > 0.
 
 # Seaquest compatibility toggles.
@@ -217,6 +218,9 @@ alg:
   # Environment/label specific shaping knobs (only used in specific env wrappers).
   AVOID_SURVIVAL_BONUS: 0.0         # Per-step survival bonus for avoid reward branch. Options: float.
   SKILL_DEATH_PENALIZE_COLLECT: false # Also −1 COLLECT on life loss (default: AVOID/DESTROY only). Options: true/false.
+  COLLECT_LIVING_PENALTY: false     # COLLECT: −0.01/frame until contact instead of approach shaping. Options: true/false.
+  DESTROY_CONTACT_FAIL: false       # DESTROY: −1 and done on ram (AABB rising edge). Options: true/false.
+  DESTROY_LIVING_PENALTY: false     # DESTROY: −0.01/frame while the enemy lives. Options: true/false.
   ALWAYS_ACTIVE_SURFACE_TARGET: false # Seaquest: keep surface waypoint target always available. Options: true/false.
   SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
   FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.

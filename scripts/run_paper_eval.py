@@ -17,6 +17,9 @@ Usage:
   # DESTROY urgency (contact+living-tax, no shot ego):
   python scripts/run_paper_eval.py --suite destroy_urgency --wait-deps --lean
 
+  # COLLECT urgency + DESTROY shot-between (2 GPUs, one arm each):
+  python scripts/run_paper_eval.py --suite collect_shot_probes --gpus 0,1 --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -123,10 +126,21 @@ DESTROY_URGENCY_STEMS = (
     "seaquest_skills_ego_destroy_urgency_eval",
     "pong_transfer_ego_destroy_urgency",
 )
+COLLECT_SHOT_PROBES_SUITE = "collect_shot_probes"
+# Shard-critical for 2 GPUs: GPU i gets train/eval/pong of one arm.
+COLLECT_SHOT_PROBES_STEMS = (
+    "seaquest_skills_ego_collect_urgency",
+    "seaquest_skills_ego_destroy_shot_between",
+    "seaquest_skills_ego_collect_urgency_eval",
+    "seaquest_skills_ego_destroy_shot_between_eval",
+    "pong_transfer_ego_collect_urgency",
+    "pong_transfer_ego_destroy_shot_between",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
     DESTROY_URGENCY_SUITE: DESTROY_URGENCY_STEMS,
+    COLLECT_SHOT_PROBES_SUITE: COLLECT_SHOT_PROBES_STEMS,
 }
 
 
@@ -1288,7 +1302,9 @@ def main() -> None:
             "(y-align / standoff / contact-fail), lean 5-mod Seaquest + Pong base; "
             "use --gpus 0,1,2 so each GPU owns one arm. "
             f"{DESTROY_URGENCY_SUITE}: contact-fail + living tax (no shot ego); "
-            "lean 5-mod Seaquest + Pong base."
+            "lean 5-mod Seaquest + Pong base. "
+            f"{COLLECT_SHOT_PROBES_SUITE}: COLLECT living tax (NAVIGATE still "
+            "shaped) and DESTROY shot-between bit; 2 GPUs, one arm each."
         ),
     )
     parser.add_argument(
@@ -1296,7 +1312,8 @@ def main() -> None:
         action="store_true",
         help=(
             "With --suite: skip train configs (requires existing ckpts). "
-            "Valid for skill_reshape, destroy_ablation, and destroy_urgency."
+            "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
+            "and collect_shot_probes."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")

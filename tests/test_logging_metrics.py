@@ -152,6 +152,24 @@ def test_discrete_ego_flag_layout_los_and_weapon_state():
     ]
 
 
+def test_discrete_ego_flag_layout_includes_shot_between():
+    configure_ego_obs_from_config(
+        {
+            "USE_LEGACY_EGO_OBS": False,
+            "USE_EGO_SIZE_FEATURES": False,
+            "USE_EGO_VELOCITY_FEATURES": False,
+            "USE_EGO_BLOCKING_FEATURES": True,
+            "USE_EGO_WEAPON_FEATURES": True,
+            "USE_EGO_SHOT_BETWEEN": True,
+            "ENV_NAME": "seaquest",
+        }
+    )
+    # + shot_between
+    assert ego_obs_channels_per_frame() == 7
+    layout = discrete_ego_flag_layout()
+    assert layout[-1] == ("shot_between", 6, 2, 0.0)
+
+
 def test_flag_combination_occupancy_per_skill_histogram():
     configure_ego_obs_from_config(
         {

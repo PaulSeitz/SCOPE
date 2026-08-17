@@ -21,6 +21,7 @@ from concept_based_learning.observations.egocentric import (
 )
 from concept_based_learning.observations.line_of_sight import (
     line_of_sight_blocked,
+    missile_on_open_segment,
     segment_intersects_box,
 )
 
@@ -70,6 +71,24 @@ def test_vertical_segment_parallel_slab():
     assert bool(segment_intersects_box(10.0, 0.0, 10.0, 20.0, 8.0, 8.0, 12.0, 12.0))
     # Vertical segment beside the box.
     assert not bool(segment_intersects_box(20.0, 0.0, 20.0, 20.0, 8.0, 8.0, 12.0, 12.0))
+
+
+def test_missile_on_open_segment_between_player_and_target():
+    assert bool(
+        missile_on_open_segment(12.0, 50.0, 82.0, 50.0, 44.0, 50.0, 8.0, 1.0)
+    )
+
+
+def test_missile_on_open_segment_wrong_way():
+    assert not bool(
+        missile_on_open_segment(12.0, 50.0, 82.0, 50.0, 4.0, 50.0, 8.0, 1.0)
+    )
+
+
+def test_missile_on_open_segment_past_target():
+    assert not bool(
+        missile_on_open_segment(12.0, 50.0, 82.0, 50.0, 100.0, 50.0, 8.0, 1.0)
+    )
 
 
 # ---------------------------------------------------------------------------

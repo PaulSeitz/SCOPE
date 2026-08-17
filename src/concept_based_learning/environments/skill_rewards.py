@@ -6,9 +6,12 @@ Reward magnitudes and trigger conditions:
              (escape progress). No per-frame survival farm.
              -1  on rising edge of AABB overlap / was_killed (contact fail).
              No sparse “cleared” success terminal (escape shaping only).
-  COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1;
-             +0.01 when centre-distance to the (still active) collectible decreases
-             (approach shaping — same magnitude as NAVIGATE progress).
+  COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1.
+             Default dense term: +0.01 when centre-distance to the (still active)
+             collectible decreases (approach shaping).
+             COLLECT_LIVING_PENALTY: replace approach with −0.01 every frame the
+             collectible is still active and not collected this step (same clock
+             as DESTROY living tax). NAVIGATE is unchanged.
   DESTROY  : +1  when next_target.was_killed == 1 (set by env wrapper from raw state).
              Optional per-run extras (config flags, default off):
              DESTROY_Y_ALIGN: +0.01 when |Δy| to the target decreases.
@@ -77,6 +80,7 @@ AVOID_SURVIVAL_REWARD = AVOID_ESCAPE_REWARD  # back-compat alias (old survival f
 AVOID_FAILURE_REWARD = -1.0
 COLLECT_SUCCESS_REWARD = 1.0
 COLLECT_PROGRESS_REWARD = 0.01  # distance-to-collectible decreased this step
+COLLECT_LIVING_PENALTY = -0.01  # per-frame tax while the collectible is uncollected
 DESTROY_SUCCESS_REWARD = 1.0
 DESTROY_FAILURE_REWARD = -1.0  # contact-fail ablation (DESTROY_CONTACT_FAIL)
 DESTROY_Y_ALIGN_REWARD = 0.01  # |centre-Δy| decreased this step
@@ -121,6 +125,7 @@ class RewardContext:
     destroy_contact_fail: bool
     destroy_living_penalty: bool
     destroy_standoff_px: float
+    collect_living_penalty: bool
 
 
 @dataclass(frozen=True)
@@ -340,7 +345,9 @@ def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
 
 
 def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    # Sparse contact success + approach progress (same idea as NAVIGATE).
+    # Sparse contact success. Default dense term is approach progress (same
+    # idea as NAVIGATE). Optional living tax replaces approach: delay costs,
+    # without telling the skill to close the gap.
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
@@ -348,12 +355,21 @@ def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
+    living_tax = jnp.where(
+        jnp.logical_and(
+            ctx.collect_living_penalty,
+            jnp.logical_and(both_active, jnp.logical_not(success)),
+        ),
+        COLLECT_LIVING_PENALTY,
+        0.0,
+    )
     progressed = jnp.logical_and(both_active, next_dist < prev_dist)
-    reward = jnp.where(
-        success,
-        COLLECT_SUCCESS_REWARD,
+    shaped = jnp.where(
+        ctx.collect_living_penalty,
+        living_tax,
         jnp.where(progressed, COLLECT_PROGRESS_REWARD, 0.0),
     )
+    reward = jnp.where(success, COLLECT_SUCCESS_REWARD, shaped)
     return reward, success
 
 
@@ -480,6 +496,7 @@ def extract_skill_rewards(
     destroy_standoff: bool | None = None,
     destroy_contact_fail: bool | None = None,
     destroy_living_penalty: bool | None = None,
+    collect_living_penalty: bool | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all skills against a single target.
@@ -502,6 +519,8 @@ def extract_skill_rewards(
         destroy_y_align / destroy_standoff / destroy_contact_fail /
         destroy_living_penalty:
             per-run DESTROY extras (see module docstring). ``None`` → config.
+        collect_living_penalty:
+            per-run COLLECT clock (replaces approach shaping). ``None`` → config.
 
     Returns:
         rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
@@ -518,6 +537,9 @@ def extract_skill_rewards(
         flags["destroy_contact_fail"] = bool(destroy_contact_fail)
     if destroy_living_penalty is not None:
         flags["destroy_living_penalty"] = bool(destroy_living_penalty)
+    collect_clock = collect_living_penalty_from_config(config)
+    if collect_living_penalty is not None:
+        collect_clock = bool(collect_living_penalty)
 
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
@@ -540,6 +562,7 @@ def extract_skill_rewards(
         destroy_contact_fail=flags["destroy_contact_fail"],
         destroy_living_penalty=flags["destroy_living_penalty"],
         destroy_standoff_px=flags["destroy_standoff_px"],
+        collect_living_penalty=collect_clock,
     )
 
     died = ctx.life_lost > 0
@@ -610,6 +633,13 @@ def avoid_escape_reward_from_config(config) -> float:
 def avoid_survival_reward_from_config(config) -> float:
     """Deprecated alias for ``avoid_escape_reward_from_config``."""
     return avoid_escape_reward_from_config(config)
+
+def collect_living_penalty_from_config(config) -> bool:
+    """Per-run COLLECT clock; default off (keep approach shaping)."""
+    if config is None:
+        return False
+    return bool(config.get("COLLECT_LIVING_PENALTY", False))
+
 
 def penalize_collect_death_from_config(config) -> bool:
     """Whether COLLECT receives the life-loss death penalty (default False)."""

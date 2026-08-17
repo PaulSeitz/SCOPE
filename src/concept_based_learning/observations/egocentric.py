@@ -5,7 +5,7 @@ import jax.numpy as jnp
 
 from concept_based_learning.observations.line_of_sight import line_of_sight_blocked
 from concept_based_learning.observations.skill_ego_features import (
-    DISCRETE_SKILL_EGO_FLAGS,
+    discrete_skill_ego_flags,
     build_skill_ego_extras_stacked,
     configure_ego_weapon_features,
     skill_ego_extra_channels_per_frame,
@@ -138,6 +138,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         enabled=bool(weapon),
         env_name=str(config.get("ENV_NAME", "")),
         shot_features=bool(config.get("USE_EGO_SHOT_FEATURES", False)),
+        shot_between=bool(config.get("USE_EGO_SHOT_BETWEEN", False)),
     )
 
 
@@ -199,7 +200,7 @@ def discrete_ego_flag_layout() -> list[tuple[str, int, int, float]]:
         # LOS is the last base channel (immediately before skill extras).
         layout.append(("los_blocked", base - 1, 2, 0.0))
     if using_ego_weapon_features() and extras_width > 0:
-        for flag in DISCRETE_SKILL_EGO_FLAGS:
+        for flag in discrete_skill_ego_flags():
             idx = base + int(flag.offset)
             if 0 <= flag.offset < extras_width:
                 layout.append(

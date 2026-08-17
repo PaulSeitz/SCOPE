@@ -12,7 +12,9 @@ from concept_based_learning.environments.datatypes import (
 )
 from concept_based_learning.environments.skill_rewards import (
     AVOID_ESCAPE_REWARD,
+    COLLECT_LIVING_PENALTY,
     COLLECT_PROGRESS_REWARD,
+    COLLECT_SUCCESS_REWARD,
     DESTROY_FAILURE_REWARD,
     DESTROY_LIVING_PENALTY,
     DESTROY_STANDOFF_PENALTY,
@@ -324,3 +326,65 @@ def test_destroy_contact_fail_beats_living_penalty():
     )
     assert float(r[0]) == pytest.approx(DESTROY_FAILURE_REWARD)
     assert bool(d[0])
+
+
+def test_collect_living_penalty_replaces_approach():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_living_penalty=True
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_LIVING_PENALTY)
+    assert not bool(d[1])
+
+
+def test_collect_living_penalty_idle_still_taxes():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_living_penalty=True
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_LIVING_PENALTY)
+    assert not bool(d[1])
+
+
+def test_collect_success_overrides_living_penalty():
+    prev_r, prev_t = _mk(10, 50, 20, 50, LABEL_COLLECT, tw=8, th=8)
+    next_r, next_t = _mk(20, 50, 20, 50, LABEL_COLLECT, tw=8, th=8)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_living_penalty=True
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_SUCCESS_REWARD)
+    assert bool(d[1])
+
+
+def test_navigate_keeps_approach_when_collect_living_on():
+    prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_NAVIGATE)
+    next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_living_penalty=True
+    )
+    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    assert not bool(d[3])
+
+
+def test_collect_living_penalty_from_config():
+    from concept_based_learning.environments.skill_rewards import (
+        collect_living_penalty_from_config,
+    )
+
+    assert collect_living_penalty_from_config(None) is False
+    assert collect_living_penalty_from_config({}) is False
+    assert collect_living_penalty_from_config({"COLLECT_LIVING_PENALTY": True}) is True
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        config={"COLLECT_LIVING_PENALTY": True},
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_LIVING_PENALTY)
+    assert not bool(d[1])

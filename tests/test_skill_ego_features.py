@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 
+from concept_based_learning.environments.datatypes import LABEL_COLLECT, LABEL_DESTROY
 from concept_based_learning.observations.egocentric import (
     configure_ego_obs_from_config,
     ego_obs_channels_per_frame,
@@ -32,9 +33,11 @@ class _FakeProjectiles:
 
 
 class _FakePlayer:
-    def __init__(self, n_frames: int, orientation=90.0, x=10.0, width=4.0):
+    def __init__(self, n_frames: int, orientation=90.0, x=10.0, y=45.0, width=4.0, height=11.0):
         self.x = jnp.full((n_frames,), x, dtype=jnp.float32)
+        self.y = jnp.full((n_frames,), y, dtype=jnp.float32)
         self.width = jnp.full((n_frames,), width, dtype=jnp.float32)
+        self.height = jnp.full((n_frames,), height, dtype=jnp.float32)
         self.orientation = jnp.full((n_frames,), orientation, dtype=jnp.float32)
 
 
@@ -48,13 +51,16 @@ class _FakeRawObs:
 
 
 class _FakeObjects:
-    def __init__(self, n_frames, target_x, target_w=4.0, n_objects=2):
+    def __init__(self, n_frames, target_x, target_w=4.0, n_objects=2, label=LABEL_DESTROY):
         self.x = jnp.zeros((n_frames, n_objects), dtype=jnp.float32)
         self.x = self.x.at[:, 0].set(target_x)
         self.width = jnp.full((n_frames, n_objects), target_w, dtype=jnp.float32)
         self.y = jnp.zeros((n_frames, n_objects), dtype=jnp.float32)
         self.height = jnp.ones((n_frames, n_objects), dtype=jnp.float32)
         self.active = jnp.ones((n_frames, n_objects), dtype=jnp.int32)
+        self.semantic_label = jnp.full(
+            (n_frames, n_objects), label, dtype=jnp.int32
+        )
 
 
 class _FakeSingleProjectile:
@@ -90,6 +96,10 @@ def test_skill_ego_extra_channel_count():
         enabled=True, env_name="seaquest", shot_features=True
     )
     assert skill_ego_extra_channels_per_frame() == 4
+    configure_skill_ego_features(
+        enabled=True, env_name="seaquest", shot_between=True
+    )
+    assert skill_ego_extra_channels_per_frame() == 3
     configure_skill_ego_features(enabled=False, env_name="seaquest", shot_features=True)
     assert skill_ego_extra_channels_per_frame() == 0
 
@@ -284,3 +294,50 @@ def test_shot_channels_zero_on_env_without_bullets():
     assert float(extras[0, 1]) == FACING_ENEMY_YES
     assert float(extras[0, 2]) == 0.0
     assert float(extras[0, 3]) == 0.0
+
+
+def test_shot_between_when_missile_on_open_segment():
+    configure_skill_ego_features(enabled=True, env_name="seaquest", shot_between=True)
+    raw = _FakeRawObs(jnp.array([0.0, 1.0]), orientation=90.0, x=10.0)
+    raw.projectiles.x = raw.projectiles.x.at[1, 0].set(40.0)
+    raw.projectiles.y = raw.projectiles.y.at[1, 0].set(50.0)
+    objects = _FakeObjects(2, target_x=80.0)
+    objects.y = objects.y.at[:, 0].set(50.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert extras.shape == (2, 3)
+    assert float(extras[0, 2]) == 0.0  # no missile
+    assert float(extras[1, 2]) == 1.0  # missile between player and enemy
+
+
+def test_shot_between_zero_when_missile_goes_the_wrong_way():
+    configure_skill_ego_features(enabled=True, env_name="seaquest", shot_between=True)
+    raw = _FakeRawObs(jnp.array([1.0]), orientation=90.0, x=10.0)
+    raw.projectiles.x = raw.projectiles.x.at[0, 0].set(0.0)
+    raw.projectiles.y = raw.projectiles.y.at[0, 0].set(50.0)
+    objects = _FakeObjects(1, target_x=80.0)
+    objects.y = objects.y.at[:, 0].set(50.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert float(extras[0, 2]) == 0.0
+
+
+def test_shot_between_zero_for_collect_target():
+    configure_skill_ego_features(enabled=True, env_name="seaquest", shot_between=True)
+    raw = _FakeRawObs(jnp.array([1.0]), orientation=90.0, x=10.0)
+    raw.projectiles.x = raw.projectiles.x.at[0, 0].set(40.0)
+    raw.projectiles.y = raw.projectiles.y.at[0, 0].set(50.0)
+    objects = _FakeObjects(1, target_x=80.0, label=LABEL_COLLECT)
+    objects.y = objects.y.at[:, 0].set(50.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert float(extras[0, 2]) == 0.0
+
+
+def test_shot_between_zero_on_env_without_bullets():
+    configure_skill_ego_features(enabled=True, env_name="pong", shot_between=True)
+
+    class _PongObs:
+        def __init__(self):
+            self.player = _FakePlayer(2)
+
+    extras = build_skill_ego_extras_stacked(_PongObs())
+    assert extras.shape == (2, 3)
+    assert float(extras[0, 2]) == 0.0
