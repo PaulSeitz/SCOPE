@@ -9,6 +9,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_BLOCKER,
     LABEL_COLLECT,
     LABEL_DESTROY,
+    LABEL_NAVIGATE,
     LABEL_NOOP,
     static_blocker_arrays,
 )
@@ -218,11 +219,11 @@ def test_ego_obs_los_channel_value():
     target_idx = jnp.int32(0)
 
     blocked_objs = _stacked_objects([
-        (28, 3, 4, 4, 1, LABEL_COLLECT),   # target
+        (28, 3, 4, 4, 1, LABEL_DESTROY),  # DESTROY target (LOS only applies here)
         (14, 3, 4, 4, 1, LABEL_AVOID),     # hazard on the ray
     ], n_frames)
     clear_objs = _stacked_objects([
-        (28, 3, 4, 4, 1, LABEL_COLLECT),
+        (28, 3, 4, 4, 1, LABEL_DESTROY),
         (14, 50, 4, 4, 1, LABEL_AVOID),    # hazard far off the ray
     ], n_frames)
 
@@ -232,6 +233,14 @@ def test_ego_obs_los_channel_value():
     # LOS flag is the last base channel (no skill extras configured).
     assert ego_blocked[:, -1].tolist() == [1.0, 1.0]
     assert ego_clear[:, -1].tolist() == [0.0, 0.0]
+
+    # NAVIGATE / COLLECT targets keep los_blocked=0 even with an occluder on the ray.
+    navigate_objs = _stacked_objects([
+        (28, 3, 4, 4, 1, LABEL_NAVIGATE),
+        (14, 3, 4, 4, 1, LABEL_AVOID),
+    ], n_frames)
+    ego_nav = get_ego_obs(raw, navigate_objs, target_idx).reshape(n_frames, -1)
+    assert ego_nav[:, -1].tolist() == [0.0, 0.0]
 
     # Restore defaults for other tests.
     configure_ego_obs_from_config({})

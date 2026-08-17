@@ -11,6 +11,14 @@ from concept_based_learning.environments.datatypes import (
     LABEL_NAVIGATE,
 )
 from concept_based_learning.environments.skill_rewards import (
+    AVOID_ESCAPE_REWARD,
+    COLLECT_PROGRESS_REWARD,
+    DESTROY_FAILURE_REWARD,
+    DESTROY_LIVING_PENALTY,
+    DESTROY_STANDOFF_PENALTY,
+    DESTROY_STANDOFF_REWARD,
+    DESTROY_SUCCESS_REWARD,
+    DESTROY_Y_ALIGN_REWARD,
     NAVIGATE_PROGRESS_REWARD,
     NAVIGATE_SUCCESS_REWARD,
     SKILL_DEATH_PENALTY,
@@ -94,12 +102,46 @@ def test_navigate_arrive_overrides_progress():
     assert bool(d[3])
 
 
-def test_collect_stays_sparse_no_progress_term():
+def test_collect_approach_progress_when_distance_decreases():
     prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
     next_r, next_t = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[1]) == pytest.approx(COLLECT_PROGRESS_REWARD)
+    assert not bool(d[1])
+
+
+def test_collect_idle_gets_no_progress():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
     assert float(r[1]) == 0.0
     assert not bool(d[1])
+
+
+def test_avoid_escape_progress_when_distance_increases():
+    # Move away from threat → escape shaping, not survival farm / not done.
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_r, next_t = _mk(30, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[2]) == pytest.approx(AVOID_ESCAPE_REWARD)
+    assert not bool(d[2])
+
+
+def test_avoid_idle_near_threat_gets_zero():
+    # Old survival farm would pay +0.01 here; escape shaping must not.
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_r, next_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[2]) == 0.0
+    assert not bool(d[2])
+
+
+def test_avoid_closing_in_gets_zero():
+    prev_r, prev_t = _mk(30, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_r, next_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[2]) == 0.0
+    assert not bool(d[2])
 
 
 def test_death_does_not_penalize_navigate_or_collect():
@@ -113,7 +155,8 @@ def test_death_does_not_penalize_navigate_or_collect():
     prev_c, prev_tc = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
     next_c, next_tc = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
     rc, dc = extract_skill_rewards(prev_c, next_c, prev_tc, next_tc, jnp.int32(1))
-    assert float(rc[1]) == 0.0
+    # Approach progress still applies when COLLECT death is not opted in.
+    assert float(rc[1]) == pytest.approx(COLLECT_PROGRESS_REWARD)
     assert not bool(dc[1])
 
 
@@ -169,3 +212,115 @@ def test_death_penalizes_avoid_and_destroy():
     ra, da = extract_skill_rewards(prev_a, next_a, prev_ta, next_ta, jnp.int32(1))
     assert float(ra[2]) == SKILL_DEATH_PENALTY
     assert bool(da[2])
+
+
+def test_destroy_stays_sparse_without_flags():
+    prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 80, 50, 40, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[0]) == 0.0
+    assert not bool(d[0])
+
+
+def test_destroy_kill_still_plus_one():
+    prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 100, 50, 40, LABEL_DESTROY, tw=8, th=7)
+    next_t = next_t.replace(was_killed=_S(1))
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[0]) == pytest.approx(DESTROY_SUCCESS_REWARD)
+    assert bool(d[0])
+
+
+def test_destroy_y_align_when_abs_dy_shrinks():
+    prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 80, 50, 40, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_y_align=True
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_Y_ALIGN_REWARD)
+    assert not bool(d[0])
+
+
+def test_destroy_standoff_backs_off_in_melee():
+    # Same lane, overlapping x; step away horizontally.
+    prev_r, prev_t = _mk(48, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(20, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_standoff=True
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_STANDOFF_REWARD)
+    assert not bool(d[0])
+
+
+def test_destroy_standoff_penalizes_closing_in_melee():
+    prev_r, prev_t = _mk(30, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(48, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_standoff=True
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_STANDOFF_PENALTY)
+    assert not bool(d[0])
+
+
+def test_destroy_contact_fail_on_overlap_rising_edge():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_contact_fail=True
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_FAILURE_REWARD)
+    assert bool(d[0])
+
+
+def test_destroy_kill_overrides_contact_fail():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_t = next_t.replace(was_killed=_S(1))
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_contact_fail=True
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_SUCCESS_REWARD)
+    assert bool(d[0])
+
+
+def test_destroy_living_penalty_while_enemy_alive():
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_living_penalty=True
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_LIVING_PENALTY)
+    assert not bool(d[0])
+
+
+def test_destroy_living_penalty_skipped_on_kill():
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=7)
+    next_t = next_t.replace(was_killed=_S(1))
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        destroy_living_penalty=True,
+        destroy_contact_fail=True,
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_SUCCESS_REWARD)
+    assert bool(d[0])
+
+
+def test_destroy_contact_fail_beats_living_penalty():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        destroy_living_penalty=True,
+        destroy_contact_fail=True,
+    )
+    assert float(r[0]) == pytest.approx(DESTROY_FAILURE_REWARD)
+    assert bool(d[0])

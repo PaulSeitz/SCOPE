@@ -1,14 +1,16 @@
 """
 Heuristic meta-policy for Seaquest.
 
-Simple nearest-object targeting:
-- Always pick the nearest active game object using the same AABB surface-gap
-  distance as skill ego features (edge/corner gap along the centre→centre ray).
+Simple nearest-object targeting, with two Seaquest-specific overrides:
+- COLLECT (divers) only if that diver's horizontal lane is clear of DESTROY
+  (no shark/sub with |Δy| ≤ ``DIVER_LANE_Y_PX``). Otherwise prefer sharks,
+  even when they are farther than the diver, so lanes are cleared before
+  diving in for a collect.
 - Surface sub (slot 29) is ignored unless the player is near the surface and
   within ``SURFACE_SUB_NEAR_RANGE``.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
   at the surface with divers on board, or when divers ≥ 6 — but only if the
-  surface sub is inactive / left of the player, or oxygen is critical.
+  surface sub is inactive / left of the player, or oxygen is low.
   While forced to surface, a danger within ``SURFACE_DANGER_CLOSE_RANGE``
   overrides the waypoint (nearest AVOID, or DESTROY within the larger
   ``DESTROY_INTERRUPT_RANGE``). Anytime, a DESTROY within
@@ -60,6 +62,9 @@ DESTROY_INTERRUPT_RANGE = 40.0
 # disables interrupts entirely (must surface).
 O2_LOW_ENEMY_INTERRUPT_RANGE = 12.0
 O2_CRITICAL_ENEMY_INTERRUPT_RANGE = 0.0
+# A diver's lane is blocked if a DESTROY shares this vertical band (centre Δy).
+# Overridable via config ``DIVER_LANE_Y_PX``.
+DIVER_LANE_Y_PX = 14.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
 PLAYER_UNDERWATER_Y = 52.0
@@ -87,7 +92,7 @@ def _surface_approach_clear(raw_observation, objects=None):
     """True if surfacing is allowed: sub gone/left, or oxygen already low.
 
     Low O₂ forces the surface WP even if the surface sub is still to the right;
-    the waypoint itself sits behind the sub when it is on-screen.
+    the waypoint itself sits on a left/mid/right slot away from the sub.
     """
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     oxygen_low = oxygen < OXYGEN_LOW_THRESHOLD
@@ -122,7 +127,7 @@ def _surface_required_from_raw(raw_observation, objects=None):
     underwater, or while refilling at the surface with divers on board.
 
     Surface WP is gated on surface-sub left/gone unless oxygen is already low
-    (must surface; the WP sits behind the sub when it is on-screen).
+    (must surface; the WP uses a left/mid/right slot away from the sub).
     """
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     collected_divers = _latest_leaf(raw_observation.collected_divers)
@@ -225,15 +230,19 @@ def _select_target(
     *,
     danger_close_range=None,
     destroy_interrupt_range=None,
+    diver_lane_y_px=None,
 ):
-    """Nearest object by AABB surface gap; DESTROY interrupt; surface WP."""
+    """Nearest object by AABB surface gap; lane-clear COLLECT; surface WP."""
     del prev_target_idx
     if danger_close_range is None:
         danger_close_range = SURFACE_DANGER_CLOSE_RANGE
     if destroy_interrupt_range is None:
         destroy_interrupt_range = DESTROY_INTERRUPT_RANGE
+    if diver_lane_y_px is None:
+        diver_lane_y_px = DIVER_LANE_Y_PX
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
     destroy_interrupt_range = jnp.asarray(destroy_interrupt_range, dtype=jnp.float32)
+    diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     danger_close_range = _oxygen_scaled_interrupt_range(oxygen, danger_close_range)
     destroy_interrupt_range = _oxygen_scaled_interrupt_range(
@@ -273,12 +282,26 @@ def _select_target(
         jnp.logical_or(jnp.logical_not(is_surface_sub), surface_sub_eligible),
     )
 
-    nearest_dist = jnp.where(selectable, distances, jnp.inf)
-    best_idx = jnp.argmin(nearest_dist).astype(jnp.int32)
-    any_selectable = jnp.any(selectable)
-
     is_destroy = labels == LABEL_DESTROY
     is_avoid = labels == LABEL_AVOID
+    is_collect = labels == LABEL_COLLECT
+    # Lane-clear COLLECT: a diver is ineligible if any DESTROY shares its
+    # horizontal row, so far sharks still win over a same-lane diver.
+    cy = oy.astype(jnp.float32) + oh.astype(jnp.float32) / 2.0
+    same_lane = jnp.logical_and(
+        diver_lane_y_px > 0.0,
+        jnp.abs(cy[:, None] - cy[None, :]) <= diver_lane_y_px,
+    )
+    destroy_j = jnp.logical_and(is_destroy, selectable)
+    blocks = jnp.logical_and(same_lane, destroy_j[None, :])
+    blocks = jnp.logical_and(blocks, idxs[:, None] != idxs[None, :])
+    diver_blocked = jnp.logical_and(is_collect, jnp.any(blocks, axis=1))
+    selectable_nearest = jnp.logical_and(selectable, jnp.logical_not(diver_blocked))
+
+    nearest_dist = jnp.where(selectable_nearest, distances, jnp.inf)
+    best_idx = jnp.argmin(nearest_dist).astype(jnp.int32)
+    any_selectable = jnp.any(selectable_nearest)
+
     # Nearby sharks/subs steal COLLECT (and other nearer non-DESTROY) so
     # FRAME_SKIP cannot ram a shark the heuristic has not yet selected.
     # Missiles / surface-sub (AVOID) stay out of this interrupt.
@@ -339,6 +362,7 @@ def get_heuristic_target_with_state(
     *,
     danger_close_range=None,
     destroy_interrupt_range=None,
+    diver_lane_y_px=None,
 ):
     del rng
     target = _select_target(
@@ -347,6 +371,7 @@ def get_heuristic_target_with_state(
         prev_target_idx,
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
+        diver_lane_y_px=diver_lane_y_px,
     )
     # Persist DESTROY/COLLECT only (AVOID is reactive; surface WP is re-forced).
     labels = objects.semantic_label[-1]
@@ -367,6 +392,7 @@ def get_heuristic_target(
     *,
     danger_close_range=None,
     destroy_interrupt_range=None,
+    diver_lane_y_px=None,
 ):
     """Stateless wrapper."""
     del rng
@@ -376,4 +402,5 @@ def get_heuristic_target(
         prev_target_idx,
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
+        diver_lane_y_px=diver_lane_y_px,
     )

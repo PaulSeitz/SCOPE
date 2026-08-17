@@ -30,10 +30,10 @@ from concept_based_learning.observations.action_space import (
 _SCROLL_X_MIN = 5
 _SCROLL_X_MAX = 155
 
-# Surface waypoint: fixed y at surfacing threshold; x prefers "behind" the
-# surface sub (10px opposite its travel) so NAVIGATE practices horizontal
-# approach, not only pure vertical climbs. When the sub is inactive, x is a
-# fixed screen-center slot (player-hashed fallback teleported every frame).
+# Surface waypoint: fixed y at the surfacing band; x is one of three slots
+# (left / mid / right). Pick the slot closest to the player unless the surface
+# sub is on-screen — then drop slots within SURFACE_WP_SUB_CLEAR_PX of it, and
+# if the sub is to the player's right (approaching) only keep slots left of it.
 # JAXAtari Seaquest begins surfacing when player_y == 46 (see update_oxygen()).
 # Reward overlap globally applies a 1px inward inset, so we place this band at y=44
 # with h=1; after inset that yields an effective [45, 46] band and a clean
@@ -41,15 +41,52 @@ _SCROLL_X_MAX = 155
 _SURFACE_TRIGGER_PLAYER_Y = 46
 _SURFACE_WAYPOINT_Y = _SURFACE_TRIGGER_PLAYER_Y - 2
 _SURFACE_WAYPOINT_H = 1
-_SURFACE_WP_BEHIND_SUB_PX = 10
 _SURFACE_WP_SCREEN_W = 160
+# Slot *centres* (player-width is subtracted to get the WP left edge).
+SURFACE_WP_SLOT_CX = (28.0, 80.0, 132.0)
+SURFACE_WP_SUB_CLEAR_PX = 40.0
 # Surface sub is the last of the 25 enemy slots (12 sharks + 12 subs + 1).
 _SURFACE_SUB_ENEMY_SLOT = 24
 
 
-def surface_waypoint_fallback_x(player_w):
-    """Fixed screen-center left edge for the WP when no surface sub is active."""
-    return jnp.float32(_SURFACE_WP_SCREEN_W) / 2.0 - player_w.astype(jnp.float32) / 2.0
+def select_surface_waypoint_x(
+    player_x,
+    player_w,
+    *,
+    sub_active,
+    sub_x,
+    sub_w,
+):
+    """Left-edge x of the surface WP: nearest safe slot of left/mid/right."""
+    player_x = jnp.asarray(player_x, dtype=jnp.float32)
+    player_w = jnp.asarray(player_w, dtype=jnp.float32)
+    slot_cx = jnp.array(SURFACE_WP_SLOT_CX, dtype=jnp.float32)
+    player_cx = player_x + player_w / 2.0
+    dist_player = jnp.abs(slot_cx - player_cx)
+
+    sub_cx = jnp.asarray(sub_x, dtype=jnp.float32) + jnp.asarray(sub_w, dtype=jnp.float32) / 2.0
+    clearance = jnp.abs(slot_cx - sub_cx)
+    clear_px = jnp.float32(SURFACE_WP_SUB_CLEAR_PX)
+    safe = clearance >= clear_px
+    sub_on_right = sub_cx > player_cx
+    left_of_sub = slot_cx <= sub_cx - clear_px
+    allowed = jnp.where(sub_on_right, jnp.logical_and(safe, left_of_sub), safe)
+    allowed = jnp.where(sub_active, allowed, jnp.ones_like(safe))
+
+    # Sub approaching from the right: take the leftmost safe slot (away from it).
+    # Otherwise take the slot nearest the player.
+    toward_player = dist_player
+    toward_left = slot_cx
+    scored = jnp.where(sub_on_right, toward_left, toward_player)
+    scored = jnp.where(allowed, scored, jnp.inf)
+    scored = jnp.where(sub_active, scored, toward_player)
+    pick = jnp.argmin(scored)
+    no_safe = jnp.logical_and(sub_active, jnp.logical_not(jnp.any(allowed)))
+    pick = jnp.where(no_safe, jnp.argmax(clearance), pick)
+    left_edge = slot_cx[pick] - player_w / 2.0
+    max_x = jnp.float32(_SURFACE_WP_SCREEN_W) - player_w
+    return jnp.clip(left_edge, 0.0, jnp.maximum(max_x, 0.0))
+
 
 _SEAQUEST_MOVE_TABLE = [3, 8, 5, 9, 4, 7, 2, 6]
 _SEAQUEST_MOVE_FIRE_TABLE = [11, 16, 13, 17, 12, 15, 10, 14]
@@ -212,7 +249,8 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
           player 16×11, diver 8×11, shark 8×7, sub 8×11, missile 8×1.
 
         The surface waypoint uses a fixed y band near the top (surfacing trigger)
-        and x behind the surface sub when it is on-screen, else screen center.
+        and x on one of three slots (left / mid / right), preferring a slot away
+        from the surface sub when it is on-screen.
         """
         divers = obs.divers            # n=4
         enemies = obs.enemies          # n=25 (12 sharks + 12 subs + 1 surface sub)
@@ -247,26 +285,21 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_labels     = jnp.concatenate([diver_labels,  enemy_labels,   enemy_missile_labels])
         all_offscreen  = jnp.concatenate([diver_offscreen, enemy_offscreen, enemy_missile_offscreen])
 
-        # Surface waypoint: y fixed to surfacing band; x behind surface sub
-        # when it is on-screen, else a fixed screen-center x.
+        # Surface waypoint: y fixed to surfacing band; x is the nearest of
+        # left/mid/right that stays clear of the surface sub.
+        player_x = jnp.reshape(obs.player.x, ())
         player_w = jnp.reshape(obs.player.width, ())
 
         sub_x = enemies.x[_SURFACE_SUB_ENEMY_SLOT]
         sub_w = enemies.width[_SURFACE_SUB_ENEMY_SLOT]
         sub_active = enemies.active[_SURFACE_SUB_ENEMY_SLOT] > 0.5
-        # jaxatari: orientation < 180 → facing/moving right; behind = opposite.
-        sub_ori = enemies.orientation[_SURFACE_SUB_ENEMY_SLOT].astype(jnp.float32)
-        facing_right = sub_ori < 180.0
-        behind_sign = jnp.where(facing_right, jnp.float32(-1.0), jnp.float32(1.0))
-        sub_cx = sub_x.astype(jnp.float32) + sub_w.astype(jnp.float32) / 2.0
-        behind_x = sub_cx + behind_sign * jnp.float32(_SURFACE_WP_BEHIND_SUB_PX) - (
-            player_w.astype(jnp.float32) / 2.0
+        surface_x_f = select_surface_waypoint_x(
+            player_x,
+            player_w,
+            sub_active=sub_active,
+            sub_x=sub_x,
+            sub_w=sub_w,
         )
-        fallback_x = surface_waypoint_fallback_x(player_w)
-
-        surface_x_f = jnp.where(sub_active, behind_x, fallback_x)
-        max_x = jnp.float32(_SURFACE_WP_SCREEN_W) - player_w.astype(jnp.float32)
-        surface_x_f = jnp.clip(surface_x_f, 0.0, jnp.maximum(max_x, 0.0))
 
         surface_x = jnp.reshape(surface_x_f.astype(jnp.int32), (1,))
         surface_y = jnp.array([_SURFACE_WAYPOINT_Y], dtype=jnp.int32)

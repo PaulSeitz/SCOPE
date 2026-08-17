@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import jax.numpy as jnp
+import pytest
 
 from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
@@ -14,14 +15,21 @@ from concept_based_learning.environments.datatypes import (
 )
 from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
 from concept_based_learning.environments.seaquest.heuristic_policy import (
-    CLOSE_DANGER_RANGE,
-    SUB_DESTROY_RANGE,
+    DESTROY_INTERRUPT_RANGE,
+    DIVER_LANE_Y_PX,
+    O2_CRITICAL_ENEMY_INTERRUPT_RANGE,
+    O2_LOW_ENEMY_INTERRUPT_RANGE,
+    SURFACE_DANGER_CLOSE_RANGE,
     SURFACE_DUMMY_IDX,
     SURFACE_SUB_IDX,
     SURFACE_SUB_NEAR_RANGE,
-    X_RANGE_SCALE,
     apply_meta_mask_overrides,
     get_heuristic_target,
+)
+from concept_based_learning.environments.seaquest.label import (
+    SURFACE_WP_SLOT_CX,
+    SURFACE_WP_SUB_CLEAR_PX,
+    select_surface_waypoint_x,
 )
 
 
@@ -72,6 +80,7 @@ def _make_objects(
     shark_xy=None,
     shark2_xy=None,
     sub_xy=None,
+    missile_xy=None,
     surface_sub_xy=None,
     surface_sub_active=False,
     stack_len=1,
@@ -85,7 +94,6 @@ def _make_objects(
     active = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
     labels = jnp.full((stack_len, n_slots), -1, dtype=jnp.int32)
 
-    # Slot layout after meta NOOP: divers 1-4, sharks 5-16, ..., surface sub 29, WP 34
     labels = labels.at[:, 1:5].set(LABEL_COLLECT)
     labels = labels.at[:, 5:17].set(LABEL_DESTROY)
     labels = labels.at[:, 17:29].set(LABEL_DESTROY)
@@ -119,6 +127,14 @@ def _make_objects(
         y = y.at[:, 17].set(sy)
         active = active.at[:, 17].set(1.0)
 
+    if missile_xy is not None:
+        mx, my = missile_xy
+        x = x.at[:, 30].set(mx)
+        y = y.at[:, 30].set(my)
+        w = w.at[:, 30].set(4.0)
+        h = h.at[:, 30].set(2.0)
+        active = active.at[:, 30].set(1.0)
+
     if surface_sub_xy is not None:
         ssx, ssy = surface_sub_xy
         x = x.at[:, SURFACE_SUB_IDX].set(ssx)
@@ -138,104 +154,154 @@ def _make_objects(
     )
 
 
-def test_close_danger_range_matches_plan():
-    assert CLOSE_DANGER_RANGE == 18.0
-    assert SUB_DESTROY_RANGE == 42.0
+def test_surface_waypoint_picks_nearest_slot_without_sub():
+    # Player width 16 → left edges 20 / 72 / 124 for centres 28 / 80 / 132.
+    mid = float(
+        select_surface_waypoint_x(
+            80.0, 16.0, sub_active=False, sub_x=0.0, sub_w=8.0
+        )
+    )
+    left = float(
+        select_surface_waypoint_x(
+            20.0, 16.0, sub_active=False, sub_x=0.0, sub_w=8.0
+        )
+    )
+    right = float(
+        select_surface_waypoint_x(
+            140.0, 16.0, sub_active=False, sub_x=0.0, sub_w=8.0
+        )
+    )
+    assert mid == pytest.approx(SURFACE_WP_SLOT_CX[1] - 8.0)
+    assert left == pytest.approx(SURFACE_WP_SLOT_CX[0] - 8.0)
+    assert right == pytest.approx(SURFACE_WP_SLOT_CX[2] - 8.0)
+
+
+def test_surface_waypoint_avoids_sub_on_the_right():
+    # Player at mid, sub approaching from the right → left slot, not 10px behind.
+    x = float(
+        select_surface_waypoint_x(
+            80.0, 16.0, sub_active=True, sub_x=120.0, sub_w=8.0
+        )
+    )
+    sub_cx = 120.0 + 4.0
+    wp_cx = x + 8.0
+    assert wp_cx == pytest.approx(SURFACE_WP_SLOT_CX[0])
+    assert abs(wp_cx - sub_cx) >= SURFACE_WP_SUB_CLEAR_PX
+
+
+def test_surface_danger_close_range():
+    assert SURFACE_DANGER_CLOSE_RANGE == 25.0
+    assert DESTROY_INTERRUPT_RANGE == 40.0
+    assert DIVER_LANE_Y_PX == 14.0
+    assert O2_LOW_ENEMY_INTERRUPT_RANGE == 12.0
+    assert O2_CRITICAL_ENEMY_INTERRUPT_RANGE == 0.0
     assert SURFACE_SUB_NEAR_RANGE == 15.0
-    assert X_RANGE_SCALE == 1.5
 
 
-def test_prefers_diver_when_threat_is_far():
-    # Player at (80,100); diver nearby; shark beyond CLOSE_DANGER_RANGE.
+def test_always_nearest_object():
     raw = _make_raw(px=80.0, py=100.0)
-    objs = _make_objects(diver_xy=(100.0, 100.0), shark_xy=(80.0, 160.0))
+    # Shark closer than diver → shark.
+    objs = _make_objects(diver_xy=(140.0, 100.0), shark_xy=(100.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1  # diver slot
+    assert int(target) == 5
 
 
-def test_diver_preferred_when_shark_behind_but_outside_tight_range():
-    # Shark ~25px away vertically (was interrupt at 30, now 18) — stay on diver.
+def test_destroy_interrupt_beats_nearer_diver():
+    """Shark within DESTROY_INTERRUPT_RANGE wins even if a diver is closer."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(diver_xy=(100.0, 100.0), shark_xy=(80.0, 125.0))
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(120.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap_diver = float(aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 95.0, 100.0, 8.0, 8.0))
+    gap_shark = float(aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 120.0, 100.0, 8.0, 8.0))
+    assert gap_diver < gap_shark
+    assert gap_shark <= DESTROY_INTERRUPT_RANGE
+
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
+
+
+def test_destroy_interrupt_does_not_select_avoid_missile():
+    """AVOID in the DESTROY interrupt band must not steal COLLECT."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(95.0, 100.0), missile_xy=(120.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 1
 
 
-def test_close_threat_overrides_diver():
+def test_same_lane_far_shark_blocks_diver():
+    """Same-row shark (beyond DESTROY_INTERRUPT_RANGE) still beats the diver."""
     raw = _make_raw(px=80.0, py=100.0)
-    # Shark within CLOSE_DANGER_RANGE, horizontally offset (not vertical).
-    objs = _make_objects(diver_xy=(120.0, 100.0), shark_xy=(95.0, 105.0))
-    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5  # shark
-
-
-def test_same_lane_shark_preferred_over_closer_above():
-    # Slot 6 above but Euclidean-closer; slot 5 same lane farther in x — pick lane.
-    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(
-        diver_xy=(140.0, 100.0),
-        shark_xy=(110.0, 100.0),  # same lane, farther
-        shark2_xy=(88.0, 112.0),  # above, nearer Euclidean
-    )
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 5
 
 
-def test_horizontal_range_wider_than_vertical():
-    # |dx| ≈ 24 (>18 circle, < 18*1.5=27 ellipse x) → still interrupts.
-    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(diver_xy=(140.0, 100.0), shark_xy=(104.0, 100.0))
+def test_other_lane_shark_allows_diver():
+    """A shark in a different row does not block a closer clear-lane diver."""
+    raw = _make_raw(px=80.0, py=100.0)
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 160.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 1
 
 
-def test_faster_closing_shark_preferred():
-    # Same lane: nearer fleeing shark vs farther closing shark (still in ellipse).
+def test_nearest_among_multiple_sharks():
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(
-        diver_xy=(140.0, 100.0),
-        shark_xy=(100.0, 100.0),
-        shark2_xy=(108.0, 100.0),
-        stack_len=2,
+        diver_xy=(160.0, 100.0),
+        shark_xy=(120.0, 100.0),
+        shark2_xy=(100.0, 100.0),
     )
-    # Slot 5: fleeing right. Slot 6: closing left (centers ~104 vs ~112).
-    objs.x = objs.x.at[0, 5].set(98.0)
-    objs.x = objs.x.at[1, 5].set(100.0)
-    objs.x = objs.x.at[0, 6].set(111.0)
-    objs.x = objs.x.at[1, 6].set(108.0)
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 6
 
 
-def test_vertical_shark_does_not_interrupt_diver():
-    # Shark almost directly below player — DESTROY skipped (vertical gate).
-    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(diver_xy=(120.0, 100.0), shark_xy=(84.0, 115.0))
-    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+def test_edge_gap_prefers_nose_shark_over_center_nearer_diver():
+    """Centre→centre would pick diver below; surface-gap picks nose-on shark.
 
-
-def test_sub_selected_from_farther_than_shark_range():
-    # Sub ~35px away: beyond shark range (18) but within SUB_DESTROY_RANGE (42).
+    Matches the failure mode where COLLECT is selected while a shark sits on
+    the player's nose (edge gap ~0, centre distance still larger than diver).
+    """
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(diver_xy=(140.0, 100.0), sub_xy=(120.0, 100.0))
+    objs = _make_objects(
+        diver_xy=(84.0, 114.0),
+        shark_xy=(98.0, 102.0),
+    )
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    pw, ph = 16.0, 11.0
+    p_cx, p_cy = 80.0 + pw / 2.0, 100.0 + ph / 2.0
+    diver_cx, diver_cy = 84.0 + 4.0, 114.0 + 4.0
+    shark_cx, shark_cy = 98.0 + 4.0, 102.0 + 4.0
+    center_diver = ((diver_cx - p_cx) ** 2 + (diver_cy - p_cy) ** 2) ** 0.5
+    center_shark = ((shark_cx - p_cx) ** 2 + (shark_cy - p_cy) ** 2) ** 0.5
+    assert center_diver < center_shark
+
+    gap_diver = float(
+        aabb_surface_gap_px(80.0, 100.0, pw, ph, 84.0, 114.0, 8.0, 8.0)
+    )
+    gap_shark = float(
+        aabb_surface_gap_px(80.0, 100.0, pw, ph, 98.0, 102.0, 8.0, 8.0)
+    )
+    assert gap_shark < gap_diver
+
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 17  # first sub slot
+    assert int(target) == 5
 
 
 def test_surface_sub_ignored_when_deep():
-    raw = _make_raw(px=80.0, py=120.0)  # deep underwater
+    raw = _make_raw(px=80.0, py=120.0)
     objs = _make_objects(
         diver_xy=(100.0, 120.0),
         surface_sub_xy=(85.0, 46.0),
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1  # diver, not surface sub
+    assert int(target) == 1
 
 
 def test_surface_sub_selectable_near_surface_and_close():
-    raw = _make_raw(px=80.0, py=50.0)  # near surface
+    raw = _make_raw(px=80.0, py=50.0)
     objs = _make_objects(
         diver_xy=(140.0, 100.0),
         surface_sub_xy=(85.0, 46.0),
@@ -263,7 +329,7 @@ def test_surface_wp_when_full_divers_and_sub_left():
     assert int(target) == SURFACE_DUMMY_IDX
 
 
-def test_surface_wp_blocked_when_sub_on_right_unless_critical_o2():
+def test_surface_wp_blocked_when_sub_on_right_unless_oxygen_low():
     raw = _make_raw(
         px=80.0,
         py=100.0,
@@ -278,7 +344,18 @@ def test_surface_wp_blocked_when_sub_on_right_unless_critical_o2():
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1  # stay on diver; wait for clear approach
+    assert int(target) == 1  # stay on nearest diver; wait for clear approach
+
+    raw_low = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=6,
+        oxygen=10.0,
+        surface_sub_x=120.0,
+        surface_sub_active=1,
+    )
+    target_low = get_heuristic_target(raw_low, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target_low) == SURFACE_DUMMY_IDX
 
     raw_crit = _make_raw(
         px=80.0,
@@ -290,6 +367,137 @@ def test_surface_wp_blocked_when_sub_on_right_unless_critical_o2():
     )
     target_crit = get_heuristic_target(raw_crit, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target_crit) == SURFACE_DUMMY_IDX
+
+
+def test_surface_danger_close_overrides_waypoint():
+    # Full divers + clear approach, but shark within 25px → interrupt surface.
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=6,
+        oxygen=64.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(160.0, 100.0),
+        shark_xy=(95.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
+
+
+def test_surface_danger_close_range_knob_disables_override():
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=6,
+        oxygen=64.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(160.0, 100.0),
+        shark_xy=(95.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(
+        raw,
+        objs,
+        jnp.int32(NO_TARGET_IDX),
+        None,
+        danger_close_range=0.0,
+        destroy_interrupt_range=0.0,
+    )
+    assert int(target) == SURFACE_DUMMY_IDX
+
+
+def test_surface_no_danger_close_keeps_waypoint():
+    # Shark farther than 25px while forced surface → stay on WP.
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=6,
+        oxygen=64.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(160.0, 100.0),
+        shark_xy=(140.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == SURFACE_DUMMY_IDX
+
+
+def test_low_oxygen_forces_waypoint_over_midrange_shark():
+    """O₂ low shrinks DESTROY interrupt (40 → 12); a 24px shark must not block ascent."""
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=0,
+        oxygen=10.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(160.0, 100.0),
+        shark_xy=(120.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap_shark = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 120.0, 100.0, 8.0, 8.0)
+    )
+    assert O2_LOW_ENEMY_INTERRUPT_RANGE < gap_shark <= DESTROY_INTERRUPT_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == SURFACE_DUMMY_IDX
+
+
+def test_low_oxygen_still_interrupts_nose_shark():
+    """Low O₂ still dodges a shark on the nose (within the shrunk 12px band)."""
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=0,
+        oxygen=10.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(160.0, 100.0),
+        shark_xy=(95.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
+
+
+def test_critical_oxygen_forces_waypoint_even_with_nose_shark():
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=0,
+        oxygen=4.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(160.0, 100.0),
+        shark_xy=(95.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == SURFACE_DUMMY_IDX
 
 
 def test_meta_mask_overrides_batched_objects_surface_gate():
@@ -304,7 +512,6 @@ def test_meta_mask_overrides_batched_objects_surface_gate():
     x = jnp.zeros((num_envs, stack_len, n_slots), dtype=jnp.float32)
     w = jnp.full((num_envs, stack_len, n_slots), 8.0, dtype=jnp.float32)
     active = jnp.zeros((num_envs, stack_len, n_slots), dtype=jnp.float32)
-    # Env 0: sub left of player → surface OK. Env 1: sub on right → blocked.
     x = x.at[0, -1, SURFACE_SUB_IDX].set(20.0)
     x = x.at[1, -1, SURFACE_SUB_IDX].set(120.0)
     active = active.at[:, -1, SURFACE_SUB_IDX].set(1.0)

@@ -20,8 +20,15 @@ from concept_based_learning.observations.skill_ego_features import (
 
 
 class _FakeProjectiles:
-    def __init__(self, active):
+    def __init__(self, active, x=None, y=None, width=8.0, height=1.0):
         self.active = active
+        n = active.shape[0]
+        n_slots = active.shape[1] if active.ndim > 1 else 1
+        shape = (n, n_slots) if active.ndim > 1 else (n,)
+        self.x = jnp.zeros(shape, dtype=jnp.float32) if x is None else x
+        self.y = jnp.zeros(shape, dtype=jnp.float32) if y is None else y
+        self.width = jnp.full(shape, width, dtype=jnp.float32)
+        self.height = jnp.full(shape, height, dtype=jnp.float32)
 
 
 class _FakePlayer:
@@ -79,7 +86,11 @@ class _FakeGroupedProjectileObs:
 def test_skill_ego_extra_channel_count():
     configure_skill_ego_features(enabled=True, env_name="seaquest")
     assert skill_ego_extra_channels_per_frame() == 2
-    configure_skill_ego_features(enabled=False, env_name="seaquest")
+    configure_skill_ego_features(
+        enabled=True, env_name="seaquest", shot_features=True
+    )
+    assert skill_ego_extra_channels_per_frame() == 4
+    configure_skill_ego_features(enabled=False, env_name="seaquest", shot_features=True)
     assert skill_ego_extra_channels_per_frame() == 0
 
 
@@ -103,6 +114,22 @@ def test_latch_weapon_state_ready_aimed_wasted():
         WEAPON_IN_FLIGHT_WASTED,
         WEAPON_IN_FLIGHT_WASTED,
     ]
+
+
+def test_seaquest_facing_enemy_yes_when_target_co_located_vertically():
+    """Surface WP shares player x — must not invent a rightward aim bias."""
+    configure_skill_ego_features(enabled=True, env_name="seaquest")
+    n = 2
+    # Player facing left (270) with target at same centre x → aim N/A → YES.
+    raw = _FakeRawObs(
+        jnp.ones((n,), dtype=jnp.float32),
+        orientation=270.0,
+        x=40.0,
+    )
+    objects = _FakeObjects(n, target_x=40.0, target_w=4.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert float(extras[0, 1]) == FACING_ENEMY_YES
+    assert float(extras[1, 1]) == FACING_ENEMY_YES
 
 
 def test_seaquest_can_fire_and_facing_enemy_when_aimed():
@@ -208,3 +235,52 @@ def test_ego_obs_channels_include_velocity_and_weapon():
     )
     # distance + v_r + v_t + sin/cos + can_fire + facing_enemy
     assert ego_obs_channels_per_frame() == 5 + 2
+
+
+def test_ego_obs_channels_include_shot_features():
+    configure_ego_obs_from_config(
+        {
+            "USE_LEGACY_EGO_OBS": False,
+            "USE_EGO_SIZE_FEATURES": False,
+            "USE_EGO_VELOCITY_FEATURES": True,
+            "USE_EGO_WEAPON_FEATURES": True,
+            "USE_EGO_SHOT_FEATURES": True,
+            "ENV_NAME": "seaquest",
+        }
+    )
+    # + shot_dx + shot_dy
+    assert ego_obs_channels_per_frame() == 5 + 4
+
+
+def test_shot_to_target_channels_when_in_flight():
+    configure_skill_ego_features(
+        enabled=True, env_name="seaquest", shot_features=True
+    )
+    raw = _FakeRawObs(jnp.array([0.0, 1.0]), orientation=90.0, x=10.0)
+    raw.projectiles.x = raw.projectiles.x.at[1, 0].set(40.0)
+    raw.projectiles.y = raw.projectiles.y.at[1, 0].set(50.0)
+    objects = _FakeObjects(2, target_x=80.0)
+    objects.y = objects.y.at[:, 0].set(50.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert extras.shape == (2, 4)
+    assert float(extras[0, 2]) == 0.0
+    assert float(extras[0, 3]) == 0.0
+    # missile centre 40+4=44; target centre 80+2=82
+    assert abs(float(extras[1, 2]) - (82.0 - 44.0) / 160.0) < 1e-5
+    assert abs(float(extras[1, 3])) < 1e-5
+
+
+def test_shot_channels_zero_on_env_without_bullets():
+    """Pong/Freeway keep the same extra dim; missing bullets are zeros, not OOD."""
+    configure_skill_ego_features(enabled=True, env_name="pong", shot_features=True)
+
+    class _PongObs:
+        def __init__(self):
+            self.player = _FakePlayer(2)
+
+    extras = build_skill_ego_extras_stacked(_PongObs())
+    assert extras.shape == (2, 4)
+    assert float(extras[0, 0]) == CAN_FIRE_READY
+    assert float(extras[0, 1]) == FACING_ENEMY_YES
+    assert float(extras[0, 2]) == 0.0
+    assert float(extras[0, 3]) == 0.0

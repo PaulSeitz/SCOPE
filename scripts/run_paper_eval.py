@@ -14,8 +14,8 @@ Usage:
   # DESTROY ablation (3 GPUs: one variant per shard):
   python scripts/run_paper_eval.py --suite destroy_ablation --gpus 0,1,2 --wait-deps --lean
 
-  # DESTROY urgency (2 GPUs: shot-ego vs reward-only; heuristic WP/O2 in both):
-  python scripts/run_paper_eval.py --suite destroy_urgency --gpus 0,1 --wait-deps --lean
+  # DESTROY urgency (contact+living-tax, no shot ego):
+  python scripts/run_paper_eval.py --suite destroy_urgency --wait-deps --lean
 
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
@@ -117,13 +117,10 @@ DESTROY_ABLATION_STEMS = (
     "pong_transfer_ego_destroy_contact",
 )
 DESTROY_URGENCY_SUITE = "destroy_urgency"
-# Order is shard-critical: 2 GPUs get (train, eval, pong) of one variant each.
+# Shot-ego arm dropped: it underperformed; suite is urgency (reward+heuristic) only.
 DESTROY_URGENCY_STEMS = (
-    "seaquest_skills_ego_destroy_shot",
     "seaquest_skills_ego_destroy_urgency",
-    "seaquest_skills_ego_destroy_shot_eval",
     "seaquest_skills_ego_destroy_urgency_eval",
-    "pong_transfer_ego_destroy_shot",
     "pong_transfer_ego_destroy_urgency",
 )
 SUITE_STEMS = {
@@ -974,6 +971,7 @@ _EVAL_OVERRIDE_KEYS = (
     "GAME_MODS",
     "SURFACE_DANGER_CLOSE_RANGE",
     "DESTROY_INTERRUPT_RANGE",
+    "DIVER_LANE_Y_PX",
 )
 
 
@@ -1289,9 +1287,8 @@ def main() -> None:
             f"{DESTROY_ABLATION_SUITE}: 3 DESTROY reward arms "
             "(y-align / standoff / contact-fail), lean 5-mod Seaquest + Pong base; "
             "use --gpus 0,1,2 so each GPU owns one arm. "
-            f"{DESTROY_URGENCY_SUITE}: 2 arms (shot-ego vs contact+living-tax, "
-            "no shot channels); lean 5-mod Seaquest + Pong base; "
-            "use --gpus 0,1 so each GPU owns one arm."
+            f"{DESTROY_URGENCY_SUITE}: contact-fail + living tax (no shot ego); "
+            "lean 5-mod Seaquest + Pong base."
         ),
     )
     parser.add_argument(
