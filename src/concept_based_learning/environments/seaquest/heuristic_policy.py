@@ -10,7 +10,13 @@ Simple nearest-object targeting:
   at the surface with divers on board, or when divers ≥ 6 — but only if the
   surface sub is inactive / left of the player, or oxygen is critical.
   While forced to surface, a danger within ``SURFACE_DANGER_CLOSE_RANGE``
-  overrides the waypoint (nearest AVOID/DESTROY).
+  overrides the waypoint (nearest AVOID, or DESTROY within the larger
+  ``DESTROY_INTERRUPT_RANGE``). Anytime, a DESTROY within
+  ``DESTROY_INTERRUPT_RANGE`` beats a nearer COLLECT so sharks interrupt
+  dives before frameskip closes the gap. AVOID (missiles / surface sub)
+  is not pulled in at that range.
+  When oxygen is low, those enemy interrupt radii shrink (and go to 0 at
+  critical O₂) so the surface waypoint stays selected and the player goes up.
 
 Object slots after meta-NOOP:
   divers 1–4, sharks 5–16, subs 17–28, surface sub 29,
@@ -42,9 +48,18 @@ SURFACE_SUB_IDX = 29
 OXYGEN_LOW_THRESHOLD = 15.0
 CRITICAL_OXYGEN_THRESHOLD = 5.0
 SURFACE_SUB_NEAR_RANGE = 15.0
-# While forced to surface, AVOID/DESTROY within this surface-gap radius interrupt.
+# While forced to surface, AVOID within this surface-gap radius interrupt.
 # Overridable via config ``SURFACE_DANGER_CLOSE_RANGE`` (see resolve_heuristic_*).
 SURFACE_DANGER_CLOSE_RANGE = 25.0
+# DESTROY (sharks/subs) interrupt COLLECT — and surface WP — at this larger
+# AABB gap so FRAME_SKIP=4 cannot close a shark before the heuristic retargets.
+# AVOID is *not* included. Overridable via ``DESTROY_INTERRUPT_RANGE``.
+DESTROY_INTERRUPT_RANGE = 40.0
+# While oxygen is low the surface WP must win: shrink combat interrupts so a
+# shark in the usual 40px band cannot keep the player underwater. Critical O₂
+# disables interrupts entirely (must surface).
+O2_LOW_ENEMY_INTERRUPT_RANGE = 12.0
+O2_CRITICAL_ENEMY_INTERRUPT_RANGE = 0.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
 PLAYER_UNDERWATER_Y = 52.0
@@ -69,9 +84,13 @@ def _latest_object_frame(field):
 
 
 def _surface_approach_clear(raw_observation, objects=None):
-    """True if surfacing is safe enough: sub gone/left, or O₂ critical."""
+    """True if surfacing is allowed: sub gone/left, or oxygen already low.
+
+    Low O₂ forces the surface WP even if the surface sub is still to the right;
+    the waypoint itself sits behind the sub when it is on-screen.
+    """
     oxygen = _latest_leaf(raw_observation.oxygen_level)
-    oxygen_critical = oxygen < CRITICAL_OXYGEN_THRESHOLD
+    oxygen_low = oxygen < OXYGEN_LOW_THRESHOLD
     player = raw_observation.player
     px = _latest_leaf(player.x) + _latest_leaf(player.width) / 2.0
 
@@ -91,7 +110,7 @@ def _surface_approach_clear(raw_observation, objects=None):
         sub_cx = ex[..., 24] + ew[..., 24] / 2.0
 
     sub_left_or_gone = jnp.logical_or(jnp.logical_not(sub_active), sub_cx < px)
-    return jnp.logical_or(oxygen_critical, sub_left_or_gone)
+    return jnp.logical_or(oxygen_low, sub_left_or_gone)
 
 
 def _surface_required_from_raw(raw_observation, objects=None):
@@ -102,7 +121,8 @@ def _surface_required_from_raw(raw_observation, objects=None):
     trap skills on an already-reached target. Low O2 only forces surface once
     underwater, or while refilling at the surface with divers on board.
 
-    Surface WP is gated on surface-sub left/gone unless oxygen is critical.
+    Surface WP is gated on surface-sub left/gone unless oxygen is already low
+    (must surface; the WP sits behind the sub when it is on-screen).
     """
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     collected_divers = _latest_leaf(raw_observation.collected_divers)
@@ -181,12 +201,44 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None, objec
     return current_targets
 
 
-def _select_target(raw_observation, objects, prev_target_idx, *, danger_close_range=None):
-    """Nearest object by AABB surface gap; surface WP with danger-close override."""
+def _oxygen_scaled_interrupt_range(oxygen, full_range):
+    """Shrink (or zero) an enemy interrupt radius when oxygen is low/critical."""
+    oxygen = jnp.asarray(oxygen, dtype=jnp.float32)
+    full_range = jnp.asarray(full_range, dtype=jnp.float32)
+    low_cap = jnp.float32(O2_LOW_ENEMY_INTERRUPT_RANGE)
+    crit_cap = jnp.float32(O2_CRITICAL_ENEMY_INTERRUPT_RANGE)
+    return jnp.where(
+        oxygen < jnp.float32(CRITICAL_OXYGEN_THRESHOLD),
+        jnp.minimum(full_range, crit_cap),
+        jnp.where(
+            oxygen < jnp.float32(OXYGEN_LOW_THRESHOLD),
+            jnp.minimum(full_range, low_cap),
+            full_range,
+        ),
+    )
+
+
+def _select_target(
+    raw_observation,
+    objects,
+    prev_target_idx,
+    *,
+    danger_close_range=None,
+    destroy_interrupt_range=None,
+):
+    """Nearest object by AABB surface gap; DESTROY interrupt; surface WP."""
     del prev_target_idx
     if danger_close_range is None:
         danger_close_range = SURFACE_DANGER_CLOSE_RANGE
+    if destroy_interrupt_range is None:
+        destroy_interrupt_range = DESTROY_INTERRUPT_RANGE
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
+    destroy_interrupt_range = jnp.asarray(destroy_interrupt_range, dtype=jnp.float32)
+    oxygen = _latest_leaf(raw_observation.oxygen_level)
+    danger_close_range = _oxygen_scaled_interrupt_range(oxygen, danger_close_range)
+    destroy_interrupt_range = _oxygen_scaled_interrupt_range(
+        oxygen, destroy_interrupt_range
+    )
 
     px = raw_observation.player.x[-1]
     py = raw_observation.player.y[-1]
@@ -225,19 +277,37 @@ def _select_target(raw_observation, objects, prev_target_idx, *, danger_close_ra
     best_idx = jnp.argmin(nearest_dist).astype(jnp.int32)
     any_selectable = jnp.any(selectable)
 
-    # Danger-close while surfacing: nearest AVOID/DESTROY within configured range.
-    # range <= 0 disables the override (always keep surface WP when forced).
-    is_danger = jnp.logical_or(labels == LABEL_AVOID, labels == LABEL_DESTROY)
-    danger_close = jnp.logical_and(
+    is_destroy = labels == LABEL_DESTROY
+    is_avoid = labels == LABEL_AVOID
+    # Nearby sharks/subs steal COLLECT (and other nearer non-DESTROY) so
+    # FRAME_SKIP cannot ram a shark the heuristic has not yet selected.
+    # Missiles / surface-sub (AVOID) stay out of this interrupt.
+    destroy_close = jnp.logical_and(
         selectable,
         jnp.logical_and(
-            is_danger,
+            is_destroy,
+            jnp.logical_and(
+                destroy_interrupt_range > 0.0,
+                distances <= destroy_interrupt_range,
+            ),
+        ),
+    )
+    destroy_dist = jnp.where(destroy_close, distances, jnp.inf)
+    best_destroy_idx = jnp.argmin(destroy_dist).astype(jnp.int32)
+    any_destroy_close = jnp.any(destroy_close)
+
+    # Surfacing: AVOID at the tight range, DESTROY at the (larger) interrupt range.
+    avoid_close = jnp.logical_and(
+        selectable,
+        jnp.logical_and(
+            is_avoid,
             jnp.logical_and(danger_close_range > 0.0, distances <= danger_close_range),
         ),
     )
-    danger_dist = jnp.where(danger_close, distances, jnp.inf)
-    best_danger_idx = jnp.argmin(danger_dist).astype(jnp.int32)
-    any_danger_close = jnp.any(danger_close)
+    surface_interrupt = jnp.logical_or(avoid_close, destroy_close)
+    interrupt_dist = jnp.where(surface_interrupt, distances, jnp.inf)
+    best_interrupt_idx = jnp.argmin(interrupt_dist).astype(jnp.int32)
+    any_surface_interrupt = jnp.any(surface_interrupt)
 
     force_surface = _surface_required_from_raw(raw_observation, objects)
 
@@ -246,12 +316,13 @@ def _select_target(raw_observation, objects, prev_target_idx, *, danger_close_ra
         best_idx,
         jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
     )
+    target_idx = jnp.where(any_destroy_close, best_destroy_idx, target_idx)
     # Prefer surface WP when required, unless a nearby danger overrides.
     target_idx = jnp.where(
         force_surface,
         jnp.where(
-            any_danger_close,
-            best_danger_idx,
+            any_surface_interrupt,
+            best_interrupt_idx,
             jnp.array(SURFACE_DUMMY_IDX, dtype=jnp.int32),
         ),
         target_idx,
@@ -267,6 +338,7 @@ def get_heuristic_target_with_state(
     rng,
     *,
     danger_close_range=None,
+    destroy_interrupt_range=None,
 ):
     del rng
     target = _select_target(
@@ -274,6 +346,7 @@ def get_heuristic_target_with_state(
         objects,
         prev_target_idx,
         danger_close_range=danger_close_range,
+        destroy_interrupt_range=destroy_interrupt_range,
     )
     # Persist DESTROY/COLLECT only (AVOID is reactive; surface WP is re-forced).
     labels = objects.semantic_label[-1]
@@ -293,6 +366,7 @@ def get_heuristic_target(
     rng,
     *,
     danger_close_range=None,
+    destroy_interrupt_range=None,
 ):
     """Stateless wrapper."""
     del rng
@@ -301,4 +375,5 @@ def get_heuristic_target(
         objects,
         prev_target_idx,
         danger_close_range=danger_close_range,
+        destroy_interrupt_range=destroy_interrupt_range,
     )

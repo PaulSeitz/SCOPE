@@ -33,7 +33,7 @@ _SCROLL_X_MAX = 155
 # Surface waypoint: fixed y at surfacing threshold; x prefers "behind" the
 # surface sub (10px opposite its travel) so NAVIGATE practices horizontal
 # approach, not only pure vertical climbs. When the sub is inactive, x is a
-# deterministic pseudo-random slot from player/diver state (JAX-safe).
+# fixed screen-center slot (player-hashed fallback teleported every frame).
 # JAXAtari Seaquest begins surfacing when player_y == 46 (see update_oxygen()).
 # Reward overlap globally applies a 1px inward inset, so we place this band at y=44
 # with h=1; after inset that yields an effective [45, 46] band and a clean
@@ -43,10 +43,13 @@ _SURFACE_WAYPOINT_Y = _SURFACE_TRIGGER_PLAYER_Y - 2
 _SURFACE_WAYPOINT_H = 1
 _SURFACE_WP_BEHIND_SUB_PX = 10
 _SURFACE_WP_SCREEN_W = 160
-_SURFACE_WP_FALLBACK_SLOTS = 5
-_SURFACE_WP_FALLBACK_MARGIN = 16
 # Surface sub is the last of the 25 enemy slots (12 sharks + 12 subs + 1).
 _SURFACE_SUB_ENEMY_SLOT = 24
+
+
+def surface_waypoint_fallback_x(player_w):
+    """Fixed screen-center left edge for the WP when no surface sub is active."""
+    return jnp.float32(_SURFACE_WP_SCREEN_W) / 2.0 - player_w.astype(jnp.float32) / 2.0
 
 _SEAQUEST_MOVE_TABLE = [3, 8, 5, 9, 4, 7, 2, 6]
 _SEAQUEST_MOVE_FIRE_TABLE = [11, 16, 13, 17, 12, 15, 10, 14]
@@ -208,8 +211,8 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         Object dimensions match JAXAtari's native hitbox sizes (plain AABB, no insets):
           player 16×11, diver 8×11, shark 8×7, sub 8×11, missile 8×1.
 
-        The surface waypoint tracks player x/width but uses a fixed y band near the
-        top, aligned with Seaquest's surfacing trigger height.
+        The surface waypoint uses a fixed y band near the top (surfacing trigger)
+        and x behind the surface sub when it is on-screen, else screen center.
         """
         divers = obs.divers            # n=4
         enemies = obs.enemies          # n=25 (12 sharks + 12 subs + 1 surface sub)
@@ -245,11 +248,8 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_offscreen  = jnp.concatenate([diver_offscreen, enemy_offscreen, enemy_missile_offscreen])
 
         # Surface waypoint: y fixed to surfacing band; x behind surface sub
-        # when it is on-screen, else a deterministic pseudo-random surface slot
-        # (so NAVIGATE learns lateral approach, not only vertical climbs).
-        player_x = jnp.reshape(obs.player.x, ())
+        # when it is on-screen, else a fixed screen-center x.
         player_w = jnp.reshape(obs.player.width, ())
-        divers_n = jnp.reshape(obs.collected_divers, ()).astype(jnp.int32)
 
         sub_x = enemies.x[_SURFACE_SUB_ENEMY_SLOT]
         sub_w = enemies.width[_SURFACE_SUB_ENEMY_SLOT]
@@ -262,14 +262,7 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         behind_x = sub_cx + behind_sign * jnp.float32(_SURFACE_WP_BEHIND_SUB_PX) - (
             player_w.astype(jnp.float32) / 2.0
         )
-
-        # Deterministic fallback slots across the playable width.
-        usable = _SURFACE_WP_SCREEN_W - 2 * _SURFACE_WP_FALLBACK_MARGIN - 1
-        slot = (player_x.astype(jnp.int32) * 17 + divers_n * 31) % _SURFACE_WP_FALLBACK_SLOTS
-        fallback_x = (
-            jnp.int32(_SURFACE_WP_FALLBACK_MARGIN)
-            + (slot * usable) // jnp.int32(_SURFACE_WP_FALLBACK_SLOTS)
-        ).astype(jnp.float32)
+        fallback_x = surface_waypoint_fallback_x(player_w)
 
         surface_x_f = jnp.where(sub_active, behind_x, fallback_x)
         max_x = jnp.float32(_SURFACE_WP_SCREEN_W) - player_w.astype(jnp.float32)

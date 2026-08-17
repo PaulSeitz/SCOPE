@@ -137,6 +137,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
     configure_ego_weapon_features(
         enabled=bool(weapon),
         env_name=str(config.get("ENV_NAME", "")),
+        shot_features=bool(config.get("USE_EGO_SHOT_FEATURES", False)),
     )
 
 

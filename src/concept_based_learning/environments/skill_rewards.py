@@ -16,6 +16,9 @@ Reward magnitudes and trigger conditions:
                increasing); −0.01 closing further while already in melee.
              DESTROY_CONTACT_FAIL: −1 and skill-done on rising-edge AABB overlap
                (ram). Kill still wins if was_killed on the same step.
+             DESTROY_LIVING_PENALTY: −0.01 every frame the target stays alive
+               (both still active, no kill this step). Combined with contact-fail
+               this is the “urgency” arm: ram loses, waiting/jiggling ticks down.
   NAVIGATE : +1  on rising-edge overlap / was_collected (arrive at waypoint);
              +0.01 when centre-distance to the (still active) waypoint decreases
              between t and t+1 (progress shaping for long-horizon ladders /
@@ -80,6 +83,7 @@ DESTROY_Y_ALIGN_REWARD = 0.01  # |centre-Δy| decreased this step
 DESTROY_STANDOFF_REWARD = 0.01  # centre-dist increased while inside melee radius
 DESTROY_STANDOFF_PENALTY = -0.01  # centre-dist decreased while inside melee radius
 DESTROY_STANDOFF_PX = 20.0  # melee radius (centre-to-centre)
+DESTROY_LIVING_PENALTY = -0.01  # per-frame tax while the enemy still lives
 NAVIGATE_SUCCESS_REWARD = 1.0
 NAVIGATE_PROGRESS_REWARD = 0.01  # distance-to-waypoint decreased this step
 JUMP_SUCCESS_REWARD = 1.0
@@ -115,6 +119,7 @@ class RewardContext:
     destroy_y_align: bool
     destroy_standoff: bool
     destroy_contact_fail: bool
+    destroy_living_penalty: bool
     destroy_standoff_px: float
 
 
@@ -317,10 +322,18 @@ def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
             jnp.where(y_aligned, DESTROY_Y_ALIGN_REWARD, 0.0),
         ),
     )
+    living_tax = jnp.where(
+        jnp.logical_and(
+            ctx.destroy_living_penalty,
+            jnp.logical_and(both_active, jnp.logical_not(success)),
+        ),
+        DESTROY_LIVING_PENALTY,
+        0.0,
+    )
     reward = jnp.where(
         success,
         DESTROY_SUCCESS_REWARD,
-        jnp.where(contact, DESTROY_FAILURE_REWARD, shaped),
+        jnp.where(contact, DESTROY_FAILURE_REWARD, shaped + living_tax),
     )
     done = jnp.logical_or(success, contact)
     return reward, done
@@ -466,6 +479,7 @@ def extract_skill_rewards(
     destroy_y_align: bool | None = None,
     destroy_standoff: bool | None = None,
     destroy_contact_fail: bool | None = None,
+    destroy_living_penalty: bool | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all skills against a single target.
@@ -485,7 +499,8 @@ def extract_skill_rewards(
             on life loss (default False; AVOID/DESTROY always do)
         config: optional experiment dict; DESTROY_* flags are read from here
             when the explicit destroy_* kwargs are left None
-        destroy_y_align / destroy_standoff / destroy_contact_fail:
+        destroy_y_align / destroy_standoff / destroy_contact_fail /
+        destroy_living_penalty:
             per-run DESTROY extras (see module docstring). ``None`` → config.
 
     Returns:
@@ -501,6 +516,8 @@ def extract_skill_rewards(
         flags["destroy_standoff"] = bool(destroy_standoff)
     if destroy_contact_fail is not None:
         flags["destroy_contact_fail"] = bool(destroy_contact_fail)
+    if destroy_living_penalty is not None:
+        flags["destroy_living_penalty"] = bool(destroy_living_penalty)
 
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
@@ -521,6 +538,7 @@ def extract_skill_rewards(
         destroy_y_align=flags["destroy_y_align"],
         destroy_standoff=flags["destroy_standoff"],
         destroy_contact_fail=flags["destroy_contact_fail"],
+        destroy_living_penalty=flags["destroy_living_penalty"],
         destroy_standoff_px=flags["destroy_standoff_px"],
     )
 
@@ -566,6 +584,7 @@ def destroy_shaping_from_config(config) -> dict:
             "destroy_y_align": False,
             "destroy_standoff": False,
             "destroy_contact_fail": False,
+            "destroy_living_penalty": False,
             "destroy_standoff_px": DESTROY_STANDOFF_PX,
         }
     px = config.get("DESTROY_STANDOFF_PX", DESTROY_STANDOFF_PX)
@@ -573,6 +592,7 @@ def destroy_shaping_from_config(config) -> dict:
         "destroy_y_align": bool(config.get("DESTROY_Y_ALIGN", False)),
         "destroy_standoff": bool(config.get("DESTROY_STANDOFF", False)),
         "destroy_contact_fail": bool(config.get("DESTROY_CONTACT_FAIL", False)),
+        "destroy_living_penalty": bool(config.get("DESTROY_LIVING_PENALTY", False)),
         "destroy_standoff_px": float(px) if px is not None else DESTROY_STANDOFF_PX,
     }
 

@@ -14,6 +14,9 @@ Usage:
   # DESTROY ablation (3 GPUs: one variant per shard):
   python scripts/run_paper_eval.py --suite destroy_ablation --gpus 0,1,2 --wait-deps --lean
 
+  # DESTROY urgency (2 GPUs: shot-ego vs reward-only; heuristic WP/O2 in both):
+  python scripts/run_paper_eval.py --suite destroy_urgency --gpus 0,1 --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -113,9 +116,20 @@ DESTROY_ABLATION_STEMS = (
     "pong_transfer_ego_destroy_standoff",
     "pong_transfer_ego_destroy_contact",
 )
+DESTROY_URGENCY_SUITE = "destroy_urgency"
+# Order is shard-critical: 2 GPUs get (train, eval, pong) of one variant each.
+DESTROY_URGENCY_STEMS = (
+    "seaquest_skills_ego_destroy_shot",
+    "seaquest_skills_ego_destroy_urgency",
+    "seaquest_skills_ego_destroy_shot_eval",
+    "seaquest_skills_ego_destroy_urgency_eval",
+    "pong_transfer_ego_destroy_shot",
+    "pong_transfer_ego_destroy_urgency",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
+    DESTROY_URGENCY_SUITE: DESTROY_URGENCY_STEMS,
 }
 
 
@@ -959,6 +973,7 @@ _EVAL_OVERRIDE_KEYS = (
     "EVAL_GAME_MODS",
     "GAME_MODS",
     "SURFACE_DANGER_CLOSE_RANGE",
+    "DESTROY_INTERRUPT_RANGE",
 )
 
 
@@ -1273,7 +1288,10 @@ def main() -> None:
             f"{SUITE_EVAL_MAX_FRAMES}). "
             f"{DESTROY_ABLATION_SUITE}: 3 DESTROY reward arms "
             "(y-align / standoff / contact-fail), lean 5-mod Seaquest + Pong base; "
-            "use --gpus 0,1,2 so each GPU owns one arm."
+            "use --gpus 0,1,2 so each GPU owns one arm. "
+            f"{DESTROY_URGENCY_SUITE}: 2 arms (shot-ego vs contact+living-tax, "
+            "no shot channels); lean 5-mod Seaquest + Pong base; "
+            "use --gpus 0,1 so each GPU owns one arm."
         ),
     )
     parser.add_argument(
@@ -1281,7 +1299,7 @@ def main() -> None:
         action="store_true",
         help=(
             "With --suite: skip train configs (requires existing ckpts). "
-            "Valid for skill_reshape and destroy_ablation."
+            "Valid for skill_reshape, destroy_ablation, and destroy_urgency."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1523,7 +1541,7 @@ def main() -> None:
         eval_max_frames = int(args.eval_max_frames)
     elif trial:
         eval_max_frames = 400
-    elif suite in {SKILL_RESHAPE_SUITE, DESTROY_ABLATION_SUITE}:
+    elif suite in {SKILL_RESHAPE_SUITE, DESTROY_ABLATION_SUITE, DESTROY_URGENCY_SUITE}:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
         eval_max_frames = 800

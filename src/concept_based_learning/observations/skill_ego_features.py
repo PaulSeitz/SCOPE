@@ -11,6 +11,18 @@ always visible — not latched on fire — so skills can turn before shooting.
 When centres nearly share an x (``|Δx| < 2px``), aim is treated as N/A (+1)
 so vertical NAVIGATE waypoints do not invent a rightward bias.
 Occupancy histograms list both channels in ``DISCRETE_SKILL_EGO_FLAGS``.
+
+``USE_EGO_SHOT_FEATURES`` (requires weapon features) appends two *continuous*
+channels that locate the player projectile relative to the skill target:
+
+  shot_dx, shot_dy   (target_centre - missile_centre) / screen, clipped [-1, 1]
+                     zeros when there is no projectile attr, the slot is
+                     inactive, or the env has no bullets (Pong / Freeway).
+
+Channel count is therefore identical across games: missing bullets are a
+zero vector, not a missing dim, so transfer is not OOD in shape. Looking
+direction is already in ``facing_enemy`` + ``sin/cos(ψ)``; shot geometry is
+the missing “where is my missile going” cue.
 """
 
 from __future__ import annotations
@@ -20,6 +32,7 @@ from typing import Any, NamedTuple
 import jax.numpy as jnp
 
 _USE_EGO_WEAPON_FEATURES = False
+_USE_EGO_SHOT_FEATURES = False
 _ENV_NAME = ""
 
 # Channel values (±1 binaries).
@@ -33,8 +46,16 @@ WEAPON_READY = CAN_FIRE_READY
 WEAPON_IN_FLIGHT_AIMED = 0.0  # legacy ternary mid value
 WEAPON_IN_FLIGHT_WASTED = CAN_FIRE_IN_FLIGHT
 
-# Two channels when weapon features are enabled.
-WEAPON_CHANNELS_PER_FRAME = 2
+# Base weapon extras (can_fire, facing_enemy). Shot geometry is optional.
+WEAPON_BASE_CHANNELS_PER_FRAME = 2
+SHOT_CHANNELS_PER_FRAME = 2
+# Backward-compat alias: base extras only (shot flag off).
+WEAPON_CHANNELS_PER_FRAME = WEAPON_BASE_CHANNELS_PER_FRAME
+
+# Screen scales for shot Δx/Δy (Atari native). Avoid importing egocentric
+# (circular: egocentric → this module).
+_SHOT_DX_SCALE = 160.0
+_SHOT_DY_SCALE = 210.0
 
 
 class DiscreteSkillEgoFlag(NamedTuple):
@@ -76,15 +97,18 @@ def configure_ego_weapon_features(
     env_name: str,
     num_skills: int | None = None,
     extra_dim_per_skill: int | None = None,
+    shot_features: bool = False,
 ) -> None:
     """Enable/disable the shared can_fire + facing_enemy ego channels.
 
+    ``shot_features`` adds shot-to-target Δx/Δy (zeros when no bullet).
     ``num_skills`` / ``extra_dim_per_skill`` are ignored (kept for call-site
     compatibility with older configs that passed a padded per-skill dim).
     """
     del num_skills, extra_dim_per_skill
-    global _USE_EGO_WEAPON_FEATURES, _ENV_NAME
+    global _USE_EGO_WEAPON_FEATURES, _USE_EGO_SHOT_FEATURES, _ENV_NAME
     _USE_EGO_WEAPON_FEATURES = bool(enabled)
+    _USE_EGO_SHOT_FEATURES = bool(enabled) and bool(shot_features)
     _ENV_NAME = str(env_name).lower()
 
 
@@ -94,6 +118,7 @@ def configure_skill_ego_features(
     num_skills: int = 3,
     extra_dim_per_skill: int = 1,
     env_name: str = "",
+    shot_features: bool = False,
 ) -> None:
     """Backward-compatible alias for ``configure_ego_weapon_features``."""
     configure_ego_weapon_features(
@@ -101,11 +126,16 @@ def configure_skill_ego_features(
         env_name=env_name,
         num_skills=num_skills,
         extra_dim_per_skill=extra_dim_per_skill,
+        shot_features=shot_features,
     )
 
 
 def using_ego_weapon_features() -> bool:
     return _USE_EGO_WEAPON_FEATURES
+
+
+def using_ego_shot_features() -> bool:
+    return _USE_EGO_SHOT_FEATURES
 
 
 def using_skill_ego_features() -> bool:
@@ -114,13 +144,18 @@ def using_skill_ego_features() -> bool:
 
 
 def skill_ego_extra_channels_per_frame() -> int:
-    """Extra ego channels/frame from weapon features (0 or 2)."""
-    return WEAPON_CHANNELS_PER_FRAME if _USE_EGO_WEAPON_FEATURES else 0
+    """Extra ego channels/frame from weapon features (0, 2, or 4)."""
+    if not _USE_EGO_WEAPON_FEATURES:
+        return 0
+    extra = WEAPON_BASE_CHANNELS_PER_FRAME
+    if _USE_EGO_SHOT_FEATURES:
+        extra += SHOT_CHANNELS_PER_FRAME
+    return extra
 
 
 def skill_ego_extra_dim_per_skill() -> int:
     """Backward-compatible alias: weapon extras are shared channels."""
-    return WEAPON_CHANNELS_PER_FRAME if _USE_EGO_WEAPON_FEATURES else 0
+    return skill_ego_extra_channels_per_frame()
 
 
 def _stack_len(raw_observation) -> int:
@@ -150,6 +185,65 @@ def _player_projectile_active_per_frame(
     if projectile_slot is not None:
         return active[:, projectile_slot]
     return jnp.max(active, axis=-1)
+
+
+def _leaf_per_frame(arr, projectile_slot: int | None, stack_len: int) -> jnp.ndarray:
+    """Take one projectile-slot scalar per stacked frame from x/y/w/h."""
+    arr = jnp.asarray(arr, dtype=jnp.float32)
+    if arr.ndim == 0:
+        return jnp.full((stack_len,), arr)
+    if arr.ndim == 1:
+        if arr.shape[0] == stack_len:
+            return arr
+        if projectile_slot is not None:
+            return jnp.full((stack_len,), arr[projectile_slot])
+        return jnp.broadcast_to(arr[0], (stack_len,))
+    if projectile_slot is not None:
+        return arr[:, projectile_slot]
+    return arr[:, 0]
+
+
+def _shot_to_target_xy(
+    raw_observation,
+    objects: Any | None,
+    target_idx: jnp.ndarray | int | None,
+    *,
+    projectile_attr: str,
+    projectile_slot: int | None,
+    stack_len: int,
+    in_flight: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-frame (Δx, Δy) from missile centre to target centre; 0 if no shot."""
+    zeros = jnp.zeros((stack_len,), dtype=jnp.float32)
+    if not _USE_EGO_SHOT_FEATURES:
+        return zeros, zeros
+    if objects is None or target_idx is None:
+        return zeros, zeros
+    if not hasattr(raw_observation, projectile_attr):
+        return zeros, zeros
+    projectiles = getattr(raw_observation, projectile_attr)
+    if not hasattr(projectiles, "x") or not hasattr(projectiles, "y"):
+        return zeros, zeros
+
+    mx = _leaf_per_frame(projectiles.x, projectile_slot, stack_len)
+    my = _leaf_per_frame(projectiles.y, projectile_slot, stack_len)
+    mw = _leaf_per_frame(getattr(projectiles, "width", 0.0), projectile_slot, stack_len)
+    mh = _leaf_per_frame(getattr(projectiles, "height", 0.0), projectile_slot, stack_len)
+    m_cx = mx + mw / 2.0
+    m_cy = my + mh / 2.0
+
+    idx = jnp.asarray(target_idx, dtype=jnp.int32)
+    ox = objects.x.astype(jnp.float32)
+    oy = objects.y.astype(jnp.float32)
+    ow = objects.width.astype(jnp.float32)
+    oh = objects.height.astype(jnp.float32)
+    t_cx = ox[:, idx] + ow[:, idx] / 2.0
+    t_cy = oy[:, idx] + oh[:, idx] / 2.0
+
+    dx = jnp.clip((t_cx - m_cx) / jnp.float32(_SHOT_DX_SCALE), -1.0, 1.0)
+    dy = jnp.clip((t_cy - m_cy) / jnp.float32(_SHOT_DY_SCALE), -1.0, 1.0)
+    flying = in_flight > 0.5
+    return jnp.where(flying, dx, zeros), jnp.where(flying, dy, zeros)
 
 
 # When |Δx| is below this, L/R aim is undefined (pure vertical / co-located).
@@ -242,15 +336,17 @@ def _weapon_channels_stacked(
     projectile_attr: str,
     projectile_slot: int | None = None,
 ) -> jnp.ndarray:
-    """Per-frame [can_fire, facing_enemy], shape [stack_len, 2]."""
+    """Per-frame weapon extras: [can_fire, facing_enemy] (+ shot_dx, shot_dy)."""
     stack_len = _stack_len(raw_observation)
     if not hasattr(raw_observation, projectile_attr):
         can_fire = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
+        in_flight = jnp.zeros((stack_len,), dtype=jnp.float32)
     else:
         projectiles = getattr(raw_observation, projectile_attr)
         player_proj_active = _player_projectile_active_per_frame(
             projectiles.active, projectile_slot
         )
+        in_flight = player_proj_active
         can_fire = jnp.where(
             player_proj_active > 0.5,
             CAN_FIRE_IN_FLIGHT,
@@ -260,7 +356,19 @@ def _weapon_channels_stacked(
     facing = _facing_enemy_per_frame(
         raw_observation, objects, target_idx, stack_len
     )
-    return jnp.stack([can_fire, facing], axis=-1)
+    channels = [can_fire, facing]
+    if _USE_EGO_SHOT_FEATURES:
+        shot_dx, shot_dy = _shot_to_target_xy(
+            raw_observation,
+            objects,
+            target_idx,
+            projectile_attr=projectile_attr,
+            projectile_slot=projectile_slot,
+            stack_len=stack_len,
+            in_flight=in_flight,
+        )
+        channels.extend([shot_dx, shot_dy])
+    return jnp.stack(channels, axis=-1)
 
 
 def build_skill_ego_extras_stacked(
@@ -269,11 +377,13 @@ def build_skill_ego_extras_stacked(
     target_idx: jnp.ndarray | int | None = None,
 ) -> jnp.ndarray:
     """
-    Per-frame weapon extras. Shape ``[stack_len, 2]`` when enabled, else
-    ``[stack_len, 0]``.
+    Per-frame weapon extras. Shape ``[stack_len, 2]`` when enabled, or
+    ``[stack_len, 4]`` with shot features, else ``[stack_len, 0]``.
 
     ``objects`` / ``target_idx`` drive ``facing_enemy`` on L/R envs
-    (Seaquest, Chopper Command); other envs keep ``facing_enemy=+1``.
+    (Seaquest, Chopper Command) and shot-to-target Δx/Δy when the shot
+    flag is on; other envs keep ``facing_enemy=+1`` and shot Δ=0 if no
+    projectile is present.
     """
     stack_len = _stack_len(raw_observation)
     if not _USE_EGO_WEAPON_FEATURES:
@@ -315,13 +425,13 @@ def build_skill_ego_extras_stacked(
             **common,
         )
 
-    return jnp.stack(
-        [
-            jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32),
-            jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32),
-        ],
-        axis=-1,
-    )
+    ready = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
+    facing = jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32)
+    channels = [ready, facing]
+    if _USE_EGO_SHOT_FEATURES:
+        zeros = jnp.zeros((stack_len,), dtype=jnp.float32)
+        channels.extend([zeros, zeros])
+    return jnp.stack(channels, axis=-1)
 
 
 def _latest_can_fire(

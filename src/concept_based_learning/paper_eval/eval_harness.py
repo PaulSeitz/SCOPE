@@ -167,6 +167,7 @@ def _overlay_ego_flags_from_skill_config(
             "USE_EGO_VELOCITY_FEATURES",
             "USE_EGO_BLOCKING_FEATURES",
             "USE_EGO_WEAPON_FEATURES",
+            "USE_EGO_SHOT_FEATURES",
             "EGO_DISTANCE_CLIP_MAX_PX",
             "FRAME_STACK_SIZE",
             "SKILL_INPUT_MODE",

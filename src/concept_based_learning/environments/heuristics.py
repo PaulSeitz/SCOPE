@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from concept_based_learning.environments.manual_policy.state import PolicyState
 from concept_based_learning.environments.seaquest.heuristic_policy import (
+    DESTROY_INTERRUPT_RANGE as SEAQUEST_DESTROY_INTERRUPT_RANGE,
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
 )
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
@@ -39,10 +40,24 @@ def get_avoid_only_target(raw_obs, objects, last_target, rng, *, no_target_idx=-
 
 
 def _seaquest_danger_close_range(config) -> float:
-    """AABB surface-gap px for surface danger override; ``<=0`` disables."""
+    """AABB surface-gap px for surface AVOID override; ``<=0`` disables."""
     return float(
         config.get("SURFACE_DANGER_CLOSE_RANGE", SEAQUEST_SURFACE_DANGER_CLOSE_RANGE)
     )
+
+
+def _seaquest_destroy_interrupt_range(config) -> float:
+    """AABB surface-gap px for DESTROY interrupt; ``<=0`` disables."""
+    return float(
+        config.get("DESTROY_INTERRUPT_RANGE", SEAQUEST_DESTROY_INTERRUPT_RANGE)
+    )
+
+
+def _seaquest_heuristic_kwargs(config) -> dict:
+    return {
+        "danger_close_range": _seaquest_danger_close_range(config),
+        "destroy_interrupt_range": _seaquest_destroy_interrupt_range(config),
+    }
 
 
 def resolve_heuristic_target_fn(config, env_name: str, components):
@@ -60,9 +75,7 @@ def resolve_heuristic_target_fn(config, env_name: str, components):
         return spaceinvaders_sweep_heuristic_target
     fn = components.get_heuristic_target
     if str(env_name).lower() == "seaquest":
-        fn = functools.partial(
-            fn, danger_close_range=_seaquest_danger_close_range(config)
-        )
+        fn = functools.partial(fn, **_seaquest_heuristic_kwargs(config))
     return fn
 
 
@@ -93,9 +106,7 @@ def resolve_heuristic_with_state_fn(config, env_name: str, components):
         return _sweep_as_policy_state
     fn = getattr(components, "get_heuristic_with_state", None)
     if fn is not None and str(env_name).lower() == "seaquest":
-        return functools.partial(
-            fn, danger_close_range=_seaquest_danger_close_range(config)
-        )
+        return functools.partial(fn, **_seaquest_heuristic_kwargs(config))
     return fn
 
 
