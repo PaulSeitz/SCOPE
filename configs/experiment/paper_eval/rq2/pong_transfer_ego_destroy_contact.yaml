@@ -1,0 +1,56 @@
+# DESTROY ablation: contact_fail only (sparse +1 kill remains).
+# Lean suite: train + 5 Seaquest mods + Pong base transfer.
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: transfer
+PAPER_EVAL_MODS: pong
+PAPER_EVAL_MOD_KEYS:
+- base
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_ego_destroy_contact
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_destroy_contact/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: pong
+SAVE_PATH: ./outputs/models/paper_eval/rq2/pong_transfer_ego_destroy_contact
+WANDB_RUN_NAME: po_paper_rq2_transfer_ego_destroy_contact
+WANDB_TAGS:
+- suite:paper_eval
+- rq:2
+- env:pong
+- phase:zero_shot
+- skill_input:ego
+- destroy:contact_fail
+- probe:destroy_ablation
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: true
+USE_EGO_WEAPON_FEATURES: true
+EGO_DISTANCE_CLIP_MAX_PX: null
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: nearest
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 2
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: nearest
+  SKILL_INPUT_MODE: ego
+  DESTROY_CONTACT_FAIL: true

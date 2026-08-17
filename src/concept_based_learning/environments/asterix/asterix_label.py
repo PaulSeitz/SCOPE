@@ -31,6 +31,7 @@ def extract_all_skills_rewards(
         life_lost,
         avoid_survival_reward=avoid_survival_reward_from_config(config),
         penalize_collect_death=penalize_collect_death_from_config(config),
+        config=config,
     )
 
 

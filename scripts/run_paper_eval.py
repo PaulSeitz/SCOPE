@@ -11,6 +11,9 @@ Usage:
   python scripts/run_paper_eval.py --smoke --trial   # full wiring smoke test
   python scripts/materialize_paper_eval_configs.py   # regenerate RQ2/RQ3 YAMLs
 
+  # DESTROY ablation (3 GPUs: one variant per shard):
+  python scripts/run_paper_eval.py --suite destroy_ablation --gpus 0,1,2 --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -97,8 +100,22 @@ SKILL_RESHAPE_STEMS = (
 SKILL_RESHAPE_EVAL_STEMS = tuple(
     s for s in SKILL_RESHAPE_STEMS if s != "seaquest_skills_ego"
 )
+DESTROY_ABLATION_SUITE = "destroy_ablation"
+# Order is shard-critical: 3 GPUs get (train, eval, pong) of one variant each.
+DESTROY_ABLATION_STEMS = (
+    "seaquest_skills_ego_destroy_yalign",
+    "seaquest_skills_ego_destroy_standoff",
+    "seaquest_skills_ego_destroy_contact",
+    "seaquest_skills_ego_destroy_yalign_eval",
+    "seaquest_skills_ego_destroy_standoff_eval",
+    "seaquest_skills_ego_destroy_contact_eval",
+    "pong_transfer_ego_destroy_yalign",
+    "pong_transfer_ego_destroy_standoff",
+    "pong_transfer_ego_destroy_contact",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
+    DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
 }
 
 
@@ -1069,6 +1086,7 @@ def _run_mod_eval(
             flat_pqn_path=flat_path,
             object_centric=object_centric,
             trial=trial,
+            mod_keys=list(raw["PAPER_EVAL_MOD_KEYS"]) if raw.get("PAPER_EVAL_MOD_KEYS") else None,
             num_episodes=eval_episodes,
             num_seeds=1,
             base_seed=base_seed,
@@ -1252,15 +1270,18 @@ def main() -> None:
             "Curated multi-phase run list (ignores --phase). "
             f"{SKILL_RESHAPE_SUITE}: ego Seaquest train + mod eval "
             "+ Pong/BeamRider transfer (default --eval-max-frames "
-            f"{SUITE_EVAL_MAX_FRAMES})."
+            f"{SUITE_EVAL_MAX_FRAMES}). "
+            f"{DESTROY_ABLATION_SUITE}: 3 DESTROY reward arms "
+            "(y-align / standoff / contact-fail), lean 5-mod Seaquest + Pong base; "
+            "use --gpus 0,1,2 so each GPU owns one arm."
         ),
     )
     parser.add_argument(
         "--eval-only",
         action="store_true",
         help=(
-            "With --suite skill_reshape: skip seaquest_skills_ego train "
-            "(requires existing RQ1 ego ckpt)."
+            "With --suite: skip train configs (requires existing ckpts). "
+            "Valid for skill_reshape and destroy_ablation."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1417,17 +1438,22 @@ def main() -> None:
     elif suite:
         if args.only:
             raise SystemExit("Use either --suite or --only, not both")
-        if args.eval_only and suite != SKILL_RESHAPE_SUITE:
-            raise SystemExit("--eval-only is only valid with --suite skill_reshape")
-        if suite == SKILL_RESHAPE_SUITE and args.eval_only:
-            only = list(SKILL_RESHAPE_EVAL_STEMS)
+        if args.eval_only:
+            only = []
+            for s in SUITE_STEMS[suite]:
+                matches = list(CONFIG_DIR.rglob(f"{s}.yaml"))
+                if not matches:
+                    raise SystemExit(f"Config(s) not found: {[s]}")
+                phase = str(_load_yaml(matches[0]).get("PAPER_EVAL_PHASE", "train")).lower()
+                if phase != "train":
+                    only.append(s)
         else:
             only = list(SUITE_STEMS[suite])
         # Suites span train+eval; do not filter by --phase.
         phase_filter = None
         print(f"paper_eval suite={suite} ({len(only)} run(s))", flush=True)
     elif args.eval_only:
-        raise SystemExit("--eval-only requires --suite skill_reshape")
+        raise SystemExit("--eval-only requires --suite")
 
     paths = _discover_configs(rq=args.rq, only=only, phase=phase_filter)
     if not paths:
@@ -1471,9 +1497,7 @@ def main() -> None:
 
     # Smoke / skill-reshape train first in-order; gate per-run instead of upfront.
     # --wait-deps: skip the upfront fail; each run polls instead.
-    suite_will_train = bool(
-        suite == SKILL_RESHAPE_SUITE and not args.eval_only
-    )
+    suite_will_train = bool(suite and not args.eval_only)
     skip_gate = bool(
         args.skip_rq_gate or args.smoke or args.wait_deps or suite_will_train
     )
@@ -1499,7 +1523,7 @@ def main() -> None:
         eval_max_frames = int(args.eval_max_frames)
     elif trial:
         eval_max_frames = 400
-    elif suite == SKILL_RESHAPE_SUITE:
+    elif suite in {SKILL_RESHAPE_SUITE, DESTROY_ABLATION_SUITE}:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
         eval_max_frames = 800

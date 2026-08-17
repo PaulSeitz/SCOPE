@@ -25,6 +25,7 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
         life_lost,
         avoid_survival_reward=avoid_survival_reward_from_config(config),
         penalize_collect_death=penalize_collect_death_from_config(config),
+        config=config,
     )
 
 
