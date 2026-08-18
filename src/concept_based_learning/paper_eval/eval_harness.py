@@ -23,6 +23,20 @@ from concept_based_learning.pqn_visualizer import (
 )
 
 
+def merge_train_and_eval_game_mods(
+    config: dict[str, Any], eval_mods: list[str] | tuple[str, ...] | None
+) -> list[str] | None:
+    """Keep training GAME_MODS on eval so persistent env mods are not wiped.
+
+    Eval specs replace GAME_MODS; if the agent was trained with e.g.
+    ``no_surfacing_death``, that mod must still apply on ``base`` / OOD keys.
+    """
+    train = [str(m) for m in (config.get("GAME_MODS") or []) if m]
+    extra = [str(m) for m in (eval_mods or []) if m]
+    merged = list(dict.fromkeys(train + extra))
+    return merged or None
+
+
 def _rtpt_tick_eval_mod() -> None:
     """Count one completed greedy-mod eval toward the suite RTPT bar."""
     rtpt_add_units(RTPT_EVAL_UNITS_PER_MOD)
@@ -114,9 +128,10 @@ def run_hierarchical_mod_eval(
     results: dict[str, dict[str, Any]] = {}
     for mod in mod_specs:
         eval_cfg = copy.deepcopy(config)
-        eval_cfg["GAME_MODS"] = list(mod.mods) if mod.mods else None
+        merged = merge_train_and_eval_game_mods(config, mod.mods)
+        eval_cfg["GAME_MODS"] = merged
         eval_cfg.pop("EVAL_GAME_MODS", None)
-        print(f"\n--- hierarchical / {mod.key} (mods={list(mod.mods) or 'none'}) ---")
+        print(f"\n--- hierarchical / {mod.key} (mods={merged or 'none'}) ---")
         stats = run_greedy_eval_episodes(
             eval_cfg,
             params_tree=params_tree,
@@ -127,7 +142,7 @@ def run_hierarchical_mod_eval(
             max_frames=max_frames,
             progress=True,
         )
-        stats["mods"] = list(mod.mods)
+        stats["mods"] = list(merged or ())
         stats["category"] = mod.category
         results[mod.key] = stats
         _rtpt_tick_eval_mod()
@@ -273,10 +288,11 @@ def run_mod_eval(
             raise ValueError("flat_pqn eval requires flat_pqn_path")
         results = {}
         for mod in mod_specs:
-            print(f"\n--- flat_pqn / {mod.key} (mods={list(mod.mods) or 'none'}) ---")
+            merged = merge_train_and_eval_game_mods(config, mod.mods)
+            print(f"\n--- flat_pqn / {mod.key} (mods={merged or 'none'}) ---")
             stats = run_flat_pqn_greedy_eval(
                 model_path=str(flat_pqn_path),
-                game_mods=list(mod.mods),
+                game_mods=merged or [],
                 num_episodes=num_episodes,
                 num_seeds=num_seeds,
                 base_seed=base_seed,
@@ -284,7 +300,7 @@ def run_mod_eval(
                 object_centric=object_centric,
                 progress=True,
             )
-            stats["mods"] = list(mod.mods)
+            stats["mods"] = list(merged or ())
             stats["category"] = mod.category
             results[mod.key] = stats
             _rtpt_tick_eval_mod()

@@ -26,6 +26,9 @@ Usage:
   # COLLECT death-off vs DESTROY-first heuristic (2 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite collect_combat_probes --gpus 0,1 --wait-deps --lean
 
+  # No surfacing-death env mod (urg-v2 clone; needs JAXAtari no_surfacing_death):
+  python scripts/run_paper_eval.py --suite no_surface_death --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -162,6 +165,12 @@ COLLECT_COMBAT_PROBES_STEMS = (
     "pong_transfer_ego_collect_nodeath",
     "pong_transfer_ego_destroy_first",
 )
+NO_SURFACE_DEATH_SUITE = "no_surface_death"
+NO_SURFACE_DEATH_STEMS = (
+    "seaquest_skills_ego_no_surface_death",
+    "seaquest_skills_ego_no_surface_death_eval",
+    "pong_transfer_ego_no_surface_death",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -169,6 +178,7 @@ SUITE_STEMS = {
     COLLECT_SHOT_PROBES_SUITE: COLLECT_SHOT_PROBES_STEMS,
     EGO_POSE_PROBES_SUITE: EGO_POSE_PROBES_STEMS,
     COLLECT_COMBAT_PROBES_SUITE: COLLECT_COMBAT_PROBES_STEMS,
+    NO_SURFACE_DEATH_SUITE: NO_SURFACE_DEATH_STEMS,
 }
 
 
@@ -1337,7 +1347,9 @@ def main() -> None:
             f"{EGO_POSE_PROBES_SUITE}: pose-only 12-dim vs DESTROY-only extras "
             "(COLLECT/AVOID/NAVIGATE pose, DESTROY pose+LoS+weapon); 2 GPUs. "
             f"{COLLECT_COMBAT_PROBES_SUITE}: urg-v2 clones — COLLECT death "
-            "penalty off vs DESTROY-first (COLLECT never fights); 2 GPUs."
+            "penalty off vs DESTROY-first (COLLECT never fights); 2 GPUs. "
+            f"{NO_SURFACE_DEATH_SUITE}: urg-v2 clone trained with "
+            "no_surfacing_death (0-diver surface is not a life loss)."
         ),
     )
     parser.add_argument(
@@ -1346,7 +1358,8 @@ def main() -> None:
         help=(
             "With --suite: skip train configs (requires existing ckpts). "
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
-            "collect_shot_probes, ego_pose_probes, and collect_combat_probes."
+            "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
+            "and no_surface_death."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1595,6 +1608,7 @@ def main() -> None:
         COLLECT_SHOT_PROBES_SUITE,
         EGO_POSE_PROBES_SUITE,
         COLLECT_COMBAT_PROBES_SUITE,
+        NO_SURFACE_DEATH_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:

@@ -46,6 +46,9 @@ eval_mods:
   - key: surface_sub_always
     mods: [surface_sub_always]
     category: semantic
+  - key: no_surfacing_death
+    mods: [no_surfacing_death]
+    category: semantic
   # dynamics (expect ego to struggle more here)
   - key: gravity
     mods: [gravity]
