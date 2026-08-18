@@ -1555,7 +1555,12 @@ def main() -> None:
         eval_max_frames = int(args.eval_max_frames)
     elif trial:
         eval_max_frames = 400
-    elif suite in {SKILL_RESHAPE_SUITE, DESTROY_ABLATION_SUITE, DESTROY_URGENCY_SUITE}:
+    elif suite in {
+        SKILL_RESHAPE_SUITE,
+        DESTROY_ABLATION_SUITE,
+        DESTROY_URGENCY_SUITE,
+        COLLECT_SHOT_PROBES_SUITE,
+    }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
         eval_max_frames = 800
