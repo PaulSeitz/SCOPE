@@ -29,6 +29,9 @@ Usage:
   # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
+  # Winner of ego_clip_bins (clip50+θ bins) with constant SKILL_LR:
+  python scripts/run_paper_eval.py --suite clip_bins_nodecay --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -188,6 +191,12 @@ EGO_CLIP_BINS_STEMS = (
     "pong_transfer_ego_angbins",
     "pong_transfer_ego_clip50_angbins",
 )
+CLIP_BINS_NODECAY_SUITE = "clip_bins_nodecay"
+CLIP_BINS_NODECAY_STEMS = (
+    "seaquest_skills_ego_clip50_angbins_nodecay",
+    "seaquest_skills_ego_clip50_angbins_nodecay_eval",
+    "pong_transfer_ego_clip50_angbins_nodecay",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -197,6 +206,7 @@ SUITE_STEMS = {
     COLLECT_COMBAT_PROBES_SUITE: COLLECT_COMBAT_PROBES_STEMS,
     NO_SURFACE_DEATH_SUITE: NO_SURFACE_DEATH_STEMS,
     EGO_CLIP_BINS_SUITE: EGO_CLIP_BINS_STEMS,
+    CLIP_BINS_NODECAY_SUITE: CLIP_BINS_NODECAY_STEMS,
 }
 
 
@@ -1371,7 +1381,9 @@ def main() -> None:
             "no_surfacing_death (0-diver surface is not a life loss). "
             f"{EGO_CLIP_BINS_SUITE}: urg-v2 + new heuristic; 2×2 of "
             "distance clip 50px and 8 overlapping world-θ bins "
-            "(replace sin/cos(ψ)); 4 GPUs, one arm each."
+            "(replace sin/cos(ψ)); 4 GPUs, one arm each. "
+            f"{CLIP_BINS_NODECAY_SUITE}: clip50+θ-bins winner with constant "
+            "SKILL_LR (no decay)."
         ),
     )
     parser.add_argument(
@@ -1381,7 +1393,7 @@ def main() -> None:
             "With --suite: skip train configs (requires existing ckpts). "
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
-            "no_surface_death, and ego_clip_bins."
+            "no_surface_death, ego_clip_bins, and clip_bins_nodecay."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1632,6 +1644,7 @@ def main() -> None:
         COLLECT_COMBAT_PROBES_SUITE,
         NO_SURFACE_DEATH_SUITE,
         EGO_CLIP_BINS_SUITE,
+        CLIP_BINS_NODECAY_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
