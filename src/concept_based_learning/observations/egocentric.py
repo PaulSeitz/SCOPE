@@ -36,6 +36,9 @@ _USE_EGO_BLOCKING_FEATURES = False
 # None = normalize by MAX_DIST (full screen diagonal). Otherwise clip Euclidean
 # distance in pixels to this cap, then divide by the cap so feature ∈ [0, 1].
 _EGO_DISTANCE_CLIP_MAX_PX: float | None = None
+# None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
+# channels with this many triangular, 50%-overlap bins of world θ_target.
+_EGO_ANGLE_BINS: int | None = None
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -115,6 +118,51 @@ def ego_distance_clip_max_pixels() -> float | None:
     return _EGO_DISTANCE_CLIP_MAX_PX
 
 
+def set_ego_angle_bins(n_bins: int | None) -> None:
+    """Replace sin/cos(ψ) with ``n_bins`` overlapping world-θ bins.
+
+    ``None`` / ``0`` restores continuous sin/cos(ψ). ``n_bins`` must be >= 2.
+    Bins are triangular with 50% overlap and wrap at ±π (see
+    :func:`triangular_angle_bins`).
+    """
+    global _EGO_ANGLE_BINS
+    if n_bins is None:
+        _EGO_ANGLE_BINS = None
+        return
+    n = int(n_bins)
+    if n <= 0:
+        _EGO_ANGLE_BINS = None
+        return
+    if n < 2:
+        raise ValueError(f"EGO_ANGLE_BINS must be >= 2, got {n_bins}")
+    _EGO_ANGLE_BINS = n
+
+
+def ego_angle_bins() -> int | None:
+    """Return the active world-θ bin count, or None when using sin/cos(ψ)."""
+    return _EGO_ANGLE_BINS
+
+
+def ego_angle_channels_per_frame() -> int:
+    """Pose angle block width: ``n`` bins, or 2 for sin/cos(ψ)."""
+    return int(_EGO_ANGLE_BINS) if _EGO_ANGLE_BINS else 2
+
+
+def triangular_angle_bins(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
+    """Triangular circular bins of ``theta`` (radians), 50% overlap.
+
+    Centres at ``k * 2π / n`` (k=0 is +x / screen-right). Half-width is
+    ``2π / n`` so adjacent bins are 0.5 at the midpoint and the features
+    form a partition of unity. Output shape is ``theta.shape + (n_bins,)``.
+    """
+    n = int(n_bins)
+    centers = jnp.arange(n, dtype=jnp.float32) * (jnp.float32(2.0 * jnp.pi) / n)
+    delta = jnp.asarray(theta, dtype=jnp.float32)[..., None] - centers
+    delta = jnp.arctan2(jnp.sin(delta), jnp.cos(delta))
+    half = jnp.float32(2.0 * jnp.pi) / n
+    return jnp.maximum(0.0, 1.0 - jnp.abs(delta) / half)
+
+
 _USE_DESTROY_ONLY_EGO_EXTRAS = False
 
 
@@ -142,6 +190,8 @@ def configure_ego_obs_from_config(config: dict) -> None:
     set_ego_blocking_features(bool(blocking))
     clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
     set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
+    angle_bins = config.get("EGO_ANGLE_BINS", None)
+    set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
     # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
     weapon = config.get(
@@ -184,11 +234,12 @@ def ego_obs_channels_per_frame() -> int:
             4 if _USE_EGO_SIZE_FEATURES else 0
         ) + los_channels + skill_ego_extra_channels_per_frame()
     # Target-aligned channel groups:
-    #   always: distance, sin(psi), cos(psi)          -> 3
+    #   always: distance + angle (sin/cos(ψ) or N θ bins)
     #   velocity (optional): radial, tangential       -> +2
     #   size (optional): target_w, target_h           -> +2
     #   line-of-sight (optional): blocked             -> +1
-    return 3 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+    pose = 1 + ego_angle_channels_per_frame()
+    return pose + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
         2 if _USE_EGO_SIZE_FEATURES else 0
     ) + los_channels + skill_ego_extra_channels_per_frame()
 
@@ -199,8 +250,9 @@ def ego_base_channels_per_frame() -> int:
 
 
 def ego_pose_channels_per_frame() -> int:
-    """Pose block shared by every skill: distance (or dx/dy), optional vel/size, sin/cos.
+    """Pose block shared by every skill: distance (or dx/dy), optional vel/size, angle.
 
+    Angle is sin/cos(ψ) (2) or ``EGO_ANGLE_BINS`` overlapping world-θ bins.
     LoS and weapon extras are *not* included; those are DESTROY concatenations
     when ``USE_DESTROY_ONLY_EGO_EXTRAS`` is on (and still a shared suffix otherwise).
     Pose is a prefix of the full ``get_ego_obs`` vector.
@@ -209,9 +261,9 @@ def ego_pose_channels_per_frame() -> int:
         return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
             4 if _USE_EGO_SIZE_FEATURES else 0
         )
-    return 3 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
-        2 if _USE_EGO_SIZE_FEATURES else 0
-    )
+    return 1 + ego_angle_channels_per_frame() + (
+        2 if _USE_EGO_VELOCITY_FEATURES else 0
+    ) + (2 if _USE_EGO_SIZE_FEATURES else 0)
 
 
 def ego_destroy_extra_channels_per_frame() -> int:
@@ -702,7 +754,11 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
         channels.extend([v_r_norm, v_t_norm])
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
-    channels.extend([jnp.sin(psis), jnp.cos(psis)])
+    if _EGO_ANGLE_BINS:
+        bin_feats = triangular_angle_bins(thetas, _EGO_ANGLE_BINS)
+        channels.extend([bin_feats[:, i] for i in range(int(_EGO_ANGLE_BINS))])
+    else:
+        channels.extend([jnp.sin(psis), jnp.cos(psis)])
     if _USE_EGO_BLOCKING_FEATURES:
         channels.append(
             _los_blocked_stacked(

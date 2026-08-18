@@ -18,8 +18,9 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   overrides the waypoint (nearest AVOID, or DESTROY within the larger
   ``DESTROY_INTERRUPT_RANGE``). Anytime, a DESTROY within
   ``DESTROY_INTERRUPT_RANGE`` beats a nearer COLLECT so sharks interrupt
-  dives before frameskip closes the gap. AVOID (missiles / surface sub)
-  is not pulled in at that range.
+  dives before frameskip closes the gap. AVOID (missiles) within the larger
+  ``AVOID_INTERRUPT_RANGE`` then steals DESTROY/COLLECT so a fired torpedo
+  is selected before it rams.
   When oxygen is low, those enemy interrupt radii shrink (and go to 0 at
   critical O₂) so the surface waypoint stays selected and the player goes up.
 
@@ -58,8 +59,12 @@ SURFACE_SUB_NEAR_RANGE = 15.0
 SURFACE_DANGER_CLOSE_RANGE = 25.0
 # DESTROY (sharks/subs) interrupt COLLECT — and surface WP — at this larger
 # AABB gap so FRAME_SKIP=4 cannot close a shark before the heuristic retargets.
-# AVOID is *not* included. Overridable via ``DESTROY_INTERRUPT_RANGE``.
+# Overridable via ``DESTROY_INTERRUPT_RANGE``.
 DESTROY_INTERRUPT_RANGE = 40.0
+# AVOID (torpedoes) steal DESTROY/COLLECT inside this AABB gap. Larger than
+# DESTROY so a sub that just fired is dropped before the shot connects.
+# Overridable via ``AVOID_INTERRUPT_RANGE``. ``<=0`` disables.
+AVOID_INTERRUPT_RANGE = 55.0
 # While oxygen is low the surface WP must win: shrink combat interrupts so a
 # shark in the usual 40px band cannot keep the player underwater. Critical O₂
 # disables interrupts entirely (must surface).
@@ -151,6 +156,13 @@ def _surface_required_from_raw(raw_observation, objects=None):
     return jnp.logical_and(want_surface, _surface_approach_clear(raw_observation, objects))
 
 
+def _surface_refilling_from_raw(raw_observation):
+    """True while Seaquest pins the player at the surface to refill oxygen."""
+    oxygen = _latest_leaf(raw_observation.oxygen_level)
+    py = _latest_leaf(raw_observation.player.y)
+    return jnp.logical_and(py <= PLAYER_UNDERWATER_Y, oxygen < 64)
+
+
 def _surface_needed_pred(raw_observation, objects, ctx):
     del ctx
     return _surface_required_from_raw(raw_observation, objects)
@@ -233,6 +245,7 @@ def _select_target(
     *,
     danger_close_range=None,
     destroy_interrupt_range=None,
+    avoid_interrupt_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
 ):
@@ -242,16 +255,22 @@ def _select_target(
         danger_close_range = SURFACE_DANGER_CLOSE_RANGE
     if destroy_interrupt_range is None:
         destroy_interrupt_range = DESTROY_INTERRUPT_RANGE
+    if avoid_interrupt_range is None:
+        avoid_interrupt_range = AVOID_INTERRUPT_RANGE
     if diver_lane_y_px is None:
         diver_lane_y_px = DIVER_LANE_Y_PX
     collect_requires_no_destroy = bool(collect_requires_no_destroy)
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
     destroy_interrupt_range = jnp.asarray(destroy_interrupt_range, dtype=jnp.float32)
+    avoid_interrupt_range = jnp.asarray(avoid_interrupt_range, dtype=jnp.float32)
     diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     danger_close_range = _oxygen_scaled_interrupt_range(oxygen, danger_close_range)
     destroy_interrupt_range = _oxygen_scaled_interrupt_range(
         oxygen, destroy_interrupt_range
+    )
+    avoid_interrupt_range = _oxygen_scaled_interrupt_range(
+        oxygen, avoid_interrupt_range
     )
 
     px = raw_observation.player.x[-1]
@@ -309,7 +328,6 @@ def _select_target(
 
     # Nearby sharks/subs steal COLLECT (and other nearer non-DESTROY) so
     # FRAME_SKIP cannot ram a shark the heuristic has not yet selected.
-    # Missiles / surface-sub (AVOID) stay out of this interrupt.
     destroy_close = jnp.logical_and(
         selectable,
         jnp.logical_and(
@@ -324,7 +342,25 @@ def _select_target(
     best_destroy_idx = jnp.argmin(destroy_dist).astype(jnp.int32)
     any_destroy_close = jnp.any(destroy_close)
 
-    # Surfacing: AVOID at the tight range, DESTROY at the (larger) interrupt range.
+    # Torpedoes (and a near-surface patrol sub) steal DESTROY/COLLECT inside a
+    # wider band than sharks. Far AVOID still loses to nearest combat/collect.
+    avoid_interrupt = jnp.logical_and(
+        selectable,
+        jnp.logical_and(
+            is_avoid,
+            jnp.logical_and(
+                avoid_interrupt_range > 0.0,
+                distances <= avoid_interrupt_range,
+            ),
+        ),
+    )
+    avoid_interrupt_dist = jnp.where(avoid_interrupt, distances, jnp.inf)
+    best_avoid_idx = jnp.argmin(avoid_interrupt_dist).astype(jnp.int32)
+    any_avoid_interrupt = jnp.any(avoid_interrupt)
+
+    # Surfacing: AVOID at the tight range, DESTROY at the (larger) interrupt
+    # range. The anytime AVOID band also interrupts WP so a 50px torpedo is
+    # not overwritten by the surface waypoint.
     avoid_close = jnp.logical_and(
         selectable,
         jnp.logical_and(
@@ -332,7 +368,10 @@ def _select_target(
             jnp.logical_and(danger_close_range > 0.0, distances <= danger_close_range),
         ),
     )
-    surface_interrupt = jnp.logical_or(avoid_close, destroy_close)
+    surface_interrupt = jnp.logical_or(
+        jnp.logical_or(avoid_close, destroy_close),
+        avoid_interrupt,
+    )
     interrupt_dist = jnp.where(surface_interrupt, distances, jnp.inf)
     best_interrupt_idx = jnp.argmin(interrupt_dist).astype(jnp.int32)
     any_surface_interrupt = jnp.any(surface_interrupt)
@@ -345,6 +384,7 @@ def _select_target(
         jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
     )
     target_idx = jnp.where(any_destroy_close, best_destroy_idx, target_idx)
+    target_idx = jnp.where(any_avoid_interrupt, best_avoid_idx, target_idx)
     if collect_requires_no_destroy:
         # Any live shark/sub beats COLLECT so the collector is never the fighter.
         # Does not steal NAVIGATE / surface WP (those still use the interrupt band).
@@ -372,6 +412,13 @@ def _select_target(
         ),
         target_idx,
     )
+    # The environment ignores movement while oxygen refills at y=46. Selecting
+    # an object there only trains a target/action association on blocked steps.
+    target_idx = jnp.where(
+        _surface_refilling_from_raw(raw_observation),
+        jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
+        target_idx,
+    )
     return target_idx.astype(jnp.int32)
 
 
@@ -384,6 +431,7 @@ def get_heuristic_target_with_state(
     *,
     danger_close_range=None,
     destroy_interrupt_range=None,
+    avoid_interrupt_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
 ):
@@ -394,6 +442,7 @@ def get_heuristic_target_with_state(
         prev_target_idx,
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
+        avoid_interrupt_range=avoid_interrupt_range,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
     )
@@ -416,6 +465,7 @@ def get_heuristic_target(
     *,
     danger_close_range=None,
     destroy_interrupt_range=None,
+    avoid_interrupt_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
 ):
@@ -427,6 +477,7 @@ def get_heuristic_target(
         prev_target_idx,
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
+        avoid_interrupt_range=avoid_interrupt_range,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
     )

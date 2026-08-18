@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from concept_based_learning.environments.manual_policy.state import PolicyState
 from concept_based_learning.environments.seaquest.heuristic_policy import (
+    AVOID_INTERRUPT_RANGE as SEAQUEST_AVOID_INTERRUPT_RANGE,
     DESTROY_INTERRUPT_RANGE as SEAQUEST_DESTROY_INTERRUPT_RANGE,
     DIVER_LANE_Y_PX as SEAQUEST_DIVER_LANE_Y_PX,
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
@@ -54,6 +55,11 @@ def _seaquest_destroy_interrupt_range(config) -> float:
     )
 
 
+def _seaquest_avoid_interrupt_range(config) -> float:
+    """AABB surface-gap px for AVOID (torpedo) interrupt; ``<=0`` disables."""
+    return float(config.get("AVOID_INTERRUPT_RANGE", SEAQUEST_AVOID_INTERRUPT_RANGE))
+
+
 def _seaquest_diver_lane_y_px(config) -> float:
     """Centre-Δy band that blocks COLLECT; ``<=0`` disables lane gating."""
     return float(config.get("DIVER_LANE_Y_PX", SEAQUEST_DIVER_LANE_Y_PX))
@@ -68,6 +74,7 @@ def _seaquest_heuristic_kwargs(config) -> dict:
     return {
         "danger_close_range": _seaquest_danger_close_range(config),
         "destroy_interrupt_range": _seaquest_destroy_interrupt_range(config),
+        "avoid_interrupt_range": _seaquest_avoid_interrupt_range(config),
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
         "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
     }

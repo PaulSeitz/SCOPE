@@ -15,6 +15,7 @@ from concept_based_learning.environments.datatypes import (
 )
 from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
 from concept_based_learning.environments.seaquest.heuristic_policy import (
+    AVOID_INTERRUPT_RANGE,
     DESTROY_INTERRUPT_RANGE,
     DIVER_LANE_Y_PX,
     O2_CRITICAL_ENEMY_INTERRUPT_RANGE,
@@ -192,6 +193,7 @@ def test_surface_waypoint_avoids_sub_on_the_right():
 def test_surface_danger_close_range():
     assert SURFACE_DANGER_CLOSE_RANGE == 25.0
     assert DESTROY_INTERRUPT_RANGE == 40.0
+    assert AVOID_INTERRUPT_RANGE == 55.0
     assert DIVER_LANE_Y_PX == 14.0
     assert O2_LOW_ENEMY_INTERRUPT_RANGE == 12.0
     assert O2_CRITICAL_ENEMY_INTERRUPT_RANGE == 0.0
@@ -221,12 +223,32 @@ def test_destroy_interrupt_beats_nearer_diver():
     assert int(target) == 5
 
 
-def test_destroy_interrupt_does_not_select_avoid_missile():
-    """AVOID in the DESTROY interrupt band must not steal COLLECT."""
+def test_avoid_interrupt_steals_destroy_when_torpedo_is_in_band():
+    """A fired torpedo inside AVOID_INTERRUPT_RANGE beats a closer shark/sub."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(diver_xy=(95.0, 100.0), missile_xy=(120.0, 100.0))
+    objs = _make_objects(shark_xy=(95.0, 100.0), missile_xy=(145.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap_missile = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 145.0, 100.0, 4.0, 2.0)
+    )
+    assert DESTROY_INTERRUPT_RANGE < gap_missile <= AVOID_INTERRUPT_RANGE
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+    assert int(target) == 30
+
+
+def test_far_avoid_does_not_steal_nearest_destroy():
+    """AVOID outside the interrupt band stays out of DESTROY/COLLECT fights."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(shark_xy=(95.0, 100.0), missile_xy=(170.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap_missile = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 170.0, 100.0, 4.0, 2.0)
+    )
+    assert gap_missile > AVOID_INTERRUPT_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
 
 
 def test_same_lane_far_shark_blocks_diver():
@@ -349,6 +371,25 @@ def test_surface_sub_selectable_near_surface_and_close():
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == SURFACE_SUB_IDX
+
+
+def test_surface_refill_selects_nothing():
+    """Do not train skills while Seaquest pins movement during oxygen refill."""
+    raw = _make_raw(px=80.0, py=46.0, oxygen=32.0, divers=2)
+    objs = _make_objects(
+        diver_xy=(100.0, 100.0),
+        shark_xy=(110.0, 100.0),
+        missile_xy=(90.0, 90.0),
+    )
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == NO_TARGET_IDX
+
+
+def test_surface_full_oxygen_resumes_targeting():
+    raw = _make_raw(px=80.0, py=46.0, oxygen=64.0, divers=2)
+    objs = _make_objects(diver_xy=(100.0, 100.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 1
 
 
 def test_surface_wp_when_full_divers_and_sub_left():

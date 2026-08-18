@@ -63,7 +63,8 @@ USE_EGO_WEAPON_FEATURES: false    # Append can_fire + facing_enemy (2 channels/f
 USE_EGO_SHOT_FEATURES: false      # Append shot_dx/shot_dy to target (zeros if no bullet). Requires weapon features. Options: true/false.
 USE_EGO_SHOT_BETWEEN: false       # Append 0/1: player missile on the open player→target segment (DESTROY only). Requires weapon features. Options: true/false.
 USE_DESTROY_ONLY_EGO_EXTRAS: false # DESTROY keeps LoS/weapon extras; other skills get pose only (different in_dim). Options: true/false.
-EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization. Options: null or number > 0.
+EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization (cap is the new max). Options: null or number > 0.
+EGO_ANGLE_BINS: null              # Replace sin/cos(ψ) with N overlapping world-θ bins (50% triangular). Options: null or int >= 2.
 
 # Seaquest compatibility toggles.
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false           # Use old orientation-relative action mapper. Options: true/false.
@@ -226,5 +227,7 @@ alg:
   SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
   FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.
   SURFACE_DANGER_CLOSE_RANGE: 25.0  # Seaquest: while forced to surface, AVOID/DESTROY within this Euclidean px override the WP. <=0 disables. Options: float.
+  DESTROY_INTERRUPT_RANGE: 40.0     # Seaquest: DESTROY (sharks/subs) steal nearer COLLECT within this AABB gap. <=0 disables. Options: float.
+  AVOID_INTERRUPT_RANGE: 55.0       # Seaquest: AVOID (torpedoes) steal DESTROY/COLLECT within this AABB gap. Larger than DESTROY_INTERRUPT_RANGE. <=0 disables. Options: float.
   COLLECT_REQUIRES_NO_DESTROY: false # Seaquest: if any selectable DESTROY exists, never target COLLECT (nearest shark/sub wins). Does not steal NAVIGATE / surface WP. Options: true/false.
   FREEWAY_THREAT_DIST_THRESH: null  # Freeway threat gating threshold. Options: float > 0 or null.

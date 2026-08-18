@@ -26,8 +26,8 @@ Usage:
   # COLLECT death-off vs DESTROY-first heuristic (2 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite collect_combat_probes --gpus 0,1 --wait-deps --lean
 
-  # No surfacing-death env mod (urg-v2 clone; needs JAXAtari no_surfacing_death):
-  python scripts/run_paper_eval.py --suite no_surface_death --wait-deps --lean
+  # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
+  python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
@@ -171,6 +171,23 @@ NO_SURFACE_DEATH_STEMS = (
     "seaquest_skills_ego_no_surface_death_eval",
     "pong_transfer_ego_no_surface_death",
 )
+# urg-v2 + new heuristic: 2×2 of distance clip 50px and 8 world-θ bins.
+# Shard-critical for 4 GPUs: GPU i gets train/eval/pong of one arm.
+EGO_CLIP_BINS_SUITE = "ego_clip_bins"
+EGO_CLIP_BINS_STEMS = (
+    "seaquest_skills_ego_clip_bins_base",
+    "seaquest_skills_ego_clip50",
+    "seaquest_skills_ego_angbins",
+    "seaquest_skills_ego_clip50_angbins",
+    "seaquest_skills_ego_clip_bins_base_eval",
+    "seaquest_skills_ego_clip50_eval",
+    "seaquest_skills_ego_angbins_eval",
+    "seaquest_skills_ego_clip50_angbins_eval",
+    "pong_transfer_ego_clip_bins_base",
+    "pong_transfer_ego_clip50",
+    "pong_transfer_ego_angbins",
+    "pong_transfer_ego_clip50_angbins",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -179,6 +196,7 @@ SUITE_STEMS = {
     EGO_POSE_PROBES_SUITE: EGO_POSE_PROBES_STEMS,
     COLLECT_COMBAT_PROBES_SUITE: COLLECT_COMBAT_PROBES_STEMS,
     NO_SURFACE_DEATH_SUITE: NO_SURFACE_DEATH_STEMS,
+    EGO_CLIP_BINS_SUITE: EGO_CLIP_BINS_STEMS,
 }
 
 
@@ -1023,6 +1041,7 @@ _EVAL_OVERRIDE_KEYS = (
     "GAME_MODS",
     "SURFACE_DANGER_CLOSE_RANGE",
     "DESTROY_INTERRUPT_RANGE",
+    "AVOID_INTERRUPT_RANGE",
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
 )
@@ -1349,7 +1368,10 @@ def main() -> None:
             f"{COLLECT_COMBAT_PROBES_SUITE}: urg-v2 clones — COLLECT death "
             "penalty off vs DESTROY-first (COLLECT never fights); 2 GPUs. "
             f"{NO_SURFACE_DEATH_SUITE}: urg-v2 clone trained with "
-            "no_surfacing_death (0-diver surface is not a life loss)."
+            "no_surfacing_death (0-diver surface is not a life loss). "
+            f"{EGO_CLIP_BINS_SUITE}: urg-v2 + new heuristic; 2×2 of "
+            "distance clip 50px and 8 overlapping world-θ bins "
+            "(replace sin/cos(ψ)); 4 GPUs, one arm each."
         ),
     )
     parser.add_argument(
@@ -1359,7 +1381,7 @@ def main() -> None:
             "With --suite: skip train configs (requires existing ckpts). "
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
-            "and no_surface_death."
+            "no_surface_death, and ego_clip_bins."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1609,6 +1631,7 @@ def main() -> None:
         EGO_POSE_PROBES_SUITE,
         COLLECT_COMBAT_PROBES_SUITE,
         NO_SURFACE_DEATH_SUITE,
+        EGO_CLIP_BINS_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
