@@ -23,6 +23,9 @@ Usage:
   # Pose-only vs DESTROY-only extras (2 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_pose_probes --gpus 0,1 --wait-deps --lean
 
+  # COLLECT death-off vs DESTROY-first heuristic (2 GPUs, one arm each):
+  python scripts/run_paper_eval.py --suite collect_combat_probes --gpus 0,1 --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -149,12 +152,23 @@ EGO_POSE_PROBES_STEMS = (
     "pong_transfer_ego_pose",
     "pong_transfer_ego_destroy_extras",
 )
+COLLECT_COMBAT_PROBES_SUITE = "collect_combat_probes"
+# Isolated urg-v2 clones: COLLECT death penalty off vs DESTROY-first heuristic.
+COLLECT_COMBAT_PROBES_STEMS = (
+    "seaquest_skills_ego_collect_nodeath",
+    "seaquest_skills_ego_destroy_first",
+    "seaquest_skills_ego_collect_nodeath_eval",
+    "seaquest_skills_ego_destroy_first_eval",
+    "pong_transfer_ego_collect_nodeath",
+    "pong_transfer_ego_destroy_first",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
     DESTROY_URGENCY_SUITE: DESTROY_URGENCY_STEMS,
     COLLECT_SHOT_PROBES_SUITE: COLLECT_SHOT_PROBES_STEMS,
     EGO_POSE_PROBES_SUITE: EGO_POSE_PROBES_STEMS,
+    COLLECT_COMBAT_PROBES_SUITE: COLLECT_COMBAT_PROBES_STEMS,
 }
 
 
@@ -1000,6 +1014,7 @@ _EVAL_OVERRIDE_KEYS = (
     "SURFACE_DANGER_CLOSE_RANGE",
     "DESTROY_INTERRUPT_RANGE",
     "DIVER_LANE_Y_PX",
+    "COLLECT_REQUIRES_NO_DESTROY",
 )
 
 
@@ -1320,7 +1335,9 @@ def main() -> None:
             f"{COLLECT_SHOT_PROBES_SUITE}: COLLECT living tax (NAVIGATE still "
             "shaped) and DESTROY shot-between bit; 2 GPUs, one arm each. "
             f"{EGO_POSE_PROBES_SUITE}: pose-only 12-dim vs DESTROY-only extras "
-            "(COLLECT/AVOID/NAVIGATE pose, DESTROY pose+LoS+weapon); 2 GPUs."
+            "(COLLECT/AVOID/NAVIGATE pose, DESTROY pose+LoS+weapon); 2 GPUs. "
+            f"{COLLECT_COMBAT_PROBES_SUITE}: urg-v2 clones — COLLECT death "
+            "penalty off vs DESTROY-first (COLLECT never fights); 2 GPUs."
         ),
     )
     parser.add_argument(
@@ -1329,7 +1346,7 @@ def main() -> None:
         help=(
             "With --suite: skip train configs (requires existing ckpts). "
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
-            "collect_shot_probes, and ego_pose_probes."
+            "collect_shot_probes, ego_pose_probes, and collect_combat_probes."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1577,6 +1594,7 @@ def main() -> None:
         DESTROY_URGENCY_SUITE,
         COLLECT_SHOT_PROBES_SUITE,
         EGO_POSE_PROBES_SUITE,
+        COLLECT_COMBAT_PROBES_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:

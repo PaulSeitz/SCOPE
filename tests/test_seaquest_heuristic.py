@@ -245,6 +245,46 @@ def test_other_lane_shark_allows_diver():
     assert int(target) == 1
 
 
+def test_collect_requires_no_destroy_steals_other_lane_diver():
+    """Any live DESTROY beats COLLECT, including a far other-lane shark."""
+    raw = _make_raw(px=80.0, py=100.0)
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 160.0))
+    target = get_heuristic_target(
+        raw,
+        objs,
+        jnp.int32(NO_TARGET_IDX),
+        None,
+        collect_requires_no_destroy=True,
+    )
+    assert int(target) == 5
+
+
+def test_collect_requires_no_destroy_does_not_steal_surface_wp():
+    """Surface WP still wins when O2/divers require surfacing, even with a shark."""
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=6,
+        oxygen=64.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    objs = _make_objects(
+        diver_xy=(100.0, 100.0),
+        shark_xy=(140.0, 160.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(
+        raw,
+        objs,
+        jnp.int32(NO_TARGET_IDX),
+        None,
+        collect_requires_no_destroy=True,
+    )
+    assert int(target) == SURFACE_DUMMY_IDX
+
+
 def test_nearest_among_multiple_sharks():
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(

@@ -59,11 +59,17 @@ def _seaquest_diver_lane_y_px(config) -> float:
     return float(config.get("DIVER_LANE_Y_PX", SEAQUEST_DIVER_LANE_Y_PX))
 
 
+def _seaquest_collect_requires_no_destroy(config) -> bool:
+    """If True, any live DESTROY beats COLLECT (COLLECT never fights)."""
+    return bool(config.get("COLLECT_REQUIRES_NO_DESTROY", False))
+
+
 def _seaquest_heuristic_kwargs(config) -> dict:
     return {
         "danger_close_range": _seaquest_danger_close_range(config),
         "destroy_interrupt_range": _seaquest_destroy_interrupt_range(config),
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
+        "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
     }
 
 

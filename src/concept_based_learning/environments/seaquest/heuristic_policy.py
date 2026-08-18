@@ -6,6 +6,9 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   (no shark/sub with |Δy| ≤ ``DIVER_LANE_Y_PX``). Otherwise prefer sharks,
   even when they are farther than the diver, so lanes are cleared before
   diving in for a collect.
+- Optional ``COLLECT_REQUIRES_NO_DESTROY``: if any selectable DESTROY exists,
+  never target a diver (nearest shark/sub wins). Surface WP / NAVIGATE are
+  unchanged. Use this so COLLECT is not asked to fight.
 - Surface sub (slot 29) is ignored unless the player is near the surface and
   within ``SURFACE_SUB_NEAR_RANGE``.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
@@ -231,6 +234,7 @@ def _select_target(
     danger_close_range=None,
     destroy_interrupt_range=None,
     diver_lane_y_px=None,
+    collect_requires_no_destroy=False,
 ):
     """Nearest object by AABB surface gap; lane-clear COLLECT; surface WP."""
     del prev_target_idx
@@ -240,6 +244,7 @@ def _select_target(
         destroy_interrupt_range = DESTROY_INTERRUPT_RANGE
     if diver_lane_y_px is None:
         diver_lane_y_px = DIVER_LANE_Y_PX
+    collect_requires_no_destroy = bool(collect_requires_no_destroy)
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
     destroy_interrupt_range = jnp.asarray(destroy_interrupt_range, dtype=jnp.float32)
     diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
@@ -340,6 +345,23 @@ def _select_target(
         jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
     )
     target_idx = jnp.where(any_destroy_close, best_destroy_idx, target_idx)
+    if collect_requires_no_destroy:
+        # Any live shark/sub beats COLLECT so the collector is never the fighter.
+        # Does not steal NAVIGATE / surface WP (those still use the interrupt band).
+        any_destroy = jnp.any(jnp.logical_and(is_destroy, selectable))
+        destroy_any_dist = jnp.where(
+            jnp.logical_and(is_destroy, selectable), distances, jnp.inf
+        )
+        nearest_destroy_idx = jnp.argmin(destroy_any_dist).astype(jnp.int32)
+        tgt_clip = jnp.clip(target_idx, 0, labels.shape[0] - 1)
+        is_collect_tgt = jnp.logical_and(
+            target_idx >= 0, labels[tgt_clip] == LABEL_COLLECT
+        )
+        target_idx = jnp.where(
+            jnp.logical_and(is_collect_tgt, any_destroy),
+            nearest_destroy_idx,
+            target_idx,
+        )
     # Prefer surface WP when required, unless a nearby danger overrides.
     target_idx = jnp.where(
         force_surface,
@@ -363,6 +385,7 @@ def get_heuristic_target_with_state(
     danger_close_range=None,
     destroy_interrupt_range=None,
     diver_lane_y_px=None,
+    collect_requires_no_destroy=False,
 ):
     del rng
     target = _select_target(
@@ -372,6 +395,7 @@ def get_heuristic_target_with_state(
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
         diver_lane_y_px=diver_lane_y_px,
+        collect_requires_no_destroy=collect_requires_no_destroy,
     )
     # Persist DESTROY/COLLECT only (AVOID is reactive; surface WP is re-forced).
     labels = objects.semantic_label[-1]
@@ -393,6 +417,7 @@ def get_heuristic_target(
     danger_close_range=None,
     destroy_interrupt_range=None,
     diver_lane_y_px=None,
+    collect_requires_no_destroy=False,
 ):
     """Stateless wrapper."""
     del rng
@@ -403,4 +428,5 @@ def get_heuristic_target(
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
         diver_lane_y_px=diver_lane_y_px,
+        collect_requires_no_destroy=collect_requires_no_destroy,
     )

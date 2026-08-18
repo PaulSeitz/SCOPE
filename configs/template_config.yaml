@@ -226,4 +226,5 @@ alg:
   SURFACE_PICK_PROB: 0.0            # Seaquest heuristic probability to pick surface target. Options: float in [0,1].
   FORCE_SURFACE_OVERRIDE: false     # Seaquest heuristic hard override to surface target. Options: true/false.
   SURFACE_DANGER_CLOSE_RANGE: 25.0  # Seaquest: while forced to surface, AVOID/DESTROY within this Euclidean px override the WP. <=0 disables. Options: float.
+  COLLECT_REQUIRES_NO_DESTROY: false # Seaquest: if any selectable DESTROY exists, never target COLLECT (nearest shark/sub wins). Does not steal NAVIGATE / surface WP. Options: true/false.
   FREEWAY_THREAT_DIST_THRESH: null  # Freeway threat gating threshold. Options: float > 0 or null.
