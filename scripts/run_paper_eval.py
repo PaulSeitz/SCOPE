@@ -29,8 +29,11 @@ Usage:
   # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
-  # Winner of ego_clip_bins (clip50+θ bins) with constant SKILL_LR:
-  python scripts/run_paper_eval.py --suite clip_bins_nodecay --wait-deps --lean
+  # Overnight, two GPUs (do not use --gpus on these; pin CUDA yourself):
+  #   GPU 0: full eval of existing clip50+θ-bins ckpt, then RQ3 OC tandem
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite clip50_angbins_full --wait-deps --lean
+  #   GPU 1: retraining with constant SKILL_LR, then the same full eval
+  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite clip_bins_nodecay --wait-deps --lean
 
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
@@ -196,6 +199,19 @@ CLIP_BINS_NODECAY_STEMS = (
     "seaquest_skills_ego_clip50_angbins_nodecay",
     "seaquest_skills_ego_clip50_angbins_nodecay_eval",
     "pong_transfer_ego_clip50_angbins_nodecay",
+    "tennis_transfer_ego_clip50_angbins_nodecay",
+    "beamrider_transfer_ego_clip50_angbins_nodecay",
+)
+# Paper-scale eval of the clip50+θ-bins winner (existing ckpt). 1 GPU:
+# full Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem.
+CLIP50_ANGBINS_FULL_SUITE = "clip50_angbins_full"
+CLIP50_ANGBINS_FULL_STEMS = (
+    "seaquest_skills_ego_clip50_angbins_eval_full",
+    "pong_transfer_ego_clip50_angbins_full",
+    "tennis_transfer_ego_clip50_angbins",
+    "beamrider_transfer_ego_clip50_angbins",
+    "seaquest_tandem_oc_ego_clip50_angbins",
+    "seaquest_tandem_oc_ego_clip50_angbins_eval",
 )
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
@@ -207,6 +223,7 @@ SUITE_STEMS = {
     NO_SURFACE_DEATH_SUITE: NO_SURFACE_DEATH_STEMS,
     EGO_CLIP_BINS_SUITE: EGO_CLIP_BINS_STEMS,
     CLIP_BINS_NODECAY_SUITE: CLIP_BINS_NODECAY_STEMS,
+    CLIP50_ANGBINS_FULL_SUITE: CLIP50_ANGBINS_FULL_STEMS,
 }
 
 
@@ -420,6 +437,15 @@ def _skill_ckpt_from_save(save_path: str | Path, env_name: str, seed: int) -> Pa
     return root / env_name / f"hierarchical_pqn_{env_name}_seed{seed}.safetensors"
 
 
+def _config_yaml_for_stem(stem: str) -> Path | None:
+    """Resolve a paper_eval YAML by stem (rq1 first, then any rq/)."""
+    rq1 = CONFIG_DIR / "rq1" / f"{stem}.yaml"
+    if rq1.is_file():
+        return rq1
+    matches = list(CONFIG_DIR.rglob(f"{stem}.yaml"))
+    return matches[0] if matches else None
+
+
 def _eval_json_path(stem: str) -> Path:
     return (
         PROJECT_ROOT
@@ -590,17 +616,20 @@ def _filter_remaining_paths(
 
 
 def _rq1_checkpoint_ready(stem: str, *, seed: int) -> tuple[bool, Path]:
-    path = CONFIG_DIR / "rq1" / f"{stem}.yaml"
-    if not path.is_file():
-        return False, path
+    """True when the train artifacts for ``stem`` exist (skills, or tandem pair)."""
+    path = _config_yaml_for_stem(stem)
+    if path is None:
+        return False, CONFIG_DIR / "rq1" / f"{stem}.yaml"
     raw = _load_yaml(path)
     cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
-    ckpt = _skill_ckpt_from_save(
-        cfg.get("SAVE_PATH", f"./outputs/models/paper_eval/rq1/{stem}"),
-        str(cfg.get("ENV_NAME", "seaquest")),
-        int(cfg.get("SEED", seed)),
+    kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
+    artifacts = _skills_train_artifacts(
+        cfg, seed=int(cfg.get("SEED", seed)), kind=kind
     )
-    return ckpt.is_file(), ckpt
+    missing = [p for p in artifacts if not p.is_file()]
+    if missing:
+        return False, missing[0]
+    return True, artifacts[0]
 
 
 def _check_rq_gate(paths: list[Path], *, seed: int) -> None:
@@ -1159,6 +1188,8 @@ def _run_mod_eval(
         "transfer": "transfer",
         "skills": "skills",
         "hierarchical": "skills",
+        "tandem": "skills",
+        "meta": "skills",
     }.get(kind, kind)
 
     out_json = (
@@ -1382,8 +1413,11 @@ def main() -> None:
             f"{EGO_CLIP_BINS_SUITE}: urg-v2 + new heuristic; 2×2 of "
             "distance clip 50px and 8 overlapping world-θ bins "
             "(replace sin/cos(ψ)); 4 GPUs, one arm each. "
-            f"{CLIP_BINS_NODECAY_SUITE}: clip50+θ-bins winner with constant "
-            "SKILL_LR (no decay)."
+            f"{CLIP_BINS_NODECAY_SUITE}: retraining clip50+θ-bins with constant "
+            "SKILL_LR, then full Seaquest/Pong/Tennis/BeamRider eval. "
+            f"{CLIP50_ANGBINS_FULL_SUITE}: existing clip50+θ-bins ckpt; full "
+            "Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem "
+            "(1 GPU sequential)."
         ),
     )
     parser.add_argument(
@@ -1393,7 +1427,8 @@ def main() -> None:
             "With --suite: skip train configs (requires existing ckpts). "
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
-            "no_surface_death, ego_clip_bins, and clip_bins_nodecay."
+            "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
+            "clip50_angbins_full."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1645,6 +1680,7 @@ def main() -> None:
         NO_SURFACE_DEATH_SUITE,
         EGO_CLIP_BINS_SUITE,
         CLIP_BINS_NODECAY_SUITE,
+        CLIP50_ANGBINS_FULL_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
