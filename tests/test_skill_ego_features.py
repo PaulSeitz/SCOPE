@@ -1,9 +1,13 @@
+import jax
 import jax.numpy as jnp
 
 from concept_based_learning.environments.datatypes import LABEL_COLLECT, LABEL_DESTROY
 from concept_based_learning.observations.egocentric import (
     configure_ego_obs_from_config,
     ego_obs_channels_per_frame,
+    ego_pose_channels_per_frame,
+    skill_ego_flat_dim,
+    slice_skill_ego,
 )
 from concept_based_learning.observations.skill_ego_features import (
     CAN_FIRE_IN_FLIGHT,
@@ -341,3 +345,96 @@ def test_shot_between_zero_on_env_without_bullets():
     extras = build_skill_ego_extras_stacked(_PongObs())
     assert extras.shape == (2, 3)
     assert float(extras[0, 2]) == 0.0
+
+
+def _paper_eval_ego_cfg(**overrides):
+    cfg = {
+        "USE_LEGACY_EGO_OBS": False,
+        "USE_EGO_SIZE_FEATURES": False,
+        "USE_EGO_VELOCITY_FEATURES": False,
+        "USE_EGO_BLOCKING_FEATURES": True,
+        "USE_EGO_WEAPON_FEATURES": True,
+        "USE_EGO_SHOT_FEATURES": False,
+        "USE_EGO_SHOT_BETWEEN": False,
+        "USE_DESTROY_ONLY_EGO_EXTRAS": False,
+        "ENV_NAME": "seaquest",
+    }
+    cfg.update(overrides)
+    configure_ego_obs_from_config(cfg)
+    return cfg
+
+
+def test_pose_only_is_12_dim_for_every_skill():
+    _paper_eval_ego_cfg(
+        USE_EGO_BLOCKING_FEATURES=False,
+        USE_EGO_WEAPON_FEATURES=False,
+        USE_DESTROY_ONLY_EGO_EXTRAS=False,
+    )
+    assert ego_pose_channels_per_frame() == 3
+    assert ego_obs_channels_per_frame() == 3
+    for i in range(4):
+        assert skill_ego_flat_dim(i, stack_size=4) == 12
+
+
+def test_destroy_only_extras_shrinks_collect_avoid_navigate():
+    _paper_eval_ego_cfg(USE_DESTROY_ONLY_EGO_EXTRAS=True)
+    # pose 3 + los 1 + can_fire/facing 2 = 6 / frame → 24 DESTROY, 12 others
+    assert ego_obs_channels_per_frame() == 6
+    assert skill_ego_flat_dim(0, stack_size=4, destroy_skill_idx=0) == 24
+    for i in (1, 2, 3):
+        assert skill_ego_flat_dim(i, stack_size=4, destroy_skill_idx=0) == 12
+
+
+def test_slice_skill_ego_drops_weapon_for_collect():
+    _paper_eval_ego_cfg(USE_DESTROY_ONLY_EGO_EXTRAS=True)
+    # Fake a 4-stack full vector; last frame extras are the tail of each 6-block.
+    full = jnp.arange(24, dtype=jnp.float32)
+    collect = slice_skill_ego(full, 1, stack_size=4, destroy_skill_idx=0)
+    assert collect.shape == (12,)
+    # Pose prefix per frame is 3 channels; extras (los, can_fire, facing) dropped.
+    expected = jnp.concatenate([full[frame * 6 : frame * 6 + 3] for frame in range(4)])
+    assert jnp.allclose(collect, expected)
+    destroy = slice_skill_ego(full, 0, stack_size=4, destroy_skill_idx=0)
+    assert destroy.shape == (24,)
+    assert jnp.allclose(destroy, full)
+
+
+def test_pong_collect_pose_has_no_can_fire_channel():
+    """Pong COLLECT intercept should not see Seaquest leftover magazine bits."""
+    _paper_eval_ego_cfg(USE_DESTROY_ONLY_EGO_EXTRAS=True, ENV_NAME="pong")
+    assert skill_ego_flat_dim(1, stack_size=4) == 12
+    # Shared (non-sliced) layout still builds the extras for DESTROY / occupancy.
+    assert ego_obs_channels_per_frame() == 6
+
+
+def test_flatten_packed_skill_params_roundtrip():
+    from flax.traverse_util import unflatten_dict
+
+    from concept_based_learning.training.skill_params import (
+        as_per_skill_param_list,
+        flatten_skill_params,
+    )
+
+    packed = tuple(
+        {"Dense_0": {"kernel": jnp.zeros((12 if i else 24, 8))}} for i in range(4)
+    )
+    flat = flatten_skill_params(packed)
+    restored = unflatten_dict(flat, sep=",")
+    listed = as_per_skill_param_list(restored)
+    assert listed is not None
+    assert len(listed) == 4
+    assert listed[0]["Dense_0"]["kernel"].shape[0] == 24
+    assert listed[1]["Dense_0"]["kernel"].shape[0] == 12
+
+
+def test_qnetwork_accepts_per_skill_in_dim():
+    from concept_based_learning.networks.skill_network import QNetwork
+
+    net = QNetwork(action_dim=18, hidden_size=8, num_layers=2)
+    rng = jax.random.PRNGKey(0)
+    v24 = net.init(rng, jnp.zeros(24), train=False)
+    v12 = net.init(rng, jnp.zeros(12), train=False)
+    q24 = net.apply({"params": v24["params"]}, jnp.zeros((2, 24)), train=False)
+    q12 = net.apply({"params": v12["params"]}, jnp.zeros((2, 12)), train=False)
+    assert q24.shape == (2, 18)
+    assert q12.shape == (2, 18)

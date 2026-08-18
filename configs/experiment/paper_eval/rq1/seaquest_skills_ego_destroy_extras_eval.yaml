@@ -1,0 +1,39 @@
+# DESTROY-only extras eval: DESTROY 24-dim, other skills 12-dim pose. Urgency rewards.
+# Lean suite: train + 5 Seaquest mods + Pong base transfer.
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: skills
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_MOD_KEYS:
+- base
+- faster_enemies
+- only_sharks
+- no_divers
+- peaceful_enemies
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_ego_destroy_extras
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_destroy_extras/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_destroy_extras
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: seaquest
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_destroy_extras
+WANDB_RUN_NAME: sq_paper_rq1_eval_ego_destroy_extras
+WANDB_TAGS:
+- suite:paper_eval
+- rq:1
+- env:seaquest
+- phase:mod_eval
+- skill_input:ego
+- ego:destroy_extras
+- destroy:contact_fail
+- destroy:living_penalty
+- probe:destroy_extras
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: env_specific
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
+USE_EGO_SHOT_FEATURES: false
+USE_EGO_SHOT_BETWEEN: false
+USE_DESTROY_ONLY_EGO_EXTRAS: true

@@ -13,7 +13,15 @@ import numpy as np
 import optax
 from pathlib import Path
 
-from concept_based_learning.observations.egocentric import get_ego_obs
+from concept_based_learning.observations.egocentric import (
+    destroy_only_extras_active,
+    get_ego_obs,
+    set_destroy_only_ego_extras,
+    skill_ego_flat_dim,
+    slice_skill_ego,
+    take_ego_pose,
+)
+from concept_based_learning.training.skill_params import as_per_skill_param_list
 from concept_based_learning.observations.egocentric import _get_player as _get_player_entity
 from concept_based_learning.observations.action_space import fire_ego_action_indices
 from concept_based_learning.networks.skill_network import (
@@ -204,6 +212,13 @@ def make_train(
     symbolic_collect_skill_idx = int(config.get("COLLECT_SKILL_INDEX", 1))
     symbolic_collect_up_action = int(config.get("SYMBOLIC_COLLECT_UP_ACTION", 1))
     skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    frame_stack_size = int(config.get("FRAME_STACK_SIZE", 4))
+    destroy_skill_idx = skill_names.index("DESTROY") if "DESTROY" in skill_names else 0
+    set_destroy_only_ego_extras(bool(config.get("USE_DESTROY_ONLY_EGO_EXTRAS", False)))
+    heterogeneous_skill_ego = (
+        destroy_only_extras_active()
+        and skill_input_mode in ("ego", "ego_embed")
+    )
     use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
     use_object_skill = skill_input_mode in OBJECT_CONDITIONED_SKILL_INPUT_MODES
     skill_bootstrap_chunk_steps = resolve_skill_chunk_steps(
@@ -387,7 +402,30 @@ def make_train(
         else:
             ego_feat_dim = int(probe_ego.shape[-1])
 
-        if params is None:
+        def _skill_counter(states, field: str):
+            if isinstance(states, tuple):
+                return getattr(states[0], field)
+            return getattr(states, field)[0]
+
+        if heterogeneous_skill_ego:
+            packed_init = None if params is None else as_per_skill_param_list(params)
+            if params is not None and packed_init is None:
+                raise ValueError(
+                    "USE_DESTROY_ONLY_EGO_EXTRAS needs per-skill checkpoints "
+                    "(packed skill-0..N params). Shared stacked Dense_0 is the "
+                    "legacy same-width layout."
+                )
+            states = []
+            for i in range(NUM_SKILLS):
+                dim_i = skill_ego_flat_dim(
+                    i,
+                    stack_size=frame_stack_size,
+                    destroy_skill_idx=destroy_skill_idx,
+                )
+                init_p = None if packed_init is None else packed_init[i]
+                states.append(create_agent(rng_keys[i], skill_network, dim_i, init_p))
+            train_states = tuple(states)
+        elif params is None:
             train_states = jax.vmap(create_agent, in_axes=(0, None, None, None))(
                 rng_keys, skill_network, ego_feat_dim, None
             )
@@ -471,7 +509,7 @@ def make_train(
                     )
                     meta_eps = jnp.full(
                         config["NUM_ENVS"],
-                        meta_eps_scheduler(train_states.n_updates[0]),
+                        meta_eps_scheduler(_skill_counter(train_states, "n_updates")),
                     )
                     target_obj_idxs = jax.vmap(eps_greedy_exploration)(
                         policy_rngs, meta_q_vals, meta_eps, safe_masks
@@ -550,10 +588,10 @@ def make_train(
                     else last_obs.raw_observation
                 )
 
-                def compute_skill_actions(train_state, skill_idx):
+                def compute_skill_actions(train_state, skill_idx, ego_for_skill):
                     q_vals = skill_network.apply(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
-                        ego_obses,
+                        ego_for_skill,
                         train=False,
                         target_idx=safe_target_idxs,
                         pixel_obs=pixel_obses if use_pixel_skill else None,
@@ -587,12 +625,30 @@ def make_train(
                     ego_action = jax.vmap(eps_greedy_exploration)(_rngs, q_vals, eps, mask)
                     return ego_action, q_vals
 
-                all_ego_actions, all_skill_q_vals = map_over_skills(
-                    compute_skill_actions,
-                    train_states,
-                    jnp.arange(NUM_SKILLS, dtype=jnp.int32),
-                    sequential=use_pixel_skill,
-                )
+                if heterogeneous_skill_ego:
+                    acts = []
+                    qs = []
+                    for i in range(NUM_SKILLS):
+                        ego_i = slice_skill_ego(
+                            ego_obses,
+                            i,
+                            stack_size=frame_stack_size,
+                            destroy_skill_idx=destroy_skill_idx,
+                        )
+                        a_i, q_i = compute_skill_actions(
+                            train_states[i], jnp.int32(i), ego_i
+                        )
+                        acts.append(a_i)
+                        qs.append(q_i)
+                    all_ego_actions = jnp.stack(acts)
+                    all_skill_q_vals = jnp.stack(qs)
+                else:
+                    all_ego_actions, all_skill_q_vals = map_over_skills(
+                        lambda state, idx: compute_skill_actions(state, idx, ego_obses),
+                        train_states,
+                        jnp.arange(NUM_SKILLS, dtype=jnp.int32),
+                        sequential=use_pixel_skill,
+                    )
 
                 chosen_ego_actions = all_ego_actions[
                     active_skills, jnp.arange(config["NUM_ENVS"])
@@ -976,7 +1032,7 @@ def make_train(
                 maybe_jax_check_rollout_transitions(
                     config,
                     transitions=transitions,
-                    update_idx=train_states.n_updates[0],
+                    update_idx=_skill_counter(train_states, "n_updates"),
                     max_objects=MAX_OBJECTS,
                     no_target_idx=no_target_idx,
                     skill_input_mode=skill_input_mode,
@@ -1004,11 +1060,16 @@ def make_train(
             ) = carry_final
             expl_state = (last_obs, env_state)
 
-            def _update_skill(train_state, skill_idx, rng):
+            def _update_skill(train_state, skill_idx, rng, pose_only=False):
                 train_state = train_state.replace(
                     timesteps=train_state.timesteps + config["NUM_STEPS"] * config["NUM_ENVS"]
                 )
                 use_one_step_td = skill_bootstrap == "one_step"
+
+                def _ego(x):
+                    if (not pose_only) or x is None:
+                        return x
+                    return take_ego_pose(x, stack_size=frame_stack_size)
 
                 if relabel_all_objects:
                     # Lambda returns over [NUM_STEPS, NUM_ENVS, MAX_OBJECTS].
@@ -1026,7 +1087,7 @@ def make_train(
                         skill_network.apply,
                         train_state.params,
                         train_state.batch_stats,
-                        transitions.next_ego_obs_all,
+                        _ego(transitions.next_ego_obs_all),
                         target_idx=target_idx_all,
                         pixel_obs=next_pixel_obs_all,
                         objects=next_objects_all,
@@ -1092,7 +1153,7 @@ def make_train(
                         skill_network.apply,
                         train_state.params,
                         train_state.batch_stats,
-                        transitions.next_ego_obs,
+                        _ego(transitions.next_ego_obs),
                         target_idx=transitions.target_idx,
                         pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                         objects=transitions.next_objects if use_object_skill else None,
@@ -1121,7 +1182,7 @@ def make_train(
                         skill_network.apply,
                         train_state.params,
                         train_state.batch_stats,
-                        transitions.next_ego_obs,
+                        _ego(transitions.next_ego_obs),
                         target_idx=transitions.target_idx,
                         pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                         objects=transitions.next_objects if use_object_skill else None,
@@ -1189,7 +1250,7 @@ def make_train(
                                 maybe_jax_check_skill_minibatch(
                                     config,
                                     update_idx=train_state.n_updates,
-                                    ego_obs=minibatch["ego_obs_all"],
+                                    ego_obs=_ego(minibatch["ego_obs_all"]),
                                     target_idx=mb_target_idx,
                                     pixel_obs=mb_pixel_obs,
                                     use_pixel_skill=use_pixel_skill,
@@ -1197,7 +1258,7 @@ def make_train(
                                 )
                             q_vals, updates = skill_network.apply(
                                 {"params": params, "batch_stats": train_state.batch_stats},
-                                minibatch["ego_obs_all"],
+                                _ego(minibatch["ego_obs_all"]),
                                 train=True,
                                 mutable=["batch_stats"],
                                 target_idx=mb_target_idx,
@@ -1296,13 +1357,30 @@ def make_train(
                 return metrics, train_state
 
             rngs = jax.random.split(rng, NUM_SKILLS)
-            skill_metrics, train_states = map_over_skills(
-                _update_skill,
-                train_states,
-                jnp.arange(NUM_SKILLS),
-                rngs,
-                sequential=use_pixel_skill,
-            )
+            if heterogeneous_skill_ego:
+                metrics_list = []
+                new_states = []
+                for i in range(NUM_SKILLS):
+                    m_i, st_i = _update_skill(
+                        train_states[i],
+                        jnp.int32(i),
+                        rngs[i],
+                        pose_only=(i != destroy_skill_idx),
+                    )
+                    metrics_list.append(m_i)
+                    new_states.append(st_i)
+                skill_metrics = jax.tree_util.tree_map(
+                    lambda *xs: jnp.stack(xs), *metrics_list
+                )
+                train_states = tuple(new_states)
+            else:
+                skill_metrics, train_states = map_over_skills(
+                    _update_skill,
+                    train_states,
+                    jnp.arange(NUM_SKILLS),
+                    rngs,
+                    sequential=use_pixel_skill,
+                )
 
             metrics = {
                 f"skill_{skill_names[i]}/{k}": v[i]
@@ -1369,9 +1447,13 @@ def make_train(
                 )
                 metrics["freeway/car_hits_per_update"] = car_hits_sum
 
-            metrics["update_steps"] = train_states.n_updates[0]
-            metrics["global/update_steps"] = step_offset_updates + train_states.n_updates[0]
-            metrics["env/step"] = step_offset_timesteps + train_states.timesteps[0]
+            metrics["update_steps"] = _skill_counter(train_states, "n_updates")
+            metrics["global/update_steps"] = step_offset_updates + _skill_counter(
+                train_states, "n_updates"
+            )
+            metrics["env/step"] = step_offset_timesteps + _skill_counter(
+                train_states, "timesteps"
+            )
 
             if config.get("WANDB_MODE", "disabled") != "disabled" or training_metrics_csv is not None:
                 def _wandb_log_cb(m):
@@ -1406,7 +1488,7 @@ def make_train(
 
             if is_rtpt_enabled(config):
                 # Pass a scan-dependent value so JAX cannot hoist this callback.
-                jax.debug.callback(rtpt_step_callback, train_states.n_updates[0])
+                jax.debug.callback(rtpt_step_callback, _skill_counter(train_states, "n_updates"))
 
             runner_state = (
                 train_states,

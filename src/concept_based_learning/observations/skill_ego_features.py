@@ -134,6 +134,8 @@ def configure_ego_weapon_features(
     open player→target segment).
     ``num_skills`` / ``extra_dim_per_skill`` are ignored (kept for call-site
     compatibility with older configs that passed a padded per-skill dim).
+    Different skill in-dims use ``USE_DESTROY_ONLY_EGO_EXTRAS`` (pose for
+    COLLECT/AVOID/NAVIGATE; extras concatenated only on DESTROY).
     """
     del num_skills, extra_dim_per_skill
     global _USE_EGO_WEAPON_FEATURES, _USE_EGO_SHOT_FEATURES, _USE_EGO_SHOT_BETWEEN, _ENV_NAME

@@ -62,6 +62,7 @@ USE_EGO_BLOCKING_FEATURES: false  # Append line-of-sight blocked flag (1 channel
 USE_EGO_WEAPON_FEATURES: false    # Append can_fire + facing_enemy (2 channels/frame). Options: true/false.
 USE_EGO_SHOT_FEATURES: false      # Append shot_dx/shot_dy to target (zeros if no bullet). Requires weapon features. Options: true/false.
 USE_EGO_SHOT_BETWEEN: false       # Append 0/1: player missile on the open player→target segment (DESTROY only). Requires weapon features. Options: true/false.
+USE_DESTROY_ONLY_EGO_EXTRAS: false # DESTROY keeps LoS/weapon extras; other skills get pose only (different in_dim). Options: true/false.
 EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization. Options: null or number > 0.
 
 # Seaquest compatibility toggles.

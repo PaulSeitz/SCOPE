@@ -17,13 +17,19 @@ from concept_based_learning.observations.egocentric import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
     ego_obs_channels_per_frame,
+    ego_pose_channels_per_frame,
     _get_player,
     _center_y,
     _uses_bottom_edge_y,
     configure_ego_obs_from_config,
     distance_pixels_from_feature,
     get_ego_obs,
+    slice_skill_ego,
     using_legacy_ego_obs,
+)
+from concept_based_learning.training.skill_params import (
+    as_per_skill_param_list,
+    dense0_in_dim,
 )
 from concept_based_learning.environments.datatypes import ConceptObservation
 from concept_based_learning.environments.env_manager import EnvManager
@@ -235,8 +241,16 @@ def resolve_tandem_checkpoint_paths(
     return skill_resolved, None
 
 
+def _destroy_skill_idx(config: dict) -> int:
+    names = [str(n) for n in (config.get("SKILL_NAMES") or [])]
+    return names.index("DESTROY") if "DESTROY" in names else 0
+
+
 def _unwrap_stacked_skill_params(params_tree):
     """Return a single-skill param subtree and the number of stacked skills."""
+    packed = as_per_skill_param_list(params_tree)
+    if packed is not None:
+        return packed[0], len(packed)
     kernel = params_tree["Dense_0"]["kernel"]
     arr = np.asarray(kernel)
     if arr.ndim == 3:
@@ -261,6 +275,7 @@ def infer_skill_hparams_from_params(
     treat it as ``channels × FRAME_STACK_SIZE``.
     """
     sample, num_skills = _unwrap_stacked_skill_params(params_tree)
+    packed = as_per_skill_param_list(params_tree)
     dense_indices = sorted(
         int(key.split("_", 1)[1])
         for key in sample
@@ -269,11 +284,16 @@ def infer_skill_hparams_from_params(
     if not dense_indices:
         raise ValueError("Skill checkpoint has no Dense_* layers; cannot infer architecture.")
 
-    first = sample[f"Dense_{dense_indices[0]}"]["kernel"]
-    last = sample[f"Dense_{dense_indices[-1]}"]["kernel"]
-    first_in = int(first.shape[0])
-    hidden_size = int(first.shape[1])
-    ego_action_dim = int(last.shape[1])
+    first = np.asarray(sample[f"Dense_{dense_indices[0]}"]["kernel"])
+    last = np.asarray(sample[f"Dense_{dense_indices[-1]}"]["kernel"])
+    if packed is not None:
+        in_dims = [dense0_in_dim(p) for p in packed]
+        first_in = max(in_dims)
+    else:
+        in_dims = None
+        first_in = int(first.shape[0])
+    hidden_size = int(first.shape[-1])
+    ego_action_dim = int(last.shape[-1])
     num_layers = len(dense_indices) - 1
 
     mode = str(skill_input_mode or "ego").lower().strip()
@@ -283,9 +303,14 @@ def infer_skill_hparams_from_params(
         channels_per_frame = ego_obs_channels_per_frame()
         if channels_per_frame > 0 and first_in % channels_per_frame == 0:
             frame_stack_size = first_in // channels_per_frame
+        elif ego_pose_channels_per_frame() > 0:
+            pose_in = min(in_dims) if in_dims else first_in
+            pose_ch = ego_pose_channels_per_frame()
+            if pose_in % pose_ch == 0:
+                frame_stack_size = pose_in // pose_ch
         ckpt_ego_in = first_in
 
-    return {
+    out = {
         "HIDDEN_SIZE": hidden_size,
         "NUM_LAYERS": num_layers,
         "EGO_ACTION_DIM": ego_action_dim,
@@ -294,10 +319,23 @@ def infer_skill_hparams_from_params(
         "_ckpt_ego_in": ckpt_ego_in,
         "_ckpt_dense0_in": first_in,
     }
+    if in_dims is not None:
+        out["_ckpt_skill_in_dims"] = in_dims
+    return out
 
 
 def ensure_skill_params_stack(params_tree, num_skills: int):
-    """Ensure skill params are stacked along axis 0 for ``jax.vmap`` over skills."""
+    """Ensure skill params are stacked along axis 0 for ``jax.vmap`` over skills.
+
+    Packed per-skill checkpoints (different ``Dense_0`` widths) stay a tuple.
+    """
+    packed = as_per_skill_param_list(params_tree)
+    if packed is not None:
+        if len(packed) != int(num_skills):
+            raise ValueError(
+                f"Packed skill checkpoint has {len(packed)} heads, config NUM_SKILLS={num_skills}"
+            )
+        return tuple(packed)
     kernel = np.asarray(params_tree["Dense_0"]["kernel"])
     if kernel.ndim == 2:
         return jax.tree_util.tree_map(
@@ -305,6 +343,54 @@ def ensure_skill_params_stack(params_tree, num_skills: int):
             params_tree,
         )
     return params_tree
+
+
+def apply_skill_q_all(
+    skill_network,
+    params_tree,
+    ego_full,
+    *,
+    target_idx,
+    pixel_obs=None,
+    objects=None,
+    stack_size: int,
+    destroy_skill_idx: int = 0,
+):
+    """Apply every skill head. Slices pose-only ego for non-DESTROY when packed."""
+    packed = as_per_skill_param_list(params_tree)
+    if packed is None:
+
+        def apply_one(params_for_skill):
+            return skill_network.apply(
+                {"params": params_for_skill},
+                ego_full,
+                train=False,
+                target_idx=target_idx,
+                pixel_obs=pixel_obs,
+                objects=objects,
+            )
+
+        return jax.vmap(apply_one)(params_tree)
+
+    qs = []
+    for i, params_for_skill in enumerate(packed):
+        ego_i = slice_skill_ego(
+            ego_full,
+            i,
+            stack_size=int(stack_size),
+            destroy_skill_idx=int(destroy_skill_idx),
+        )
+        qs.append(
+            skill_network.apply(
+                {"params": params_for_skill},
+                ego_i,
+                train=False,
+                target_idx=target_idx,
+                pixel_obs=pixel_obs,
+                objects=objects,
+            )
+        )
+    return jnp.stack(qs)
 
 
 def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
@@ -315,6 +401,7 @@ def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
     inferred = infer_skill_hparams_from_params(params_tree, skill_input_mode=mode)
     ckpt_ego_in = inferred.pop("_ckpt_ego_in", None)
     inferred.pop("_ckpt_dense0_in", None)
+    inferred.pop("_ckpt_skill_in_dims", None)
     frame_stack_size = inferred.get("FRAME_STACK_SIZE")
     # Never clobber FRAME_STACK_SIZE with a bogus embed_dim / channel quotient.
     updated = {
@@ -649,17 +736,16 @@ def _make_jitted_greedy_episode_runner(
         ego_obs = _skill_input_from_obs(config, obs.raw_observation, obs.objects, safe_target)
         pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
-        def apply_one(params_for_skill):
-            return skill_network.apply(
-                {"params": params_for_skill},
-                ego_obs,
-                train=False,
-                target_idx=safe_target,
-                pixel_obs=pixel_obs,
-                objects=obs.objects,
-            )
-
-        q_all = jax.vmap(apply_one)(skill_params)
+        q_all = apply_skill_q_all(
+            skill_network,
+            skill_params,
+            ego_obs,
+            target_idx=safe_target,
+            pixel_obs=pixel_obs,
+            objects=obs.objects,
+            stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            destroy_skill_idx=_destroy_skill_idx(config),
+        )
         q_skill = q_all[sk_idx]
         if restrict_fire_for_non_destroy:
             q_skill = jax.lax.cond(
@@ -1044,17 +1130,16 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     # JIT skill Q eval once — the old per-step jax.vmap.apply was the reason
     # skills_only end videos appeared to hang after "Recording...".
     def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch, objects_batch):
-        def apply_one(params_for_skill):
-            return skill_network.apply(
-                {"params": params_for_skill},
-                ego_batch,
-                train=False,
-                target_idx=target_idx_arr,
-                pixel_obs=pixel_batch,
-                objects=objects_batch,
-            )
-
-        return jax.vmap(apply_one)(params_stack)
+        return apply_skill_q_all(
+            skill_network,
+            params_stack,
+            ego_batch,
+            target_idx=target_idx_arr,
+            pixel_obs=pixel_batch,
+            objects=objects_batch,
+            stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            destroy_skill_idx=_destroy_skill_idx(config),
+        )
 
     apply_all_skills = jax.jit(_apply_all_skills)
 
@@ -1527,17 +1612,16 @@ def run_live_visualization(
 
     # JIT skill Q eval once (same fix as record-mode eval rollouts).
     def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch, objects_batch):
-        def apply_one(params_for_skill):
-            return skill_network.apply(
-                {"params": params_for_skill},
-                ego_batch,
-                train=False,
-                target_idx=target_idx_arr,
-                pixel_obs=pixel_batch,
-                objects=objects_batch,
-            )
-
-        return jax.vmap(apply_one)(params_stack)
+        return apply_skill_q_all(
+            skill_network,
+            params_stack,
+            ego_batch,
+            target_idx=target_idx_arr,
+            pixel_obs=pixel_batch,
+            objects=objects_batch,
+            stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            destroy_skill_idx=_destroy_skill_idx(config),
+        )
 
     apply_all_skills = jax.jit(_apply_all_skills)
 

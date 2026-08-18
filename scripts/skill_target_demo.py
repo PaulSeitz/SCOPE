@@ -59,6 +59,7 @@ from concept_based_learning.observations.egocentric import (  # noqa: E402
     using_legacy_ego_obs,
 )
 from concept_based_learning.pqn_visualizer import (  # noqa: E402
+    apply_skill_q_all,
     align_config_with_skill_checkpoint,
     create_eval_env,
     ensure_skill_params_stack,
@@ -360,15 +361,13 @@ class SkillTargetDemo:
                         jnp.array(1, dtype=jnp.int32),
                     )
                     ego_obs_batch = ego_obs[jnp.newaxis, ...]
-
-                    def apply_one(params_for_skill):
-                        return self.skill_network.apply(
-                            {"params": params_for_skill},
-                            ego_obs_batch,
-                            train=False,
-                        )
-
-                    q_vals = jax.vmap(apply_one)(self.skill_params)
+                    q_vals = apply_skill_q_all(
+                        self.skill_network,
+                        self.skill_params,
+                        ego_obs_batch,
+                        target_idx=jnp.array(1, dtype=jnp.int32),
+                        stack_size=int(self.config.get("FRAME_STACK_SIZE", 4)),
+                    )
                     jax.block_until_ready(q_vals)
                 self._jax_skill = True
                 self._jax_warmup_phase = "ready"
@@ -545,14 +544,13 @@ class SkillTargetDemo:
             )
             self.last_angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
-        def apply_one(params_for_skill):
-            return self.skill_network.apply(
-                {"params": params_for_skill},
-                ego_obs_batch,
-                train=False,
-            )
-
-        q_vals = jax.vmap(apply_one)(self.skill_params)
+        q_vals = apply_skill_q_all(
+            self.skill_network,
+            self.skill_params,
+            ego_obs_batch,
+            target_idx=jnp.array(target_obj_idx, dtype=jnp.int32),
+            stack_size=int(self.config.get("FRAME_STACK_SIZE", 4)),
+        )
         q_vals = jnp.squeeze(q_vals, axis=1)
         self.last_q_vals = np.array(jax.device_get(q_vals[active_skill_idx]), dtype=np.float32)
 

@@ -108,6 +108,11 @@ def make_tandem_train(
         "NUM_MINIBATCHES must divide NUM_STEPS * NUM_ENVS"
     )
     reset_flag_combo_cumulative()
+    if bool(config.get("USE_DESTROY_ONLY_EGO_EXTRAS", False)):
+        raise NotImplementedError(
+            "USE_DESTROY_ONLY_EGO_EXTRAS is skills_only for now; tandem still "
+            "vmaps a shared ego width. Train skills_only or turn the flag off."
+        )
 
     num_skills = config["NUM_SKILLS"]
     max_objects = config["MAX_OBJECTS"]

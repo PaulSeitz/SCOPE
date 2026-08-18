@@ -115,11 +115,25 @@ def ego_distance_clip_max_pixels() -> float | None:
     return _EGO_DISTANCE_CLIP_MAX_PX
 
 
+_USE_DESTROY_ONLY_EGO_EXTRAS = False
+
+
+def set_destroy_only_ego_extras(enabled: bool) -> None:
+    """When True, LoS/weapon extras are concatenated only for the DESTROY head."""
+    global _USE_DESTROY_ONLY_EGO_EXTRAS
+    _USE_DESTROY_ONLY_EGO_EXTRAS = bool(enabled)
+
+
+def using_destroy_only_ego_extras() -> bool:
+    return _USE_DESTROY_ONLY_EGO_EXTRAS
+
+
 def configure_ego_obs_from_config(config: dict) -> None:
     """Apply all ego observation toggles from a merged experiment config dict."""
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
     set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    set_destroy_only_ego_extras(bool(config.get("USE_DESTROY_ONLY_EGO_EXTRAS", False)))
     # Shared blocking/LOS flag (new name preferred; old USE_EGO_LOS_FEATURES still works).
     blocking = config.get(
         "USE_EGO_BLOCKING_FEATURES",
@@ -182,6 +196,89 @@ def ego_obs_channels_per_frame() -> int:
 def ego_base_channels_per_frame() -> int:
     """Per-frame channel count excluding skill extras (includes LOS when enabled)."""
     return ego_obs_channels_per_frame() - skill_ego_extra_channels_per_frame()
+
+
+def ego_pose_channels_per_frame() -> int:
+    """Pose block shared by every skill: distance (or dx/dy), optional vel/size, sin/cos.
+
+    LoS and weapon extras are *not* included; those are DESTROY concatenations
+    when ``USE_DESTROY_ONLY_EGO_EXTRAS`` is on (and still a shared suffix otherwise).
+    Pose is a prefix of the full ``get_ego_obs`` vector.
+    """
+    if _USE_LEGACY_EGO_OBS:
+        return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+            4 if _USE_EGO_SIZE_FEATURES else 0
+        )
+    return 3 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+        2 if _USE_EGO_SIZE_FEATURES else 0
+    )
+
+
+def ego_destroy_extra_channels_per_frame() -> int:
+    """LoS + weapon extras appended after the pose prefix."""
+    los_channels = 1 if _USE_EGO_BLOCKING_FEATURES else 0
+    return los_channels + skill_ego_extra_channels_per_frame()
+
+
+def skill_ego_flat_dim(
+    skill_idx: int,
+    *,
+    stack_size: int,
+    destroy_skill_idx: int = 0,
+) -> int:
+    """Flattened ego width for one skill head (pose × stack, plus DESTROY extras)."""
+    pose = ego_pose_channels_per_frame() * int(stack_size)
+    extra = ego_destroy_extra_channels_per_frame() * int(stack_size)
+    if (
+        using_destroy_only_ego_extras()
+        and extra > 0
+        and int(skill_idx) != int(destroy_skill_idx)
+    ):
+        return pose
+    return pose + extra
+
+
+def take_ego_pose(ego: jnp.ndarray, *, stack_size: int) -> jnp.ndarray:
+    """Keep the pose prefix of each stacked frame (not a flat leading slice).
+
+    ``get_ego_obs`` flattens ``[stack, channels]`` so extras sit *inside* every
+    frame, after the pose channels. ``x[..., :12]`` would keep frame-0 extras
+    and drop later pose.
+    """
+    full_ch = ego_obs_channels_per_frame()
+    pose_ch = ego_pose_channels_per_frame()
+    stack = int(stack_size)
+    if ego.shape[-1] != stack * full_ch:
+        raise ValueError(
+            f"ego tail dim {ego.shape[-1]} != stack {stack} × channels {full_ch}"
+        )
+    leading = ego.shape[:-1]
+    framed = ego.reshape(*leading, stack, full_ch)
+    return framed[..., :pose_ch].reshape(*leading, pose_ch * stack)
+
+
+def slice_skill_ego(
+    ego: jnp.ndarray,
+    skill_idx: int,
+    *,
+    stack_size: int,
+    destroy_skill_idx: int = 0,
+) -> jnp.ndarray:
+    """Slice a full ``get_ego_obs`` vector to the head's input width.
+
+    ``skill_idx`` must be a Python int so the branch is static under JIT.
+    """
+    width = skill_ego_flat_dim(
+        skill_idx, stack_size=stack_size, destroy_skill_idx=destroy_skill_idx
+    )
+    if width == ego.shape[-1]:
+        return ego
+    return take_ego_pose(ego, stack_size=stack_size)
+
+
+def destroy_only_extras_active() -> bool:
+    """True when non-DESTROY heads should drop the LoS/weapon suffix."""
+    return using_destroy_only_ego_extras() and ego_destroy_extra_channels_per_frame() > 0
 
 
 def discrete_ego_flag_layout() -> list[tuple[str, int, int, float]]:

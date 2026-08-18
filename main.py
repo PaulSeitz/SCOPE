@@ -37,8 +37,11 @@ from concept_based_learning.training.train_tandem import make_tandem_train
 from concept_based_learning.training.rtpt_progress import start_rtpt
 from concept_based_learning.observations.egocentric import (
     configure_ego_obs_from_config,
+    destroy_only_extras_active,
     ego_obs_channels_per_frame,
+    skill_ego_flat_dim,
 )
+from concept_based_learning.training.skill_params import flatten_skill_params
 from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
 from concept_based_learning.pqn_visualizer import (
     load_params_from_file,
@@ -87,8 +90,20 @@ def _configure_ego_obs_format(config: dict) -> None:
         f"velocity={config.get('USE_EGO_VELOCITY_FEATURES', True)}, "
         f"weapon={config.get('USE_EGO_WEAPON_FEATURES', config.get('USE_SKILL_EGO_FEATURES', False))}, "
         f"blocking={config.get('USE_EGO_BLOCKING_FEATURES', config.get('USE_EGO_LOS_FEATURES', False))}, "
+        f"destroy_only_extras={config.get('USE_DESTROY_ONLY_EGO_EXTRAS', False)}, "
         f"{clip_note})"
     )
+    if destroy_only_extras_active():
+        names = config.get("SKILL_NAMES") or []
+        n_skills = int(config.get("NUM_SKILLS", len(names) or 4))
+        destroy_idx = 0
+        if isinstance(names, (list, tuple)) and "DESTROY" in [str(n) for n in names]:
+            destroy_idx = [str(n) for n in names].index("DESTROY")
+        dims = [
+            skill_ego_flat_dim(i, stack_size=stack, destroy_skill_idx=destroy_idx)
+            for i in range(n_skills)
+        ]
+        print(f"  per-skill ego in-dim @ stack {stack}: {dims} (DESTROY extras not shared)")
 
 
 def _resolve_heuristic_target_fn(config, env_name: str, components):
@@ -380,12 +395,18 @@ def single_run(config):
             runner_state = outs["runner_state"]
             train_states, *_ = runner_state
             first_train_states = jax.tree_util.tree_map(lambda x: x[0], train_states)
-            current_params = first_train_states.params
+            if isinstance(first_train_states, tuple):
+                current_params = tuple(s.params for s in first_train_states)
+                timesteps0 = first_train_states[0].timesteps
+            else:
+                current_params = first_train_states.params
+                timesteps0 = first_train_states.timesteps[0]
 
-            # Skill trainer vmaps over skills; timesteps is [num_skills] after seed[0].
+            # Skill trainer vmaps over skills; timesteps is [num_skills] after seed[0]
+            # unless heads have different ego widths (tuple of TrainStates).
             global_step_end_of_phase = _wandb_env_step(
                 phase_config,
-                int(jax.device_get(first_train_states.timesteps[0])),
+                int(jax.device_get(timesteps0)),
                 step_offset_updates=int(phase.step_offset_updates),
             )
             if (
@@ -756,7 +777,7 @@ def single_run(config):
             print(f"Config saved to {save_dir}")
 
             if final_skill_params is not None:
-                flat_skill_params = flatten_dict(final_skill_params, sep=",")
+                flat_skill_params = flatten_skill_params(final_skill_params)
                 if final_meta_params is None:
                     skills_filename = f'{alg_name}_{env_name}_seed{base_config["SEED"]}.safetensors'
                 else:
