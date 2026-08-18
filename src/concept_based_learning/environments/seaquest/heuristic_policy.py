@@ -156,11 +156,16 @@ def _surface_required_from_raw(raw_observation, objects=None):
     return jnp.logical_and(want_surface, _surface_approach_clear(raw_observation, objects))
 
 
-def _surface_refilling_from_raw(raw_observation):
-    """True while Seaquest pins the player at the surface to refill oxygen."""
-    oxygen = _latest_leaf(raw_observation.oxygen_level)
-    py = _latest_leaf(raw_observation.player.y)
-    return jnp.logical_and(py <= PLAYER_UNDERWATER_Y, oxygen < 64)
+def _oxygen_rising_from_raw(raw_observation):
+    """True when the oxygen meter increased between the last two stacked frames.
+
+    Oxygen only rises while Seaquest is refilling (actions ignored). Independent
+    of player y — the breathing band freezes O₂, drain decreases it.
+    """
+    o2 = jnp.asarray(raw_observation.oxygen_level, dtype=jnp.float32)
+    if o2.ndim == 0 or o2.shape[-1] < 2:
+        return jnp.bool_(False)
+    return o2[..., -1] > o2[..., -2]
 
 
 def _surface_needed_pred(raw_observation, objects, ctx):
@@ -412,10 +417,10 @@ def _select_target(
         ),
         target_idx,
     )
-    # The environment ignores movement while oxygen refills at y=46. Selecting
-    # an object there only trains a target/action association on blocked steps.
+    # Oxygen only increases while the env pins the player to refill. Selecting
+    # an object on those frames trains a target/action pair on ignored actions.
     target_idx = jnp.where(
-        _surface_refilling_from_raw(raw_observation),
+        _oxygen_rising_from_raw(raw_observation),
         jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
         target_idx,
     )

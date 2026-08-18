@@ -65,7 +65,7 @@ def _make_raw(
             width=_stack(pw, n),
             height=_stack(ph, n),
         ),
-        oxygen_level=_stack(oxygen, n),
+        oxygen_level=_stack(oxygen, n) if jnp.asarray(oxygen).ndim == 0 else jnp.asarray(oxygen, dtype=jnp.float32),
         collected_divers=_stack(divers, n),
         enemies=SimpleNamespace(
             x=enemies_x,
@@ -374,8 +374,8 @@ def test_surface_sub_selectable_near_surface_and_close():
 
 
 def test_surface_refill_selects_nothing():
-    """Do not train skills while Seaquest pins movement during oxygen refill."""
-    raw = _make_raw(px=80.0, py=46.0, oxygen=32.0, divers=2)
+    """Rising oxygen means refill (actions ignored) — no object, any y."""
+    raw = _make_raw(px=80.0, py=100.0, oxygen=(31.0, 32.0), divers=2)
     objs = _make_objects(
         diver_xy=(100.0, 100.0),
         shark_xy=(110.0, 100.0),
@@ -383,6 +383,21 @@ def test_surface_refill_selects_nothing():
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == NO_TARGET_IDX
+
+
+def test_breathing_band_with_low_oxygen_still_targets():
+    """Frozen/draining O₂ is not refill — keep targeting in the breathing band."""
+    raw = _make_raw(px=80.0, py=50.0, oxygen=(32.0, 32.0), divers=2)
+    objs = _make_objects(diver_xy=(100.0, 100.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 1
+
+
+def test_oxygen_falling_still_targets():
+    raw = _make_raw(px=80.0, py=46.0, oxygen=(40.0, 39.0), divers=2)
+    objs = _make_objects(diver_xy=(100.0, 100.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 1
 
 
 def test_surface_full_oxygen_resumes_targeting():
