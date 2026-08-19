@@ -53,6 +53,10 @@ _EGO_ANGLE_BINS: int | None = None
 # When True (and angle bins enabled), collapse angle bins to one scalar
 # tier channel in [0,1] (nearest-bin index normalized by n-1).
 _EGO_ANGLE_BINS_SCALAR: bool = False
+# When True (and angle bins enabled), snap world θ to the nearest of ``n``
+# hard sectors and emit sin/cos of the sector centre (2 channels, finite
+# alphabet on the unit circle). Mutually exclusive with ``_EGO_ANGLE_BINS_SCALAR``.
+_EGO_ANGLE_SINCOS_SNAP: bool = False
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -212,6 +216,12 @@ def set_ego_angle_bins_scalar(enabled: bool) -> None:
     _EGO_ANGLE_BINS_SCALAR = bool(enabled)
 
 
+def set_ego_angle_sincos_snap(enabled: bool) -> None:
+    """Snap world θ to hard sector centres; emit sin/cos (2 channels)."""
+    global _EGO_ANGLE_SINCOS_SNAP
+    _EGO_ANGLE_SINCOS_SNAP = bool(enabled)
+
+
 def ego_angle_bins() -> int | None:
     """Return the active world-θ bin count, or None when using sin/cos(ψ)."""
     return _EGO_ANGLE_BINS
@@ -220,8 +230,19 @@ def ego_angle_bins() -> int | None:
 def ego_angle_channels_per_frame() -> int:
     """Pose angle block width: ``n`` bins, or 2 for sin/cos(ψ)."""
     if _EGO_ANGLE_BINS:
+        if _EGO_ANGLE_SINCOS_SNAP:
+            return 2
         return 1 if _EGO_ANGLE_BINS_SCALAR else int(_EGO_ANGLE_BINS)
     return 2
+
+
+def quantize_angle_sincos(theta: jnp.ndarray, n_bins: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Hard world-θ sectors: sin/cos of the sector centre (``n_bins`` levels)."""
+    n = int(n_bins)
+    t = (jnp.asarray(theta, dtype=jnp.float32) + jnp.pi) / (jnp.float32(2.0) * jnp.pi)
+    idx = (jnp.floor(t * n).astype(jnp.int32) % n).astype(jnp.float32)
+    center = (idx + 0.5) * (jnp.float32(2.0) * jnp.pi) / n - jnp.pi
+    return jnp.sin(center), jnp.cos(center)
 
 
 def triangular_angle_bins(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
@@ -274,7 +295,11 @@ def configure_ego_obs_from_config(config: dict) -> None:
     set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
     angle_bins = config.get("EGO_ANGLE_BINS", None)
     set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
-    set_ego_angle_bins_scalar(bool(config.get("EGO_ANGLE_BINS_SCALAR", False)))
+    set_ego_angle_sincos_snap(bool(config.get("EGO_ANGLE_SINCOS_SNAP", False)))
+    set_ego_angle_bins_scalar(
+        bool(config.get("EGO_ANGLE_BINS_SCALAR", False))
+        and not bool(config.get("EGO_ANGLE_SINCOS_SNAP", False))
+    )
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
     # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
     weapon = config.get(
@@ -892,14 +917,18 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
     if _EGO_ANGLE_BINS:
-        bin_feats = triangular_angle_bins(thetas, _EGO_ANGLE_BINS)
-        if _EGO_ANGLE_BINS_SCALAR:
-            n = jnp.float32(bin_feats.shape[-1] - 1)
-            idx = jnp.argmax(bin_feats, axis=-1).astype(jnp.float32)
-            scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
-            channels.append(scalar)
+        if _EGO_ANGLE_SINCOS_SNAP:
+            sin_t, cos_t = quantize_angle_sincos(thetas, _EGO_ANGLE_BINS)
+            channels.extend([sin_t, cos_t])
         else:
-            channels.extend([bin_feats[:, i] for i in range(int(_EGO_ANGLE_BINS))])
+            bin_feats = triangular_angle_bins(thetas, _EGO_ANGLE_BINS)
+            if _EGO_ANGLE_BINS_SCALAR:
+                n = jnp.float32(bin_feats.shape[-1] - 1)
+                idx = jnp.argmax(bin_feats, axis=-1).astype(jnp.float32)
+                scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
+                channels.append(scalar)
+            else:
+                channels.extend([bin_feats[:, i] for i in range(int(_EGO_ANGLE_BINS))])
     else:
         channels.extend([jnp.sin(psis), jnp.cos(psis)])
     if _USE_EGO_BLOCKING_FEATURES:

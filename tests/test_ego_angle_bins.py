@@ -140,3 +140,23 @@ def test_set_ego_angle_bins_rejects_one():
         set_ego_angle_bins(1)
     set_ego_angle_bins(0)
     assert ego_angle_bins() is None
+
+
+def test_sincos_snap_finite_alphabet_and_channel_count():
+    from concept_based_learning.observations.egocentric import (
+        quantize_angle_sincos,
+        set_ego_angle_sincos_snap,
+    )
+
+    _pose_only_cfg(EGO_ANGLE_BINS=32, EGO_ANGLE_SINCOS_SNAP=True)
+    assert ego_pose_channels_per_frame() == 3  # dist + sin + cos
+    n_frames = 2
+    objs = _stacked_objects(28.0, 3.0, n_frames=n_frames)
+    obs = get_ego_obs(_FakeRawObs(n_frames), objs, jnp.int32(0)).reshape(n_frames, -1)
+    sin_c = obs[:, 1:3]
+    uniq = {tuple(np.round(row, 4)) for row in np.array(sin_c)}
+    assert len(uniq) <= 32
+    # Sector centres lie on the unit circle.
+    norms = np.linalg.norm(np.array(sin_c), axis=1)
+    np.testing.assert_allclose(norms, 1.0, atol=1e-5)
+    set_ego_angle_sincos_snap(False)

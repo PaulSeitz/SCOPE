@@ -29,6 +29,9 @@ Usage:
   # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
+  # Minimal-engineering ablation (2 GPUs, ~6 trains overnight):
+  python scripts/run_paper_eval.py --suite minimal_ablation --gpus 0,1 --wait-deps --lean
+
   # Overnight, two GPUs (do not use --gpus on these; pin CUDA yourself):
   #   GPU 0: full eval of existing clip50+θ-bins ckpt, then RQ3 OC tandem
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite clip50_angbins_full --wait-deps --lean
@@ -248,6 +251,35 @@ SCALAR_ABLATION_DUAL_STEMS = (
     "beamrider_transfer_ego_clip50_angbins_tierscalar",
     "beamrider_transfer_ego_angscalar_only",
 )
+# Minimal-engineering overnight: 6 isolated ablations off clip50_angbins baseline.
+# 2 GPUs interleaved (even/odd stems): train → eval_full → pong base → beamrider base.
+MINIMAL_ABLATION_SUITE = "minimal_ablation"
+MINIMAL_ABLATION_STEMS = (
+    "seaquest_skills_ego_clip50_ang32scalar",
+    "seaquest_skills_ego_clip50_ang32sincos",
+    "seaquest_skills_ego_clip50_ang32scalar_eval_full",
+    "seaquest_skills_ego_clip50_ang32sincos_eval_full",
+    "pong_transfer_ego_clip50_ang32scalar",
+    "pong_transfer_ego_clip50_ang32sincos",
+    "beamrider_transfer_ego_clip50_ang32scalar",
+    "beamrider_transfer_ego_clip50_ang32sincos",
+    "seaquest_skills_ego_clip50_ang8scalar",
+    "seaquest_skills_ego_clip50_angbins_noliving",
+    "seaquest_skills_ego_clip50_ang8scalar_eval_full",
+    "seaquest_skills_ego_clip50_angbins_noliving_eval_full",
+    "pong_transfer_ego_clip50_ang8scalar",
+    "pong_transfer_ego_clip50_angbins_noliving",
+    "beamrider_transfer_ego_clip50_ang8scalar",
+    "beamrider_transfer_ego_clip50_angbins_noliving",
+    "seaquest_skills_ego_clip50_angbins_nodestroyshape",
+    "seaquest_skills_ego_clip50_angbins_nolos",
+    "seaquest_skills_ego_clip50_angbins_nodestroyshape_eval_full",
+    "seaquest_skills_ego_clip50_angbins_nolos_eval_full",
+    "pong_transfer_ego_clip50_angbins_nodestroyshape",
+    "pong_transfer_ego_clip50_angbins_nolos",
+    "beamrider_transfer_ego_clip50_angbins_nodestroyshape",
+    "beamrider_transfer_ego_clip50_angbins_nolos",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -263,6 +295,7 @@ SUITE_STEMS = {
     TIERSCALAR_PIPELINE_SUITE: TIERSCALAR_PIPELINE_STEMS,
     ANGSCALAR_ONLY_PIPELINE_SUITE: ANGSCALAR_ONLY_PIPELINE_STEMS,
     SCALAR_ABLATION_DUAL_SUITE: SCALAR_ABLATION_DUAL_STEMS,
+    MINIMAL_ABLATION_SUITE: MINIMAL_ABLATION_STEMS,
 }
 
 
@@ -1464,7 +1497,10 @@ def main() -> None:
             f"{ANGSCALAR_ONLY_PIPELINE_SUITE}: single-channel angle tiers only "
             "(no distance clip/bins), then full Seaquest/Pong/BeamRider eval. "
             f"{SCALAR_ABLATION_DUAL_SUITE}: 2-GPU paired run of tierscalar and "
-            "angscalar-only arms (train + eval + Pong + BeamRider each)."
+            "angscalar-only arms (train + eval + Pong + BeamRider each). "
+            f"{MINIMAL_ABLATION_SUITE}: 6 isolated simplification ablations "
+            "(32-sector angle encodings, destroy reward flags, no-LoS) with "
+            "full Seaquest eval + Pong/BeamRider base transfer; 2 GPUs interleaved."
         ),
     )
     parser.add_argument(
@@ -1476,7 +1512,7 @@ def main() -> None:
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
             "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
-            "angscalar_only_pipeline, and scalar_ablation_dual."
+            "angscalar_only_pipeline, scalar_ablation_dual, and minimal_ablation."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1733,6 +1769,7 @@ def main() -> None:
         TIERSCALAR_PIPELINE_SUITE,
         ANGSCALAR_ONLY_PIPELINE_SUITE,
         SCALAR_ABLATION_DUAL_SUITE,
+        MINIMAL_ABLATION_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
