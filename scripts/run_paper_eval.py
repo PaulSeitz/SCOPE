@@ -213,6 +213,13 @@ CLIP50_ANGBINS_FULL_STEMS = (
     "seaquest_tandem_oc_ego_clip50_angbins",
     "seaquest_tandem_oc_ego_clip50_angbins_eval",
 )
+DISTBINS8_PIPELINE_SUITE = "distbins8_pipeline"
+DISTBINS8_PIPELINE_STEMS = (
+    "seaquest_skills_ego_clip50_angbins_distbins8",
+    "seaquest_skills_ego_clip50_angbins_distbins8_eval_full",
+    "pong_transfer_ego_clip50_angbins_distbins8_full",
+    "beamrider_transfer_ego_clip50_angbins_distbins8",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -224,6 +231,7 @@ SUITE_STEMS = {
     EGO_CLIP_BINS_SUITE: EGO_CLIP_BINS_STEMS,
     CLIP_BINS_NODECAY_SUITE: CLIP_BINS_NODECAY_STEMS,
     CLIP50_ANGBINS_FULL_SUITE: CLIP50_ANGBINS_FULL_STEMS,
+    DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
 }
 
 
@@ -1417,7 +1425,9 @@ def main() -> None:
             "SKILL_LR, then full Seaquest/Pong/Tennis/BeamRider eval. "
             f"{CLIP50_ANGBINS_FULL_SUITE}: existing clip50+θ-bins ckpt; full "
             "Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem "
-            "(1 GPU sequential)."
+            "(1 GPU sequential). "
+            f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
+            "Seaquest/Pong/BeamRider eval."
         ),
     )
     parser.add_argument(
@@ -1428,7 +1438,7 @@ def main() -> None:
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
-            "clip50_angbins_full."
+            "clip50_angbins_full, and distbins8_pipeline."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1681,6 +1691,7 @@ def main() -> None:
         EGO_CLIP_BINS_SUITE,
         CLIP_BINS_NODECAY_SUITE,
         CLIP50_ANGBINS_FULL_SUITE,
+        DISTBINS8_PIPELINE_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
