@@ -39,26 +39,12 @@ tennis_action_mapper, tennis_inverse_action_mapper = make_target_aligned_action_
 
 
 def _apply_visual_ball_y(obs, ball_z):
+    """No-op: ball.y is already the shadow/court position, which is the correct
+    COLLECT target. JAXAtari Tennis collision checks use the shadow, so we keep
+    ball.y as-is and ignore ball_z.
     """
-    Replace ball.y (court/shadow position) with visual y (ball_y - ball_z).
-
-    The TennisObservation stores ball_y as the court projection (shadow).
-    The actual rendered ball is at ball_y - ball_z. We use visual y for AABB
-    so that COLLECT fires when the player is at the ball, not the shadow.
-
-    obs.raw_observation.ball.y has shape [stack_size]; ball_z is a scalar from
-    the current env_state. All stack frames are corrected by the same ball_z
-    (only the most-recent frame's height is available).
-    """
-    screen_h = jnp.array(209, dtype=jnp.int32)
-    visual_y = jnp.clip(
-        (obs.raw_observation.ball.y - ball_z.astype(jnp.int32)),
-        0,
-        screen_h,
-    )
-    new_ball = obs.raw_observation.ball.replace(y=visual_y)
-    new_raw = obs.raw_observation.replace(ball=new_ball)
-    return obs.replace(raw_observation=new_raw)
+    del ball_z
+    return obs
 
 
 class TennisSemanticWrapper(JaxatariSemanticBaseWrapper):

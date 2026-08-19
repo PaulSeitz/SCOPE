@@ -26,9 +26,9 @@ FREEWAY_TOP_BORDER = 15     # player scores when chicken_y (bottom edge) ≤ thi
 # Nudge the fixed NAVIGATE goal toward the top (smaller y in Freeway coords).
 # Must ensure goal band bottom > top_border so the rising-edge fires before the game resets
 # the chicken (scoring at chicken_y=top_border immediately spawns chicken at y≈187).
-# goal_y = top_border + chicken_hit_h - offset → 15 + 10 - 14 = 11 (top-left y).
-# With goal_h=10 and 1px reward inset, effective band y∈[12,20]; chicken scores at bottom y≤15.
-FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX = 14
+# goal_y = top_border + chicken_hit_h - offset → 15 + 10 - 18 = 7 (top-left y).
+# With goal_h=10 and 1px reward inset, effective band y∈[8,16]; chicken scores at bottom y≤15.
+FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX = 18
 # Back-compat alias for older imports / configs.
 FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX
 
