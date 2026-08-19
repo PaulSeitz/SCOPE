@@ -29,8 +29,9 @@ Usage:
   # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
-  # Minimal-engineering ablation (2 GPUs, ~6 trains overnight):
-  python scripts/run_paper_eval.py --suite minimal_ablation --gpus 0,1 --wait-deps --lean
+  # Minimal-engineering ablation (4 GPUs: 6 trains in parallel waves, then evals):
+  python scripts/run_paper_eval.py --suite minimal_ablation --gpus 0,1,2,3 --wait-deps --lean
+  # After a reboot: --resume (skips finished ckpts / eval JSONs)
 
   # Overnight, two GPUs (do not use --gpus on these; pin CUDA yourself):
   #   GPU 0: full eval of existing clip50+θ-bins ckpt, then RQ3 OC tandem
@@ -252,31 +253,36 @@ SCALAR_ABLATION_DUAL_STEMS = (
     "beamrider_transfer_ego_angscalar_only",
 )
 # Minimal-engineering overnight: 6 isolated ablations off clip50_angbins baseline.
-# 2 GPUs interleaved (even/odd stems): train → eval_full → pong base → beamrider base.
+# Stem order is shard-critical for 4 GPUs (i % 4): all trains first (4 parallel),
+# then Seaquest eval_full, Pong base, BeamRider base per arm.
 MINIMAL_ABLATION_SUITE = "minimal_ablation"
 MINIMAL_ABLATION_STEMS = (
+    # --- trains (indices 0–5: one on each GPU 0–3, then 4–5 on GPU 0–1) ---
     "seaquest_skills_ego_clip50_ang32scalar",
     "seaquest_skills_ego_clip50_ang32sincos",
-    "seaquest_skills_ego_clip50_ang32scalar_eval_full",
-    "seaquest_skills_ego_clip50_ang32sincos_eval_full",
-    "pong_transfer_ego_clip50_ang32scalar",
-    "pong_transfer_ego_clip50_ang32sincos",
-    "beamrider_transfer_ego_clip50_ang32scalar",
-    "beamrider_transfer_ego_clip50_ang32sincos",
     "seaquest_skills_ego_clip50_ang8scalar",
     "seaquest_skills_ego_clip50_angbins_noliving",
-    "seaquest_skills_ego_clip50_ang8scalar_eval_full",
-    "seaquest_skills_ego_clip50_angbins_noliving_eval_full",
-    "pong_transfer_ego_clip50_ang8scalar",
-    "pong_transfer_ego_clip50_angbins_noliving",
-    "beamrider_transfer_ego_clip50_ang8scalar",
-    "beamrider_transfer_ego_clip50_angbins_noliving",
     "seaquest_skills_ego_clip50_angbins_nodestroyshape",
     "seaquest_skills_ego_clip50_angbins_nolos",
+    # --- Seaquest full mod eval ---
+    "seaquest_skills_ego_clip50_ang32scalar_eval_full",
+    "seaquest_skills_ego_clip50_ang32sincos_eval_full",
+    "seaquest_skills_ego_clip50_ang8scalar_eval_full",
+    "seaquest_skills_ego_clip50_angbins_noliving_eval_full",
     "seaquest_skills_ego_clip50_angbins_nodestroyshape_eval_full",
     "seaquest_skills_ego_clip50_angbins_nolos_eval_full",
+    # --- Pong base transfer ---
+    "pong_transfer_ego_clip50_ang32scalar",
+    "pong_transfer_ego_clip50_ang32sincos",
+    "pong_transfer_ego_clip50_ang8scalar",
+    "pong_transfer_ego_clip50_angbins_noliving",
     "pong_transfer_ego_clip50_angbins_nodestroyshape",
     "pong_transfer_ego_clip50_angbins_nolos",
+    # --- BeamRider base transfer ---
+    "beamrider_transfer_ego_clip50_ang32scalar",
+    "beamrider_transfer_ego_clip50_ang32sincos",
+    "beamrider_transfer_ego_clip50_ang8scalar",
+    "beamrider_transfer_ego_clip50_angbins_noliving",
     "beamrider_transfer_ego_clip50_angbins_nodestroyshape",
     "beamrider_transfer_ego_clip50_angbins_nolos",
 )
@@ -1500,7 +1506,8 @@ def main() -> None:
             "angscalar-only arms (train + eval + Pong + BeamRider each). "
             f"{MINIMAL_ABLATION_SUITE}: 6 isolated simplification ablations "
             "(32-sector angle encodings, destroy reward flags, no-LoS) with "
-            "full Seaquest eval + Pong/BeamRider base transfer; 2 GPUs interleaved."
+            "full Seaquest eval + Pong/BeamRider base transfer; 4 GPUs "
+            "(train-first stem order, then --resume after reboot)."
         ),
     )
     parser.add_argument(
