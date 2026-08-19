@@ -220,6 +220,34 @@ DISTBINS8_PIPELINE_STEMS = (
     "pong_transfer_ego_clip50_angbins_distbins8_full",
     "beamrider_transfer_ego_clip50_angbins_distbins8",
 )
+TIERSCALAR_PIPELINE_SUITE = "tierscalar_pipeline"
+TIERSCALAR_PIPELINE_STEMS = (
+    "seaquest_skills_ego_clip50_angbins_tierscalar",
+    "seaquest_skills_ego_clip50_angbins_tierscalar_eval_full",
+    "pong_transfer_ego_clip50_angbins_tierscalar_full",
+    "beamrider_transfer_ego_clip50_angbins_tierscalar",
+)
+ANGSCALAR_ONLY_PIPELINE_SUITE = "angscalar_only_pipeline"
+ANGSCALAR_ONLY_PIPELINE_STEMS = (
+    "seaquest_skills_ego_angscalar_only",
+    "seaquest_skills_ego_angscalar_only_eval_full",
+    "pong_transfer_ego_angscalar_only_full",
+    "beamrider_transfer_ego_angscalar_only",
+)
+# Two-arm 2-GPU batch: each GPU gets one full arm (train+eval+pong+beam) via sharding.
+SCALAR_ABLATION_DUAL_SUITE = "scalar_ablation_dual"
+SCALAR_ABLATION_DUAL_STEMS = (
+    # idx even -> shard1/GPU0 (tierscalar)
+    "seaquest_skills_ego_clip50_angbins_tierscalar",
+    # idx odd -> shard2/GPU1 (angscalar-only)
+    "seaquest_skills_ego_angscalar_only",
+    "seaquest_skills_ego_clip50_angbins_tierscalar_eval_full",
+    "seaquest_skills_ego_angscalar_only_eval_full",
+    "pong_transfer_ego_clip50_angbins_tierscalar_full",
+    "pong_transfer_ego_angscalar_only_full",
+    "beamrider_transfer_ego_clip50_angbins_tierscalar",
+    "beamrider_transfer_ego_angscalar_only",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -232,6 +260,9 @@ SUITE_STEMS = {
     CLIP_BINS_NODECAY_SUITE: CLIP_BINS_NODECAY_STEMS,
     CLIP50_ANGBINS_FULL_SUITE: CLIP50_ANGBINS_FULL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
+    TIERSCALAR_PIPELINE_SUITE: TIERSCALAR_PIPELINE_STEMS,
+    ANGSCALAR_ONLY_PIPELINE_SUITE: ANGSCALAR_ONLY_PIPELINE_STEMS,
+    SCALAR_ABLATION_DUAL_SUITE: SCALAR_ABLATION_DUAL_STEMS,
 }
 
 
@@ -1427,7 +1458,13 @@ def main() -> None:
             "Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem "
             "(1 GPU sequential). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
-            "Seaquest/Pong/BeamRider eval."
+            "Seaquest/Pong/BeamRider eval. "
+            f"{TIERSCALAR_PIPELINE_SUITE}: single-channel tier scalar for both "
+            "distance and angle, then full Seaquest/Pong/BeamRider eval. "
+            f"{ANGSCALAR_ONLY_PIPELINE_SUITE}: single-channel angle tiers only "
+            "(no distance clip/bins), then full Seaquest/Pong/BeamRider eval. "
+            f"{SCALAR_ABLATION_DUAL_SUITE}: 2-GPU paired run of tierscalar and "
+            "angscalar-only arms (train + eval + Pong + BeamRider each)."
         ),
     )
     parser.add_argument(
@@ -1438,7 +1475,8 @@ def main() -> None:
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
-            "clip50_angbins_full, and distbins8_pipeline."
+            "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
+            "angscalar_only_pipeline, and scalar_ablation_dual."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1692,6 +1730,9 @@ def main() -> None:
         CLIP_BINS_NODECAY_SUITE,
         CLIP50_ANGBINS_FULL_SUITE,
         DISTBINS8_PIPELINE_SUITE,
+        TIERSCALAR_PIPELINE_SUITE,
+        ANGSCALAR_ONLY_PIPELINE_SUITE,
+        SCALAR_ABLATION_DUAL_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:

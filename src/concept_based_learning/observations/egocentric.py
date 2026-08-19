@@ -44,9 +44,15 @@ _EGO_DISTANCE_BINS: int | None = None
 _EGO_DISTANCE_BIN_CENTERS_PX: tuple[float, ...] | None = None
 # Upper support limit for generated distance bins when centers are not provided.
 _EGO_DISTANCE_BIN_MAX_PX: float = MAX_DIST
+# When True (and distance bins enabled), collapse distance bins to one scalar
+# tier channel in [0,1] (nearest-bin index normalized by n-1).
+_EGO_DISTANCE_BINS_SCALAR: bool = False
 # None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
 # channels with this many triangular, 50%-overlap bins of world θ_target.
 _EGO_ANGLE_BINS: int | None = None
+# When True (and angle bins enabled), collapse angle bins to one scalar
+# tier channel in [0,1] (nearest-bin index normalized by n-1).
+_EGO_ANGLE_BINS_SCALAR: bool = False
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -141,6 +147,12 @@ def set_ego_distance_bins(n_bins: int | None) -> None:
     _EGO_DISTANCE_BINS = n
 
 
+def set_ego_distance_bins_scalar(enabled: bool) -> None:
+    """Use one scalar tier channel instead of N distance-bin channels."""
+    global _EGO_DISTANCE_BINS_SCALAR
+    _EGO_DISTANCE_BINS_SCALAR = bool(enabled)
+
+
 def ego_distance_bins() -> int | None:
     """Return active distance-bin count, or None for scalar distance."""
     return _EGO_DISTANCE_BINS
@@ -194,6 +206,12 @@ def set_ego_angle_bins(n_bins: int | None) -> None:
     _EGO_ANGLE_BINS = n
 
 
+def set_ego_angle_bins_scalar(enabled: bool) -> None:
+    """Use one scalar tier channel instead of N angle-bin channels."""
+    global _EGO_ANGLE_BINS_SCALAR
+    _EGO_ANGLE_BINS_SCALAR = bool(enabled)
+
+
 def ego_angle_bins() -> int | None:
     """Return the active world-θ bin count, or None when using sin/cos(ψ)."""
     return _EGO_ANGLE_BINS
@@ -201,7 +219,9 @@ def ego_angle_bins() -> int | None:
 
 def ego_angle_channels_per_frame() -> int:
     """Pose angle block width: ``n`` bins, or 2 for sin/cos(ψ)."""
-    return int(_EGO_ANGLE_BINS) if _EGO_ANGLE_BINS else 2
+    if _EGO_ANGLE_BINS:
+        return 1 if _EGO_ANGLE_BINS_SCALAR else int(_EGO_ANGLE_BINS)
+    return 2
 
 
 def triangular_angle_bins(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
@@ -248,11 +268,13 @@ def configure_ego_obs_from_config(config: dict) -> None:
     set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
     dist_bins = config.get("EGO_DISTANCE_BINS", None)
     set_ego_distance_bins(None if dist_bins in (None, "", False) else int(dist_bins))
+    set_ego_distance_bins_scalar(bool(config.get("EGO_DISTANCE_BINS_SCALAR", False)))
     dist_centers = config.get("EGO_DISTANCE_BIN_CENTERS_PX", None)
     set_ego_distance_bin_centers_px(dist_centers)
     set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
     angle_bins = config.get("EGO_ANGLE_BINS", None)
     set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
+    set_ego_angle_bins_scalar(bool(config.get("EGO_ANGLE_BINS_SCALAR", False)))
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
     # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
     weapon = config.get(
@@ -277,7 +299,9 @@ def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
 
 def ego_distance_channels_per_frame() -> int:
     """Distance block width: ``n`` bins, or 1 scalar channel."""
-    return int(_EGO_DISTANCE_BINS) if _EGO_DISTANCE_BINS else 1
+    if _EGO_DISTANCE_BINS:
+        return 1 if _EGO_DISTANCE_BINS_SCALAR else int(_EGO_DISTANCE_BINS)
+    return 1
 
 
 def triangular_distance_bins(distances_px: jnp.ndarray, centers_px: jnp.ndarray) -> jnp.ndarray:
@@ -318,6 +342,11 @@ def distance_features_from_pixels(distances_px: jnp.ndarray) -> list[jnp.ndarray
                 dtype=jnp.float32,
             )
         bin_feats = triangular_distance_bins(distances_px, centers)
+        if _EGO_DISTANCE_BINS_SCALAR:
+            n = jnp.float32(bin_feats.shape[-1] - 1)
+            idx = jnp.argmax(bin_feats, axis=-1).astype(jnp.float32)
+            scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
+            return [scalar]
         return [bin_feats[:, i] for i in range(int(bin_feats.shape[-1]))]
     return [distance_feature_from_pixels(distances_px)]
 
@@ -864,7 +893,13 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
         channels.extend([size_w, size_h])
     if _EGO_ANGLE_BINS:
         bin_feats = triangular_angle_bins(thetas, _EGO_ANGLE_BINS)
-        channels.extend([bin_feats[:, i] for i in range(int(_EGO_ANGLE_BINS))])
+        if _EGO_ANGLE_BINS_SCALAR:
+            n = jnp.float32(bin_feats.shape[-1] - 1)
+            idx = jnp.argmax(bin_feats, axis=-1).astype(jnp.float32)
+            scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
+            channels.append(scalar)
+        else:
+            channels.extend([bin_feats[:, i] for i in range(int(_EGO_ANGLE_BINS))])
     else:
         channels.extend([jnp.sin(psis), jnp.cos(psis)])
     if _USE_EGO_BLOCKING_FEATURES:
