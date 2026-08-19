@@ -29,9 +29,9 @@ Usage:
   # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
-  # Minimal-engineering ablation (4 GPUs: 6 trains in parallel waves, then evals):
-  python scripts/run_paper_eval.py --suite minimal_ablation --gpus 0,1,2,3 --wait-deps --lean
-  # After a reboot: --resume (skips finished ckpts / eval JSONs)
+  # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
+  python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite minimal_ablation --eval-only --resume --gpus 0,1,2,3 --wait-deps --lean
 
   # Overnight, two GPUs (do not use --gpus on these; pin CUDA yourself):
   #   GPU 0: full eval of existing clip50+θ-bins ckpt, then RQ3 OC tandem
@@ -286,6 +286,16 @@ MINIMAL_ABLATION_STEMS = (
     "beamrider_transfer_ego_clip50_angbins_nodestroyshape",
     "beamrider_transfer_ego_clip50_angbins_nolos",
 )
+# Train-only subset for minimal_ablation (3 GPUs: 2 waves × 3 parallel trains ≈ 3h).
+MINIMAL_ABLATION_TRAIN_SUITE = "minimal_ablation_train"
+MINIMAL_ABLATION_TRAIN_STEMS = (
+    "seaquest_skills_ego_clip50_ang32scalar",
+    "seaquest_skills_ego_clip50_ang32sincos",
+    "seaquest_skills_ego_clip50_ang8scalar",
+    "seaquest_skills_ego_clip50_angbins_noliving",
+    "seaquest_skills_ego_clip50_angbins_nodestroyshape",
+    "seaquest_skills_ego_clip50_angbins_nolos",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -302,6 +312,7 @@ SUITE_STEMS = {
     ANGSCALAR_ONLY_PIPELINE_SUITE: ANGSCALAR_ONLY_PIPELINE_STEMS,
     SCALAR_ABLATION_DUAL_SUITE: SCALAR_ABLATION_DUAL_STEMS,
     MINIMAL_ABLATION_SUITE: MINIMAL_ABLATION_STEMS,
+    MINIMAL_ABLATION_TRAIN_SUITE: MINIMAL_ABLATION_TRAIN_STEMS,
 }
 
 
@@ -1507,7 +1518,9 @@ def main() -> None:
             f"{MINIMAL_ABLATION_SUITE}: 6 isolated simplification ablations "
             "(32-sector angle encodings, destroy reward flags, no-LoS) with "
             "full Seaquest eval + Pong/BeamRider base transfer; 4 GPUs "
-            "(train-first stem order, then --resume after reboot)."
+            "(train-first stem order, then --resume after reboot). "
+            f"{MINIMAL_ABLATION_TRAIN_SUITE}: the six RQ1 trains only (~3h on "
+            "3 GPUs); run {MINIMAL_ABLATION_SUITE} --eval-only --resume next day."
         ),
     )
     parser.add_argument(
@@ -1519,7 +1532,8 @@ def main() -> None:
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
             "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
-            "angscalar_only_pipeline, scalar_ablation_dual, and minimal_ablation."
+            "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, and "
+            "minimal_ablation_train (train-only; use minimal_ablation --eval-only after)."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
