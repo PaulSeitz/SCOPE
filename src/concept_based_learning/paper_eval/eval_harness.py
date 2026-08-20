@@ -186,7 +186,13 @@ def _overlay_ego_flags_from_skill_config(
             "USE_EGO_SHOT_BETWEEN",
             "USE_DESTROY_ONLY_EGO_EXTRAS",
             "EGO_DISTANCE_CLIP_MAX_PX",
+            "EGO_DISTANCE_BINS",
+            "EGO_DISTANCE_BINS_SCALAR",
+            "EGO_DISTANCE_BIN_CENTERS_PX",
+            "EGO_DISTANCE_BIN_MAX_PX",
             "EGO_ANGLE_BINS",
+            "EGO_ANGLE_BINS_SCALAR",
+            "EGO_ANGLE_SINCOS_SNAP",
             "FRAME_STACK_SIZE",
             "SKILL_INPUT_MODE",
         ):

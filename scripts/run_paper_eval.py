@@ -1162,6 +1162,13 @@ def _print_matrix(paths: list[Path]) -> None:
 # Eval YAMLs may set PAPER_EVAL_ARCHITECTURE_OF to pin network/obs shape to a
 # train config while still overriding policy/eval knobs locally.
 _EVAL_OVERRIDE_KEYS = (
+    # Critical for transfer: architecture YAMLs are Seaquest trains; without these
+    # the eval silently keeps ENV_NAME=seaquest (mislabeled Pong/BeamRider scores).
+    "ENV_NAME",
+    "MAX_OBJECTS",
+    "SAVE_PATH",
+    "WANDB_RUN_NAME",
+    "WANDB_TAGS",
     "HEURISTIC_MODE",
     "NO_TARGET_GAME_ACTION",
     "SKILL_DEATH_PENALIZE_COLLECT",
@@ -1172,6 +1179,19 @@ _EVAL_OVERRIDE_KEYS = (
     "AVOID_INTERRUPT_RANGE",
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
+    # Ego layout must follow the transfer YAML / ckpt (scalar snap flags included).
+    "USE_EGO_BLOCKING_FEATURES",
+    "USE_EGO_WEAPON_FEATURES",
+    "USE_EGO_SHOT_FEATURES",
+    "USE_EGO_SHOT_BETWEEN",
+    "EGO_DISTANCE_CLIP_MAX_PX",
+    "EGO_ANGLE_BINS",
+    "EGO_ANGLE_BINS_SCALAR",
+    "EGO_ANGLE_SINCOS_SNAP",
+    "EGO_DISTANCE_BINS",
+    "EGO_DISTANCE_BINS_SCALAR",
+    "EGO_DISTANCE_BIN_CENTERS_PX",
+    "EGO_DISTANCE_BIN_MAX_PX",
 )
 
 
@@ -1290,6 +1310,15 @@ def _run_mod_eval(
         / f"{path.stem}_mods.json"
     )
     print(f"\n{'=' * 70}\n  EVAL mods: {path.relative_to(CONFIG_DIR)} kind={kind}\n{'=' * 70}")
+    cfg_env = str(cfg.get("ENV_NAME", "")).lower().strip()
+    raw_env = str(env_name).lower().strip()
+    if kind == "transfer" and cfg_env and raw_env and cfg_env != raw_env:
+        raise SystemExit(
+            f"Transfer eval ENV mismatch: YAML ENV_NAME={raw_env!r} but architecture "
+            f"config has ENV_NAME={cfg_env!r}. Add ENV_NAME to _EVAL_OVERRIDE_KEYS "
+            f"(or drop PAPER_EVAL_ARCHITECTURE_OF). Refusing to run mislabeled eval."
+        )
+    cfg["ENV_NAME"] = env_name
     _pin_jaxatari_action_sets_to_host()
     try:
         run_mod_eval(
