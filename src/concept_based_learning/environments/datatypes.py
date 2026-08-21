@@ -39,6 +39,28 @@ BLOCKING_LABELS = (LABEL_DESTROY, LABEL_AVOID, LABEL_JUMP_OVER, LABEL_BLOCKER)
 # label_to_skill_idx remaps the extended labels onto the closest base skill.
 NUM_SKILL_LABELS = 5
 
+# When True, NAVIGATE targets always use the COLLECT skill head even if
+# NUM_SKILLS >= 4 (transfer smoke tests / ablations).  Same fold as the
+# num_skills < 4 fallback.  Set via configure_label_routing_from_config.
+_REMAP_NAVIGATE_TO_COLLECT = False
+
+
+def set_remap_navigate_to_collect(enabled: bool) -> None:
+    global _REMAP_NAVIGATE_TO_COLLECT
+    _REMAP_NAVIGATE_TO_COLLECT = bool(enabled)
+
+
+def remap_navigate_to_collect() -> bool:
+    return _REMAP_NAVIGATE_TO_COLLECT
+
+
+def configure_label_routing_from_config(config: Dict[str, Any] | None) -> None:
+    """Apply ``REMAP_NAVIGATE_TO_COLLECT`` from a training / eval config dict."""
+    if not config:
+        set_remap_navigate_to_collect(False)
+        return
+    set_remap_navigate_to_collect(bool(config.get("REMAP_NAVIGATE_TO_COLLECT", False)))
+
 
 def label_to_skill_idx(label, num_skills: int):
     """Map semantic label → skill index in ``[0, num_skills)``.
@@ -46,13 +68,14 @@ def label_to_skill_idx(label, num_skills: int):
     Base mapping is ``skill_idx = label - 1``.  When ``num_skills`` truncates the
     vocabulary, extended labels fall back so 3-skill runs keep working after
     waypoints emit ``LABEL_NAVIGATE``:
-      NAVIGATE  → COLLECT (1) when ``num_skills < 4``
+      NAVIGATE  → COLLECT (1) when ``num_skills < 4`` or ``REMAP_NAVIGATE_TO_COLLECT``
       JUMP_OVER → AVOID (2) when ``num_skills < 5``
     """
     label = jnp.asarray(label)
     skill = label - 1
+    navigate_to_collect = num_skills < LABEL_NAVIGATE or _REMAP_NAVIGATE_TO_COLLECT
     skill = jnp.where(
-        jnp.logical_and(label == LABEL_NAVIGATE, num_skills < LABEL_NAVIGATE),
+        jnp.logical_and(label == LABEL_NAVIGATE, navigate_to_collect),
         LABEL_COLLECT - 1,
         skill,
     )
@@ -71,7 +94,7 @@ def project_skill_outcomes(rewards, skill_done, num_skills: int):
     ``extract_skill_rewards`` always returns width ``NUM_SKILL_LABELS`` (5).
     When configs truncate with ``NUM_SKILLS < 5``, fold remapped channels the
     same way as :func:`label_to_skill_idx`:
-      NAVIGATE  → COLLECT when ``num_skills < 4``
+      NAVIGATE  → COLLECT when ``num_skills < 4`` or ``REMAP_NAVIGATE_TO_COLLECT``
       JUMP_OVER → AVOID   when ``num_skills < 5``
     """
     rewards = jnp.asarray(rewards)
@@ -90,7 +113,10 @@ def project_skill_outcomes(rewards, skill_done, num_skills: int):
     navigate_i = LABEL_NAVIGATE - 1
     jump_i = LABEL_JUMP_OVER - 1
 
-    if num_skills < LABEL_NAVIGATE and full_w > navigate_i and out_w > collect_i:
+    fold_navigate = (
+        num_skills < LABEL_NAVIGATE or _REMAP_NAVIGATE_TO_COLLECT
+    ) and full_w > navigate_i and out_w > collect_i
+    if fold_navigate:
         nav_r = rewards[..., navigate_i]
         nav_d = skill_done[..., navigate_i]
         out_r = out_r.at[..., collect_i].add(nav_r)

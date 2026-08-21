@@ -43,7 +43,8 @@ kangaroo_action_mapper, kangaroo_inverse_action_mapper = make_target_aligned_act
 # standable platforms the ladder connects (not the ladder sprite edges), so
 # NavigateTo(arrive) fires when the player is actually standing on that floor:
 #   bottom: centre of player AABB when standing on the platform at the ladder foot
-#   top:    centre of player AABB when standing on the platform at the ladder head
+#   top:    standing-centre on the upper platform, raised by ``_TOP_WAYPOINT_LIFT_PX``
+#           so mid-ladder approach cannot complete the stage early
 # Observation pads ladders/platforms to 20 slots; inactive slots are ignored.
 #
 # Total objects: 20 bottom + 20 top + 3 fruits + 1 bell + 1 child
@@ -63,8 +64,16 @@ _PLAYER_STAND_HEIGHT = 24
 _PLAYER_STAND_HALF = _PLAYER_STAND_HEIGHT // 2
 # If no platform matches, lift the top waypoint by this many px (L1 ladder→floor gap).
 _TOP_FALLBACK_LIFT = 8
+# Pull top waypoints above standing-centre so NavigateTo(arrive) / overlap only
+# fire once the player is actually on the upper platform — not while still on
+# the ladder a few px below the floor (arrive_dist alone was firing early).
+_TOP_WAYPOINT_LIFT_PX = 8
 # Max |ladder_edge - platform.y| to count as the connected floor.
 _PLATFORM_MATCH_PX = 16
+# Falling coco x must lie within ladder width ± this margin to "cover" it.
+_FALLING_COCO_LADDER_X_MARGIN = 10
+# Obs orientation: 90 = facing right, 270 = facing left (jax_kangaroo _get_observation).
+_ORI_RIGHT_DEG = 90.0
 
 
 def _scalar_to_1d(x):
@@ -78,6 +87,50 @@ def _falling_coco_active(pos):
 def _standing_center_y(platform_y):
     """Player centre-y when feet rest on ``platform_y`` (top-left player convention)."""
     return platform_y - _PLAYER_STAND_HALF
+
+
+def _top_waypoint_y(platform_y):
+    """Standing-centre on ``platform_y``, then raised by ``_TOP_WAYPOINT_LIFT_PX``."""
+    return _standing_center_y(platform_y) - _TOP_WAYPOINT_LIFT_PX
+
+
+def _falling_coco_covers_ladders(falling_coconut, ladders):
+    """Per-ladder bool: falling coco is in this ladder's x-column and above its foot.
+
+    Climbing into that column while the coco hangs / drops will hit the player, so
+    both bottom and top waypoints for the ladder should go inactive until it clears.
+    """
+    coco_x = falling_coconut.x
+    coco_y = falling_coconut.y
+    coco_w = falling_coconut.width
+    coco_active = falling_coconut.active > 0.5
+    coco_alive = jnp.logical_and(
+        coco_active,
+        _falling_coco_active(jnp.stack([coco_x, coco_y])),
+    )
+    coco_left = coco_x - _FALLING_COCO_LADDER_X_MARGIN
+    coco_right = coco_x + coco_w + _FALLING_COCO_LADDER_X_MARGIN
+    lad_left = ladders.x
+    lad_right = ladders.x + ladders.width
+    x_overlap = jnp.logical_and(coco_left < lad_right, coco_right > lad_left)
+    # Above the ladder foot (smaller y = higher on screen); still relevant until
+    # past the bottom edge.
+    lad_bot = ladders.y + ladders.height
+    above_foot = coco_y <= lad_bot
+    return jnp.logical_and(
+        coco_alive,
+        jnp.logical_and(x_overlap, above_foot),
+    )
+
+
+def _thrown_coco_in_front(player, thrown_coconuts):
+    """Per-thrown-coco bool: active and on the side the player is facing."""
+    # Observation orientation is degrees (90 right / 270 left).
+    facing_right = jnp.abs(player.orientation - _ORI_RIGHT_DEG) < 45.0
+    p_cx = player.x + player.width / 2.0
+    c_cx = thrown_coconuts.x + thrown_coconuts.width / 2.0
+    in_front = jnp.where(facing_right, c_cx >= p_cx, c_cx <= p_cx)
+    return jnp.logical_and(thrown_coconuts.active > 0.5, in_front)
 
 
 def _match_platform_y(edge_y, plat_y, plat_active, *, above: bool):
@@ -169,6 +222,7 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         falling_coconut = obs.falling_coconut  # scalar
         monkeys = obs.monkeys               # n=4
         thrown_coconuts = obs.thrown_coconuts  # n=4
+        player = obs.player
 
         # --- Ladder waypoints (NAVIGATE), snapped to standable floors ---
         lad_half_w = ladders.width // 2
@@ -190,13 +244,19 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
             lad_bot_edge, platforms.y, platforms.active, above=False
         )
 
+        coco_on_ladder = _falling_coco_covers_ladders(falling_coconut, ladders)
+        ladder_climbable = jnp.logical_and(
+            ladders.active > 0.5,
+            jnp.logical_not(coco_on_ladder),
+        ).astype(jnp.int32)
+
         bot_x = lad_cx
         bot_y = _standing_center_y(src_plat_y)
-        bot_active = ladders.active
+        bot_active = ladder_climbable
 
         top_x = lad_cx
-        top_y = _standing_center_y(dest_plat_y)
-        top_active = ladders.active
+        top_y = _top_waypoint_y(dest_plat_y)
+        top_active = ladder_climbable
 
         waypoint_w = jnp.ones_like(bot_x)
         waypoint_h = jnp.ones_like(bot_y)
@@ -246,11 +306,12 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         destroy_act = jnp.concatenate([fc_act, monkey_act])
         n_destroy = destroy_x.shape[0]  # 5
 
+        # Thrown cocos: AVOID only while in front of the player (facing side).
         avoid_x = thrown_coconuts.x
         avoid_y = thrown_coconuts.y
         avoid_w = thrown_coconuts.width
         avoid_h = thrown_coconuts.height
-        avoid_act = thrown_coconuts.active
+        avoid_act = _thrown_coco_in_front(player, thrown_coconuts).astype(jnp.int32)
         n_avoid = avoid_x.shape[0]  # 4
 
         all_x = jnp.concatenate([nav_x, collect_x, destroy_x, avoid_x])

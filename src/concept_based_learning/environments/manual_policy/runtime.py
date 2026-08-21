@@ -125,8 +125,10 @@ def _eval_navigate_to(
         done = jnp.logical_or(arrived, inactive)
     else:  # "arrive"
         done = arrived
-        # Skip stages whose waypoint was never spawned (padded inactive ladders).
-        done = jnp.logical_or(done, inactive)
+        # Skip stages whose waypoint was never spawned (padded inactive ladders),
+        # unless the slot may be hazard-gated (skip_if_inactive=False → wait).
+        if bool(getattr(node, "skip_if_inactive", True)):
+            done = jnp.logical_or(done, inactive)
 
     target = jnp.where(active, slot, jnp.int32(no_target_idx))
     # Keep mission on the slot even while inactive-wait isn't needed; if inactive
@@ -324,6 +326,15 @@ def _apply_interrupts(
         for lab in interrupt.labels:
             label_mask = jnp.logical_or(label_mask, ctx.labels == int(lab))
         threat = jnp.logical_and(ctx.active, label_mask)
+        if interrupt.threat_mask is not None:
+            extra = jnp.asarray(
+                interrupt.threat_mask(raw, objects, ctx, plan_target)
+            )
+            # Accept scalar (broadcast) or per-slot mask.
+            if extra.shape == ():
+                threat = jnp.logical_and(threat, extra)
+            else:
+                threat = jnp.logical_and(threat, extra.reshape((ctx.n,)))
 
         score, in_within = _interrupt_metric(
             ctx,

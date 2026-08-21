@@ -38,13 +38,15 @@ def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_tar
     )
 
 
-# Phoenix: horizontal movement + shield (DOWN); ship fires upward so all *_FIRE collapses to FIRE.
-# Direction table (R DR D DL L UL U UR) → (RIGHT, RIGHT, DOWN/shield, LEFT, LEFT, LEFT, NOOP, RIGHT)
+# Phoenix ACTION_SET indices: 0=NOOP 1=FIRE 2=RIGHT 3=LEFT 4=DOWN(shield)
+#   5=RIGHTFIRE 6=LEFTFIRE 7=DOWNFIRE.
+# Horizontal + shield; ship fires upward. UP has no lateral move so pure UP→NOOP /
+# UP+FIRE→FIRE; diagonals prefer horizontal; DOWN is shield.
 phoenix_action_mapper, phoenix_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
     fire_action=1,
-    move_table=     [2, 2, 4, 3, 3, 3, 0, 2],
-    move_fire_table=[1, 1, 1, 1, 1, 1, 1, 1],
+    move_table=     [2, 2, 4, 3, 3, 3, 0, 2],   # R DR D DL L UL U UR
+    move_fire_table=[5, 5, 7, 6, 6, 6, 1, 5],   # RIGHTFIRE / LEFTFIRE / DOWNFIRE / FIRE
 )
 
 

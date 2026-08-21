@@ -75,11 +75,17 @@ class NavigateTo:
       - ``"inactive"``: slot becomes inactive (fruit collected, enemy gone).
         Stays locked on the slot until then; ``arrive_dist`` is unused.
       - ``"either"``: arrive **or** inactive (skip already-cleared stages).
+
+    ``skip_if_inactive`` (arrive mode only): when True (default), a permanently
+    inactive padded slot completes the stage immediately.  Set False when the
+    slot may be gated off temporarily (e.g. kangaroo ladder under a falling
+    coconut) so the plan waits instead of skipping.
     """
 
     slot: int
     arrive_dist: float = 8.0
     complete_when: str = "arrive"  # "arrive" | "inactive" | "either"
+    skip_if_inactive: bool = True
     kind: str = field(default="navigate_to", init=False)
 
 
@@ -157,6 +163,9 @@ class Interrupt:
     If ``release`` is set, hysteresis keeps the interrupt latched until all
     matching threats leave the release range (same metric).  ``suppress``
     (optional predicate) disables the interrupt (e.g. while surfacing).
+
+    ``threat_mask`` if set is ``(raw, objects, ctx, plan_target) -> bool[n]``
+    further filtering which label-matched threats may fire the interrupt.
     """
 
     labels: Tuple[int, ...]
@@ -167,6 +176,7 @@ class Interrupt:
     release_x: Optional[float] = None
     release_y: Optional[float] = None
     suppress: Optional[Union[str, PredicateFn]] = None
+    threat_mask: Optional[Callable[..., jnp.ndarray]] = None
     kind: str = field(default="interrupt", init=False)
 
 
