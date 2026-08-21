@@ -47,7 +47,7 @@ VISUALIZER_FPS: 15                # FPS for local visualization output. Options:
 # Environment / experiment selection
 # ---------------------------
 ALG_NAME: "hierarchical_pqn"      # Run identifier used in names/logs. Options: string.
-ENV_NAME: "seaquest"              # Environment name. Options seen: "seaquest","freeway","phoenix","spaceinvaders","choppercommand","beamrider","breakout","pong","kangaroo","tennis","skiing".
+ENV_NAME: "seaquest"              # Environment name. Options seen: "seaquest","freeway","phoenix","spaceinvaders","choppercommand","beamrider","breakout","pong","kangaroo","tennis","skiing","asterix","montezumarevenge","venture".
 TRAIN_MODE: "tandem"              # Training pipeline. Options: "skills_only","meta_only","tandem".
 
 GAME_MODS: null                   # Train-time environment mods. Options: null or list[string].
@@ -195,6 +195,9 @@ alg:
   # Action masking / symbolic behavior.
   RESTRICT_FIRE_FOR_NON_DESTROY: false # Block FIRE for non-destroy skills. Options: true/false.
   INVALID_EGO_ACTIONS: []           # Always-invalid ego action indices. Options: list[int].
+  # If true, argmax / ε-greedy only over ego actions the env mapper can realize
+  # (skip FORWARD→NOOP collapses on restricted sticks, e.g. Phoenix).
+  EGO_LEGAL_ACTION_MASK: false
   FIRE_EGO_ACTION_INDICES: null     # Explicit ego FIRE action indices. Options: list[int] or null.
   SYMBOLIC_COLLECT_FORCE_UP: false  # Force UP action in collect skill under symbolic mode. Options: true/false.
   COLLECT_SKILL_INDEX: 1            # Skill index used as collect skill. Options: int in [0, NUM_SKILLS-1].

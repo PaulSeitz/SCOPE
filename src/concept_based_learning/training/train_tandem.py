@@ -6,7 +6,11 @@ import numpy as np
 
 import optax
 
-from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.observations.action_space import (
+    fire_ego_action_indices,
+    make_realized_ego_mask_fn,
+    mask_q_with_legal_ego,
+)
 from concept_based_learning.observations.egocentric import get_ego_obs
 from concept_based_learning.networks.skill_network import (
     OBJECT_CONDITIONED_SKILL_INPUT_MODES,
@@ -98,6 +102,8 @@ def make_tandem_train(
     extract_life_lost,
     meta_mask_hook,
     forced_target_hook,
+    ego_mapper_noop_action=0,
+    ego_mapper_fire_action=1,
 ):
     del test_env, renderer
 
@@ -117,6 +123,13 @@ def make_tandem_train(
     num_skills = config["NUM_SKILLS"]
     max_objects = config["MAX_OBJECTS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_realized_ego_mask_fn(
+        action_mapper,
+        noop_action=int(ego_mapper_noop_action),
+        fire_action=int(ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
     skill_warmup_updates = int(config.get("SKILL_WARMUP_UPDATES", 0))
     meta_learn_during_warmup = bool(config.get("META_LEARN_DURING_WARMUP", False))
     meta_num_epochs = int(config.get("META_NUM_EPOCHS", config["NUM_EPOCHS"]))
@@ -639,6 +652,13 @@ def make_tandem_train(
 
                 mask_row = build_mask_for_skill(skill_idx)
                 mask = jnp.broadcast_to(mask_row, (config["NUM_ENVS"], ego_action_dim))
+                if use_legal_ego_mask:
+                    dyn = jax.vmap(legal_ego_mask_fn)(
+                        last_obs.raw_observation,
+                        safe_target_idxs,
+                        last_obs.objects,
+                    )
+                    mask = jnp.logical_and(mask, dyn)
 
                 ego_action = jax.vmap(eps_greedy_exploration)(
                     jax.random.split(rng_skill, config["NUM_ENVS"]),

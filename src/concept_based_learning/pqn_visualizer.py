@@ -2,6 +2,13 @@ import argparse
 import os
 from pathlib import Path
 
+# Pin a real SDL video driver *before* importing pygame. If this is left unset
+# (or set to "dummy"), pygame can initialize a headless surface and never show
+# a window — which looks like "pygame is running but nothing spawns".
+_sdl_driver = str(os.environ.get("SDL_VIDEODRIVER", "")).lower().strip()
+if _sdl_driver in ("", "dummy", "auto"):
+    os.environ["SDL_VIDEODRIVER"] = "x11"
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,7 +18,11 @@ from omegaconf import OmegaConf
 from safetensors.flax import load_file
 from flax.traverse_util import unflatten_dict
 
-from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.observations.action_space import (
+    fire_ego_action_indices,
+    make_realized_ego_mask_fn,
+    mask_q_with_legal_ego,
+)
 from concept_based_learning.observations.egocentric import (
     MAX_DIST,
     SCREEN_WIDTH,
@@ -31,7 +42,11 @@ from concept_based_learning.training.skill_params import (
     as_per_skill_param_list,
     dense0_in_dim,
 )
-from concept_based_learning.environments.datatypes import ConceptObservation
+from concept_based_learning.environments.datatypes import (
+    ConceptObservation,
+    EgocentricAction,
+    configure_label_routing_from_config,
+)
 from concept_based_learning.environments.env_manager import EnvManager
 from concept_based_learning.environments.heuristics import (
     initial_policy_state,
@@ -78,6 +93,114 @@ from concept_based_learning.video_recorder import (
 def _project_root() -> Path:
     """Return the repository root (two levels above this file)."""
     return Path(__file__).resolve().parents[2]
+
+
+def _prepare_pygame_env() -> None:
+    """Strip IME hooks and pin a real SDL video driver before display init."""
+    for key in ("SDL_IM_MODULE", "XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"):
+        os.environ.pop(key, None)
+    # "dummy" creates no window; force a real driver unless the user set one.
+    current = str(os.environ.get("SDL_VIDEODRIVER", "")).lower().strip()
+    if current in ("", "dummy", "auto"):
+        if (
+            os.environ.get("WAYLAND_DISPLAY")
+            and str(os.environ.get("XDG_SESSION_TYPE", "")).lower() == "wayland"
+            and not os.environ.get("DISPLAY")
+        ):
+            os.environ["SDL_VIDEODRIVER"] = "wayland"
+        else:
+            os.environ["SDL_VIDEODRIVER"] = "x11"
+    # Prefer a centered window on multi-monitor setups (left-edge is easy to miss).
+    os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+
+
+def _raise_pygame_window() -> None:
+    """Best-effort focus/raise so the SDL window is not buried under other apps."""
+    import subprocess
+
+    try:
+        wm = pygame.display.get_wm_info()
+    except pygame.error:
+        return
+    wid = wm.get("window")
+    if not wid:
+        return
+    hex_id = hex(int(wid))
+    for argv in (
+        ["wmctrl", "-i", "-a", hex_id],
+        ["xdotool", "windowactivate", "--sync", str(int(wid))],
+        ["xdotool", "windowraise", str(int(wid))],
+    ):
+        try:
+            subprocess.run(
+                argv,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            continue
+
+
+def bootstrap_pygame_window(
+    window_name: str = "Hierarchical PQN Live Visualization",
+    window_size: tuple[int, int] = (480, 630),
+) -> tuple:
+    """
+    Create the pygame window *before* heavy JAX/GPU work / OpenCV import.
+
+    Returns ``(screen, font)``. Calling this early avoids SDL picking the
+    ``dummy`` driver (no window) once JAX or OpenCV have touched the process.
+    """
+    _prepare_pygame_env()
+    # If a previous init selected the wrong driver, tear it down and retry.
+    if pygame.get_init() or pygame.display.get_init():
+        try:
+            if pygame.display.get_init() and pygame.display.get_driver() == "dummy":
+                pygame.display.quit()
+                pygame.quit()
+        except pygame.error:
+            pygame.quit()
+
+    if not pygame.get_init():
+        pygame.init()
+    elif not pygame.display.get_init():
+        pygame.display.init()
+
+    pygame.display.set_caption(window_name)
+    flags = pygame.SHOWN | pygame.RESIZABLE
+    screen = pygame.display.set_mode(window_size, flags)
+    font = pygame.font.Font(None, 28)
+    screen.fill((20, 20, 20))
+    splash = font.render("Starting visualizer...", True, (240, 240, 240))
+    screen.blit(splash, (16, window_size[1] // 2 - 10))
+    pygame.display.flip()
+    pygame.event.pump()
+    _raise_pygame_window()
+
+    driver = pygame.display.get_driver()
+    active = pygame.display.get_active()
+    print(
+        f"[live-viz] pygame window opened "
+        f"(driver={driver}, size={screen.get_size()}, active={active}, "
+        f"DISPLAY={os.environ.get('DISPLAY')}, "
+        f"SDL_VIDEODRIVER={os.environ.get('SDL_VIDEODRIVER')})",
+        flush=True,
+    )
+    if driver == "dummy":
+        raise RuntimeError(
+            "pygame selected the SDL 'dummy' video driver, so no window will appear. "
+            "Unset SDL_VIDEODRIVER (or set it to x11), ensure DISPLAY is set, "
+            "or re-run with --display opencv."
+        )
+    if not active:
+        print(
+            "[live-viz] warning: pygame window reports inactive — "
+            "it may be on another monitor/workspace; try Alt-Tab",
+            flush=True,
+        )
+    return screen, font
 
 
 def load_base_config(experiment: str | None = None):
@@ -192,7 +315,23 @@ def _infer_env_name_from_checkpoint_path(model_path: str) -> str | None:
     if resolved is None:
         return None
     parent = Path(resolved).parent.name
-    known = {"seaquest", "phoenix", "choppercommand", "spaceinvaders"}
+    known = {
+        "seaquest",
+        "phoenix",
+        "choppercommand",
+        "spaceinvaders",
+        "montezumarevenge",
+        "montezuma_revenge",
+        "venture",
+        "asterix",
+        "beamrider",
+        "kangaroo",
+        "freeway",
+        "pong",
+        "tennis",
+        "breakout",
+        "skiing",
+    }
     return parent if parent in known else None
 
 
@@ -397,6 +536,7 @@ def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
     """Override skill architecture fields so the network matches the checkpoint."""
     # Sync ego channel globals before inferring stack size from Dense_0.
     configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     inferred = infer_skill_hparams_from_params(params_tree, skill_input_mode=mode)
     ckpt_ego_in = inferred.pop("_ckpt_ego_in", None)
@@ -721,6 +861,13 @@ def _make_jitted_greedy_episode_runner(
     fire_indices = fire_ego_action_indices(ego_action_dim)
     use_meta = meta_network is not None
     update_metrics, finalize_metrics = make_metric_fns(env_name, has_semantic_obs=True)
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_realized_ego_mask_fn(
+        action_mapper,
+        noop_action=int(components.ego_mapper_noop_action),
+        fire_action=int(components.ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
 
     def _skill_game_action(obs, target):
         is_noop = is_meta_noop_target(
@@ -754,6 +901,9 @@ def _make_jitted_greedy_episode_runner(
                 lambda q: q.at[fire_indices].set(-jnp.inf),
                 q_skill,
             )
+        if use_legal_ego_mask:
+            legal = legal_ego_mask_fn(obs.raw_observation, safe_target, obs.objects)
+            q_skill = mask_q_with_legal_ego(q_skill, legal)
         ego_a = jnp.argmax(q_skill)
         game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
         game_a = jnp.where(is_fire, fire_action, game_a)
@@ -914,6 +1064,7 @@ def run_greedy_eval_episodes(
     Each episode is one JIT-compiled ``while_loop`` (not a slow Python step loop).
     """
     configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
 
     num_skills = int(config["NUM_SKILLS"])
     ego_action_dim = int(config["EGO_ACTION_DIM"])
@@ -1038,6 +1189,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     Returns the same tensors that `video_recorder.video_callback` expects.
     """
     configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -1071,6 +1223,17 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
+    reset_policy_on_life_lost = bool(
+        getattr(components, "reset_policy_on_life_lost", False)
+    )
+    extract_life_lost = components.extract_life_lost
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_realized_ego_mask_fn(
+        action_mapper,
+        noop_action=int(components.ego_mapper_noop_action),
+        fire_action=int(components.ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
 
     meta_network = None
     if meta_params is not None:
@@ -1320,6 +1483,13 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             q_active = q_vals[active_skill_idx]
             if restrict_fire_for_non_destroy and active_skill_idx != 0:
                 q_active = q_active.at[fire_indices].set(-jnp.inf)
+            if use_legal_ego_mask:
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
+                )
+                q_active = mask_q_with_legal_ego(q_active, legal)
 
             chosen_ego = int(jnp.argmax(q_active))
             global_action = int(
@@ -1331,11 +1501,21 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 )
             )
         # Step the environment
+        prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
+        obs, state = jax.device_get((obs, state))
+        done = bool(done)
+        life_lost = 0
+        if reset_policy_on_life_lost:
+            life_lost = int(
+                jax.device_get(extract_life_lost(prev_env_state, state))
+            )
 
         # Keep video length = VIDEO_MAX_FRAMES; subsample env steps via stride.
-        log_frame = (step_i % frame_stride == 0) or bool(done)
+        log_frame = (step_i % frame_stride == 0) or done
         if log_frame:
+            if len(states_list) >= max_frames:
+                break
             states_list.append(state)
             active_list.append(active_skill_idx)
             combined_qs_list.append(combined_q.astype(np.float32))
@@ -1352,7 +1532,22 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             obj_active_list.append(np.array(obs.objects.active[-1]))
 
         if done:
-            break
+            # Keep filling the video budget across lives / episodes (demo rollouts).
+            rng, rng_reset = jax.random.split(rng)
+            obs, state = env.reset(rng_reset)
+            obs, state = jax.device_get((obs, state))
+            prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+        elif life_lost > 0:
+            # Kangaroo etc.: life loss respawns in-env without done=True.
+            prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
     print(
         f"Eval rollout done ({len(states_list)} video frames "
@@ -1398,21 +1593,23 @@ def run_live_visualization(
     meta_params=None,
     max_frames=None,
     fps: int | None = None,
-    display_backend: str = "opencv",
+    display_backend: str = "pygame",
+    pygame_screen=None,
+    pygame_font=None,
 ):
     """
     Run a live, interactive visualization loop.
 
-    Default display backend is OpenCV (``cv2.imshow``). Pygame+SDL often
-    deadlocks or fails to map a window once JAX has worker threads on this
-    machine; OpenCV is much more reliable for live viz.
+    Default display backend is Pygame. Prefer calling ``bootstrap_pygame_window``
+    before loading JAX weights so the SDL window can map; pass the resulting
+    screen/font via ``pygame_screen`` / ``pygame_font``. Use
+    ``display_backend="opencv"`` if Pygame still fails to show a window.
     """
-    import cv2
-
     def _log(msg: str) -> None:
         print(f"[live-viz] {msg}", flush=True)
 
     configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -1429,7 +1626,7 @@ def run_live_visualization(
     # VIDEO_MAX_FRAMES is for recorded rollouts; live mode runs until quit unless capped.
     frame_limit = max_frames
     display_fps = int(fps if fps is not None else config.get("VISUALIZER_FPS", 15))
-    display_backend = str(display_backend or "opencv").lower().strip()
+    display_backend = str(display_backend or "pygame").lower().strip()
     if display_backend not in ("opencv", "pygame"):
         raise ValueError(f"Unknown display_backend={display_backend!r} (use opencv|pygame)")
 
@@ -1437,23 +1634,32 @@ def run_live_visualization(
     _log(f"display_backend={display_backend}")
 
     window_name = "Hierarchical PQN Live Visualization"
-    scale = 2
+    scale = 3
     window_size = (160 * scale, 210 * scale)
-    screen = None
-    font = None
+    screen = pygame_screen
+    font = pygame_font
     clock = None
     wait_ms = max(1, int(round(1000.0 / max(display_fps, 1))))
+    cv2 = None
 
     if display_backend == "pygame":
-        # Avoid fcitx/IME hooks that can wedge SDL event delivery.
-        for key in ("SDL_IM_MODULE", "XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"):
-            os.environ.pop(key, None)
-        os.environ.setdefault("SDL_VIDEODRIVER", "x11")
-        pygame.init()
-        pygame.display.set_caption(window_name)
-        font = pygame.font.Font(None, 28)
-        screen = pygame.display.set_mode(window_size)
+        if screen is None or font is None:
+            screen, font = bootstrap_pygame_window(window_name, window_size)
+        else:
+            pygame.display.set_caption(window_name)
+            if screen.get_size() != window_size:
+                screen = pygame.display.set_mode(
+                    window_size, pygame.SHOWN | pygame.RESIZABLE
+                )
+            pygame.display.flip()
+            pygame.event.pump()
+            _raise_pygame_window()
     else:
+        # Import OpenCV only for this backend — importing cv2 before pygame
+        # display init can leave SDL on the dummy driver (no window).
+        import cv2 as _cv2
+
+        cv2 = _cv2
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, window_size[0], window_size[1])
 
@@ -1498,6 +1704,7 @@ def run_live_visualization(
                 ty = window_size[1] - text_surface.get_height() - 10
                 screen.blit(text_surface, (tx, ty))
             pygame.display.flip()
+            pygame.event.pump()
             return
         bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         bgr = cv2.resize(bgr, window_size, interpolation=cv2.INTER_NEAREST)
@@ -1552,10 +1759,22 @@ def run_live_visualization(
     components = manager.get_components(env_name)
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
+    heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper = components.action_mapper
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
+    reset_policy_on_life_lost = bool(
+        getattr(components, "reset_policy_on_life_lost", False)
+    )
+    extract_life_lost = components.extract_life_lost
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_realized_ego_mask_fn(
+        action_mapper,
+        noop_action=int(components.ego_mapper_noop_action),
+        fire_action=int(components.ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
 
     meta_network = None
     if meta_params is not None:
@@ -1636,9 +1855,12 @@ def run_live_visualization(
     window_size = (W * scale, H * scale)
     if display_backend == "pygame":
         if screen.get_size() != window_size:
-            screen = pygame.display.set_mode(window_size)
+            screen = pygame.display.set_mode(
+                window_size, pygame.SHOWN | pygame.RESIZABLE
+            )
         font = pygame.font.Font(None, 20)
         clock = pygame.time.Clock()
+        _raise_pygame_window()
     else:
         cv2.resizeWindow(window_name, window_size[0], window_size[1])
 
@@ -1648,12 +1870,14 @@ def run_live_visualization(
     running = True
     prev_target_idx = no_target_idx
     mission_target_idx = no_target_idx
+    policy_state = initial_policy_state(no_target_idx)
     persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
     suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
     frame_count = 0
 
     def reset_env_episode():
-        nonlocal obs, state, prev_target_idx, mission_target_idx, persist_steps_remaining, suspended_mission_idx, rng
+        nonlocal obs, state, prev_target_idx, mission_target_idx, policy_state
+        nonlocal persist_steps_remaining, suspended_mission_idx, rng
         rng_local, rng_reset_local = jax.random.split(rng)
         obs_local, state_local = env.reset(rng_reset_local)
         obs = obs_local
@@ -1661,13 +1885,24 @@ def run_live_visualization(
         rng = rng_local
         prev_target_idx = no_target_idx
         mission_target_idx = no_target_idx
+        policy_state = initial_policy_state(no_target_idx)
         persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
         suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
     def _select_target(step_key):
         nonlocal mission_target_idx, persist_steps_remaining, suspended_mission_idx
+        nonlocal policy_state
         if meta_network is None:
-            if heuristic_with_mission is not None:
+            if heuristic_with_state is not None:
+                target_obj_idx, policy_state = heuristic_with_state(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    policy_state,
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            elif heuristic_with_mission is not None:
                 target_obj_idx, mission_target_idx = heuristic_with_mission(
                     obs.raw_observation,
                     obs.objects,
@@ -1709,13 +1944,16 @@ def run_live_visualization(
         )
         return int(target_obj_idx)
 
+    skill_names = [str(n) for n in (config.get("SKILL_NAMES") or [])]
+    _ego_action_names = {a.value: a.name for a in EgocentricAction}
+
     def _policy_action(target_obj_idx):
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
-            return 0, 0, np.nan, np.nan
+            return 0, 0, 0, np.nan, np.nan
         if is_meta_fire:
-            return meta_fire_game_action, 0, np.nan, np.nan
+            return meta_fire_game_action, 0, 1, np.nan, np.nan
 
         raw_label = obs.objects.semantic_label[-1, target_obj_idx]
         active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
@@ -1775,6 +2013,13 @@ def run_live_visualization(
         q_active = q_vals[active_skill_idx]
         if restrict_fire_for_non_destroy and active_skill_idx != 0:
             q_active = q_active.at[fire_indices].set(-jnp.inf)
+        if use_legal_ego_mask:
+            legal = legal_ego_mask_fn(
+                obs.raw_observation,
+                jnp.array(target_obj_idx, dtype=jnp.int32),
+                obs.objects,
+            )
+            q_active = mask_q_with_legal_ego(q_active, legal)
 
         chosen_ego = int(jnp.argmax(q_active))
         global_action = int(
@@ -1785,14 +2030,14 @@ def run_live_visualization(
                 obs.objects,
             )
         )
-        return global_action, active_skill_idx, distance, angle
+        return global_action, active_skill_idx, chosen_ego, distance, angle
 
     # Warm first-frame compiles while the window stays responsive/visible.
     _show_status("Compiling heuristic / policy / env.step...")
     _log("Warmup: heuristic + policy + env.step (can take a bit)...")
     rng, warm_key = jax.random.split(rng)
     warm_target = _select_target(warm_key)
-    warm_action, _, _, _ = _policy_action(warm_target)
+    warm_action, _, _, _, _ = _policy_action(warm_target)
     obs, state, _reward, _done, _info = env.step(state, int(warm_action))
     obs, state = jax.device_get((obs, state))
     prev_target_idx = warm_target
@@ -1815,12 +2060,31 @@ def run_live_visualization(
 
         if frame_count < 5:
             _log(f"frame {frame_count}: policy action (target={target_obj_idx})...")
-        global_action, active_skill_idx, distance, angle = _policy_action(target_obj_idx)
+        global_action, active_skill_idx, chosen_ego, distance, angle = _policy_action(
+            target_obj_idx
+        )
+        skill_name = (
+            skill_names[active_skill_idx]
+            if 0 <= active_skill_idx < len(skill_names)
+            else str(active_skill_idx)
+        )
+        ego_name = _ego_action_names.get(chosen_ego, str(chosen_ego))
 
         if frame_count < 5:
-            _log(f"frame {frame_count}: env.step(action={global_action})...")
+            _log(
+                f"frame {frame_count}: env.step(action={global_action}) "
+                f"skill={skill_name} ego={ego_name}..."
+            )
         # Step env
+        prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
+        obs, state = jax.device_get((obs, state))
+        done = bool(done)
+        life_lost = 0
+        if reset_policy_on_life_lost:
+            life_lost = int(
+                jax.device_get(extract_life_lost(prev_env_state, state))
+            )
 
         if frame_count < 5:
             _log(f"frame {frame_count}: render...")
@@ -1851,9 +2115,9 @@ def run_live_visualization(
             )
             frame = np.transpose(frame_chw, (1, 2, 0))
 
-        overlay = None
+        overlay = f"{skill_name} ego={ego_name} game={global_action}"
         if not np.isnan(distance):
-            overlay = f"skill: d={distance:.1f}px, a={angle:.2f} rad"
+            overlay = f"{overlay} d={distance:.1f}px a={angle:.2f}"
         if frame_count < 5:
             _log(f"frame {frame_count}: display...")
         _show_rgb_frame(frame, overlay=overlay)
@@ -1864,10 +2128,23 @@ def run_live_visualization(
             _log(f"frame {frame_count - 1}: done")
 
         if done:
+            _log("episode done — env + waypoint plan reset")
             rng, rng_reset = jax.random.split(rng)
             obs, state = env.reset(rng_reset)
+            obs, state = jax.device_get((obs, state))
             prev_target_idx = no_target_idx
             mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+        elif life_lost > 0:
+            # Kangaroo: lives drop on crash without done=True; restart the climb plan.
+            _log(f"life lost (livesΔ={life_lost}) — waypoint plan reset")
+            prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
     if frame_limit is not None and frame_count >= frame_limit:
         print(f"Live visualization stopped after {frame_count} frames (--max-frames={frame_limit}).")
@@ -1941,6 +2218,25 @@ def main():
         ),
     )
     parser.add_argument(
+        "--remap-navigate-to-collect",
+        action="store_true",
+        default=False,
+        help=(
+            "Route LABEL_NAVIGATE targets through the COLLECT skill head "
+            "(same fold as NUM_SKILLS<4). Useful for transfer smoke tests "
+            "when the NAVIGATE head fails to generalize."
+        ),
+    )
+    parser.add_argument(
+        "--video-out",
+        type=str,
+        default=None,
+        help=(
+            "When --record is set, also write an mp4 to this path "
+            "(works with --wandb-mode disabled)."
+        ),
+    )
+    parser.add_argument(
         "--meta-model",
         type=str,
         default=None,
@@ -1956,10 +2252,10 @@ def main():
         "--display",
         type=str,
         choices=["opencv", "pygame"],
-        default="opencv",
+        default="pygame",
         help=(
-            "Live window backend. Default opencv (reliable with JAX). "
-            "pygame often fails to map a window once JAX threads are running."
+            "Live window backend. Default pygame. "
+            "Use opencv if pygame fails to map a window once JAX threads are running."
         ),
     )
     parser.add_argument(
@@ -1973,6 +2269,12 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    # Open the pygame window before JAX weight loading so SDL can map it.
+    pygame_screen = None
+    pygame_font = None
+    if (not args.record) and str(args.display).lower().strip() == "pygame":
+        pygame_screen, pygame_font = bootstrap_pygame_window()
 
     base_config = load_base_config(experiment=args.experiment)
 
@@ -2019,6 +2321,11 @@ def main():
     # even when checkpoint-side *_config.yaml is present.
     if args.env_name is not None:
         base_config["ENV_NAME"] = args.env_name
+    if args.remap_navigate_to_collect:
+        base_config["REMAP_NAVIGATE_TO_COLLECT"] = True
+        print(
+            "REMAP_NAVIGATE_TO_COLLECT=True — NAVIGATE waypoints use the COLLECT skill head"
+        )
 
     # If requested, run live interactive visualization and exit.
     if not args.record:
@@ -2029,6 +2336,8 @@ def main():
             max_frames=args.max_frames,
             fps=args.fps,
             display_backend=args.display,
+            pygame_screen=pygame_screen,
+            pygame_font=pygame_font,
         )
         return
 
@@ -2067,6 +2376,14 @@ def main():
 
     # Use the existing video logging utility to create and log the video.
     step = 0
+    video_out = args.video_out
+    if video_out is None and base_config.get("WANDB_MODE", "disabled") == "disabled":
+        video_out = str(
+            Path("outputs")
+            / "videos"
+            / f"{base_config.get('ENV_NAME', 'env')}_transfer_viz.mp4"
+        )
+        print(f"No --video-out set; writing local mp4 to {video_out}")
     video_callback(
         states,
         active_agents,
@@ -2078,6 +2395,7 @@ def main():
         objects_bbox=objects_bbox,
         distances=distances,
         angles=angles,
+        video_output_path=video_out,
     )
     wait_for_video_finish()
 

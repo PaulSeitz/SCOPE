@@ -23,7 +23,11 @@ from concept_based_learning.observations.egocentric import (
 )
 from concept_based_learning.training.skill_params import as_per_skill_param_list
 from concept_based_learning.observations.egocentric import _get_player as _get_player_entity
-from concept_based_learning.observations.action_space import fire_ego_action_indices
+from concept_based_learning.observations.action_space import (
+    fire_ego_action_indices,
+    make_realized_ego_mask_fn,
+    mask_q_with_legal_ego,
+)
 from concept_based_learning.networks.skill_network import (
     OBJECT_CONDITIONED_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
@@ -119,6 +123,9 @@ def make_train(
     forced_target_hook,
     get_heuristic_with_state=None,
     reset_policy_on_life_lost=False,
+    legal_ego_mask_fn=None,
+    ego_mapper_noop_action=0,
+    ego_mapper_fire_action=1,
 ):
     """
     Factory that creates a `train(rng, params, batch_stats)` function.
@@ -201,6 +208,14 @@ def make_train(
     else:
         FIRE_EGO_ACTION_INDICES = fire_ego_action_indices(EGO_ACTION_DIM)
     NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    if legal_ego_mask_fn is None:
+        legal_ego_mask_fn = make_realized_ego_mask_fn(
+            action_mapper,
+            noop_action=int(ego_mapper_noop_action),
+            fire_action=int(ego_mapper_fire_action),
+            ego_action_dim=EGO_ACTION_DIM,
+        )
 
     fixed_target_idx = fixed_target_idx_from_config(config)
     use_policy_state = (
@@ -621,6 +636,13 @@ def make_train(
                     mask = jnp.broadcast_to(
                         mask_row, (config["NUM_ENVS"], EGO_ACTION_DIM)
                     )
+                    if use_legal_ego_mask:
+                        dyn = jax.vmap(legal_ego_mask_fn)(
+                            last_obs.raw_observation,
+                            safe_target_idxs,
+                            last_obs.objects,
+                        )
+                        mask = jnp.logical_and(mask, dyn)
 
                     ego_action = jax.vmap(eps_greedy_exploration)(_rngs, q_vals, eps, mask)
                     return ego_action, q_vals
@@ -1674,6 +1696,12 @@ def make_train(
                     q_active = q_active.at[FIRE_EGO_ACTION_INDICES].set(-jnp.inf)
                 else:
                     q_active = q_vals[active_skills]
+
+                if use_legal_ego_mask:
+                    legal = legal_ego_mask_fn(
+                        obs.raw_observation, target_obj_idxs, obs.objects
+                    )
+                    q_active = mask_q_with_legal_ego(q_active, legal)
 
                 chosen_ego = jnp.argmax(q_active)
                 global_action = action_mapper(

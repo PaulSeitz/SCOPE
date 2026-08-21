@@ -303,8 +303,10 @@ MINIMAL_ABLATION_TRAIN_STEMS = (
 # 2 GPUs: trains first, then Seaquest full + Pong/BeamRider/Phoenix base (27k).
 CLIP_LOW_PIPELINE_SUITE = "clip_low_pipeline"
 CLIP_LOW_PIPELINE_STEMS = (
+    # --- trains (2 GPUs) ---
     "seaquest_skills_ego_clip15_angbins",
     "seaquest_skills_ego_clip8_angbins",
+    # --- Seaquest full + transfers (legal-ego decode) ---
     "seaquest_skills_ego_clip15_angbins_eval_full",
     "seaquest_skills_ego_clip8_angbins_eval_full",
     "pong_transfer_ego_clip15_angbins",
@@ -313,6 +315,11 @@ CLIP_LOW_PIPELINE_STEMS = (
     "beamrider_transfer_ego_clip8_angbins",
     "phoenix_transfer_ego_clip15_angbins",
     "phoenix_transfer_ego_clip8_angbins",
+    # --- locked clip50 ckpt re-eval with legal-ego decode (no retrain) ---
+    "seaquest_skills_ego_clip50_angbins_legalmask_eval_full",
+    "pong_transfer_ego_clip50_angbins_legalmask",
+    "beamrider_transfer_ego_clip50_angbins_legalmask",
+    "phoenix_transfer_ego_clip50_angbins_legalmask",
 )
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
@@ -1211,6 +1218,7 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_DISTANCE_BINS_SCALAR",
     "EGO_DISTANCE_BIN_CENTERS_PX",
     "EGO_DISTANCE_BIN_MAX_PX",
+    "EGO_LEGAL_ACTION_MASK",
 )
 
 
@@ -1569,7 +1577,8 @@ def main() -> None:
             "(train-first stem order, then --resume after reboot). "
             f"{MINIMAL_ABLATION_TRAIN_SUITE}: the six RQ1 trains only (~3h on "
             "3 GPUs); run {MINIMAL_ABLATION_SUITE} --eval-only --resume next day. "
-            f"{CLIP_LOW_PIPELINE_SUITE}: clip15 vs clip8 distance (same 8 θ-bins); "
+            f"{CLIP_LOW_PIPELINE_SUITE}: clip15 vs clip8 distance (same 8 θ-bins) "
+            "+ locked clip50 re-eval with legal-ego decode; "
             "full Seaquest + Pong/BeamRider/Phoenix base; 2 GPUs."
         ),
     )

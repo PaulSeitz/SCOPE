@@ -183,6 +183,8 @@ def outer_make_train(config, frozen_meta_params=None):
         reset_policy_on_life_lost=bool(
             getattr(components, "reset_policy_on_life_lost", False)
         ),
+        ego_mapper_noop_action=int(components.ego_mapper_noop_action),
+        ego_mapper_fire_action=int(components.ego_mapper_fire_action),
     )
     return train_fn, eval_rollout_fn, renderer
 
@@ -254,6 +256,8 @@ def outer_make_tandem_train(config):
         extract_life_lost=components.extract_life_lost,
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
+        ego_mapper_noop_action=int(components.ego_mapper_noop_action),
+        ego_mapper_fire_action=int(components.ego_mapper_fire_action),
     )
     return tandem_regions, renderer
 

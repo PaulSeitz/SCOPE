@@ -23,6 +23,8 @@ from jaxatari.games.jax_kangaroo import KangarooRenderer
 from jaxatari.games.jax_skiing import SkiingRenderer
 from jaxatari.games.jax_tennis import TennisRenderer
 from jaxatari.games.jax_asterix import AsterixRenderer
+from jaxatari.games.jax_montezumarevenge import MontezumaRevengeRenderer
+from jaxatari.games.jax_venture import VentureRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -145,6 +147,26 @@ from concept_based_learning.environments.asterix.asterix_label import (
 from concept_based_learning.environments.asterix.asterix_policy import (
     get_heuristic_target as asterix_get_heuristic_target,
     NO_TARGET_IDX as asterix_NO_TARGET_IDX,
+)
+from concept_based_learning.environments.montezumarevenge.montezuma_label import (
+    MontezumaRevengeSemanticWrapper,
+    montezuma_action_mapper,
+    montezuma_inverse_action_mapper,
+    extract_all_skills_rewards as montezuma_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.montezumarevenge.montezuma_policy import (
+    get_heuristic_target as montezuma_get_heuristic_target,
+    NO_TARGET_IDX as montezuma_NO_TARGET_IDX,
+)
+from concept_based_learning.environments.venture.venture_label import (
+    VentureSemanticWrapper,
+    venture_action_mapper,
+    venture_inverse_action_mapper,
+    extract_all_skills_rewards as venture_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.venture.venture_policy import (
+    get_heuristic_target as venture_get_heuristic_target,
+    NO_TARGET_IDX as venture_NO_TARGET_IDX,
 )
 from concept_based_learning.environments.generic_heuristic import (
     get_heuristic_target as generic_get_heuristic_target,
@@ -365,6 +387,9 @@ class EnvComponents:
     # episode reset.  Needed for Sequence plans that should restart on respawn
     # (e.g. Kangaroo); leave False when stickiness across lives is fine.
     reset_policy_on_life_lost: bool = False
+    # Game-action ids used by action_mapper for NOOP / stationary FIRE (legal-mask).
+    ego_mapper_noop_action: int = 0
+    ego_mapper_fire_action: int = 1
 
 
 class EnvManager:
@@ -472,6 +497,7 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
+            ego_mapper_fire_action=0,  # no distinct FIRE
         )
 
         self._registry["pong"] = EnvComponents(
@@ -559,6 +585,7 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
+            ego_mapper_fire_action=0,  # no distinct FIRE
         )
 
         self._registry["tennis"] = EnvComponents(
@@ -588,6 +615,46 @@ class EnvManager:
             action_mapper=asterix_action_mapper,
             inverse_action_mapper=asterix_inverse_action_mapper,
             reward_extractor=_wrap_reward_extractor_5arg(asterix_extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+
+        self._registry["montezumarevenge"] = EnvComponents(
+            name="MontezumaRevenge",
+            jax_game_id="montezumarevenge",
+            semantic_wrapper_cls=MontezumaRevengeSemanticWrapper,
+            renderer_cls=MontezumaRevengeRenderer,
+            get_heuristic_target=montezuma_get_heuristic_target,
+            no_target_idx=montezuma_NO_TARGET_IDX,
+            action_mapper=montezuma_action_mapper,
+            inverse_action_mapper=montezuma_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(
+                montezuma_extract_all_skills_rewards
+            ),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+        # Alias accepted by jaxatari.make("montezuma_revenge").
+        self._registry["montezuma_revenge"] = self._registry["montezumarevenge"]
+
+        self._registry["venture"] = EnvComponents(
+            name="Venture",
+            jax_game_id="venture",
+            semantic_wrapper_cls=VentureSemanticWrapper,
+            renderer_cls=VentureRenderer,
+            get_heuristic_target=venture_get_heuristic_target,
+            no_target_idx=venture_NO_TARGET_IDX,
+            action_mapper=venture_action_mapper,
+            inverse_action_mapper=venture_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(
+                venture_extract_all_skills_rewards
+            ),
             fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
             extract_life_lost=_default_extract_life_lost,
             resolve_curriculum_mods=_default_resolve_curriculum_mods,

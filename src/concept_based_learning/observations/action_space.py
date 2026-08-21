@@ -49,6 +49,7 @@ Example — Seaquest (full 18-action Atari layout):
     move_fire_table = [11, 16, 13, 17, 12, 15, 10, 14] # same with FIRE bit
 """
 
+import jax
 import jax.numpy as jnp
 
 # ---------------------------------------------------------------------------
@@ -273,3 +274,54 @@ def fire_ego_action_indices(ego_action_dim: int) -> jnp.ndarray:
     if ego_action_dim == 6:
         return FIRE_EGO_ACTION_INDICES_6
     return FIRE_EGO_ACTION_INDICES
+
+
+def make_realized_ego_mask_fn(
+    action_mapper,
+    *,
+    noop_action: int = 0,
+    fire_action: int = 1,
+    ego_action_dim: int = 18,
+):
+    """
+    Build a per-state mask over ego actions whose intentions the mapper can realize.
+
+    NOOP (0) and FIRE-only (1) are always legal. A pure-move ego is legal iff the
+    mapped game action is not ``noop_action``. A move+FIRE ego is legal iff the
+    mapped action is neither noop nor stationary FIRE (movement was not dropped).
+
+    When ``fire_action == noop_action`` (envs with no distinct FIRE, e.g. Freeway /
+    Skiing), move+FIRE only requires a non-noop mapping.
+
+    Used with ``EGO_LEGAL_ACTION_MASK`` so greedy / ε-greedy select
+    ``argmax Q`` among realizable intentions instead of collapsing illegal
+    FORWARD → NOOP (e.g. Phoenix when the target is directly above).
+    """
+    _noop = jnp.int32(noop_action)
+    _fire = jnp.int32(fire_action)
+    _dim = int(ego_action_dim)
+    _distinct_fire = bool(int(fire_action) != int(noop_action))
+
+    def legal_mask(raw_obs, target_idx, objects):
+        egos = jnp.arange(_dim, dtype=jnp.int32)
+
+        def _one(ego):
+            g = action_mapper(ego, raw_obs, target_idx, objects)
+            pure = jnp.logical_or(ego == 0, ego == 1)
+            move_fire = ego >= 10
+            ok_move = g != _noop
+            ok_mf = jnp.where(
+                _distinct_fire,
+                jnp.logical_and(g != _noop, g != _fire),
+                g != _noop,
+            )
+            return jnp.where(pure, True, jnp.where(move_fire, ok_mf, ok_move))
+
+        return jax.vmap(_one)(egos)
+
+    return legal_mask
+
+
+def mask_q_with_legal_ego(q_vals, legal_mask):
+    """Set illegal ego logits to -inf (broadcasts over leading batch dims)."""
+    return jnp.where(legal_mask, q_vals, jnp.asarray(-jnp.inf, dtype=q_vals.dtype))
