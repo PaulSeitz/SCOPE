@@ -1,0 +1,8 @@
+# Phoenix mod allowlist for paper_eval RQ2 transfer probes.
+env: phoenix
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control

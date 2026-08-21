@@ -29,6 +29,9 @@ Usage:
   # Distance clip 50px × 8 overlapping world-θ bins (4 GPUs, one arm each):
   python scripts/run_paper_eval.py --suite ego_clip_bins --gpus 0,1,2,3 --wait-deps --lean
 
+  # Low distance-clip ablations (2 GPUs: clip15 + clip8, then SQ/Pong/Beam/Phoenix):
+  python scripts/run_paper_eval.py --suite clip_low_pipeline --gpus 0,1 --wait-deps --lean
+
   # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
   python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
   python scripts/run_paper_eval.py --suite minimal_ablation --eval-only --resume --gpus 0,1,2,3 --wait-deps --lean
@@ -296,6 +299,21 @@ MINIMAL_ABLATION_TRAIN_STEMS = (
     "seaquest_skills_ego_clip50_angbins_nodestroyshape",
     "seaquest_skills_ego_clip50_angbins_nolos",
 )
+# Low distance-clip ablations (clip15 / clip8) for DESTROY range invariance.
+# 2 GPUs: trains first, then Seaquest full + Pong/BeamRider/Phoenix base (27k).
+CLIP_LOW_PIPELINE_SUITE = "clip_low_pipeline"
+CLIP_LOW_PIPELINE_STEMS = (
+    "seaquest_skills_ego_clip15_angbins",
+    "seaquest_skills_ego_clip8_angbins",
+    "seaquest_skills_ego_clip15_angbins_eval_full",
+    "seaquest_skills_ego_clip8_angbins_eval_full",
+    "pong_transfer_ego_clip15_angbins",
+    "pong_transfer_ego_clip8_angbins",
+    "beamrider_transfer_ego_clip15_angbins",
+    "beamrider_transfer_ego_clip8_angbins",
+    "phoenix_transfer_ego_clip15_angbins",
+    "phoenix_transfer_ego_clip8_angbins",
+)
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -313,6 +331,7 @@ SUITE_STEMS = {
     SCALAR_ABLATION_DUAL_SUITE: SCALAR_ABLATION_DUAL_STEMS,
     MINIMAL_ABLATION_SUITE: MINIMAL_ABLATION_STEMS,
     MINIMAL_ABLATION_TRAIN_SUITE: MINIMAL_ABLATION_TRAIN_STEMS,
+    CLIP_LOW_PIPELINE_SUITE: CLIP_LOW_PIPELINE_STEMS,
 }
 
 
@@ -1549,7 +1568,9 @@ def main() -> None:
             "full Seaquest eval + Pong/BeamRider base transfer; 4 GPUs "
             "(train-first stem order, then --resume after reboot). "
             f"{MINIMAL_ABLATION_TRAIN_SUITE}: the six RQ1 trains only (~3h on "
-            "3 GPUs); run {MINIMAL_ABLATION_SUITE} --eval-only --resume next day."
+            "3 GPUs); run {MINIMAL_ABLATION_SUITE} --eval-only --resume next day. "
+            f"{CLIP_LOW_PIPELINE_SUITE}: clip15 vs clip8 distance (same 8 θ-bins); "
+            "full Seaquest + Pong/BeamRider/Phoenix base; 2 GPUs."
         ),
     )
     parser.add_argument(
@@ -1561,8 +1582,9 @@ def main() -> None:
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
             "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
-            "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, and "
-            "minimal_ablation_train (train-only; use minimal_ablation --eval-only after)."
+            "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, "
+            "minimal_ablation_train, and clip_low_pipeline "
+            "(train-only suites: use companion --eval-only after)."
         ),
     )
     parser.add_argument("--shard", metavar="INDEX/TOTAL")
@@ -1820,6 +1842,7 @@ def main() -> None:
         ANGSCALAR_ONLY_PIPELINE_SUITE,
         SCALAR_ABLATION_DUAL_SUITE,
         MINIMAL_ABLATION_SUITE,
+        CLIP_LOW_PIPELINE_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
