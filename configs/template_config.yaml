@@ -63,7 +63,7 @@ USE_EGO_WEAPON_FEATURES: false    # Append can_fire + facing_enemy (2 channels/f
 USE_EGO_SHOT_FEATURES: false      # Append shot_dx/shot_dy to target (zeros if no bullet). Requires weapon features. Options: true/false.
 USE_EGO_SHOT_BETWEEN: false       # Append 0/1: player missile on the open player→target segment (DESTROY only). Requires weapon features. Options: true/false.
 USE_DESTROY_ONLY_EGO_EXTRAS: false # DESTROY keeps LoS/weapon extras; other skills get pose only (different in_dim). Options: true/false.
-EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before normalization (cap is the new max). Options: null or number > 0.
+EGO_DISTANCE_CLIP_MAX_PX: null    # Clip ego distances before norm. null=no clip (MAX_DIST); >0=cap; 0=zero distance channel (angle-only).
 EGO_ANGLE_BINS: null              # Replace sin/cos(ψ) with N overlapping world-θ bins (50% triangular). Options: null or int >= 2.
 
 # Seaquest compatibility toggles.

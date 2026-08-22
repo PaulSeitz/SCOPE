@@ -117,23 +117,31 @@ def set_ego_distance_clip_max_pixels(max_px: float | None) -> None:
     """
     Clip target-aligned Euclidean distance before normalization.
 
-    When set (e.g. 15), distances >= max_px are treated as max_px so the network
-    sees a single \"far\" bucket instead of sparse large values. Normalization uses
-    max_px, not MAX_DIST. Pass None to disable clipping.
+    When set to a positive value (e.g. 50), distances >= max_px are treated as
+    max_px so the network sees a single \"far\" bucket; normalization uses max_px.
+    Pass ``None`` to disable clipping (normalize by screen diagonal ``MAX_DIST``).
+    Pass ``0`` to **zero the distance channel** (angle-only ablation; input dim
+    unchanged). This is *not* \"clip at 0px\" — that would saturate everything to
+    contact.
     """
     global _EGO_DISTANCE_CLIP_MAX_PX
     if max_px is None:
         _EGO_DISTANCE_CLIP_MAX_PX = None
         return
     cap = float(max_px)
-    if cap <= 0:
-        raise ValueError(f"EGO_DISTANCE_CLIP_MAX_PX must be positive, got {max_px}")
+    if cap < 0:
+        raise ValueError(f"EGO_DISTANCE_CLIP_MAX_PX must be >= 0, got {max_px}")
     _EGO_DISTANCE_CLIP_MAX_PX = cap
 
 
 def ego_distance_clip_max_pixels() -> float | None:
     """Return the active distance clip cap in pixels, or None if disabled."""
     return _EGO_DISTANCE_CLIP_MAX_PX
+
+
+def ego_distance_zeroed() -> bool:
+    """True when distance features are forced to 0 (``EGO_DISTANCE_CLIP_MAX_PX: 0``)."""
+    return _EGO_DISTANCE_CLIP_MAX_PX is not None and float(_EGO_DISTANCE_CLIP_MAX_PX) == 0.0
 
 
 def set_ego_distance_bins(n_bins: int | None) -> None:
@@ -318,7 +326,12 @@ def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
     """Map raw pixel distances to the normalized distance channel fed to skills."""
     if _EGO_DISTANCE_CLIP_MAX_PX is not None:
         cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
-        return jnp.minimum(distances_px, cap) / cap
+        # Sentinel 0: drop distance information (keep channel width for arch parity).
+        return jnp.where(
+            cap == jnp.float32(0.0),
+            jnp.zeros_like(distances_px, dtype=jnp.float32),
+            jnp.minimum(distances_px, cap) / cap,
+        )
     return distances_px / MAX_DIST
 
 
@@ -379,6 +392,8 @@ def distance_features_from_pixels(distances_px: jnp.ndarray) -> list[jnp.ndarray
 def distance_pixels_from_feature(feature: jnp.ndarray | float) -> float:
     """Invert the distance channel for logging / overlays (clipped view)."""
     if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        if float(_EGO_DISTANCE_CLIP_MAX_PX) == 0.0:
+            return 0.0
         return float(feature) * _EGO_DISTANCE_CLIP_MAX_PX
     return float(feature) * MAX_DIST
 

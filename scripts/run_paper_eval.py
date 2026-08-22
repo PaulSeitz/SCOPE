@@ -31,6 +31,7 @@ Usage:
 
   # Low distance-clip ablations (2 GPUs: clip15 + clip8, then SQ/Pong/Beam/Phoenix):
   python scripts/run_paper_eval.py --suite clip_low_pipeline --gpus 0,1 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite clip_sweep_pipeline --gpus 0,1 --wait-deps --lean
 
   # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
   python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
@@ -321,6 +322,87 @@ CLIP_LOW_PIPELINE_STEMS = (
     "beamrider_transfer_ego_clip50_angbins_legalmask",
     "phoenix_transfer_ego_clip50_angbins_legalmask",
 )
+CLIP_SWEEP_PIPELINE_SUITE = "clip_sweep_pipeline"
+CLIP_SWEEP_PIPELINE_STEMS = (
+    # --- 7 new trains (2 GPUs) ---
+    "seaquest_skills_ego_clip0_angbins",
+    "seaquest_skills_ego_clip30_angbins",
+    "seaquest_skills_ego_clip60_angbins",
+    "seaquest_skills_ego_clip80_angbins",
+    "seaquest_skills_ego_clip100_angbins",
+    "seaquest_skills_ego_clip120_angbins",
+    "seaquest_skills_ego_noclip_angbins",
+    # --- existing ckpts: transfer dual-mask (no retrain) ---
+    "pong_transfer_ego_clip8_angbins_maskoff",
+    "beamrider_transfer_ego_clip8_angbins_maskoff",
+    "phoenix_transfer_ego_clip8_angbins_maskoff",
+    "pong_transfer_ego_clip8_angbins_maskon",
+    "beamrider_transfer_ego_clip8_angbins_maskon",
+    "phoenix_transfer_ego_clip8_angbins_maskon",
+    "pong_transfer_ego_clip15_angbins_maskoff",
+    "beamrider_transfer_ego_clip15_angbins_maskoff",
+    "phoenix_transfer_ego_clip15_angbins_maskoff",
+    "pong_transfer_ego_clip15_angbins_maskon",
+    "beamrider_transfer_ego_clip15_angbins_maskon",
+    "phoenix_transfer_ego_clip15_angbins_maskon",
+    "pong_transfer_ego_clip50_angbins_maskoff",
+    "beamrider_transfer_ego_clip50_angbins_maskoff",
+    "phoenix_transfer_ego_clip50_angbins_maskoff",
+    "pong_transfer_ego_clip50_angbins_maskon",
+    "beamrider_transfer_ego_clip50_angbins_maskon",
+    "phoenix_transfer_ego_clip50_angbins_maskon",
+    # --- new arms: SQ full (maskoff) + transfer dual-mask ---
+    "seaquest_skills_ego_clip0_angbins_eval_full",
+    "pong_transfer_ego_clip0_angbins_maskoff",
+    "beamrider_transfer_ego_clip0_angbins_maskoff",
+    "phoenix_transfer_ego_clip0_angbins_maskoff",
+    "pong_transfer_ego_clip0_angbins_maskon",
+    "beamrider_transfer_ego_clip0_angbins_maskon",
+    "phoenix_transfer_ego_clip0_angbins_maskon",
+    "seaquest_skills_ego_clip30_angbins_eval_full",
+    "pong_transfer_ego_clip30_angbins_maskoff",
+    "beamrider_transfer_ego_clip30_angbins_maskoff",
+    "phoenix_transfer_ego_clip30_angbins_maskoff",
+    "pong_transfer_ego_clip30_angbins_maskon",
+    "beamrider_transfer_ego_clip30_angbins_maskon",
+    "phoenix_transfer_ego_clip30_angbins_maskon",
+    "seaquest_skills_ego_clip60_angbins_eval_full",
+    "pong_transfer_ego_clip60_angbins_maskoff",
+    "beamrider_transfer_ego_clip60_angbins_maskoff",
+    "phoenix_transfer_ego_clip60_angbins_maskoff",
+    "pong_transfer_ego_clip60_angbins_maskon",
+    "beamrider_transfer_ego_clip60_angbins_maskon",
+    "phoenix_transfer_ego_clip60_angbins_maskon",
+    "seaquest_skills_ego_clip80_angbins_eval_full",
+    "pong_transfer_ego_clip80_angbins_maskoff",
+    "beamrider_transfer_ego_clip80_angbins_maskoff",
+    "phoenix_transfer_ego_clip80_angbins_maskoff",
+    "pong_transfer_ego_clip80_angbins_maskon",
+    "beamrider_transfer_ego_clip80_angbins_maskon",
+    "phoenix_transfer_ego_clip80_angbins_maskon",
+    "seaquest_skills_ego_clip100_angbins_eval_full",
+    "pong_transfer_ego_clip100_angbins_maskoff",
+    "beamrider_transfer_ego_clip100_angbins_maskoff",
+    "phoenix_transfer_ego_clip100_angbins_maskoff",
+    "pong_transfer_ego_clip100_angbins_maskon",
+    "beamrider_transfer_ego_clip100_angbins_maskon",
+    "phoenix_transfer_ego_clip100_angbins_maskon",
+    "seaquest_skills_ego_clip120_angbins_eval_full",
+    "pong_transfer_ego_clip120_angbins_maskoff",
+    "beamrider_transfer_ego_clip120_angbins_maskoff",
+    "phoenix_transfer_ego_clip120_angbins_maskoff",
+    "pong_transfer_ego_clip120_angbins_maskon",
+    "beamrider_transfer_ego_clip120_angbins_maskon",
+    "phoenix_transfer_ego_clip120_angbins_maskon",
+    "seaquest_skills_ego_noclip_angbins_eval_full",
+    "pong_transfer_ego_noclip_angbins_maskoff",
+    "beamrider_transfer_ego_noclip_angbins_maskoff",
+    "phoenix_transfer_ego_noclip_angbins_maskoff",
+    "pong_transfer_ego_noclip_angbins_maskon",
+    "beamrider_transfer_ego_noclip_angbins_maskon",
+    "phoenix_transfer_ego_noclip_angbins_maskon",
+)
+
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -339,6 +421,7 @@ SUITE_STEMS = {
     MINIMAL_ABLATION_SUITE: MINIMAL_ABLATION_STEMS,
     MINIMAL_ABLATION_TRAIN_SUITE: MINIMAL_ABLATION_TRAIN_STEMS,
     CLIP_LOW_PIPELINE_SUITE: CLIP_LOW_PIPELINE_STEMS,
+    CLIP_SWEEP_PIPELINE_SUITE: CLIP_SWEEP_PIPELINE_STEMS,
 }
 
 
@@ -1579,7 +1662,10 @@ def main() -> None:
             "3 GPUs); run {MINIMAL_ABLATION_SUITE} --eval-only --resume next day. "
             f"{CLIP_LOW_PIPELINE_SUITE}: clip15 vs clip8 distance (same 8 θ-bins) "
             "+ locked clip50 re-eval with legal-ego decode; "
-            "full Seaquest + Pong/BeamRider/Phoenix base; 2 GPUs."
+            "full Seaquest + Pong/BeamRider/Phoenix base; 2 GPUs. "
+            f"{CLIP_SWEEP_PIPELINE_SUITE}: distance clip sweep "
+            "(0/30/60/80/100/120/noclip trains + dual-mask Pong/Beam/Phoenix; "
+            "reuses clip8/15/50 ckpts; SQ full once per new arm); 2 GPUs overnight."
         ),
     )
     parser.add_argument(
@@ -1592,7 +1678,7 @@ def main() -> None:
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
             "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
             "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, "
-            "minimal_ablation_train, and clip_low_pipeline "
+            "minimal_ablation_train, clip_low_pipeline, and clip_sweep_pipeline "
             "(train-only suites: use companion --eval-only after)."
         ),
     )
@@ -1852,6 +1938,7 @@ def main() -> None:
         SCALAR_ABLATION_DUAL_SUITE,
         MINIMAL_ABLATION_SUITE,
         CLIP_LOW_PIPELINE_SUITE,
+        CLIP_SWEEP_PIPELINE_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
