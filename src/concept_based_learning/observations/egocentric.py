@@ -47,6 +47,8 @@ _EGO_DISTANCE_BIN_MAX_PX: float = MAX_DIST
 # When True (and distance bins enabled), collapse distance bins to one scalar
 # tier channel in [0,1] (nearest-bin index normalized by n-1).
 _EGO_DISTANCE_BINS_SCALAR: bool = False
+# When set, replace scalar/bins with one binary channel per threshold (d <= t).
+_EGO_DISTANCE_FLAG_THRESHOLDS_PX: tuple[float, ...] | None = None
 # None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
 # channels with this many triangular, 50%-overlap bins of world θ_target.
 _EGO_ANGLE_BINS: int | None = None
@@ -168,6 +170,28 @@ def set_ego_distance_bins_scalar(enabled: bool) -> None:
 def ego_distance_bins() -> int | None:
     """Return active distance-bin count, or None for scalar distance."""
     return _EGO_DISTANCE_BINS
+
+
+def set_ego_distance_flag_thresholds_px(
+    thresholds: list[float] | tuple[float, ...] | None,
+) -> None:
+    """Replace distance scalar/bins with nested ``d <= threshold`` indicator channels."""
+    global _EGO_DISTANCE_FLAG_THRESHOLDS_PX
+    if thresholds is None:
+        _EGO_DISTANCE_FLAG_THRESHOLDS_PX = None
+        return
+    vals = tuple(float(t) for t in thresholds)
+    if len(vals) < 1:
+        raise ValueError("EGO_DISTANCE_FLAG_THRESHOLDS_PX must have at least one threshold")
+    if any(v < 0.0 for v in vals):
+        raise ValueError("EGO_DISTANCE_FLAG_THRESHOLDS_PX values must be >= 0")
+    if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
+        raise ValueError("EGO_DISTANCE_FLAG_THRESHOLDS_PX must be strictly increasing")
+    _EGO_DISTANCE_FLAG_THRESHOLDS_PX = vals
+
+
+def ego_distance_flag_thresholds_px() -> tuple[float, ...] | None:
+    return _EGO_DISTANCE_FLAG_THRESHOLDS_PX
 
 
 def set_ego_distance_bin_centers_px(centers: list[float] | tuple[float, ...] | None) -> None:
@@ -293,14 +317,23 @@ def configure_ego_obs_from_config(config: dict) -> None:
         config.get("USE_EGO_LOS_FEATURES", False),
     )
     set_ego_blocking_features(bool(blocking))
-    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
-    set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
-    dist_bins = config.get("EGO_DISTANCE_BINS", None)
-    set_ego_distance_bins(None if dist_bins in (None, "", False) else int(dist_bins))
-    set_ego_distance_bins_scalar(bool(config.get("EGO_DISTANCE_BINS_SCALAR", False)))
-    dist_centers = config.get("EGO_DISTANCE_BIN_CENTERS_PX", None)
-    set_ego_distance_bin_centers_px(dist_centers)
-    set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
+    flag_thresh = config.get("EGO_DISTANCE_FLAG_THRESHOLDS_PX", None)
+    if flag_thresh not in (None, "", False):
+        set_ego_distance_flag_thresholds_px(flag_thresh)
+        set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_bins_scalar(False)
+        set_ego_distance_bin_centers_px(None)
+    else:
+        set_ego_distance_flag_thresholds_px(None)
+        clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+        set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
+        dist_bins = config.get("EGO_DISTANCE_BINS", None)
+        set_ego_distance_bins(None if dist_bins in (None, "", False) else int(dist_bins))
+        set_ego_distance_bins_scalar(bool(config.get("EGO_DISTANCE_BINS_SCALAR", False)))
+        dist_centers = config.get("EGO_DISTANCE_BIN_CENTERS_PX", None)
+        set_ego_distance_bin_centers_px(dist_centers)
+        set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
     angle_bins = config.get("EGO_ANGLE_BINS", None)
     set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
     set_ego_angle_sincos_snap(bool(config.get("EGO_ANGLE_SINCOS_SNAP", False)))
@@ -336,7 +369,9 @@ def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
 
 
 def ego_distance_channels_per_frame() -> int:
-    """Distance block width: ``n`` bins, or 1 scalar channel."""
+    """Distance block width: flag indicators, ``n`` bins, or 1 scalar channel."""
+    if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
+        return len(_EGO_DISTANCE_FLAG_THRESHOLDS_PX)
     if _EGO_DISTANCE_BINS:
         return 1 if _EGO_DISTANCE_BINS_SCALAR else int(_EGO_DISTANCE_BINS)
     return 1
@@ -368,6 +403,11 @@ def triangular_distance_bins(distances_px: jnp.ndarray, centers_px: jnp.ndarray)
 
 def distance_features_from_pixels(distances_px: jnp.ndarray) -> list[jnp.ndarray]:
     """Distance feature block as list of per-channel vectors."""
+    if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
+        thresholds = jnp.asarray(_EGO_DISTANCE_FLAG_THRESHOLDS_PX, dtype=jnp.float32)
+        d = jnp.asarray(distances_px, dtype=jnp.float32)[..., None]
+        flags = (d <= thresholds).astype(jnp.float32)
+        return [flags[..., i] for i in range(int(flags.shape[-1]))]
     if _EGO_DISTANCE_BINS:
         if _EGO_DISTANCE_BIN_CENTERS_PX is not None:
             centers = jnp.asarray(_EGO_DISTANCE_BIN_CENTERS_PX, dtype=jnp.float32)

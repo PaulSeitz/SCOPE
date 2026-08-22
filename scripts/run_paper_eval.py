@@ -32,6 +32,7 @@ Usage:
   # Low distance-clip ablations (2 GPUs: clip15 + clip8, then SQ/Pong/Beam/Phoenix):
   python scripts/run_paper_eval.py --suite clip_low_pipeline --gpus 0,1 --wait-deps --lean
   python scripts/run_paper_eval.py --suite clip_sweep_pipeline --gpus 0,1 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite distance_encode_pipeline --gpus 0,1 --wait-deps --lean
 
   # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
   python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
@@ -403,6 +404,37 @@ CLIP_SWEEP_PIPELINE_STEMS = (
     "phoenix_transfer_ego_noclip_angbins_maskon",
 )
 
+DISTANCE_ENCODE_PIPELINE_SUITE = "distance_encode_pipeline"
+DISTANCE_ENCODE_PIPELINE_STEMS = (
+    # --- trains (2 GPUs: 5 arms) ---
+    "seaquest_skills_ego_angbins_disttier2",
+    "seaquest_skills_ego_angbins_disttier4",
+    "seaquest_skills_ego_angbins_disttier6",
+    "seaquest_skills_ego_angbins_distflags3",
+    "seaquest_skills_ego_angbins_distflags6",
+    # --- per arm: Seaquest full + Pong/Beam/Phoenix base (maskoff) ---
+    "seaquest_skills_ego_angbins_disttier2_eval_full",
+    "pong_transfer_ego_angbins_disttier2",
+    "beamrider_transfer_ego_angbins_disttier2",
+    "phoenix_transfer_ego_angbins_disttier2",
+    "seaquest_skills_ego_angbins_disttier4_eval_full",
+    "pong_transfer_ego_angbins_disttier4",
+    "beamrider_transfer_ego_angbins_disttier4",
+    "phoenix_transfer_ego_angbins_disttier4",
+    "seaquest_skills_ego_angbins_disttier6_eval_full",
+    "pong_transfer_ego_angbins_disttier6",
+    "beamrider_transfer_ego_angbins_disttier6",
+    "phoenix_transfer_ego_angbins_disttier6",
+    "seaquest_skills_ego_angbins_distflags3_eval_full",
+    "pong_transfer_ego_angbins_distflags3",
+    "beamrider_transfer_ego_angbins_distflags3",
+    "phoenix_transfer_ego_angbins_distflags3",
+    "seaquest_skills_ego_angbins_distflags6_eval_full",
+    "pong_transfer_ego_angbins_distflags6",
+    "beamrider_transfer_ego_angbins_distflags6",
+    "phoenix_transfer_ego_angbins_distflags6",
+)
+
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -422,6 +454,7 @@ SUITE_STEMS = {
     MINIMAL_ABLATION_TRAIN_SUITE: MINIMAL_ABLATION_TRAIN_STEMS,
     CLIP_LOW_PIPELINE_SUITE: CLIP_LOW_PIPELINE_STEMS,
     CLIP_SWEEP_PIPELINE_SUITE: CLIP_SWEEP_PIPELINE_STEMS,
+    DISTANCE_ENCODE_PIPELINE_SUITE: DISTANCE_ENCODE_PIPELINE_STEMS,
 }
 
 
@@ -1301,6 +1334,7 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_DISTANCE_BINS_SCALAR",
     "EGO_DISTANCE_BIN_CENTERS_PX",
     "EGO_DISTANCE_BIN_MAX_PX",
+    "EGO_DISTANCE_FLAG_THRESHOLDS_PX",
     "EGO_LEGAL_ACTION_MASK",
 )
 
@@ -1665,7 +1699,9 @@ def main() -> None:
             "full Seaquest + Pong/BeamRider/Phoenix base; 2 GPUs. "
             f"{CLIP_SWEEP_PIPELINE_SUITE}: distance clip sweep "
             "(0/30/60/80/100/120/noclip trains + dual-mask Pong/Beam/Phoenix; "
-            "reuses clip8/15/50 ckpts; SQ full once per new arm); 2 GPUs overnight."
+            "reuses clip8/15/50 ckpts; SQ full once per new arm); 2 GPUs overnight. "
+            f"{DISTANCE_ENCODE_PIPELINE_SUITE}: fixed distance tiers/flags "
+            "(tier2/4/6, flags3/6) + 8 θ-bins; maskoff; SQ full + transfers."
         ),
     )
     parser.add_argument(
@@ -1678,7 +1714,8 @@ def main() -> None:
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
             "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
             "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, "
-            "minimal_ablation_train, clip_low_pipeline, and clip_sweep_pipeline "
+            "minimal_ablation_train, clip_low_pipeline, clip_sweep_pipeline, "
+            "and distance_encode_pipeline "
             "(train-only suites: use companion --eval-only after)."
         ),
     )
@@ -1939,6 +1976,7 @@ def main() -> None:
         MINIMAL_ABLATION_SUITE,
         CLIP_LOW_PIPELINE_SUITE,
         CLIP_SWEEP_PIPELINE_SUITE,
+        DISTANCE_ENCODE_PIPELINE_SUITE,
     }:
         eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
