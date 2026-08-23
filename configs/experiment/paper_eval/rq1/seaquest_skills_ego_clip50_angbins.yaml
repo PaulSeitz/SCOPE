@@ -37,6 +37,7 @@ WANDB_TAGS:
 - destroy:contact_fail
 - destroy:living_penalty
 - probe:clip50_angbins
+- probe:thesis
 SKILL_INPUT_MODE: ego
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false

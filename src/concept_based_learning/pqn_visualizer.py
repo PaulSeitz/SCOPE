@@ -27,6 +27,9 @@ from concept_based_learning.observations.egocentric import (
     MAX_DIST,
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
+    aabb_surface_gap_px,
+    ego_distance_bins,
+    ego_distance_flag_thresholds_px,
     ego_obs_channels_per_frame,
     ego_pose_channels_per_frame,
     _get_player,
@@ -624,6 +627,27 @@ def label_to_skill_idx(label, num_skills: int):
     )
 
     return _shared(label, num_skills)
+
+
+def _hud_target_distance_px(raw_obs, objects, target_obj_idx: int, last_frame_ego) -> float:
+    """True AABB surface-gap px for overlays (bins/flags make ego[0] non-invertible)."""
+    if ego_distance_bins() is not None or ego_distance_flag_thresholds_px():
+        player = _get_player(raw_obs)
+        y_bottom = _uses_bottom_edge_y(raw_obs)
+        return float(
+            aabb_surface_gap_px(
+                player.x[-1],
+                player.y[-1],
+                player.width[-1],
+                player.height[-1],
+                objects.x[-1, target_obj_idx],
+                objects.y[-1, target_obj_idx],
+                objects.width[-1, target_obj_idx],
+                objects.height[-1, target_obj_idx],
+                y_is_bottom_edge=y_bottom,
+            )
+        )
+    return distance_pixels_from_feature(float(last_frame_ego[0]))
 
 
 def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
@@ -1436,7 +1460,12 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
                 angle = float(jnp.arctan2(dy_pix, dx_pix))
             else:
-                distance = distance_pixels_from_feature(float(last_frame_ego[0]))
+                distance = _hud_target_distance_px(
+                    obs.raw_observation,
+                    obs.objects,
+                    int(target_obj_idx),
+                    last_frame_ego,
+                )
                 player = _get_player(obs.raw_observation)
                 y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
                 p_cx = float(
@@ -1975,7 +2004,12 @@ def run_live_visualization(
             distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
             angle = float(jnp.arctan2(dy_pix, dx_pix))
         else:
-            distance = distance_pixels_from_feature(float(last_frame_ego[0]))
+            distance = _hud_target_distance_px(
+                obs.raw_observation,
+                obs.objects,
+                int(target_obj_idx),
+                last_frame_ego,
+            )
             player = _get_player(obs.raw_observation)
             y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
             p_cx = float(player.x[-1] + player.width[-1] / 2.0)

@@ -3,12 +3,12 @@ PAPER_EVAL_PHASE: finetune
 PAPER_EVAL_KIND: skills
 PAPER_EVAL_MODS: pong
 PAPER_EVAL_REQUIRES_RQ1:
-- seaquest_skills_ego
+- seaquest_skills_ego_clip50_angbins
 NUM_SEEDS: 1
 ALG_NAME: hierarchical_pqn
 TRAIN_MODE: skills_only
 ENV_NAME: pong
-INIT_MODEL_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+INIT_MODEL_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_clip50_angbins/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
 SAVE_PATH: ./outputs/models/paper_eval/rq2/pong_finetune_ego
 WANDB_RUN_NAME: po_paper_rq2_finetune_ego
 WANDB_TAGS:
@@ -17,12 +17,13 @@ WANDB_TAGS:
 - env:pong
 - phase:finetune
 - skill_input:ego
+- probe:thesis
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: false
 USE_EGO_BLOCKING_FEATURES: true
 USE_EGO_WEAPON_FEATURES: true
-EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_DISTANCE_CLIP_MAX_PX: 50
 GAME_MODS: null
 EVAL_GAME_MODS: null
 SKILL_INPUT_MODE: ego
@@ -30,6 +31,11 @@ HEURISTIC_MODE: nearest
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false
 VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
+USE_EGO_SHOT_FEATURES: false
+EGO_ANGLE_BINS: 8
+EGO_LEGAL_ACTION_MASK: false
 alg:
   NUM_SKILLS: 4
   SKILL_NAMES:
@@ -77,4 +83,9 @@ alg:
   SKILL_PIXEL_CNN_CHANNELS:
   - 16
   - 32
-  INIT_MODEL_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: true
+  USE_EGO_SHOT_FEATURES: false
+  EGO_DISTANCE_CLIP_MAX_PX: 50
+  INIT_MODEL_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_clip50_angbins/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_clip50_angbins

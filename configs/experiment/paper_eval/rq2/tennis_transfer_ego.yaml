@@ -3,8 +3,8 @@ PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: transfer
 PAPER_EVAL_MODS: tennis
 PAPER_EVAL_REQUIRES_RQ1:
-- seaquest_skills_ego
-PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+- seaquest_skills_ego_clip50_angbins
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_clip50_angbins/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
 NUM_SEEDS: 1
 ALG_NAME: hierarchical_pqn
 TRAIN_MODE: skills_only
@@ -17,12 +17,13 @@ WANDB_TAGS:
 - env:tennis
 - phase:zero_shot
 - skill_input:ego
+- probe:thesis
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: false
 USE_EGO_BLOCKING_FEATURES: true
 USE_EGO_WEAPON_FEATURES: true
-EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_DISTANCE_CLIP_MAX_PX: 50
 GAME_MODS: null
 EVAL_GAME_MODS: null
 SKILL_INPUT_MODE: ego
@@ -30,6 +31,11 @@ HEURISTIC_MODE: nearest
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false
 VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
+USE_EGO_SHOT_FEATURES: false
+EGO_ANGLE_BINS: 8
+EGO_LEGAL_ACTION_MASK: false
 alg:
   NUM_SKILLS: 4
   SKILL_NAMES:
@@ -77,3 +83,8 @@ alg:
   SKILL_PIXEL_CNN_CHANNELS:
   - 16
   - 32
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: true
+  USE_EGO_SHOT_FEATURES: false
+  EGO_DISTANCE_CLIP_MAX_PX: 50
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_clip50_angbins

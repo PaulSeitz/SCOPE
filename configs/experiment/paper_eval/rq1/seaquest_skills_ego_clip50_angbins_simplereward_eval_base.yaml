@@ -1,0 +1,32 @@
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: skills
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_MOD_KEYS:
+- base
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_ego_clip50_angbins_simplereward
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_clip50_angbins_simplereward/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_clip50_angbins_simplereward
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: seaquest
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_clip50_angbins_simplereward
+WANDB_RUN_NAME: sq_paper_rq1_eval_ego_clip50_angbins_simplereward_base
+WANDB_TAGS:
+- suite:paper_eval
+- rq:1
+- env:seaquest
+- phase:mod_eval
+- ablation:simple_reward
+- collect_death_pen:true
+- probe:clip50_angbins_simplereward_base
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+DESTROY_CONTACT_FAIL: false
+DESTROY_LIVING_PENALTY: false
+USE_EGO_SHOT_FEATURES: false
+EGO_DISTANCE_CLIP_MAX_PX: 50
+EGO_ANGLE_BINS: 8

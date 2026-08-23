@@ -17,6 +17,7 @@ WANDB_TAGS:
 - env:tennis
 - phase:zero_shot
 - skill_input:oc_embed
+- probe:thesis
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: false
@@ -30,6 +31,8 @@ HEURISTIC_MODE: nearest
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false
 VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
 alg:
   NUM_SKILLS: 4
   SKILL_NAMES:
@@ -77,3 +80,6 @@ alg:
   SKILL_PIXEL_CNN_CHANNELS:
   - 16
   - 32
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: true
+  USE_EGO_SHOT_FEATURES: false

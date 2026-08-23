@@ -34,6 +34,13 @@ Usage:
   python scripts/run_paper_eval.py --suite clip_sweep_pipeline --gpus 0,1 --wait-deps --lean
   python scripts/run_paper_eval.py --suite distance_encode_pipeline --gpus 0,1 --wait-deps --lean
 
+  # Ground-up thesis Tier A (retrain clip50+θ-bins, full SQ/RQ2/RQ3 pixel tandem):
+  bash scripts/prepare_thesis_final_run.sh                  # archive + remove ckpts
+  python scripts/run_paper_eval.py --suite thesis_tier_a --gpus 0,1 --wait-deps --lean \\
+    --batch-tag thesis_tier_a_$(date +%Y%m%d)
+  # Tier B/C later: add --post-eval for finetune/scratch mod tables.
+  python scripts/run_paper_eval.py --suite thesis_tier_b --post-eval --gpus 0,1 --wait-deps --lean
+
   # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
   python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
   python scripts/run_paper_eval.py --suite minimal_ablation --eval-only --resume --gpus 0,1,2,3 --wait-deps --lean
@@ -222,6 +229,60 @@ CLIP50_ANGBINS_FULL_STEMS = (
     "seaquest_tandem_oc_ego_clip50_angbins",
     "seaquest_tandem_oc_ego_clip50_angbins_eval",
 )
+# Ground-up thesis Tier A: RQ1 all arms, RQ2 ego transfer (6 envs), RQ3 pixel tandem.
+THESIS_TIER_A_SUITE = "thesis_tier_a"
+THESIS_TIER_A_STEMS = (
+    # --- RQ1 trains (clip50 ego gates transfers / RQ3) ---
+    "seaquest_skills_ego_clip50_angbins",
+    "seaquest_skills_pixel",
+    "seaquest_skills_oc",
+    "seaquest_pqn",
+    "seaquest_pqn_oc",
+    # --- RQ1 eval (full Seaquest mod allowlist @ 27k) ---
+    "seaquest_skills_ego_clip50_angbins_eval_full",
+    "seaquest_skills_pixel_eval",
+    "seaquest_skills_oc_eval",
+    "seaquest_pqn_eval",
+    "seaquest_pqn_oc_eval",
+    "seaquest_heuristic_random",
+    # --- RQ2 zero-shot transfer (ego / clip50 winner) ---
+    "pong_transfer_ego",
+    "tennis_transfer_ego",
+    "beamrider_transfer_ego",
+    "freeway_transfer_ego",
+    "asterix_transfer_ego",
+    "phoenix_transfer_ego",
+    # --- RQ3 pixel tandem ---
+    "seaquest_tandem_pixel_ego_clip50_angbins",
+    "seaquest_tandem_pixel_ego_clip50_angbins_eval",
+)
+
+# Tier B: 5M finetune + post-eval on all RQ2 envs × ego/pixel/oc.
+THESIS_TIER_B_SUITE = "thesis_tier_b"
+THESIS_TIER_B_ENVS = ("pong", "tennis", "beamrider", "freeway", "asterix", "phoenix")
+THESIS_TIER_B_MODES = ("ego", "pixel", "oc")
+THESIS_TIER_B_STEMS = tuple(
+    f"{env}_finetune_{mode}" for env in THESIS_TIER_B_ENVS for mode in THESIS_TIER_B_MODES
+)
+
+# Tier C: 25M from-scratch + post-eval (ego/pixel) + RQ3 meta/tandem extras.
+THESIS_TIER_C_SUITE = "thesis_tier_c"
+THESIS_TIER_C_STEMS = tuple(
+    f"{env}_from_scratch_{mode}"
+    for env in THESIS_TIER_B_ENVS
+    for mode in ("ego", "pixel")
+) + (
+    "seaquest_meta_pixel_ego_skills_clip50",
+    "seaquest_meta_pixel_ego_skills_clip50_eval",
+    "seaquest_meta_oc_ego_skills_clip50",
+    "seaquest_meta_oc_ego_skills_clip50_eval",
+    "seaquest_tandem_oc_ego_clip50_angbins",
+    "seaquest_tandem_oc_ego_clip50_angbins_eval",
+)
+
+# Alias: full ground-up batch = tier A (most users start here).
+THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
+THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
 DISTBINS8_PIPELINE_SUITE = "distbins8_pipeline"
 DISTBINS8_PIPELINE_STEMS = (
     "seaquest_skills_ego_clip50_angbins_distbins8",
@@ -446,6 +507,10 @@ SUITE_STEMS = {
     EGO_CLIP_BINS_SUITE: EGO_CLIP_BINS_STEMS,
     CLIP_BINS_NODECAY_SUITE: CLIP_BINS_NODECAY_STEMS,
     CLIP50_ANGBINS_FULL_SUITE: CLIP50_ANGBINS_FULL_STEMS,
+    THESIS_TIER_A_SUITE: THESIS_TIER_A_STEMS,
+    THESIS_TIER_B_SUITE: THESIS_TIER_B_STEMS,
+    THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
+    THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
     TIERSCALAR_PIPELINE_SUITE: TIERSCALAR_PIPELINE_STEMS,
     ANGSCALAR_ONLY_PIPELINE_SUITE: ANGSCALAR_ONLY_PIPELINE_STEMS,
@@ -502,7 +567,7 @@ SMOKE_STEMS = (
 )
 
 RQ1_SKILL_STEMS = (
-    "seaquest_skills_ego",
+    "seaquest_skills_ego_clip50_angbins",
     "seaquest_skills_pixel",
     "seaquest_skills_oc",
 )
@@ -585,7 +650,15 @@ def _rtpt_name(
     *,
     suite: str | None = None,
 ) -> str:
-    if suite:
+    suite_rtpt = {
+        THESIS_TIER_A_SUITE: "sq_full_eval",
+        THESIS_FINAL_SUITE: "sq_full_eval",
+        THESIS_TIER_B_SUITE: "sq_full_eval_ft",
+        THESIS_TIER_C_SUITE: "sq_full_eval_extra",
+    }
+    if suite and suite in suite_rtpt:
+        base = suite_rtpt[suite]
+    elif suite:
         base = f"{RTPT_BASE}_{suite}"
     elif rq is not None:
         base = f"{RTPT_BASE}_rq{rq}"
@@ -1680,6 +1753,12 @@ def main() -> None:
             f"{CLIP50_ANGBINS_FULL_SUITE}: existing clip50+θ-bins ckpt; full "
             "Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem "
             "(1 GPU sequential). "
+            f"{THESIS_TIER_A_SUITE} (alias {THESIS_FINAL_SUITE}): ground-up Tier A — "
+            "RQ1 all arms + full SQ eval + RQ2 ego transfer (6 envs) + RQ3 pixel "
+            "tandem (~2–3 GPUs overnight with --wait-deps). "
+            f"{THESIS_TIER_B_SUITE}: RQ2 finetune 5M (use --post-eval). "
+            f"{THESIS_TIER_C_SUITE}: RQ2 from-scratch 25M + RQ3 meta/OC tandem "
+            "(use --post-eval). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{TIERSCALAR_PIPELINE_SUITE}: single-channel tier scalar for both "
@@ -1712,7 +1791,8 @@ def main() -> None:
             "Valid for skill_reshape, destroy_ablation, destroy_urgency, "
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
-            "clip50_angbins_full, distbins8_pipeline, tierscalar_pipeline, "
+            "clip50_angbins_full, thesis_tier_a, thesis_tier_b, thesis_tier_c, "
+            "thesis_final, distbins8_pipeline, tierscalar_pipeline, "
             "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, "
             "minimal_ablation_train, clip_low_pipeline, clip_sweep_pipeline, "
             "and distance_encode_pipeline "

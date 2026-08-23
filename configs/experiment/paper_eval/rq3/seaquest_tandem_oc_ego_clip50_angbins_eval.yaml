@@ -1,4 +1,3 @@
-# Full Seaquest mod eval of the clip50+θ-bins OC tandem (skills + meta).
 PAPER_EVAL_RQ: 3
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: tandem
@@ -13,7 +12,7 @@ ALG_NAME: hierarchical_pqn
 TRAIN_MODE: tandem
 ENV_NAME: seaquest
 SAVE_PATH: ./outputs/models/paper_eval/rq3/seaquest_tandem_oc_ego_clip50_angbins
-WANDB_RUN_NAME: sq_paper_rq3_eval_tandem_oc_ego_clip50_angbins
+WANDB_RUN_NAME: sq_paper_rq3_eval_tandem_oc_ego_clip50
 WANDB_TAGS:
 - suite:paper_eval
 - rq:3
@@ -22,15 +21,14 @@ WANDB_TAGS:
 - train_mode:tandem
 - meta_input:oc_embed
 - skill_input:ego
-- destroy:contact_fail
-- destroy:living_penalty
-- probe:clip50_angbins_full
+- probe:thesis
 SKILL_INPUT_MODE: ego
 META_INPUT_MODE: oc_embed
 HEURISTIC_MODE: env_specific
 SKILL_DEATH_PENALIZE_COLLECT: true
-DESTROY_CONTACT_FAIL: true
-DESTROY_LIVING_PENALTY: true
 USE_EGO_SHOT_FEATURES: false
 EGO_DISTANCE_CLIP_MAX_PX: 50
 EGO_ANGLE_BINS: 8
+EGO_LEGAL_ACTION_MASK: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
