@@ -72,8 +72,6 @@ _TOP_WAYPOINT_LIFT_PX = 8
 _PLATFORM_MATCH_PX = 16
 # Falling coco x must lie within ladder width ± this margin to "cover" it.
 _FALLING_COCO_LADDER_X_MARGIN = 10
-# Obs orientation: 90 = facing right, 270 = facing left (jax_kangaroo _get_observation).
-_ORI_RIGHT_DEG = 90.0
 
 
 def _scalar_to_1d(x):
@@ -121,16 +119,6 @@ def _falling_coco_covers_ladders(falling_coconut, ladders):
         coco_alive,
         jnp.logical_and(x_overlap, above_foot),
     )
-
-
-def _thrown_coco_in_front(player, thrown_coconuts):
-    """Per-thrown-coco bool: active and on the side the player is facing."""
-    # Observation orientation is degrees (90 right / 270 left).
-    facing_right = jnp.abs(player.orientation - _ORI_RIGHT_DEG) < 45.0
-    p_cx = player.x + player.width / 2.0
-    c_cx = thrown_coconuts.x + thrown_coconuts.width / 2.0
-    in_front = jnp.where(facing_right, c_cx >= p_cx, c_cx <= p_cx)
-    return jnp.logical_and(thrown_coconuts.active > 0.5, in_front)
 
 
 def _match_platform_y(edge_y, plat_y, plat_active, *, above: bool):
@@ -222,7 +210,6 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         falling_coconut = obs.falling_coconut  # scalar
         monkeys = obs.monkeys               # n=4
         thrown_coconuts = obs.thrown_coconuts  # n=4
-        player = obs.player
 
         # --- Ladder waypoints (NAVIGATE), snapped to standable floors ---
         lad_half_w = ladders.width // 2
@@ -306,12 +293,14 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         destroy_act = jnp.concatenate([fc_act, monkey_act])
         n_destroy = destroy_x.shape[0]  # 5
 
-        # Thrown cocos: AVOID only while in front of the player (facing side).
+        # Thrown cocos: AVOID while the env marks them active. Do not gate on
+        # facing — AVOID turns the player away, which would deactivate the
+        # object and flicker the interrupt back to NAVIGATE.
         avoid_x = thrown_coconuts.x
         avoid_y = thrown_coconuts.y
         avoid_w = thrown_coconuts.width
         avoid_h = thrown_coconuts.height
-        avoid_act = _thrown_coco_in_front(player, thrown_coconuts).astype(jnp.int32)
+        avoid_act = (thrown_coconuts.active > 0.5).astype(jnp.int32)
         n_avoid = avoid_x.shape[0]  # 4
 
         all_x = jnp.concatenate([nav_x, collect_x, destroy_x, avoid_x])

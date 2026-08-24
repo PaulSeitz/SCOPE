@@ -51,8 +51,14 @@ DESTROY_PATH_RANGE = 90.0
 FALLING_COCO_DODGE_RANGE = 30.0
 DESTROY_PATH_Y_SLACK = 28.0
 _BELOW_FLOOR_MARGIN_PX = 20.0
-AVOID_RANGE_X = 40.0
-AVOID_RANGE_Y = 55.0
+# Thrown cocos: early enough to react (incl. mid-air), not so early that
+# AVOID monopolizes half the floor.
+AVOID_RANGE_X = 60.0
+AVOID_RANGE_Y = 60.0
+# Hysteresis: stay on AVOID until the coco leaves a slightly larger ellipse
+# so the interrupt does not chatter at the range boundary.
+AVOID_RELEASE_X = 80.0
+AVOID_RELEASE_Y = 80.0
 LADDER_ARRIVE = 6.0
 LADDER_TOP_ARRIVE = 10.0
 
@@ -124,7 +130,7 @@ def _kangaroo_destroy_threat_mask(raw, objects, ctx, plan_target):
 
 
 def _kangaroo_avoid_threat_mask(raw, objects, ctx, plan_target):
-    """Thrown cocos: only on our floor or above (in-front gating is in the label file)."""
+    """Thrown cocos: only on our floor or above."""
     del objects, plan_target
     return _not_below_player_floor(raw, ctx)
 
@@ -148,10 +154,13 @@ KANGAROO_POLICY = compile_policy(
                 within=DESTROY_PATH_RANGE,
                 threat_mask=_kangaroo_destroy_threat_mask,
             ),
+            # Last interrupt wins: in-range AVOID beats DESTROY and the plan.
             Interrupt(
                 labels=(LABEL_AVOID,),
                 within_x=AVOID_RANGE_X,
                 within_y=AVOID_RANGE_Y,
+                release_x=AVOID_RELEASE_X,
+                release_y=AVOID_RELEASE_Y,
                 threat_mask=_kangaroo_avoid_threat_mask,
             ),
         ),
