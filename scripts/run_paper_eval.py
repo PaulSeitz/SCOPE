@@ -122,7 +122,7 @@ MODS_DIR = CONFIG_DIR / "mods"
 RTPT_BASE = "HRL_paper_eval"
 DEFAULT_SEED = 44
 TRIAL_STEPS_DEFAULT = 16384  # one update at 128×128
-# Full-game horizon for paper / skill-reshape evals (CLI default remains 800).
+# Full-game horizon for all paper_eval mod/transfer tables (trial/smoke stay short).
 SUITE_EVAL_MAX_FRAMES = 27000
 
 # After COLLECT approach + AVOID escape reshaping: train ego Seaquest, then
@@ -1909,7 +1909,15 @@ def main() -> None:
     parser.add_argument("--skip-rq-gate", action="store_true")
     parser.add_argument("--jaxatari-root", default=None)
     parser.add_argument("--eval-episodes", type=int, default=None)
-    parser.add_argument("--eval-max-frames", type=int, default=None)
+    parser.add_argument(
+        "--eval-max-frames",
+        type=int,
+        default=None,
+        help=(
+            f"Per-episode frame cap for mod/transfer evals "
+            f"(default: {SUITE_EVAL_MAX_FRAMES}; trial/smoke: 400)."
+        ),
+    )
     parser.add_argument(
         "--materialize",
         action="store_true",
@@ -2042,34 +2050,17 @@ def main() -> None:
         eval_max_frames = int(args.eval_max_frames)
     elif trial:
         eval_max_frames = 400
-    elif suite in {
-        SKILL_RESHAPE_SUITE,
-        DESTROY_ABLATION_SUITE,
-        DESTROY_URGENCY_SUITE,
-        COLLECT_SHOT_PROBES_SUITE,
-        EGO_POSE_PROBES_SUITE,
-        COLLECT_COMBAT_PROBES_SUITE,
-        NO_SURFACE_DEATH_SUITE,
-        EGO_CLIP_BINS_SUITE,
-        CLIP_BINS_NODECAY_SUITE,
-        CLIP50_ANGBINS_FULL_SUITE,
-        DISTBINS8_PIPELINE_SUITE,
-        TIERSCALAR_PIPELINE_SUITE,
-        ANGSCALAR_ONLY_PIPELINE_SUITE,
-        SCALAR_ABLATION_DUAL_SUITE,
-        MINIMAL_ABLATION_SUITE,
-        CLIP_LOW_PIPELINE_SUITE,
-        CLIP_SWEEP_PIPELINE_SUITE,
-        DISTANCE_ENCODE_PIPELINE_SUITE,
-    }:
-        eval_max_frames = SUITE_EVAL_MAX_FRAMES
     else:
-        eval_max_frames = 800
+        # Default full-game horizon for every suite / --only eval (was 800 unless
+        # the suite was on an allowlist — thesis_tier_* accidentally stayed short).
+        eval_max_frames = SUITE_EVAL_MAX_FRAMES
     batch_tag = _resolve_batch_tag(args.batch_tag)
     os.environ["PAPER_EVAL_BATCH_TAG"] = batch_tag
     print(f"paper_eval batch tag: batch:{batch_tag}")
-    if suite:
-        print(f"paper_eval eval_max_frames={eval_max_frames}", flush=True)
+    print(
+        f"paper_eval eval_episodes={eval_episodes} eval_max_frames={eval_max_frames}",
+        flush=True,
+    )
 
     lean = bool(args.lean)
     if lean:
