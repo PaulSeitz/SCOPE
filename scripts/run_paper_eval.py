@@ -927,8 +927,12 @@ def _rq1_checkpoint_ready(stem: str, *, seed: int) -> tuple[bool, Path]:
     raw = _load_yaml(path)
     cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
     kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
+    seed_i = int(cfg.get("SEED", seed))
+    if kind == "flat_pqn":
+        ckpt = _flat_pqn_ckpt_from_cfg(cfg, seed=seed_i)
+        return ckpt.is_file(), ckpt
     artifacts = _skills_train_artifacts(
-        cfg, seed=int(cfg.get("SEED", seed)), kind=kind
+        cfg, seed=seed_i, kind=kind
     )
     missing = [p for p in artifacts if not p.is_file()]
     if missing:
