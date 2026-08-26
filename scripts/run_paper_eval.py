@@ -51,6 +51,10 @@ Usage:
   #   GPU 1: retraining with constant SKILL_LR, then the same full eval
   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite clip_bins_nodecay --wait-deps --lean
 
+  # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
+    && CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite clip50_lifetime_pipeline --wait-deps --lean
+
   # Skill-reshape validation (COLLECT approach + AVOID escape; cluster RTPT):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite skill_reshape --eval-only
@@ -290,6 +294,18 @@ DISTBINS8_PIPELINE_STEMS = (
     "pong_transfer_ego_clip50_angbins_distbins8_full",
     "beamrider_transfer_ego_clip50_angbins_distbins8",
 )
+# SKILL_TARGET_CUT=lifetime: no meta-switch λ cuts (HER lifetime traces).
+KANGAROO_LIFETIME_SUITE = "kangaroo_lifetime"
+KANGAROO_LIFETIME_STEMS = (
+    "kangaroo_skills_ego_noclip_angbins_lifetime",
+)
+CLIP50_LIFETIME_PIPELINE_SUITE = "clip50_lifetime_pipeline"
+CLIP50_LIFETIME_PIPELINE_STEMS = (
+    "seaquest_skills_ego_clip50_angbins_lifetime",
+    "seaquest_skills_ego_clip50_angbins_lifetime_eval_full",
+    "pong_transfer_ego_clip50_angbins_lifetime_full",
+    "phoenix_transfer_ego_clip50_angbins_lifetime",
+)
 TIERSCALAR_PIPELINE_SUITE = "tierscalar_pipeline"
 TIERSCALAR_PIPELINE_STEMS = (
     "seaquest_skills_ego_clip50_angbins_tierscalar",
@@ -512,6 +528,8 @@ SUITE_STEMS = {
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
+    KANGAROO_LIFETIME_SUITE: KANGAROO_LIFETIME_STEMS,
+    CLIP50_LIFETIME_PIPELINE_SUITE: CLIP50_LIFETIME_PIPELINE_STEMS,
     TIERSCALAR_PIPELINE_SUITE: TIERSCALAR_PIPELINE_STEMS,
     ANGSCALAR_ONLY_PIPELINE_SUITE: ANGSCALAR_ONLY_PIPELINE_STEMS,
     SCALAR_ABLATION_DUAL_SUITE: SCALAR_ABLATION_DUAL_STEMS,
@@ -1765,6 +1783,10 @@ def main() -> None:
             "(use --post-eval). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
+            f"{KANGAROO_LIFETIME_SUITE}: Kangaroo skills train with "
+            "SKILL_TARGET_CUT=lifetime (noclip + 8θ-bins). "
+            f"{CLIP50_LIFETIME_PIPELINE_SUITE}: Seaquest clip50+θ-bins train with "
+            "SKILL_TARGET_CUT=lifetime, then full SQ mods + Pong full + Phoenix base. "
             f"{TIERSCALAR_PIPELINE_SUITE}: single-channel tier scalar for both "
             "distance and angle, then full Seaquest/Pong/BeamRider eval. "
             f"{ANGSCALAR_ONLY_PIPELINE_SUITE}: single-channel angle tiers only "
@@ -1796,7 +1818,8 @@ def main() -> None:
             "collect_shot_probes, ego_pose_probes, collect_combat_probes, "
             "no_surface_death, ego_clip_bins, clip_bins_nodecay, and "
             "clip50_angbins_full, thesis_tier_a, thesis_tier_b, thesis_tier_c, "
-            "thesis_final, distbins8_pipeline, tierscalar_pipeline, "
+            "thesis_final, distbins8_pipeline, kangaroo_lifetime, "
+            "clip50_lifetime_pipeline, tierscalar_pipeline, "
             "angscalar_only_pipeline, scalar_ablation_dual, minimal_ablation, "
             "minimal_ablation_train, clip_low_pipeline, clip_sweep_pipeline, "
             "and distance_encode_pipeline "
