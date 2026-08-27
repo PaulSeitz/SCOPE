@@ -35,6 +35,7 @@ def _meta_columns(payload: dict[str, Any], extra_meta: dict[str, Any] | None) ->
         "num_seeds": payload.get("num_seeds", ""),
         "max_frames": payload.get("max_frames", ""),
         "skill_input_mode": payload.get("skill_input_mode", ""),
+        "meta_input_mode": payload.get("meta_input_mode", ""),
         "run_name": payload.get("run_name", ""),
         "config_stem": payload.get("config_stem", ""),
         "paper_eval_rq": payload.get("paper_eval_rq", ""),

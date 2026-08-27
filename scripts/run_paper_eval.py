@@ -525,6 +525,17 @@ PIXEL_NOOUTLINE_STEMS = (
     "phoenix_transfer_pixel_nooutline",
 )
 
+# Seaquest flat PQN zero-shot on RQ2 envs (control: transfer should be near floor).
+PQN_TRANSFER_SUITE = "pqn_transfer"
+PQN_TRANSFER_STEMS = (
+    "pong_transfer_pqn",
+    "tennis_transfer_pqn",
+    "beamrider_transfer_pqn",
+    "freeway_transfer_pqn",
+    "asterix_transfer_pqn",
+    "phoenix_transfer_pqn",
+)
+
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -552,6 +563,7 @@ SUITE_STEMS = {
     CLIP_SWEEP_PIPELINE_SUITE: CLIP_SWEEP_PIPELINE_STEMS,
     DISTANCE_ENCODE_PIPELINE_SUITE: DISTANCE_ENCODE_PIPELINE_STEMS,
     PIXEL_NOOUTLINE_SUITE: PIXEL_NOOUTLINE_STEMS,
+    PQN_TRANSFER_SUITE: PQN_TRANSFER_STEMS,
 }
 
 
@@ -688,6 +700,7 @@ def _rtpt_name(
         THESIS_TIER_B_SUITE: "sq_full_eval_ft",
         THESIS_TIER_C_SUITE: "sq_full_eval_extra",
         PIXEL_NOOUTLINE_SUITE: "pix_nooutline",
+        PQN_TRANSFER_SUITE: "pqn_xfer",
     }
     if suite and suite in suite_rtpt:
         base = suite_rtpt[suite]
@@ -1826,7 +1839,9 @@ def main() -> None:
             f"{DISTANCE_ENCODE_PIPELINE_SUITE}: fixed distance tiers/flags "
             "(tier2/4/6, flags3/6) + 8 θ-bins; maskoff; SQ full + transfers. "
             f"{PIXEL_NOOUTLINE_SUITE}: eval-only — Seaquest pixel ckpt with "
-            "target outline OFF (RQ1 mods + 6 RQ2 zero-shot transfers)."
+            "target outline OFF (RQ1 mods + 6 RQ2 zero-shot transfers). "
+            f"{PQN_TRANSFER_SUITE}: eval-only — Seaquest flat PQN zero-shot on "
+            "6 RQ2 envs (control; transfer should collapse)."
         ),
     )
     parser.add_argument(

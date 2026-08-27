@@ -261,6 +261,7 @@ def run_mod_eval(
         "num_seeds": int(num_seeds),
         "max_frames": int(max_frames),
         "skill_input_mode": str(config.get("SKILL_INPUT_MODE", "")),
+        "meta_input_mode": str(config.get("META_INPUT_MODE", "")),
         "mods": [{"key": m.key, "mods": list(m.mods), "category": m.category} for m in mod_specs],
     }
     if extra_meta:
@@ -306,6 +307,7 @@ def run_mod_eval(
                 base_seed=base_seed,
                 max_frames=max_frames,
                 object_centric=object_centric,
+                env_name=str(env_name),
                 progress=True,
             )
             stats["mods"] = list(merged or ())

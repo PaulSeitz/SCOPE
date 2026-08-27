@@ -181,6 +181,22 @@ def infer_flat_pqn_num_layers(params: dict, *, action_dim: int, object_centric: 
     return max(1, hidden_layers) if hidden_layers else 2
 
 
+def infer_flat_pqn_action_dim(params: dict) -> int | None:
+    """Read Q-head output width from checkpoint (last Dense ``kernel``)."""
+    flat = flatten_dict(params, sep="/")
+    best = None
+    for key, val in flat.items():
+        if not key.endswith("kernel") or "Dense" not in key:
+            continue
+        if getattr(val, "ndim", 0) != 2:
+            continue
+        # Prefer the top-level Q head (not CNN Dense_0).
+        if key.startswith("CNN"):
+            continue
+        best = int(val.shape[1])
+    return best
+
+
 def flat_pqn_network_kwargs(
     config: dict[str, Any],
     params: dict,
@@ -269,43 +285,60 @@ def make_flat_pqn_eval_env(
     game_mods: list[str],
     config: dict[str, Any],
     env_name: str | None = None,
+    full_action_space: bool | None = None,
+    required_action_dim: int | None = None,
 ):
     cfg = normalize_flat_pqn_config(config)
     mods = list(game_mods) if game_mods else None
     game = str(env_name or cfg.get("ENV_NAME", "seaquest")).lower()
-    env = jaxatari.make(game, mods=mods)
-    env = AtariWrapper(
-        env,
-        sticky_actions=0.0,
-        episodic_life=False,
-        first_fire=True,
-        noop_max=30,
-        full_action_space=False,
-    )
-    if object_centric:
-        env = ObjectCentricWrapper(
+
+    def _build(full: bool):
+        env = jaxatari.make(game, mods=mods)
+        env = AtariWrapper(
             env,
-            frame_stack_size=int(cfg.get("FRAME_STACK_SIZE", 4)),
-            frame_skip=int(cfg.get("FRAME_SKIP", 4)),
-            clip_reward=False,
+            sticky_actions=0.0,
+            episodic_life=False,
+            first_fire=True,
+            noop_max=30,
+            full_action_space=bool(full),
         )
-        env = NormalizeObservationWrapper(env)
-        env = FlattenObservationWrapper(env)
-    else:
-        env = PixelObsWrapper(
-            env,
-            do_pixel_resize=bool(cfg.get("PIXEL_RESIZE", True)),
-            pixel_resize_shape=tuple(cfg.get("PIXEL_RESIZE_SHAPE", [84, 84])),
-            grayscale=bool(cfg.get("PIXEL_GRAYSCALE", True)),
-            use_native_downscaling=bool(cfg.get("USE_NATIVE_DOWNSCALING", True)),
-            frame_stack_size=int(cfg.get("FRAME_STACK_SIZE", 4)),
-            frame_skip=int(cfg.get("FRAME_SKIP", 4)),
-            max_pooling=True,
-            clip_reward=False,
-        )
-        # Pixel PQN trains on raw uint8 stacks inside PixelObsWrapper; the CNN
-        # applies ``x / 255.0`` internally. Do NOT add NormalizeObservationWrapper.
-    return LogWrapper(env)
+        if object_centric:
+            env = ObjectCentricWrapper(
+                env,
+                frame_stack_size=int(cfg.get("FRAME_STACK_SIZE", 4)),
+                frame_skip=int(cfg.get("FRAME_SKIP", 4)),
+                clip_reward=False,
+            )
+            env = NormalizeObservationWrapper(env)
+            env = FlattenObservationWrapper(env)
+        else:
+            env = PixelObsWrapper(
+                env,
+                do_pixel_resize=bool(cfg.get("PIXEL_RESIZE", True)),
+                pixel_resize_shape=tuple(cfg.get("PIXEL_RESIZE_SHAPE", [84, 84])),
+                grayscale=bool(cfg.get("PIXEL_GRAYSCALE", True)),
+                use_native_downscaling=bool(cfg.get("USE_NATIVE_DOWNSCALING", True)),
+                frame_stack_size=int(cfg.get("FRAME_STACK_SIZE", 4)),
+                frame_skip=int(cfg.get("FRAME_SKIP", 4)),
+                max_pooling=True,
+                clip_reward=False,
+            )
+            # Pixel PQN trains on raw uint8 stacks inside PixelObsWrapper; the CNN
+            # applies ``x / 255.0`` internally. Do NOT add NormalizeObservationWrapper.
+        return LogWrapper(env)
+
+    if full_action_space is not None:
+        return _build(bool(full_action_space))
+
+    # Prefer the training default (minimal set). If a checkpoint expects 18
+    # actions and this game only exposes e.g. 6, fall back to full ALE set so
+    # Seaquest-trained weights can zero-shot on other envs.
+    env = _build(False)
+    if required_action_dim is not None and int(env.action_space().n) != int(
+        required_action_dim
+    ):
+        env = _build(True)
+    return env
 
 
 def _make_jitted_flat_pqn_episode_runner(
@@ -403,6 +436,7 @@ def run_flat_pqn_greedy_eval(
     base_seed: int,
     max_frames: int,
     object_centric: bool | None = None,
+    env_name: str | None = None,
     progress: bool = True,
     on_episode_done: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
@@ -415,14 +449,22 @@ def run_flat_pqn_greedy_eval(
     bs_path = resolved.replace(".safetensors", "_bs.safetensors")
     batch_stats = load_flat_pqn_params(bs_path) if Path(bs_path).is_file() else {}
 
-    env_name = str(config.get("ENV_NAME", "seaquest"))
+    train_env = str(config.get("ENV_NAME", "seaquest")).lower()
+    eval_env = str(env_name or train_env).lower()
+    ckpt_action_dim = infer_flat_pqn_action_dim(params)
     env = make_flat_pqn_eval_env(
         object_centric=object_centric,
         game_mods=game_mods,
         config=config,
-        env_name=env_name,
+        env_name=eval_env,
+        required_action_dim=ckpt_action_dim,
     )
     action_dim = env.action_space().n
+    if ckpt_action_dim is not None and int(action_dim) != int(ckpt_action_dim):
+        raise ValueError(
+            f"Flat PQN checkpoint action_dim={ckpt_action_dim} but "
+            f"env={eval_env!r} exposes n={action_dim}. Cannot zero-shot load."
+        )
     network = QNetwork(
         **flat_pqn_network_kwargs(
             config,
@@ -438,11 +480,12 @@ def run_flat_pqn_greedy_eval(
         params,
         batch_stats,
         max_frames=max_frames,
-        env_name=env_name,
+        env_name=eval_env,
     )
     if progress:
         label = "oc" if object_centric else "pixel"
-        print(f"  Compiling flat PQN ({label}) greedy eval...", flush=True)
+        xfer = "" if eval_env == train_env else f"  zero-shot {train_env}→{eval_env}"
+        print(f"  Compiling flat PQN ({label}) greedy eval...{xfer}", flush=True)
     _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
 
     returns: list[float] = []
@@ -482,6 +525,8 @@ def run_flat_pqn_greedy_eval(
         "episodes_per_seed": int(num_episodes),
         "max_frames_per_episode": int(max_frames),
         "object_centric": bool(object_centric),
+        "train_env": train_env,
+        "eval_env": eval_env,
         **aggregate_episode_metrics(episode_metrics),
     }
 

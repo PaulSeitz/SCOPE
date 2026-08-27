@@ -18,23 +18,19 @@ def _stem_to_agent_label(stem: str) -> str | None:
     s = stem.lower()
     if "heuristic" in s:
         return "heuristic"
+    if "transfer" in s and "pqn" in s:
+        return "transfer/pqn"
     if "pqn" in s and ("_oc" in s or s.endswith("oc") or "/oc" in s):
         return "pqn/oc"
     if "pqn" in s:
         return "pqn/pixel"
     if "tandem" in s:
-        if "pixel" in s:
-            return "tandem/pixel"
-        if "_oc" in s or "oc_" in s:
-            return "tandem/oc"
-        return "tandem/mixed"
+        meta = "pixel" if "pixel" in s else ("oc" if ("_oc" in s or "oc_" in s) else "mixed")
+        return f"tandem({meta})+skills(ego)"
     if "meta" in s and "skills" not in s.split("_")[0:2]:
         # seaquest_meta_pixel_ego_skills etc.
-        if "pixel" in s:
-            return "meta/pixel"
-        if "_oc" in s or "oc_" in s:
-            return "meta/oc"
-        return "meta/mixed"
+        meta = "pixel" if "pixel" in s else ("oc" if ("_oc" in s or "oc_" in s) else "mixed")
+        return f"meta({meta})+skills(ego)"
     # skills / transfer / finetune / scratch
     tag = "ego"
     if "pixel" in s:

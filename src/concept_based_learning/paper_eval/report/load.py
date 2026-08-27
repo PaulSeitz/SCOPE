@@ -17,40 +17,81 @@ def _to_float(value: Any, default: float = float("nan")) -> float:
         return default
 
 
+def _short_input_mode(mode: str) -> str:
+    m = str(mode or "").lower().strip()
+    if m in {"ego", "ego_embed", "ego_embedding"}:
+        return "ego"
+    if m.startswith("pixel") or m in {"cnn"}:
+        return "pixel"
+    if m.startswith("oc") or m in {"object_embed", "object_embedding"}:
+        return "oc"
+    return m
+
+
+def _infer_meta_input_mode(row: dict[str, Any]) -> str:
+    """Meta/tandem observation mode (not skill input)."""
+    explicit = _short_input_mode(str(row.get("meta_input_mode") or ""))
+    if explicit:
+        return explicit
+    stem = str(row.get("config_stem") or row.get("run_name") or "").lower()
+    if "meta_pixel" in stem or "tandem_pixel" in stem:
+        return "pixel"
+    if "meta_oc" in stem or "tandem_oc" in stem:
+        return "oc"
+    return ""
+
+
 def _infer_agent_label(row: dict[str, Any]) -> str:
-    """Human-readable variant label used as the plot legend / heatmap column."""
+    """Human-readable variant label used as the plot legend / heatmap column.
+
+    Naming cheat-sheet
+    ------------------
+    ``skills/{ego|pixel|oc}``
+        Hierarchical skills + symbolic heuristic (in-domain Seaquest).
+    ``transfer/{ego|pixel|oc}``
+        Same Seaquest-trained skills zero-shot on another env (+ env heuristic).
+    ``finetune/…`` / ``scratch/…``
+        RQ2 continue-train / train-from-scratch skills on the target env.
+    ``pqn/pixel`` / ``pqn/oc``
+        Flat PQN baseline (in-domain).
+    ``transfer/pqn``
+        Seaquest-trained flat PQN evaluated zero-shot on another env.
+    ``meta({obs})+skills({in})``
+        Learned meta-policy on observation ``obs``, selecting among **frozen**
+        skills with skill input ``in`` (usually ego). Example:
+        ``meta(pixel)+skills(ego)`` = pixel meta + frozen Seaquest ego skills.
+    ``tandem({obs})+skills({in})``
+        Joint meta+skill training; same ``obs`` / ``in`` reading as meta.
+    ``heuristic``
+        Random / symbolic baseline with no learned skills.
+    """
     kind = str(row.get("paper_eval_kind") or row.get("agent_kind") or "").lower().strip()
-    mode = str(row.get("skill_input_mode") or "").lower().strip()
+    mode = _short_input_mode(str(row.get("skill_input_mode") or ""))
     stem = str(row.get("config_stem") or row.get("run_name") or "").lower()
     oc = str(row.get("object_centric") or "").strip().lower() in {"1", "true", "yes"}
 
     if kind in {"heuristic_random", "heuristic"} or "heuristic" in stem:
         return "heuristic"
-    if kind in {"flat_pqn"} or "pqn" in stem:
-        if oc or mode == "oc_embed" or "_oc" in stem:
-            return "pqn/oc"
-        return "pqn/pixel"
+    if kind in {"flat_pqn"} or (
+        "pqn" in stem and "skills" not in stem and "tandem" not in stem and "meta" not in stem
+    ):
+        tag = "pqn/oc" if (oc or mode == "oc" or "_oc" in stem) else "pqn/pixel"
+        if "transfer" in stem:
+            return "transfer/pqn"
+        return tag
     if kind in {"meta"}:
-        return f"meta/{mode or 'mixed'}"
+        meta_m = _infer_meta_input_mode(row) or "mixed"
+        skill_m = mode or "ego"
+        return f"meta({meta_m})+skills({skill_m})"
     if kind in {"tandem"}:
-        return f"tandem/{mode or 'mixed'}"
+        meta_m = _infer_meta_input_mode(row) or "mixed"
+        skill_m = mode or "ego"
+        return f"tandem({meta_m})+skills({skill_m})"
     if kind in {"transfer"}:
         tag = mode or "ego"
-        if tag in {"ego", "ego_embed"}:
-            tag = "ego"
-        elif tag.startswith("pixel"):
-            tag = "pixel"
-        elif tag.startswith("oc"):
-            tag = "oc"
         return f"transfer/{tag}"
     # skills / hierarchical / finetune / from_scratch
     tag = mode or "ego"
-    if tag in {"ego", "ego_embed"}:
-        tag = "ego"
-    elif tag.startswith("pixel"):
-        tag = "pixel"
-    elif tag.startswith("oc"):
-        tag = "oc"
     if "finetune" in stem:
         return f"finetune/{tag}"
     if "from_scratch" in stem or "scratch" in stem:
@@ -63,11 +104,11 @@ def _infer_protocol(row: dict[str, Any]) -> str:
     label = _infer_agent_label(row)
     if label == "heuristic":
         return "heuristic"
-    if label.startswith("pqn/"):
-        return "pqn"
-    if label.startswith("meta/"):
+    if label.startswith("pqn/") or label == "transfer/pqn":
+        return "pqn" if label.startswith("pqn/") else "transfer"
+    if label.startswith("meta("):
         return "meta"
-    if label.startswith("tandem/"):
+    if label.startswith("tandem("):
         return "tandem"
     if label.startswith("transfer/"):
         return "transfer"

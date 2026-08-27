@@ -9,6 +9,7 @@ from concept_based_learning.paper_eval.report.figures import (
     plot_base_returns,
     plot_category_retention,
     plot_overall_retention_bars,
+    plot_point_farming_scores,
     plot_retention_heatmap,
     plot_return_vs_retention_scatter,
     plot_train_peak_vs_eval,
@@ -16,7 +17,12 @@ from concept_based_learning.paper_eval.report.figures import (
     _require_matplotlib,
 )
 from concept_based_learning.paper_eval.report.load import load_mod_eval_summary
-from concept_based_learning.paper_eval.report.metrics import envs_in_rows, filter_rows
+from concept_based_learning.paper_eval.report.metrics import (
+    POINT_FARMING_MODS,
+    envs_in_rows,
+    filter_rows,
+    split_point_farming,
+)
 from concept_based_learning.paper_eval.report.training_metrics import (
     discover_training_peaks,
     train_eval_pairs,
@@ -26,12 +32,16 @@ from concept_based_learning.paper_eval.report.training_metrics import (
 def _title_page(pdf, *, title: str, subtitle: str, lines: list[str]) -> None:
     plt = _require_matplotlib()
     fig = plt.figure(figsize=(11, 8.5))
-    fig.text(0.1, 0.78, title, fontsize=20, weight="bold")
-    fig.text(0.1, 0.70, subtitle, fontsize=12, color="0.35")
-    y = 0.58
+    fig.text(0.08, 0.92, title, fontsize=18, weight="bold")
+    fig.text(0.08, 0.87, subtitle, fontsize=11, color="0.35")
+    y = 0.80
     for line in lines:
-        fig.text(0.1, y, line, fontsize=10, family="monospace")
-        y -= 0.04
+        size = 8.5 if line.startswith("  ") else 9.5
+        weight = "bold" if line.endswith(":") and not line.startswith(" ") else "normal"
+        fig.text(0.08, y, line, fontsize=size, family="monospace", weight=weight)
+        y -= 0.028
+        if y < 0.04:
+            break
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -85,8 +95,22 @@ def build_rq1_pages(
             )
             n += 1
 
+    # Easy no-threat mods explode retention for weak bases — plot separately.
+    rq1_main, rq1_farm = split_point_farming(rq1)
+    farm_keys = sorted(
+        {
+            str(r["mod_key"])
+            for r in rq1_farm
+            if r.get("mod_key") in POINT_FARMING_MODS
+        }
+    )
+
     fig = plot_category_retention(
-        rq1, title="RQ1 — Mean retention by mod category (TLDR)"
+        rq1_main,
+        title=(
+            "RQ1 — Mean retention by mod category (TLDR; "
+            "excl. point-farming mods)"
+        ),
     )
     _add_fig(
         pdf,
@@ -95,7 +119,27 @@ def build_rq1_pages(
     )
     n += 1
 
-    fig = plot_retention_heatmap(rq1, title="RQ1 — Retention heatmap (mod × agent)")
+    if farm_keys:
+        fig = plot_point_farming_scores(
+            rq1_farm,
+            title=(
+                "RQ1 — Point-farming mods (absolute score; "
+                f"{', '.join(farm_keys)})"
+            ),
+            farming_mods=farm_keys,
+        )
+        _add_fig(
+            pdf,
+            fig,
+            png_path=(fig_dir / "rq1_point_farming_scores.png")
+            if fig_dir
+            else None,
+        )
+        n += 1
+
+    fig = plot_retention_heatmap(
+        rq1_main, title="RQ1 — Retention heatmap (mod × agent; excl. point-farming)"
+    )
     _add_fig(
         pdf,
         fig,
@@ -104,7 +148,8 @@ def build_rq1_pages(
     n += 1
 
     fig = plot_overall_retention_bars(
-        rq1, title="RQ1 — Mean retention across all mods"
+        rq1_main,
+        title="RQ1 — Mean retention across mods (excl. point-farming)",
     )
     _add_fig(
         pdf,
@@ -192,7 +237,10 @@ def build_rq3_pages(
     n = 0
     fig = plot_return_vs_retention_scatter(
         combined,
-        title="RQ3 — In-domain return vs retention (meta/tandem vs RQ1 refs)",
+        title=(
+            "RQ3 — In-domain return vs retention "
+            "(learned meta/tandem vs RQ1 refs)"
+        ),
     )
     _add_fig(
         pdf,
@@ -266,9 +314,22 @@ def build_paper_eval_report(
                 f"agents: {', '.join(agents)}",
                 "Metrics: unclipped ALE score (env_score_final); "
                 "retention = mod_score / |base_score|  (1.0 = no change)",
+                "Point-farming mods (disable_enemies, no_enemies) excluded from "
+                "main retention plots; absolute scores shown separately.",
                 "Primary evidence: frozen greedy mod-eval (not training curves).",
                 train_note,
                 "Train peak = max logged avg_game_return / returned_episode_returns.",
+                "",
+                "Label legend:",
+                "  skills/X          = hierarchical skills (input X) + symbolic heuristic",
+                "  transfer/X        = Seaquest skills (input X) zero-shot on target env",
+                "  transfer/pqn      = Seaquest flat PQN zero-shot on target env",
+                "  finetune/X        = continue-train skills on target env",
+                "  scratch/X         = train skills from scratch on target env",
+                "  pqn/pixel|oc      = flat PQN in-domain (Seaquest)",
+                "  meta(M)+skills(S) = learned meta on obs M; frozen skills with input S",
+                "  tandem(M)+skills(S) = joint meta+skill train (same M/S reading)",
+                "  heuristic         = non-learned / random-skill control",
             ],
         )
         n_pages = 1
