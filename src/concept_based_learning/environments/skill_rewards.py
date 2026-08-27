@@ -23,9 +23,10 @@ Reward magnitudes and trigger conditions:
                (both still active, no kill this step). Combined with contact-fail
                this is the “urgency” arm: ram loses, waiting/jiggling ticks down.
   NAVIGATE : +1  on rising-edge overlap / was_collected (arrive at waypoint);
-             +0.01 when centre-distance to the (still active) waypoint decreases
-             between t and t+1 (progress shaping for long-horizon ladders /
-             surface runs).
+             signed dense shaping on centre-distance change while the waypoint
+             stays active: +0.05 per 10px closer, −0.05 per 10px farther
+             (``NAVIGATE_PROGRESS_REWARD`` / ``NAVIGATE_PROGRESS_UNIT_PX``).
+             Idle (Δ=0) stays 0.
   JUMP_OVER: +1  when the relative horizontal offset (player center - target
              center) changes side between t and t+1 while the player is fully
              above the target at both frames and never touches it (covers both
@@ -89,7 +90,10 @@ DESTROY_STANDOFF_PENALTY = -0.01  # centre-dist decreased while inside melee rad
 DESTROY_STANDOFF_PX = 20.0  # melee radius (centre-to-centre)
 DESTROY_LIVING_PENALTY = -0.01  # per-frame tax while the enemy still lives
 NAVIGATE_SUCCESS_REWARD = 1.0
-NAVIGATE_PROGRESS_REWARD = 0.01  # distance-to-waypoint decreased this step
+# Signed approach shaping: reward = REWARD * (prev_dist - next_dist) / UNIT_PX.
+# +0.05 for closing 10px, −0.05 for opening 10px (binary ±0.01-on-any-Δ was too weak).
+NAVIGATE_PROGRESS_REWARD = 0.05
+NAVIGATE_PROGRESS_UNIT_PX = 10.0
 JUMP_SUCCESS_REWARD = 1.0
 JUMP_FAILURE_REWARD = -1.0
 # Applied to AVOID / DESTROY on life loss (see extract_skill_rewards).
@@ -398,10 +402,21 @@ def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     return reward, failure
 
 
+def _navigate_progress_shaped(prev_dist: jnp.ndarray, next_dist: jnp.ndarray) -> jnp.ndarray:
+    """Signed dense NAVIGATE shaping: +REWARD per UNIT_PX closer, − per farther."""
+    delta_px = prev_dist - next_dist
+    return (
+        jnp.float32(NAVIGATE_PROGRESS_REWARD)
+        * delta_px
+        / jnp.float32(NAVIGATE_PROGRESS_UNIT_PX)
+    )
+
+
 def _navigate_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Arrive: same sparse contract as COLLECT (overlap / was_collected).
-    # Progress: dense shaping when centre-distance to the waypoint shrinks —
-    # needed for far static targets (Kangaroo ladders). Idle / retreat get 0.
+    # Progress: signed dense shaping proportional to centre-distance change —
+    # needed for far static targets (Kangaroo ladders). Retreat is penalized so
+    # jump-spam away from the WP cannot be reward-neutral.
     # Life-loss penalty is applied uniformly in extract_skill_rewards.
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
@@ -410,12 +425,12 @@ def _navigate_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
-    progressed = jnp.logical_and(both_active, next_dist < prev_dist)
-    reward = jnp.where(
-        success,
-        NAVIGATE_SUCCESS_REWARD,
-        jnp.where(progressed, NAVIGATE_PROGRESS_REWARD, 0.0),
+    shaped = jnp.where(
+        both_active,
+        _navigate_progress_shaped(prev_dist, next_dist),
+        jnp.float32(0.0),
     )
+    reward = jnp.where(success, NAVIGATE_SUCCESS_REWARD, shaped)
     return reward, success
 
 

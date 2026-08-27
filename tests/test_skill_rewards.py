@@ -22,6 +22,7 @@ from concept_based_learning.environments.skill_rewards import (
     DESTROY_SUCCESS_REWARD,
     DESTROY_Y_ALIGN_REWARD,
     NAVIGATE_PROGRESS_REWARD,
+    NAVIGATE_PROGRESS_UNIT_PX,
     NAVIGATE_SUCCESS_REWARD,
     SKILL_DEATH_PENALTY,
     extract_skill_rewards,
@@ -59,6 +60,16 @@ def _S(v, dtype=jnp.int32):
     return jnp.stack([a, a, a, a])
 
 
+def _centre_dist(px, py, tx, ty, *, pw=8, ph=11, tw=1, th=1) -> float:
+    pcx, pcy = px + pw / 2.0, py + ph / 2.0
+    tcx, tcy = tx + tw / 2.0, ty + th / 2.0
+    return float(((pcx - tcx) ** 2 + (pcy - tcy) ** 2) ** 0.5)
+
+
+def _nav_shaped(prev_dist: float, next_dist: float) -> float:
+    return NAVIGATE_PROGRESS_REWARD * (prev_dist - next_dist) / NAVIGATE_PROGRESS_UNIT_PX
+
+
 def _mk(px, py, tx, ty, label, *, pw=8, ph=11, tw=1, th=1, active=1, collected=0):
     raw = _Raw(_Ent(_S(px), _S(py), _S(pw), _S(ph)))
     tgt = _Tgt(
@@ -76,11 +87,16 @@ def _mk(px, py, tx, ty, label, *, pw=8, ph=11, tw=1, th=1, active=1, collected=0
 
 
 def test_navigate_progress_when_distance_decreases():
-    # Waypoint above/left; player moves closer → +progress, not done.
+    # Waypoint above/left; player moves closer → scaled +progress, not done.
     prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_NAVIGATE)
     next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
-    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    expected = _nav_shaped(
+        _centre_dist(50, 100, 50, 40),
+        _centre_dist(50, 80, 50, 40),
+    )
+    assert float(r[3]) == pytest.approx(expected)
+    assert expected > 0.0
     assert not bool(d[3])
 
 
@@ -92,7 +108,12 @@ def test_navigate_no_progress_when_idle_or_farther():
 
     away_r, away_t = _mk(50, 120, 50, 40, LABEL_NAVIGATE)
     r1, _ = extract_skill_rewards(prev_r, away_r, prev_t, away_t, jnp.int32(0))
-    assert float(r1[3]) == 0.0
+    expected = _nav_shaped(
+        _centre_dist(50, 100, 50, 40),
+        _centre_dist(50, 120, 50, 40),
+    )
+    assert float(r1[3]) == pytest.approx(expected)
+    assert expected < 0.0
 
 
 def test_navigate_arrive_overrides_progress():
@@ -102,6 +123,14 @@ def test_navigate_arrive_overrides_progress():
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
     assert float(r[3]) == NAVIGATE_SUCCESS_REWARD
     assert bool(d[3])
+
+
+def test_navigate_ten_px_close_gives_point_oh_five():
+    # Exactly 10px closer → +0.05 by construction of the scale.
+    prev_r, prev_t = _mk(0, 0, 100, 0, LABEL_NAVIGATE, pw=0, ph=0, tw=0, th=0)
+    next_r, next_t = _mk(10, 0, 100, 0, LABEL_NAVIGATE, pw=0, ph=0, tw=0, th=0)
+    r, _ = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[3]) == pytest.approx(0.05)
 
 
 def test_collect_approach_progress_when_distance_decreases():
@@ -151,7 +180,11 @@ def test_death_does_not_penalize_navigate_or_collect():
     next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(1))
     # Progress still applies; death does not override NAVIGATE.
-    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    expected = _nav_shaped(
+        _centre_dist(50, 100, 50, 40),
+        _centre_dist(50, 80, 50, 40),
+    )
+    assert float(r[3]) == pytest.approx(expected)
     assert not bool(d[3])
 
     prev_c, prev_tc = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
@@ -187,7 +220,9 @@ def test_death_penalizes_collect_when_opted_in():
         jnp.int32(1),
         penalize_collect_death=True,
     )
-    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    assert float(r[3]) == pytest.approx(
+        _nav_shaped(_centre_dist(50, 100, 50, 40), _centre_dist(50, 80, 50, 40))
+    )
     assert not bool(d[3])
 
 
@@ -364,7 +399,9 @@ def test_navigate_keeps_approach_when_collect_living_on():
     r, d = extract_skill_rewards(
         prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_living_penalty=True
     )
-    assert float(r[3]) == pytest.approx(NAVIGATE_PROGRESS_REWARD)
+    assert float(r[3]) == pytest.approx(
+        _nav_shaped(_centre_dist(50, 100, 50, 40), _centre_dist(50, 80, 50, 40))
+    )
     assert not bool(d[3])
 
 

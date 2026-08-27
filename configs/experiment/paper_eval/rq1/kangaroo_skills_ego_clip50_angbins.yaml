@@ -1,6 +1,6 @@
 # paper_eval/rq1/kangaroo_skills_ego_clip50_angbins.yaml
-# Seaquest thesis winner ego (8θ-bins) on Kangaroo; distance clip off (null).
-# skills_only + env_specific heuristic (ladder waypoints + reactive DESTROY/AVOID).
+# Seaquest thesis winner ego (clip50 + 8θ-bins) on Kangaroo.
+# 3 skills: ladder waypoints + fruits/bell/child are COLLECT.
 # Standalone probe — not part of thesis_tier_a; no mod-eval harness yet.
 #
 # Kangaroo deltas vs Seaquest: MAX_OBJECTS=55, FIRST_FIRE=false, no Seaquest legacy flags.
@@ -19,7 +19,7 @@ USE_EGO_VELOCITY_FEATURES: false
 USE_EGO_BLOCKING_FEATURES: true
 USE_EGO_WEAPON_FEATURES: true
 USE_EGO_SHOT_FEATURES: false
-EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_DISTANCE_CLIP_MAX_PX: 50
 EGO_ANGLE_BINS: 8
 GAME_MODS: null
 EVAL_GAME_MODS: null
@@ -39,10 +39,10 @@ WANDB_TAGS:
 - ablation:lr_decay
 - destroy:contact_fail
 - destroy:living_penalty
-- probe:noclip_angbins
+- probe:clip50_angbins
 - probe:kangaroo_25m
 SKILL_INPUT_MODE: ego
-SKILL_DEATH_PENALIZE_COLLECT: true
+SKILL_DEATH_PENALIZE_COLLECT: false
 RECORD_VIDEO: false
 VIDEO_AT_END: false
 VIDEO_MAX_FRAMES: 600
@@ -50,12 +50,11 @@ VIDEO_FRAME_STRIDE: 4
 DESTROY_CONTACT_FAIL: true
 DESTROY_LIVING_PENALTY: true
 alg:
-  NUM_SKILLS: 4
+  NUM_SKILLS: 3
   SKILL_NAMES:
   - DESTROY
   - COLLECT
   - AVOID
-  - NAVIGATE
   MAX_OBJECTS: 55
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128
@@ -92,7 +91,7 @@ alg:
   EPS_DECAY: 0.2
   HEURISTIC_MODE: env_specific
   SKILL_INPUT_MODE: ego
-  SKILL_DEATH_PENALYZE_COLLECT: true
+  SKILL_DEATH_PENALIZE_COLLECT: false
   DESTROY_CONTACT_FAIL: true
   DESTROY_LIVING_PENALTY: true
   USE_EGO_SHOT_FEATURES: false

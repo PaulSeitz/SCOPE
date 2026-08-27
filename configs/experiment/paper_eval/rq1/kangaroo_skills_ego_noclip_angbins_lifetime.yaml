@@ -1,7 +1,6 @@
 # paper_eval/rq1/kangaroo_skills_ego_noclip_angbins_lifetime.yaml
-# Kangaroo skills probe: 8θ-bins ego, distance clip off, SKILL_TARGET_CUT=lifetime
-# (no meta-switch bootstrap cuts — NAVIGATE keeps credit across heuristic interrupts).
-# skills_only + env_specific heuristic (ladder waypoints + reactive DESTROY/AVOID).
+# Kangaroo skills probe: 8θ-bins ego, distance clip off (default SKILL_TARGET_CUT=global).
+# 3 skills (DESTROY / COLLECT / AVOID): ladder waypoints + fruits are COLLECT.
 #
 # Kangaroo deltas vs Seaquest: MAX_OBJECTS=55, FIRST_FIRE=false, no Seaquest legacy flags.
 # NOTE: 55-object ego @ 128 envs may OOM — drop NUM_ENVS to 64 if needed.
@@ -40,10 +39,9 @@ WANDB_TAGS:
 - destroy:contact_fail
 - destroy:living_penalty
 - probe:noclip_angbins
-- probe:skill_target_cut_lifetime
 - probe:kangaroo_25m
 SKILL_INPUT_MODE: ego
-SKILL_DEATH_PENALIZE_COLLECT: true
+SKILL_DEATH_PENALIZE_COLLECT: false
 RECORD_VIDEO: false
 VIDEO_AT_END: false
 VIDEO_MAX_FRAMES: 600
@@ -51,12 +49,11 @@ VIDEO_FRAME_STRIDE: 4
 DESTROY_CONTACT_FAIL: true
 DESTROY_LIVING_PENALTY: true
 alg:
-  NUM_SKILLS: 4
+  NUM_SKILLS: 3
   SKILL_NAMES:
   - DESTROY
   - COLLECT
   - AVOID
-  - NAVIGATE
   MAX_OBJECTS: 55
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128
@@ -88,13 +85,12 @@ alg:
   RELABEL_ALL_OBJECTS: false
   RELABEL_K_OBJECTS: null
   SKILL_BOOTSTRAP: q_lambda
-  SKILL_TARGET_CUT: lifetime
   EPS_START: 0.2
   EPS_FINISH: 0.01
   EPS_DECAY: 0.2
   HEURISTIC_MODE: env_specific
   SKILL_INPUT_MODE: ego
-  SKILL_DEATH_PENALIZE_COLLECT: true
+  SKILL_DEATH_PENALIZE_COLLECT: false
   DESTROY_CONTACT_FAIL: true
   DESTROY_LIVING_PENALTY: true
   USE_EGO_SHOT_FEATURES: false

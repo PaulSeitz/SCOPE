@@ -1,6 +1,6 @@
 # feature_eval/kangaroo_skills_heuristic.yaml
-# Env-specific: Kangaroo L1 manual heuristic (NAVIGATE ladder waypoints + COLLECT
-# fruits). skills_only — heuristic selects targets for the whole run; no meta.
+# Env-specific: Kangaroo L1 manual heuristic (COLLECT waypoints + fruits + reactive threats).
+# skills_only — heuristic selects targets for the whole run; no meta.
 # Filter: suite:feature_eval
 
 ALG_NAME: hierarchical_pqn
@@ -22,19 +22,18 @@ WANDB_TAGS:
 - train_mode:skills_only
 - skill_input:ego
 - variant:skills_heuristic
-- skills:navigate
+- skills:collect
 - ego:blocking
 SKILL_INPUT_MODE: ego
 RECORD_VIDEO: true
 VIDEO_AT_END: true
 VIDEO_MAX_FRAMES: 600
 alg:
-  NUM_SKILLS: 4
+  NUM_SKILLS: 3
   SKILL_NAMES:
   - DESTROY
   - COLLECT
   - AVOID
-  - NAVIGATE
   MAX_OBJECTS: 55
   EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128

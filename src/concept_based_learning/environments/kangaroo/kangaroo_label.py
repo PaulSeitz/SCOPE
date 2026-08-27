@@ -6,7 +6,6 @@ from concept_based_learning.environments.datatypes import (
     LABEL_DESTROY,
     LABEL_COLLECT,
     LABEL_AVOID,
-    LABEL_NAVIGATE,
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import (
@@ -39,21 +38,21 @@ kangaroo_action_mapper, kangaroo_inverse_action_mapper = make_target_aligned_act
     move_fire_table=[11, 16, 13, 17, 12, 15, 10, 14],
 )
 
-# Each ladder produces two virtual 1px NAVIGATE waypoints snapped to the
+# Each ladder produces two virtual 1px COLLECT waypoints snapped to the
 # standable platforms the ladder connects (not the ladder sprite edges), so
-# NavigateTo(arrive) fires when the player is actually standing on that floor:
+# arrival fires when the player is actually standing on that floor:
 #   bottom: centre of player AABB when standing on the platform at the ladder foot
 #   top:    standing-centre on the upper platform, raised by ``_TOP_WAYPOINT_LIFT_PX``
 #           so mid-ladder approach cannot complete the stage early
 # Observation pads ladders/platforms to 20 slots; inactive slots are ignored.
 #
 # Total objects: 20 bottom + 20 top + 3 fruits + 1 bell + 1 child
-#              + 1 falling_coconut + 4 monkeys + 4 thrown_coconuts = 54
+#              + 4 monkeys + 1 falling_coconut + 4 thrown_coconuts = 54
 _KANGAROO_MAX_OBJECTS = 55  # 54 + 1 meta NOOP
-_N_NAVIGATE = 40  # 20 bottom + 20 top
-_N_COLLECT = 5    # 3 fruits + bell + child
-_N_DESTROY = 5
-_N_AVOID = 4
+_N_WAYPOINTS = 40  # 20 bottom + 20 top (COLLECT)
+_N_COLLECTIBLE = 5  # 3 fruits + bell + child (COLLECT)
+_N_DESTROY = 4  # monkeys only
+_N_AVOID = 5  # 1 falling coconut + 4 thrown
 _MONKEY_SPAWN_X = 152
 _MONKEY_SPAWN_Y = 5
 _COCO_OFFSCREEN_X = 13
@@ -64,14 +63,34 @@ _PLAYER_STAND_HEIGHT = 24
 _PLAYER_STAND_HALF = _PLAYER_STAND_HEIGHT // 2
 # If no platform matches, lift the top waypoint by this many px (L1 ladder→floor gap).
 _TOP_FALLBACK_LIFT = 8
-# Pull top waypoints above standing-centre so NavigateTo(arrive) / overlap only
-# fire once the player is actually on the upper platform — not while still on
-# the ladder a few px below the floor (arrive_dist alone was firing early).
-_TOP_WAYPOINT_LIFT_PX = 8
+# Pull top waypoints above standing-centre so arrive / overlap only fire once the
+# player is actually on the upper platform — not while still on the ladder a few
+# px below the floor (arrive_dist alone was firing early).
+_TOP_WAYPOINT_LIFT_PX = 17
+# Shift ladder waypoints toward the nearest screen wall (±x from ladder centre).
+_WAYPOINT_WALL_OFFSET_PX = 4
+# Plan waypoints 3 & 4 (ladder index 1): extra nudge left from wall offset.
+_L1_LADDER_INDEX = 1
+_L1_WAYPOINT_EXTRA_X_PX = -1
+_KANGAROO_SCREEN_MID_X = 80.0
 # Max |ladder_edge - platform.y| to count as the connected floor.
 _PLATFORM_MATCH_PX = 16
-# Falling coco x must lie within ladder width ± this margin to "cover" it.
+# Falling coco x must lie within ladder width ± this margin to gate a ladder.
 _FALLING_COCO_LADDER_X_MARGIN = 10
+# Gate until the coco has fallen past the ladder foot (+ slack). Proactive: includes
+# hanging cocos above the shaft, not only cocos already inside it.
+_FALLING_COCO_PASSED_FOOT_MARGIN_PX = 8
+# Stamped on ``raw_observation.player.state[-1]`` by ``KangarooSemanticWrapper``.
+PLAYER_STATE_CLIMBING = 1
+
+
+def stamp_player_climbing_on_raw(raw_obs, is_climbing):
+    """Expose ``env_state.player.is_climbing`` on the stacked player ``state`` channel."""
+    player = raw_obs.player
+    flag = jnp.where(is_climbing, jnp.int32(PLAYER_STATE_CLIMBING), jnp.int32(0))
+    st = player.state
+    new_state = st.at[-1].set(flag) if jnp.ndim(st) > 0 else flag
+    return raw_obs.replace(player=player.replace(state=new_state))
 
 
 def _scalar_to_1d(x):
@@ -93,10 +112,11 @@ def _top_waypoint_y(platform_y):
 
 
 def _falling_coco_covers_ladders(falling_coconut, ladders):
-    """Per-ladder bool: falling coco is in this ladder's x-column and above its foot.
+    """Per-ladder bool: falling coco blocks the column until it passes the foot.
 
-    Climbing into that column while the coco hangs / drops will hit the player, so
-    both bottom and top waypoints for the ladder should go inactive until it clears.
+    Proactive gating: any live coco whose x-column overlaps the ladder and whose
+    y has not yet cleared the ladder foot deactivates both waypoints. The plan
+    waits at the platform (``skip_if_inactive=False``) until the column is safe.
     """
     coco_x = falling_coconut.x
     coco_y = falling_coconut.y
@@ -111,24 +131,16 @@ def _falling_coco_covers_ladders(falling_coconut, ladders):
     lad_left = ladders.x
     lad_right = ladders.x + ladders.width
     x_overlap = jnp.logical_and(coco_left < lad_right, coco_right > lad_left)
-    # Above the ladder foot (smaller y = higher on screen); still relevant until
-    # past the bottom edge.
     lad_bot = ladders.y + ladders.height
-    above_foot = coco_y <= lad_bot
+    not_passed_foot = coco_y <= lad_bot + float(_FALLING_COCO_PASSED_FOOT_MARGIN_PX)
     return jnp.logical_and(
         coco_alive,
-        jnp.logical_and(x_overlap, above_foot),
+        jnp.logical_and(x_overlap, not_passed_foot),
     )
 
 
 def _match_platform_y(edge_y, plat_y, plat_active, *, above: bool):
-    """Nearest active platform to a ladder edge.
-
-    ``above=True``: destination floor (platform.y <= edge, maximize y).
-    ``above=False``: source floor (platform.y >= edge, minimize y).
-    Falls back to ``edge_y`` when nothing is within ``_PLATFORM_MATCH_PX``.
-    """
-    # Broadcast edge (n_ladders,) against platforms (n_plats,) → (n_ladders, n_plats).
+    """Nearest active platform to a ladder edge."""
     edge = edge_y[:, None]
     py = plat_y[None, :]
     active = plat_active[None, :] > 0.5
@@ -150,12 +162,30 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         super().__init__(env, max_objects=_KANGAROO_MAX_OBJECTS)
 
+    def _patch_raw_observation(self, semantic_obs, env_state):
+        return semantic_obs.replace(
+            raw_observation=stamp_player_climbing_on_raw(
+                semantic_obs.raw_observation, env_state.player.is_climbing
+            )
+        )
+
+    def reset(self, key=None):
+        semantic_obs, state = super().reset(key)
+        env_state = self._unwrap_env_state(state.atari_state)
+        return self._patch_raw_observation(semantic_obs, env_state), state
+
+    def step(self, state, action):
+        semantic_obs, new_state, reward, done, info = super().step(state, action)
+        env_state = self._unwrap_env_state(new_state.atari_state)
+        semantic_obs = self._patch_raw_observation(semantic_obs, env_state)
+        return semantic_obs, new_state, reward, done, info
+
     def _substep_env_state_events(self, prev_env_state, next_env_state):
         """
-        Detect monkey punches and falling-coconut punches from raw level state.
+        Detect monkey punches from raw level state.
 
         Returns a 54-element was_killed mask:
-          [navigate(40) | collect(5) | destroy(5) | avoid(4)]
+          [collect(45) | destroy(4) | avoid(5)]
         """
         prev_level = prev_env_state.level
         next_level = next_env_state.level
@@ -169,26 +199,9 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
             jnp.logical_and(next_level.monkey_states == 0, punched_spawn),
         ).astype(jnp.int32)
 
-        prev_fc = prev_level.falling_coco_position
-        next_fc = next_level.falling_coco_position
-        fc_prev_active = _falling_coco_active(prev_fc)
-        fc_next_active = _falling_coco_active(next_fc)
-        score_delta = next_env_state.score - prev_env_state.score
-        monkey_score = jnp.sum(monkey_killed) * _COCO_PUNCH_SCORE
-        coco_killed = jnp.logical_and(
-            jnp.logical_and(fc_prev_active, jnp.logical_not(fc_next_active)),
-            score_delta - monkey_score >= _COCO_PUNCH_SCORE,
-        ).astype(jnp.int32)
-
-        destroy_mask = jnp.concatenate(
-            [jnp.reshape(coco_killed, (1,)), monkey_killed]
-        )
-        navigate_zeros = jnp.zeros(_N_NAVIGATE, dtype=jnp.int32)
-        collect_zeros = jnp.zeros(_N_COLLECT, dtype=jnp.int32)
+        collect_zeros = jnp.zeros(_N_WAYPOINTS + _N_COLLECTIBLE, dtype=jnp.int32)
         avoid_zeros = jnp.zeros(_N_AVOID, dtype=jnp.int32)
-        return jnp.concatenate(
-            [navigate_zeros, collect_zeros, destroy_mask, avoid_zeros]
-        )
+        return jnp.concatenate([collect_zeros, monkey_killed, avoid_zeros])
 
     def _stamp_events_on_observation(self, semantic_obs, kill_mask):
         if kill_mask is None:
@@ -202,18 +215,30 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
-        ladders = obs.ladders               # n=20 (padded)
-        platforms = obs.platforms           # n=20 (padded)
-        fruits = obs.fruits                 # n=3
-        bell = obs.bell                     # scalar
-        child = obs.child                   # scalar
-        falling_coconut = obs.falling_coconut  # scalar
-        monkeys = obs.monkeys               # n=4
-        thrown_coconuts = obs.thrown_coconuts  # n=4
+        ladders = obs.ladders
+        platforms = obs.platforms
+        fruits = obs.fruits
+        bell = obs.bell
+        child = obs.child
+        falling_coconut = obs.falling_coconut
+        monkeys = obs.monkeys
+        thrown_coconuts = obs.thrown_coconuts
 
-        # --- Ladder waypoints (NAVIGATE), snapped to standable floors ---
+        # --- Ladder waypoints (COLLECT), snapped to standable floors ---
         lad_half_w = ladders.width // 2
         lad_cx = ladders.x + lad_half_w
+        wall_offset = jnp.where(
+            lad_cx >= _KANGAROO_SCREEN_MID_X,
+            float(_WAYPOINT_WALL_OFFSET_PX),
+            -float(_WAYPOINT_WALL_OFFSET_PX),
+        )
+        ladder_idx = jnp.arange(ladders.x.shape[0], dtype=jnp.float32)
+        l1_x_nudge = jnp.where(
+            ladder_idx == float(_L1_LADDER_INDEX),
+            float(_L1_WAYPOINT_EXTRA_X_PX),
+            0.0,
+        )
+        wp_x_offset = wall_offset + l1_x_nudge
 
         lad_top_edge = ladders.y
         lad_bot_edge = ladders.y + ladders.height
@@ -221,7 +246,6 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         dest_plat_y = _match_platform_y(
             lad_top_edge, platforms.y, platforms.active, above=True
         )
-        # No platform match → pull up by the usual L1 ladder→floor gap.
         dest_plat_y = jnp.where(
             dest_plat_y == lad_top_edge,
             lad_top_edge - _TOP_FALLBACK_LIFT,
@@ -237,18 +261,17 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
             jnp.logical_not(coco_on_ladder),
         ).astype(jnp.int32)
 
-        bot_x = lad_cx
+        bot_x = lad_cx + wp_x_offset
         bot_y = _standing_center_y(src_plat_y)
         bot_active = ladder_climbable
 
-        top_x = lad_cx
+        top_x = lad_cx + wp_x_offset
         top_y = _top_waypoint_y(dest_plat_y)
         top_active = ladder_climbable
 
         waypoint_w = jnp.ones_like(bot_x)
         waypoint_h = jnp.ones_like(bot_y)
 
-        # --- Flatten scalar fields ---
         bell_x, bell_y = _scalar_to_1d(bell.x), _scalar_to_1d(bell.y)
         bell_w, bell_h = _scalar_to_1d(bell.width), _scalar_to_1d(bell.height)
         bell_act = _scalar_to_1d(bell.active)
@@ -259,25 +282,27 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
 
         fc_x, fc_y = _scalar_to_1d(falling_coconut.x), _scalar_to_1d(falling_coconut.y)
         fc_w, fc_h = _scalar_to_1d(falling_coconut.width), _scalar_to_1d(falling_coconut.height)
-        fc_act = _scalar_to_1d(falling_coconut.active)
+        fc_alive = _scalar_to_1d(
+            jnp.logical_and(
+                falling_coconut.active > 0.5,
+                _falling_coco_active(jnp.stack([falling_coconut.x, falling_coconut.y])),
+            ).astype(jnp.int32)
+        )
 
-        nav_x = jnp.concatenate([bot_x, top_x])
-        nav_y = jnp.concatenate([bot_y, top_y])
-        nav_w = jnp.concatenate([waypoint_w, waypoint_w])
-        nav_h = jnp.concatenate([waypoint_h, waypoint_h])
-        nav_act = jnp.concatenate([bot_active, top_active])
-        n_nav = nav_x.shape[0]  # 40
+        wp_x = jnp.concatenate([bot_x, top_x])
+        wp_y = jnp.concatenate([bot_y, top_y])
+        wp_w = jnp.concatenate([waypoint_w, waypoint_w])
+        wp_h = jnp.concatenate([waypoint_h, waypoint_h])
+        wp_act = jnp.concatenate([bot_active, top_active])
+        n_wp = wp_x.shape[0]  # 40
 
-        collect_x = jnp.concatenate([fruits.x, bell_x, child_x])
-        collect_y = jnp.concatenate([fruits.y, bell_y, child_y])
-        collect_w = jnp.concatenate([fruits.width, bell_w, child_w])
-        collect_h = jnp.concatenate([fruits.height, bell_h, child_h])
-        collect_act = jnp.concatenate([fruits.active, bell_act, child_act])
-        n_collect = collect_x.shape[0]  # 5
+        collect_x = jnp.concatenate([wp_x, fruits.x, bell_x, child_x])
+        collect_y = jnp.concatenate([wp_y, fruits.y, bell_y, child_y])
+        collect_w = jnp.concatenate([wp_w, fruits.width, bell_w, child_w])
+        collect_h = jnp.concatenate([wp_h, fruits.height, bell_h, child_h])
+        collect_act = jnp.concatenate([wp_act, fruits.active, bell_act, child_act])
+        n_collect = collect_x.shape[0]  # 45
 
-        # Monkeys: only targetable while on a platform (walk / throw), not while
-        # climbing the wall.  jax_kangaroo states: 1=down, 2=left, 3=throw,
-        # 4=right, 5=up (see ObjectObservation.state on monkeys).
         monkey_on_platform = jnp.logical_or(
             monkeys.state == 2,
             jnp.logical_or(monkeys.state == 3, monkeys.state == 4),
@@ -286,30 +311,26 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
             jnp.int32
         )
 
-        destroy_x = jnp.concatenate([fc_x, monkeys.x])
-        destroy_y = jnp.concatenate([fc_y, monkeys.y])
-        destroy_w = jnp.concatenate([fc_w, monkeys.width])
-        destroy_h = jnp.concatenate([fc_h, monkeys.height])
-        destroy_act = jnp.concatenate([fc_act, monkey_act])
-        n_destroy = destroy_x.shape[0]  # 5
+        destroy_x = monkeys.x
+        destroy_y = monkeys.y
+        destroy_w = monkeys.width
+        destroy_h = monkeys.height
+        destroy_act = monkey_act
+        n_destroy = destroy_x.shape[0]  # 4
 
-        # Thrown cocos: AVOID while the env marks them active. Do not gate on
-        # facing — AVOID turns the player away, which would deactivate the
-        # object and flicker the interrupt back to NAVIGATE.
-        avoid_x = thrown_coconuts.x
-        avoid_y = thrown_coconuts.y
-        avoid_w = thrown_coconuts.width
-        avoid_h = thrown_coconuts.height
-        avoid_act = (thrown_coconuts.active > 0.5).astype(jnp.int32)
-        n_avoid = avoid_x.shape[0]  # 4
+        avoid_x = jnp.concatenate([fc_x, thrown_coconuts.x])
+        avoid_y = jnp.concatenate([fc_y, thrown_coconuts.y])
+        avoid_w = jnp.concatenate([fc_w, thrown_coconuts.width])
+        avoid_h = jnp.concatenate([fc_h, thrown_coconuts.height])
+        avoid_act = jnp.concatenate([fc_alive, (thrown_coconuts.active > 0.5).astype(jnp.int32)])
+        n_avoid = avoid_x.shape[0]  # 5
 
-        all_x = jnp.concatenate([nav_x, collect_x, destroy_x, avoid_x])
-        all_y = jnp.concatenate([nav_y, collect_y, destroy_y, avoid_y])
-        all_w = jnp.concatenate([nav_w, collect_w, destroy_w, avoid_w])
-        all_h = jnp.concatenate([nav_h, collect_h, destroy_h, avoid_h])
-        all_active = jnp.concatenate([nav_act, collect_act, destroy_act, avoid_act])
+        all_x = jnp.concatenate([collect_x, destroy_x, avoid_x])
+        all_y = jnp.concatenate([collect_y, destroy_y, avoid_y])
+        all_w = jnp.concatenate([collect_w, destroy_w, avoid_w])
+        all_h = jnp.concatenate([collect_h, destroy_h, avoid_h])
+        all_active = jnp.concatenate([collect_act, destroy_act, avoid_act])
         all_labels = jnp.concatenate([
-            jnp.full(n_nav, LABEL_NAVIGATE, dtype=jnp.int32),
             jnp.full(n_collect, LABEL_COLLECT, dtype=jnp.int32),
             jnp.full(n_destroy, LABEL_DESTROY, dtype=jnp.int32),
             jnp.full(n_avoid, LABEL_AVOID, dtype=jnp.int32),

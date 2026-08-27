@@ -57,12 +57,16 @@ ORANGE    = (255, 160, 30)
 
 TARGET_COLOR = (255, 60, 60)
 NAVIGATE_COLOR = (80, 200, 255)
+AVOID_COLOR = (255, 180, 40)
 # Visual size of NAVIGATE waypoints in *game* pixels (objects themselves are 1x1).
 NAVIGATE_MARKER_GAME_PX = 8
+AVOID_MARKER_GAME_PX = 10
 
 SKILL_NAMES  = ["Destroy", "Collect", "Avoid"]
 # Colour per skill for reward display
 SKILL_COLORS = [ORANGE, CYAN, MAGENTA]
+# Dashboard shows the first three registry skills (destroy / collect / avoid).
+DASHBOARD_SKILL_SLICE = slice(0, len(SKILL_NAMES))
 
 LABEL_NAMES = {
     LABEL_NOOP:      "Noop",
@@ -231,8 +235,8 @@ class RewardDashboard:
                         self.get_heuristic_target(raw, objs, prev_idx, key_pol)
                     )[0])
                     mission_idx = target_idx
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[reward_dashboard] heuristic error: {type(exc).__name__}: {exc}")
 
         self.prev_target_idx = target_idx
         self.mission_target_idx = mission_idx
@@ -320,6 +324,12 @@ class RewardDashboard:
                 jax.device_get(out[0] if isinstance(out, tuple) else out),
                 dtype=np.float32,
             )
+            if rvec.shape[0] > len(SKILL_NAMES):
+                rvec = rvec[DASHBOARD_SKILL_SLICE]
+            elif rvec.shape[0] < len(SKILL_NAMES):
+                padded = np.zeros(len(SKILL_NAMES), dtype=np.float32)
+                padded[: rvec.shape[0]] = rvec
+                rvec = padded
             self.concept_rewards[:, obj_idx] = rvec
         except Exception:
             return
@@ -383,6 +393,7 @@ class RewardDashboard:
             pygame.draw.rect(self.screen, DARK_GRAY, (10, 10, self.game_w, self.game_h))
 
         self._draw_navigate_checkpoints()
+        self._draw_avoid_target_marker()
         self._draw_target_outline()
 
     def _object_screen_rect(self, x, y, w, h, *, min_game_px: int = 1):
@@ -397,7 +408,7 @@ class RewardDashboard:
         return sx, sy, gw * self.game_scale, gh * self.game_scale
 
     def _draw_navigate_checkpoints(self):
-        """Draw enlarged markers for active NAVIGATE waypoints (they are 1x1 in obs)."""
+        """Draw enlarged markers for active NAVIGATE / ladder waypoints (often 1–2 px in obs)."""
         if self.obs is None:
             return
         try:
@@ -411,7 +422,17 @@ class RewardDashboard:
             return
 
         for i in range(int(act.shape[0])):
-            if act[i] <= 0 or int(labels[i]) != LABEL_NAVIGATE:
+            if act[i] <= 0:
+                continue
+            lab = int(labels[i])
+            is_nav = lab == LABEL_NAVIGATE
+            # Kangaroo ladder waypoints are COLLECT slots 1..40 (no separate NAVIGATE label).
+            is_kangaroo_wp = (
+                "kangaroo" in self.env_name
+                and lab == LABEL_COLLECT
+                and 1 <= i <= 40
+            )
+            if not (is_nav or is_kangaroo_wp):
                 continue
             sx, sy, sw, sh = self._object_screen_rect(
                 xa[i], ya[i], wa[i], ha[i], min_game_px=NAVIGATE_MARKER_GAME_PX
@@ -424,6 +445,32 @@ class RewardDashboard:
             cx = sx + sw // 2
             cy = sy + sh // 2
             pygame.draw.circle(self.screen, color, (cx, cy), max(2, self.game_scale), 0)
+
+    def _draw_avoid_target_marker(self):
+        """Enlarge the selected AVOID object (coconuts are easy to miss at native size)."""
+        if self.obs is None or self.current_target_idx == self.no_target_idx:
+            return
+        idx = int(self.current_target_idx)
+        try:
+            xa = np.array(self.obs.objects.x[-1])
+            ya = np.array(self.obs.objects.y[-1])
+            wa = np.array(self.obs.objects.width[-1])
+            ha = np.array(self.obs.objects.height[-1])
+            act = np.array(self.obs.objects.active[-1])
+            labels = np.array(self.obs.objects.semantic_label[-1])
+        except Exception:
+            return
+        if idx >= len(act) or act[idx] <= 0:
+            return
+        if int(labels[idx]) != LABEL_AVOID:
+            return
+        sx, sy, sw, sh = self._object_screen_rect(
+            xa[idx], ya[idx], wa[idx], ha[idx], min_game_px=AVOID_MARKER_GAME_PX
+        )
+        pygame.draw.rect(self.screen, AVOID_COLOR, (sx, sy, sw, sh), 3)
+        cx = sx + sw // 2
+        cy = sy + sh // 2
+        pygame.draw.circle(self.screen, TARGET_COLOR, (cx, cy), max(3, self.game_scale), 0)
 
     def _draw_target_outline(self):
         if self.obs is None or self.current_target_idx == self.no_target_idx:
@@ -440,8 +487,13 @@ class RewardDashboard:
             return
         if idx >= len(act) or act[idx] <= 0:
             return
-        # NAVIGATE markers already highlight the selected checkpoint.
-        if int(labels[idx]) == LABEL_NAVIGATE:
+        lab = int(labels[idx])
+        # Waypoint / coconut markers already highlight the selected checkpoint.
+        if lab == LABEL_NAVIGATE or (
+            "kangaroo" in self.env_name and lab == LABEL_COLLECT and 1 <= idx <= 40
+        ):
+            return
+        if lab == LABEL_AVOID:
             return
         x, y, w, h = int(xa[idx]), int(ya[idx]), int(wa[idx]), int(ha[idx])
         sx, sy, sw, sh = self._object_screen_rect(x, y, w, h, min_game_px=2)

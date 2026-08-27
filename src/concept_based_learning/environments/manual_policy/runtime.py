@@ -129,6 +129,30 @@ def _eval_navigate_to(
         # unless the slot may be hazard-gated (skip_if_inactive=False → wait).
         if bool(getattr(node, "skip_if_inactive", True)):
             done = jnp.logical_or(done, inactive)
+        dy_min = getattr(node, "platform_reach_dy_min", None)
+        dy_max = getattr(node, "platform_reach_dy_max", None)
+        y_slack = getattr(node, "platform_reach_y_slack", None)
+        if y_slack is not None or dy_min is not None or dy_max is not None:
+            oy = jnp.where(
+                jnp.logical_and(slot >= 0, slot < ctx.n), ctx.oy[slot], ctx.py
+            )
+            ox = jnp.where(
+                jnp.logical_and(slot >= 0, slot < ctx.n), ctx.ox[slot], ctx.px
+            )
+            if dy_min is not None or dy_max is not None:
+                dy = ctx.py - oy
+                lo = float(dy_min) if dy_min is not None else -jnp.inf
+                hi = float(dy_max) if dy_max is not None else jnp.inf
+                y_ok = jnp.logical_and(dy >= lo, dy <= hi)
+            else:
+                y_ok = ctx.py <= oy + float(y_slack)
+            x_slack = getattr(node, "platform_reach_x_slack", None)
+            if x_slack is not None:
+                x_ok = jnp.abs(ctx.px - ox) <= float(x_slack)
+                platform_reached = jnp.logical_and(y_ok, x_ok)
+            else:
+                platform_reached = y_ok
+            done = jnp.logical_or(done, platform_reached)
 
     target = jnp.where(active, slot, jnp.int32(no_target_idx))
     # Keep mission on the slot even while inactive-wait isn't needed; if inactive

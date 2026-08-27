@@ -80,12 +80,22 @@ class NavigateTo:
     inactive padded slot completes the stage immediately.  Set False when the
     slot may be gated off temporarily (e.g. kangaroo ladder under a falling
     coconut) so the plan waits instead of skipping.
+
+    ``platform_reach_*`` (arrive mode): optional floor snap for raised top
+    waypoints — stage also completes when the player stands on the platform
+    near the slot even if centre-distance arrive never fires.  Prefer
+    ``platform_reach_dy_min`` / ``platform_reach_dy_max`` (player centre below
+    waypoint by dy = py - oy) over loose ``platform_reach_y_slack``.
     """
 
     slot: int
     arrive_dist: float = 8.0
     complete_when: str = "arrive"  # "arrive" | "inactive" | "either"
     skip_if_inactive: bool = True
+    platform_reach_y_slack: Optional[float] = None
+    platform_reach_x_slack: Optional[float] = None
+    platform_reach_dy_min: Optional[float] = None
+    platform_reach_dy_max: Optional[float] = None
     kind: str = field(default="navigate_to", init=False)
 
 

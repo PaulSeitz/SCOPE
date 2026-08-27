@@ -48,6 +48,7 @@ from concept_based_learning.training.skill_params import (
 from concept_based_learning.environments.datatypes import (
     ConceptObservation,
     EgocentricAction,
+    LABEL_AVOID,
     configure_label_routing_from_config,
 )
 from concept_based_learning.environments.env_manager import EnvManager
@@ -1116,6 +1117,9 @@ def run_greedy_eval_episodes(
         pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
         pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
         pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
     )
     meta_network = create_meta_network(config) if meta_params is not None else None
 
@@ -1274,6 +1278,9 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
         pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
         pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -1819,6 +1826,9 @@ def run_live_visualization(
         pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
         pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
         pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
     )
 
     rng = jax.random.PRNGKey(seed)
@@ -2136,6 +2146,13 @@ def run_live_visualization(
             ow = np.array(obs.objects.width[-1])
             oh = np.array(obs.objects.height[-1])
             oactive = np.array(obs.objects.active[-1])
+            olabels = np.array(obs.objects.semantic_label[-1])
+            outline_min_px = 1
+            if (
+                0 <= int(target_obj_idx) < len(olabels)
+                and int(olabels[int(target_obj_idx)]) == LABEL_AVOID
+            ):
+                outline_min_px = 10
 
             frame_chw = np.transpose(frame, (2, 0, 1))
             frame_chw = draw_target_outline(
@@ -2146,6 +2163,7 @@ def run_live_visualization(
                 ow,
                 oh,
                 oactive,
+                min_game_px=outline_min_px,
             )
             frame = np.transpose(frame_chw, (1, 2, 0))
 
