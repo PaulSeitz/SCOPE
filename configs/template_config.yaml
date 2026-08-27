@@ -98,6 +98,7 @@ SKILL_INPUT_MODE: "ego"             # Skill input format. Options: "ego","ego_em
 SKILL_EMBED_DIM: 256                # Embedding dim for ego_embed / oc_embed / pixel proj. Options: int >= 1.
 SKILL_PIXEL_CNN_CHANNELS: [32, 64]  # CNN channels for skill pixel_embed. Options: list[int].
 SKILL_PIXEL_CNN_KERNEL_SIZE: [5, 5] # CNN kernel size for skill pixel_embed. Options: [int,int].
+SKILL_PIXEL_PAINT_TARGET_OUTLINE: true  # Paint target bbox ring on pixel_embed frames. Options: true/false.
 # SKILL_PIXEL_TARGET_EMBED_DIM: 16  # Deprecated/unused (outline replaces slot-channel cond).
 DEBUG_INPUTS: false                  # Log/check rollout + train input shapes/finite/mask invariants. Options: true/false.
 # DEBUG_INPUTS_ASSERT: true          # Raise on invariant violations when DEBUG_INPUTS=true. Options: true/false.

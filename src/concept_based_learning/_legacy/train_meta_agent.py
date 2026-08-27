@@ -120,6 +120,9 @@ def make_meta_train(
         embed_dim=skill_embed_dim,
         pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
         pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
     )
 
     # 2. System 2 (Meta-Policy) - LEARNED

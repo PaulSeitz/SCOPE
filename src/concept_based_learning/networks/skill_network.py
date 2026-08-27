@@ -11,6 +11,7 @@ from concept_based_learning.observations.target_conditioning import (
     DEFAULT_OUTLINE_THICKNESS,
     build_oc_object_matrix,
     gather_object_rows,
+    normalize_pixel_obs,
     paint_target_outline_pixels,
 )
 
@@ -39,9 +40,10 @@ class QNetwork(nn.Module):
         gathered — so the Dense input width is the per-object feature size
         ``F`` (shared across envs), not ``M·F``. Requires ``objects``.
     pixel_embed / pixel_embed_cond
-        CNN over pixels with a painted target outline. ``pixel_embed_cond`` is
+        CNN over pixels with an optional painted target outline
+        (``pixel_paint_target_outline``; default on). ``pixel_embed_cond`` is
         kept as a deprecated alias of ``pixel_embed`` (slot-channel conditioning
-        was removed). Requires ``pixel_obs`` and ``objects``.
+        was removed). Requires ``pixel_obs``; ``objects`` only when painting.
     """
 
     action_dim: int
@@ -55,6 +57,7 @@ class QNetwork(nn.Module):
     pixel_cnn_kernel_size: tuple = (5, 5)
     pixel_target_embed_dim: int = 16  # unused; kept for config compatibility
     pixel_outline_thickness: int = DEFAULT_OUTLINE_THICKNESS
+    pixel_paint_target_outline: bool = True
 
     @nn.compact
     def __call__(
@@ -100,18 +103,22 @@ class QNetwork(nn.Module):
                 raise ValueError(
                     f"input_mode={mode!r} requires pixel_obs from combined observation wrappers."
                 )
-            if objects is None:
-                raise ValueError(
-                    f"input_mode={mode!r} requires labeled objects to paint the "
-                    "target outline (slot one-hots were removed)."
+            if self.pixel_paint_target_outline:
+                if objects is None:
+                    raise ValueError(
+                        f"input_mode={mode!r} requires labeled objects to paint the "
+                        "target outline (slot one-hots were removed)."
+                    )
+                img = paint_target_outline_pixels(
+                    pixel_obs,
+                    objects,
+                    target_idx,
+                    max_objects=self.max_objects,
+                    thickness=self.pixel_outline_thickness,
                 )
-            img = paint_target_outline_pixels(
-                pixel_obs,
-                objects,
-                target_idx,
-                max_objects=self.max_objects,
-                thickness=self.pixel_outline_thickness,
-            )
+            else:
+                # Ablation: same CNN, no target ring — expects transfer to collapse.
+                img = normalize_pixel_obs(pixel_obs)
             # img: [..., T, H, W, C] already in [0, 1]
             if img.ndim < 4:
                 raise ValueError(

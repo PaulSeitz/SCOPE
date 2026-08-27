@@ -115,6 +115,14 @@ def _gather_target_bbox(objects, target_idx, max_objects: int):
     return x, y, w, h, valid
 
 
+def normalize_pixel_obs(pixel_obs: jnp.ndarray) -> jnp.ndarray:
+    """Cast ``pixel_obs`` to float32 in ``[0, 1]`` (accepts ``[0, 255]``)."""
+    if pixel_obs is None:
+        raise ValueError("pixel_obs is required.")
+    img = pixel_obs.astype(jnp.float32)
+    return jnp.where(jnp.max(img) > 1.5, img / 255.0, img)
+
+
 def paint_target_outline_pixels(
     pixel_obs: jnp.ndarray,
     objects,
@@ -136,9 +144,7 @@ def paint_target_outline_pixels(
     if objects is None:
         raise ValueError("objects is required to paint a target outline.")
 
-    img = pixel_obs.astype(jnp.float32)
-    # Accept either [0,1] or [0,255] inputs.
-    img = jnp.where(jnp.max(img) > 1.5, img / 255.0, img)
+    img = normalize_pixel_obs(pixel_obs)
 
     if img.ndim < 4:
         raise ValueError(

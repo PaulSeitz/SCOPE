@@ -268,6 +268,9 @@ def make_train(
         pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
         pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
         pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
     )
     use_learned_meta_policy = frozen_meta_params is not None
     if use_learned_meta_policy:

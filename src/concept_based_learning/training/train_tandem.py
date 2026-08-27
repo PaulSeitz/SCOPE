@@ -223,6 +223,9 @@ def make_tandem_train(
         pixel_cnn_channels=tuple(int(c) for c in skill_pixel_channels),
         pixel_cnn_kernel_size=tuple(int(k) for k in skill_pixel_kernel),
         pixel_target_embed_dim=skill_pixel_target_embed_dim,
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
     )
     meta_network = create_meta_network(config)
 

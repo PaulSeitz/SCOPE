@@ -512,6 +512,19 @@ DISTANCE_ENCODE_PIPELINE_STEMS = (
     "phoenix_transfer_ego_angbins_distflags6",
 )
 
+# Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
+# (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
+PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
+PIXEL_NOOUTLINE_STEMS = (
+    "seaquest_skills_pixel_eval_nooutline",
+    "pong_transfer_pixel_nooutline",
+    "tennis_transfer_pixel_nooutline",
+    "beamrider_transfer_pixel_nooutline",
+    "freeway_transfer_pixel_nooutline",
+    "asterix_transfer_pixel_nooutline",
+    "phoenix_transfer_pixel_nooutline",
+)
+
 SUITE_STEMS = {
     SKILL_RESHAPE_SUITE: SKILL_RESHAPE_STEMS,
     DESTROY_ABLATION_SUITE: DESTROY_ABLATION_STEMS,
@@ -538,6 +551,7 @@ SUITE_STEMS = {
     CLIP_LOW_PIPELINE_SUITE: CLIP_LOW_PIPELINE_STEMS,
     CLIP_SWEEP_PIPELINE_SUITE: CLIP_SWEEP_PIPELINE_STEMS,
     DISTANCE_ENCODE_PIPELINE_SUITE: DISTANCE_ENCODE_PIPELINE_STEMS,
+    PIXEL_NOOUTLINE_SUITE: PIXEL_NOOUTLINE_STEMS,
 }
 
 
@@ -673,6 +687,7 @@ def _rtpt_name(
         THESIS_FINAL_SUITE: "sq_full_eval",
         THESIS_TIER_B_SUITE: "sq_full_eval_ft",
         THESIS_TIER_C_SUITE: "sq_full_eval_extra",
+        PIXEL_NOOUTLINE_SUITE: "pix_nooutline",
     }
     if suite and suite in suite_rtpt:
         base = suite_rtpt[suite]
@@ -1431,6 +1446,9 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_DISTANCE_BIN_MAX_PX",
     "EGO_DISTANCE_FLAG_THRESHOLDS_PX",
     "EGO_LEGAL_ACTION_MASK",
+    # Pixel ablation: keep outline on/off from the eval YAML when architecture
+    # is pinned to a train config that still paints by default.
+    "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
 )
 
 
@@ -1806,7 +1824,9 @@ def main() -> None:
             "(0/30/60/80/100/120/noclip trains + dual-mask Pong/Beam/Phoenix; "
             "reuses clip8/15/50 ckpts; SQ full once per new arm); 2 GPUs overnight. "
             f"{DISTANCE_ENCODE_PIPELINE_SUITE}: fixed distance tiers/flags "
-            "(tier2/4/6, flags3/6) + 8 θ-bins; maskoff; SQ full + transfers."
+            "(tier2/4/6, flags3/6) + 8 θ-bins; maskoff; SQ full + transfers. "
+            f"{PIXEL_NOOUTLINE_SUITE}: eval-only — Seaquest pixel ckpt with "
+            "target outline OFF (RQ1 mods + 6 RQ2 zero-shot transfers)."
         ),
     )
     parser.add_argument(
