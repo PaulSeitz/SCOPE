@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Collection
+
+import numpy as np
+
+# Easy / no-threat mods where weak bases inflate retention.
+POINT_FARMING_MODS: frozenset[str] = frozenset({"disable_enemies", "no_enemies"})
 
 
 def filter_rows(
@@ -14,6 +19,7 @@ def filter_rows(
     exclude_base: bool = False,
     protocols: set[str] | None = None,
     labels: set[str] | None = None,
+    exclude_mods: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     out = rows
     if rq is not None:
@@ -27,7 +33,25 @@ def filter_rows(
         out = [r for r in out if r.get("protocol") in protocols]
     if labels is not None:
         out = [r for r in out if r.get("agent_label") in labels]
+    if exclude_mods is not None:
+        skip = set(exclude_mods)
+        out = [r for r in out if r.get("mod_key") not in skip]
     return out
+
+
+def split_point_farming(
+    rows: list[dict[str, Any]],
+    *,
+    farming_mods: Collection[str] = POINT_FARMING_MODS,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    farming_set = set(farming_mods)
+    main = [r for r in rows if r.get("mod_key") not in farming_set]
+    farming = [
+        r
+        for r in rows
+        if r.get("mod_key") in farming_set or r.get("mod_key") == "base"
+    ]
+    return main, farming
 
 
 def base_returns_by_agent(rows: list[dict[str, Any]]) -> list[tuple[str, float, float]]:
@@ -112,6 +136,58 @@ def mean_retention_by_agent(rows: list[dict[str, Any]]) -> dict[str, float]:
             continue
         buckets[str(row["agent_label"])].append(float(ret))
     return {k: sum(v) / len(v) for k, v in buckets.items() if v}
+
+
+def median_retention_by_agent(
+    rows: list[dict[str, Any]],
+    *,
+    category: str | None = None,
+    exclude_mods: Collection[str] | None = POINT_FARMING_MODS,
+) -> dict[str, float]:
+    skip = set(exclude_mods or ())
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        if row.get("mod_key") == "base" or row.get("mod_key") in skip:
+            continue
+        if category is not None and str(row.get("mod_category") or "") != category:
+            continue
+        ret = row.get("retention")
+        if ret is None or ret != ret:
+            continue
+        buckets[str(row["agent_label"])].append(float(ret))
+    return {
+        agent: float(np.median(np.asarray(vals, dtype=float)))
+        for agent, vals in buckets.items()
+        if vals
+    }
+
+
+def transfer_base_matrix(
+    rows: list[dict[str, Any]],
+    *,
+    envs: list[str] | None = None,
+    modes: list[str] | None = None,
+) -> tuple[list[str], list[str], list[list[float]]]:
+    env_list = envs or ["pong", "tennis", "beamrider", "freeway", "asterix", "phoenix"]
+    mode_list = modes or ["ego", "pixel", "oc", "pqn"]
+    by_pair: dict[tuple[str, str], float] = {}
+    for row in rows:
+        if row.get("mod_key") != "base":
+            continue
+        label = str(row.get("agent_label") or "")
+        if not label.startswith("transfer/"):
+            continue
+        mode = label.split("/", 1)[1]
+        env = str(row.get("env") or "")
+        mean = row.get("mean")
+        if mean is None or mean != mean:
+            continue
+        by_pair[(env, mode)] = float(mean)
+    matrix = [
+        [by_pair.get((env, mode), float("nan")) for mode in mode_list]
+        for env in env_list
+    ]
+    return env_list, mode_list, matrix
 
 
 def envs_in_rows(rows: list[dict[str, Any]]) -> list[str]:

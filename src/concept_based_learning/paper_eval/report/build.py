@@ -12,6 +12,10 @@ from concept_based_learning.paper_eval.report.figures import (
     plot_point_farming_scores,
     plot_retention_heatmap,
     plot_return_vs_retention_scatter,
+    plot_rq1_summary,
+    plot_rq2_retention_summary,
+    plot_rq2_summary,
+    plot_rq3_summary,
     plot_train_peak_vs_eval,
     save_figure,
     _require_matplotlib,
@@ -74,6 +78,11 @@ def build_rq1_pages(
         return 0
 
     n = 0
+    fig = plot_rq1_summary(
+        rq1, title="RQ1 TLDR — base return vs dynamics robustness"
+    )
+    _add_fig(pdf, fig, png_path=(fig_dir / "rq1_summary.png") if fig_dir else None)
+    n += 1
     fig = plot_base_returns(
         rq1, title="RQ1 — Base return (Seaquest greedy eval, unclipped score)"
     )
@@ -170,7 +179,20 @@ def build_rq2_pages(
     if not rq2:
         return 0
     n = 0
-    # Cross-env summary first
+    fig = plot_rq2_summary(
+        rq2, title="RQ2 TLDR — zero-shot base return (env × mode)"
+    )
+    _add_fig(pdf, fig, png_path=(fig_dir / "rq2_summary_base.png") if fig_dir else None)
+    n += 1
+    fig = plot_rq2_retention_summary(
+        rq2, title="RQ2 TLDR — zero-shot mean retention"
+    )
+    _add_fig(
+        pdf,
+        fig,
+        png_path=(fig_dir / "rq2_summary_retention.png") if fig_dir else None,
+    )
+    n += 1
     fig = plot_overall_retention_bars(
         rq2, title="RQ2 — Mean retention across envs/mods (all protocols)"
     )
@@ -235,6 +257,11 @@ def build_rq3_pages(
     if not rq3:
         return 0
     n = 0
+    fig = plot_rq3_summary(
+        combined, title="RQ3 TLDR — meta/tandem vs references"
+    )
+    _add_fig(pdf, fig, png_path=(fig_dir / "rq3_summary.png") if fig_dir else None)
+    n += 1
     fig = plot_return_vs_retention_scatter(
         combined,
         title=(

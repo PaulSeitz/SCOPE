@@ -9,9 +9,11 @@ eval_mods:
   - key: double_enemy_speed
     mods: [double_enemy_speed]
     category: dynamics
+    skip_eval: true  # JAXAtari API drift vs base beamrider (occupied_lanes)
   - key: fog_of_war
     mods: [fog_of_war]
     category: dynamics
+    skip_eval: true  # fog palette missing under native downscale
   - key: hardcore
     mods: [hardcore]
     category: dynamics
@@ -33,8 +35,7 @@ eval_mods:
 
 paper_core:
   - base
-  - double_enemy_speed
-  - fog_of_war
+  # double_enemy_speed / fog_of_war skipped — see skip_eval on those entries
   - hardcore
   - mothership_laser
   - teleport_ufos

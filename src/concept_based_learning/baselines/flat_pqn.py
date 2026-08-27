@@ -452,11 +452,13 @@ def run_flat_pqn_greedy_eval(
     train_env = str(config.get("ENV_NAME", "seaquest")).lower()
     eval_env = str(env_name or train_env).lower()
     ckpt_action_dim = infer_flat_pqn_action_dim(params)
+    cross_env = eval_env != train_env
     env = make_flat_pqn_eval_env(
         object_centric=object_centric,
         game_mods=game_mods,
         config=config,
         env_name=eval_env,
+        full_action_space=True if cross_env else None,
         required_action_dim=ckpt_action_dim,
     )
     action_dim = env.action_space().n

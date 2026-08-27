@@ -46,6 +46,7 @@ def mod_specs_for_env(
             category=str(e.get("category", "other")),
         )
         for e in entries
+        if not e.get("skip_eval")
     ]
     if keys:
         wanted = set(keys)
