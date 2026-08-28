@@ -280,6 +280,9 @@ def single_run(config):
 
     alg_name = base_config.get("ALG_NAME", "hierarchical_pqn")
     env_name = str(base_config.get("ENV_NAME", "Seaquest"))
+    from concept_based_learning.paper_eval.config_merge import snapshot_ego_persist_keys
+
+    ego_persist_snapshot = snapshot_ego_persist_keys(base_config)
     _configure_ego_obs_format(base_config)
 
     if base_config.get("WANDB_MODE", "disabled") != "disabled":
@@ -776,7 +779,11 @@ def single_run(config):
             save_dir = os.path.join(save_path, env_name)
             os.makedirs(save_dir, exist_ok=True)
 
-            # Save config
+            # Save config (restore ego/mapper flags from run start — training must not
+            # clobber clip / POV knobs in the sidecar yaml).
+            from concept_based_learning.paper_eval.config_merge import restore_ego_persist_keys
+
+            restore_ego_persist_keys(base_config, ego_persist_snapshot)
             OmegaConf.save(
                 base_config,
                 os.path.join(save_dir, f'{alg_name}_{env_name}_seed{base_config["SEED"]}_config.yaml'),

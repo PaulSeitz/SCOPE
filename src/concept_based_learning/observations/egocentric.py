@@ -59,6 +59,8 @@ _EGO_ANGLE_BINS_SCALAR: bool = False
 # hard sectors and emit sin/cos of the sector centre (2 channels, finite
 # alphabet on the unit circle). Mutually exclusive with ``_EGO_ANGLE_BINS_SCALAR``.
 _EGO_ANGLE_SINCOS_SNAP: bool = False
+# POV-only: replace sin/cos(ψ) with overlapping triangular bins on ψ (aim offset).
+_EGO_PSI_ANGLE_BINS: int | None = None
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -242,6 +244,25 @@ def set_ego_angle_bins(n_bins: int | None) -> None:
     _EGO_ANGLE_BINS = n
 
 
+def set_ego_psi_angle_bins(n_bins: int | None) -> None:
+    """POV-only: replace sin/cos(ψ) with ``n_bins`` overlapping ψ bins."""
+    global _EGO_PSI_ANGLE_BINS
+    if n_bins is None:
+        _EGO_PSI_ANGLE_BINS = None
+        return
+    n = int(n_bins)
+    if n <= 0:
+        _EGO_PSI_ANGLE_BINS = None
+        return
+    if n < 2:
+        raise ValueError(f"EGO_PSI_ANGLE_BINS must be >= 2, got {n_bins}")
+    _EGO_PSI_ANGLE_BINS = n
+
+
+def ego_psi_angle_bins() -> int | None:
+    return _EGO_PSI_ANGLE_BINS
+
+
 def set_ego_angle_bins_scalar(enabled: bool) -> None:
     """Use one scalar tier channel instead of N angle-bin channels."""
     global _EGO_ANGLE_BINS_SCALAR
@@ -261,6 +282,10 @@ def ego_angle_bins() -> int | None:
 
 def ego_angle_channels_per_frame() -> int:
     """Pose angle block width: ``n`` bins, or 2 for sin/cos(ψ)."""
+    from concept_based_learning.observations.pov_relative import using_pov_relative
+
+    if using_pov_relative() and _EGO_PSI_ANGLE_BINS:
+        return int(_EGO_PSI_ANGLE_BINS)
     if _EGO_ANGLE_BINS:
         if _EGO_ANGLE_SINCOS_SNAP:
             return 2
@@ -341,8 +366,14 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_bin_centers_px(dist_centers)
         set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
     angle_bins = config.get("EGO_ANGLE_BINS", None)
+    psi_bins = config.get("EGO_PSI_ANGLE_BINS", None)
     if using_pov_relative():
+        set_ego_psi_angle_bins(
+            None if psi_bins in (None, "", False) else int(psi_bins)
+        )
         angle_bins = None
+    else:
+        set_ego_psi_angle_bins(None)
     set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
     set_ego_angle_sincos_snap(bool(config.get("EGO_ANGLE_SINCOS_SNAP", False)))
     set_ego_angle_bins_scalar(
@@ -446,6 +477,15 @@ def distance_pixels_from_feature(feature: jnp.ndarray | float) -> float:
     return float(feature) * MAX_DIST
 
 
+def _ego_velocity_channels_per_frame() -> int:
+    """POV uses one signed view-radial approach channel; otherwise radial+tangential."""
+    if not _USE_EGO_VELOCITY_FEATURES:
+        return 0
+    from concept_based_learning.observations.pov_relative import using_pov_relative
+
+    return 1 if using_pov_relative() else 2
+
+
 def ego_obs_channels_per_frame() -> int:
     """Return active per-frame ego feature channel count."""
     los_channels = 1 if _USE_EGO_BLOCKING_FEATURES else 0
@@ -460,11 +500,11 @@ def ego_obs_channels_per_frame() -> int:
         ) + los_channels + skill_ego_extra_channels_per_frame()
     # Target-aligned channel groups:
     #   always: distance + angle (sin/cos(ψ) or N θ bins)
-    #   velocity (optional): radial, tangential       -> +2
+    #   velocity (optional): POV approach (1) or radial+tangential (2)
     #   size (optional): target_w, target_h           -> +2
     #   line-of-sight (optional): blocked             -> +1
     pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
-    return pose + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+    return pose + _ego_velocity_channels_per_frame() + (
         2 if _USE_EGO_SIZE_FEATURES else 0
     ) + los_channels + skill_ego_extra_channels_per_frame()
 
@@ -487,7 +527,7 @@ def ego_pose_channels_per_frame() -> int:
             4 if _USE_EGO_SIZE_FEATURES else 0
         )
     return ego_distance_channels_per_frame() + ego_angle_channels_per_frame() + (
-        2 if _USE_EGO_VELOCITY_FEATURES else 0
+        _ego_velocity_channels_per_frame()
     ) + (2 if _USE_EGO_SIZE_FEATURES else 0)
 
 
@@ -1017,7 +1057,12 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
 
 
 def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
-    """POV-relative ego obs: view = toward target; ψ = facing − view; sin/cos(ψ)."""
+    """POV-relative ego obs: view = toward target; ψ = facing − view; sin/cos(ψ).
+
+    When velocity is enabled, emit one signed **approach** channel in the view
+    frame (line of sight to target): positive = target closing on the player,
+    negative = receding. Lateral drift is omitted — view is locked on target.
+    """
     from concept_based_learning.observations.pov_relative import pov_facing_psi_rad
 
     t_x_hist = objects.x[:, target_idx]
@@ -1069,11 +1114,12 @@ def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
     d_rel_x = jnp.concatenate([jnp.zeros(1, dtype=rel_x.dtype), jnp.diff(rel_x)])
     d_rel_y = jnp.concatenate([jnp.zeros(1, dtype=rel_y.dtype), jnp.diff(rel_y)])
 
-    facing_rad = player.orientation * (jnp.pi / 180.0)
-    cos_f = jnp.cos(facing_rad)
-    sin_f = jnp.sin(facing_rad)
-    v_forward = d_rel_x * cos_f + d_rel_y * sin_f
-    v_lateral = -d_rel_x * sin_f + d_rel_y * cos_f
+    # View-radial speed along θ_view (bearing to target). Standard v_r > 0 means
+    # separation growing (receding); negate so positive = closing on the player.
+    cos_t = jnp.cos(thetas)
+    sin_t = jnp.sin(thetas)
+    v_r = d_rel_x * cos_t + d_rel_y * sin_t
+    v_approach = -v_r
 
     if _USE_EGO_SIZE_FEATURES:
         size_w = t_ws / SCREEN_WIDTH
@@ -1082,19 +1128,16 @@ def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
         size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
         size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
 
-    if _USE_EGO_VELOCITY_FEATURES:
-        v_forward_norm = v_forward / MAX_SPEED
-        v_lateral_norm = v_lateral / MAX_SPEED
-    else:
-        v_forward_norm = jnp.zeros_like(v_forward, dtype=jnp.float32)
-        v_lateral_norm = jnp.zeros_like(v_lateral, dtype=jnp.float32)
-
     channels = distance_features_from_pixels(distances)
     if _USE_EGO_VELOCITY_FEATURES:
-        channels.extend([v_forward_norm, v_lateral_norm])
+        channels.append(v_approach / MAX_SPEED)
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
-    channels.extend([jnp.sin(psis), jnp.cos(psis)])
+    if _EGO_PSI_ANGLE_BINS:
+        bin_feats = triangular_angle_bins(psis, _EGO_PSI_ANGLE_BINS)
+        channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
+    else:
+        channels.extend([jnp.sin(psis), jnp.cos(psis)])
     if _USE_EGO_BLOCKING_FEATURES:
         channels.append(
             _los_blocked_stacked(

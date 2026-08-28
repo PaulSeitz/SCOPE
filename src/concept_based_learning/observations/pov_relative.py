@@ -8,6 +8,8 @@ When ``USE_POV_RELATIVE_MAPPER`` is enabled:
 * **Ego actions** are body-relative to player facing (FORWARD = along facing).
 * **Mapper** translates ``(facing_bin, ego_action) → game_action`` with no target geometry.
 * **Ego angle** encodes ψ = facing − view via ``sin(ψ), cos(ψ)``.
+* **Optional velocity** (``USE_EGO_VELOCITY_FEATURES``): one signed view-radial
+  approach channel (+ = target closing on player, − = receding).
 """
 
 from __future__ import annotations

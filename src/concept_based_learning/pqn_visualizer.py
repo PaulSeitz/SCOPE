@@ -51,7 +51,7 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     configure_label_routing_from_config,
 )
-from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.environments.env_manager import EnvManager, align_config_max_objects
 from concept_based_learning.environments.heuristics import (
     initial_policy_state,
     resolve_heuristic_target_fn,
@@ -90,7 +90,10 @@ from concept_based_learning.networks.skill_network import (
     QNetwork,
     q_network_from_config,
 )
-from concept_based_learning.observations.pov_relative import resolve_action_mappers
+from concept_based_learning.observations.pov_relative import (
+    resolve_action_mappers,
+    using_pov_relative,
+)
 from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -229,6 +232,22 @@ def bootstrap_pygame_window(
         )
     return screen, font
 
+
+def _print_ego_runtime_summary(config: dict) -> None:
+    """Log ego/mapper knobs actually wired into globals (debug OOD visualizer runs)."""
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    clip_note = f"distance_clip={clip_px}px" if clip_px is not None else "distance_clip=off"
+    stack = int(config.get("FRAME_STACK_SIZE", 4))
+    ch = ego_obs_channels_per_frame()
+    print(
+        "Visualizer ego runtime: "
+        f"{ch} ch/frame × stack {stack} = {ch * stack} dim | "
+        f"POV={using_pov_relative()} | {clip_note} | "
+        f"blocking={config.get('USE_EGO_BLOCKING_FEATURES')} | "
+        f"weapon={config.get('USE_EGO_WEAPON_FEATURES')} | "
+        f"heuristic={config.get('HEURISTIC_MODE')} | "
+        f"env={config.get('ENV_NAME')}"
+    )
 
 def load_base_config(experiment: str | None = None):
     """
@@ -641,6 +660,7 @@ def create_eval_env(config):
     eval_cfg = dict(config)
     eval_cfg["CLIP_REWARD"] = False
     env, renderer = manager.make_env(env_name, eval_cfg, train=False)
+    align_config_max_objects(config, env, env_name=env_name)
     return env, renderer
 
 
@@ -895,6 +915,8 @@ def _make_jitted_greedy_episode_runner(
     env_name = config.get("ENV_NAME", "Seaquest")
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
+    heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
+    use_policy_state = heuristic_with_state is not None
     no_target_idx = int(components.no_target_idx)
     action_mapper, _ = resolve_action_mappers(components, config)
     forced_target_hook = components.forced_target_hook
@@ -977,6 +999,7 @@ def _make_jitted_greedy_episode_runner(
                 done,
                 _prev,
                 _mission,
+                _policy_state,
                 _steps,
                 _suspended,
                 step,
@@ -993,6 +1016,7 @@ def _make_jitted_greedy_episode_runner(
                 done,
                 prev_target,
                 mission_target,
+                policy_state,
                 persist_steps,
                 suspended_mission,
                 step,
@@ -1013,6 +1037,22 @@ def _make_jitted_greedy_episode_runner(
                     persist_steps_remaining=persist_steps,
                     suspended_mission_idx=suspended_mission,
                 )
+            elif use_policy_state:
+                target, policy_state = heuristic_with_state(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target,
+                    policy_state,
+                    step_key,
+                )
+                target = target.astype(jnp.int32)
+                target = forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.expand_dims(target, 0),
+                    config,
+                )[0].astype(jnp.int32)
             elif heuristic_with_mission is not None:
                 target, mission_target = heuristic_with_mission(
                     obs.raw_observation,
@@ -1053,6 +1093,12 @@ def _make_jitted_greedy_episode_runner(
             new_done = jnp.logical_or(done, step_done)
             target = jnp.where(new_done, no_target, target)
             mission_target = jnp.where(new_done, no_target, mission_target)
+            policy_state = jax.lax.cond(
+                new_done,
+                lambda ps: initial_policy_state(no_target_idx),
+                lambda ps: policy_state,
+                policy_state,
+            )
             persist_steps = jnp.where(new_done, jnp.array(0, dtype=jnp.int32), persist_steps)
             suspended_mission = jnp.where(
                 new_done, jnp.array(no_target, dtype=jnp.int32), suspended_mission
@@ -1065,12 +1111,14 @@ def _make_jitted_greedy_episode_runner(
                 new_done,
                 target,
                 mission_target,
+                policy_state,
                 persist_steps,
                 suspended_mission,
                 step + 1,
                 metrics,
             )
 
+        init_policy_state = initial_policy_state(no_target_idx)
         init = (
             state,
             obs,
@@ -1079,13 +1127,14 @@ def _make_jitted_greedy_episode_runner(
             False,
             prev_target,
             mission_target,
+            init_policy_state,
             persist_steps,
             suspended_mission,
             0,
             init_episode_metrics(),
         )
         final = jax.lax.while_loop(cond, body, init)
-        metrics = finalize_metrics(final[10], final[0])
+        metrics = finalize_metrics(final[11], final[0])
         return final[3], metrics
 
     return jax.jit(run_episode)
@@ -2319,6 +2368,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--paper-config",
+        type=str,
+        default=None,
+        help=(
+            "Paper-eval train/eval YAML merged after the checkpoint sidecar "
+            "(ego clip, POV mapper, transfer MAX_OBJECTS, heuristic, etc.). "
+            "Use seaquest_skills_ego_pov_clip50_eval_full.yaml for RQ1 or "
+            "pong_transfer_ego_pov_clip50.yaml for Pong transfer."
+        ),
+    )
+    parser.add_argument(
         "--experiment",
         type=str,
         default=None,
@@ -2366,11 +2426,19 @@ def main():
     if skill_path is not None:
         base_config, _ = load_config_for_checkpoint(skill_path, base_config)
         params_tree = load_params_from_file(skill_path)
-        base_config = align_config_with_skill_checkpoint(base_config, params_tree)
     if meta_path is not None:
         if meta_params is None:
             base_config, _ = load_config_for_checkpoint(meta_path, base_config)
         meta_params = load_params_from_file(meta_path)
+    if args.paper_config is not None:
+        from concept_based_learning.paper_eval.config_merge import merge_paper_eval_yaml
+
+        base_config = merge_paper_eval_yaml(
+            base_config, args.paper_config, project_root=_project_root()
+        )
+        print(f"Merged paper-eval config: {args.paper_config}")
+    if params_tree is not None:
+        base_config = align_config_with_skill_checkpoint(base_config, params_tree)
 
     # Checkpoint *_config.yaml may set WANDB_MODE=online; keep the CLI default
     # (disabled) authoritative for local visualization.
@@ -2392,6 +2460,9 @@ def main():
         black_pixel=bool(args.black_pixel),
         heuristic_mode=args.heuristic_mode,
     )
+    configure_ego_obs_from_config(base_config)
+    configure_label_routing_from_config(base_config)
+    _print_ego_runtime_summary(base_config)
     if args.no_outline:
         print("SKILL_PIXEL_PAINT_TARGET_OUTLINE=False — no target ring for CNN or viz overlay")
     if args.black_pixel:

@@ -51,6 +51,10 @@ Usage:
   #   GPU 1: retraining with constant SKILL_LR, then the same full eval
   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite clip_bins_nodecay --wait-deps --lean
 
+  # POV baseline recovery (4 GPUs: noclip / vel / ψ-bins8 / vel+ψ-bins8 in parallel):
+  python scripts/run_paper_eval.py --suite pov_baseline --gpus 0,1,2,3 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite pov_baseline_train --gpus 0,1,2,3 --wait-deps --lean
+
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
     && CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite clip50_lifetime_pipeline --wait-deps --lean
@@ -527,9 +531,59 @@ POV_NOCLIP_SUITE = "pov_noclip"
 POV_NOCLIP_STEMS = (
     "seaquest_skills_ego_pov_noclip",
     "seaquest_skills_ego_pov_noclip_eval_full",
+    "pong_transfer_ego_pov_noclip",
 )
 POV_NOCLIP_EVAL_SUITE = "pov_noclip_eval"
 POV_NOCLIP_EVAL_STEMS = ("seaquest_skills_ego_pov_noclip_eval_full",)
+
+# POV baseline recovery: 4 parallel trains (noclip / vel / ψ-bins8 / vel+ψ-bins8),
+# then full Seaquest mod eval + Pong zs per arm, plus angbins reference eval.
+POV_BASELINE_SUITE = "pov_baseline"
+POV_BASELINE_STEMS = (
+    # --- trains (indices 0–3 → GPUs 0–3) ---
+    "seaquest_skills_ego_pov_noclip",
+    "seaquest_skills_ego_pov_clip50_vel",
+    "seaquest_skills_ego_pov_clip50_psibins8",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8",
+    # --- Seaquest full mod eval @ 27k ---
+    "seaquest_skills_ego_pov_noclip_eval_full",
+    "seaquest_skills_ego_pov_clip50_vel_eval_full",
+    "seaquest_skills_ego_pov_clip50_psibins8_eval_full",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_eval_full",
+    # --- Pong zero-shot (transfer sanity) ---
+    "pong_transfer_ego_pov_noclip",
+    "pong_transfer_ego_pov_clip50_vel",
+    "pong_transfer_ego_pov_clip50_psibins8",
+    "pong_transfer_ego_pov_clip50_vel_psibins8",
+    # --- Reference baseline (existing ckpts, eval-only) ---
+    "seaquest_skills_ego_clip50_angbins_eval_full",
+    "pong_transfer_ego_clip50_angbins",
+)
+POV_BASELINE_TRAIN_SUITE = "pov_baseline_train"
+POV_BASELINE_TRAIN_STEMS = (
+    "seaquest_skills_ego_pov_noclip",
+    "seaquest_skills_ego_pov_clip50_vel",
+    "seaquest_skills_ego_pov_clip50_psibins8",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8",
+)
+POV_VEL_SUITE = "pov_vel"
+POV_VEL_STEMS = (
+    "seaquest_skills_ego_pov_clip50_vel",
+    "seaquest_skills_ego_pov_clip50_vel_eval_full",
+    "pong_transfer_ego_pov_clip50_vel",
+)
+POV_PSIBINS8_SUITE = "pov_psibins8"
+POV_PSIBINS8_STEMS = (
+    "seaquest_skills_ego_pov_clip50_psibins8",
+    "seaquest_skills_ego_pov_clip50_psibins8_eval_full",
+    "pong_transfer_ego_pov_clip50_psibins8",
+)
+POV_VEL_PSIBINS8_SUITE = "pov_vel_psibins8"
+POV_VEL_PSIBINS8_STEMS = (
+    "seaquest_skills_ego_pov_clip50_vel_psibins8",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_eval_full",
+    "pong_transfer_ego_pov_clip50_vel_psibins8",
+)
 
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
@@ -586,6 +640,11 @@ SUITE_STEMS = {
     POV_MAPPER_SUITE: POV_MAPPER_STEMS,
     POV_NOCLIP_SUITE: POV_NOCLIP_STEMS,
     POV_NOCLIP_EVAL_SUITE: POV_NOCLIP_EVAL_STEMS,
+    POV_BASELINE_SUITE: POV_BASELINE_STEMS,
+    POV_BASELINE_TRAIN_SUITE: POV_BASELINE_TRAIN_STEMS,
+    POV_VEL_SUITE: POV_VEL_STEMS,
+    POV_PSIBINS8_SUITE: POV_PSIBINS8_STEMS,
+    POV_VEL_PSIBINS8_SUITE: POV_VEL_PSIBINS8_STEMS,
 }
 
 
@@ -1467,12 +1526,16 @@ _EVAL_OVERRIDE_KEYS = (
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
     # Ego layout must follow the transfer YAML / ckpt (scalar snap flags included).
+    "USE_LEGACY_EGO_OBS",
+    "USE_EGO_SIZE_FEATURES",
+    "USE_EGO_VELOCITY_FEATURES",
     "USE_EGO_BLOCKING_FEATURES",
     "USE_EGO_WEAPON_FEATURES",
     "USE_EGO_SHOT_FEATURES",
     "USE_EGO_SHOT_BETWEEN",
     "EGO_DISTANCE_CLIP_MAX_PX",
     "EGO_ANGLE_BINS",
+    "EGO_PSI_ANGLE_BINS",
     "EGO_ANGLE_BINS_SCALAR",
     "EGO_ANGLE_SINCOS_SNAP",
     "EGO_DISTANCE_BINS",

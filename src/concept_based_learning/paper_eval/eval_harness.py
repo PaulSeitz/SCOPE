@@ -196,9 +196,15 @@ def _overlay_ego_flags_from_skill_config(
             "EGO_ANGLE_SINCOS_SNAP",
             "FRAME_STACK_SIZE",
             "SKILL_INPUT_MODE",
+            "USE_POV_RELATIVE_MAPPER",
         ):
-            if key in src:
-                cfg[key] = src[key]
+            if key not in src:
+                continue
+            val = src[key]
+            # Sidecar null must not wipe explicit eval-yaml knobs (e.g. clip 50).
+            if val is None and cfg.get(key) is not None:
+                continue
+            cfg[key] = val
         print(f"  Overlayed ego flags from {path.name}")
         break
     return cfg

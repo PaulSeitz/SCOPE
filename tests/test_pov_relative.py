@@ -85,6 +85,60 @@ def test_seaquest_pov_mapper_matches_legacy_tables():
         assert built == legacy, f"ego={ego} left legacy={legacy} built={built}"
 
 
+def test_pov_velocity_adds_single_approach_channel():
+    configure_pov_relative_from_config({"USE_POV_RELATIVE_MAPPER": True})
+    base_cfg = {
+        "USE_POV_RELATIVE_MAPPER": True,
+        "USE_EGO_BLOCKING_FEATURES": True,
+        "USE_EGO_WEAPON_FEATURES": False,
+        "ENV_NAME": "seaquest",
+    }
+    configure_ego_obs_from_config({**base_cfg, "USE_EGO_VELOCITY_FEATURES": False})
+    without_vel = ego_obs_channels_per_frame()
+    configure_ego_obs_from_config({**base_cfg, "USE_EGO_VELOCITY_FEATURES": True})
+    with_vel = ego_obs_channels_per_frame()
+    assert using_pov_relative()
+    assert with_vel == without_vel + 1
+    configure_pov_relative_from_config({"USE_POV_RELATIVE_MAPPER": False})
+    configure_ego_obs_from_config({})
+
+
+def test_pov_approach_velocity_positive_when_target_closes():
+    """View-radial approach: + when target moves toward player along line of sight."""
+    # Player fixed; target starts right and moves left (closing).
+    p_cxs = jnp.array([0.0, 0.0, 0.0, 0.0])
+    t_cxs = jnp.array([20.0, 18.0, 16.0, 14.0])
+    p_cys = jnp.zeros(4)
+    t_cys = jnp.zeros(4)
+    thetas = jnp.zeros(4)  # target bearing: east
+    d_rel_x = jnp.concatenate([jnp.zeros(1), jnp.diff(t_cxs - p_cxs)])
+    d_rel_y = jnp.zeros_like(d_rel_x)
+    cos_t = jnp.cos(thetas)
+    sin_t = jnp.sin(thetas)
+    v_r = d_rel_x * cos_t + d_rel_y * sin_t
+    v_approach = -v_r
+    # After first frame, target x decreases → d_rel_x < 0 → v_r < 0 → approach > 0
+    assert float(v_approach[1]) > 0.0
+    assert float(v_approach[2]) > 0.0
+
+
+def test_pov_psibins8_adds_six_net_angle_channels():
+    configure_pov_relative_from_config({"USE_POV_RELATIVE_MAPPER": True})
+    base_cfg = {
+        "USE_POV_RELATIVE_MAPPER": True,
+        "USE_EGO_BLOCKING_FEATURES": True,
+        "USE_EGO_WEAPON_FEATURES": False,
+        "ENV_NAME": "seaquest",
+    }
+    configure_ego_obs_from_config({**base_cfg, "EGO_PSI_ANGLE_BINS": None})
+    without_bins = ego_obs_channels_per_frame()
+    configure_ego_obs_from_config({**base_cfg, "EGO_PSI_ANGLE_BINS": 8})
+    with_bins = ego_obs_channels_per_frame()
+    assert with_bins == without_bins + 6
+    configure_pov_relative_from_config({"USE_POV_RELATIVE_MAPPER": False})
+    configure_ego_obs_from_config({})
+
+
 def test_pov_psi_zero_when_facing_matches_view():
     # View toward target at 0 rad; facing also 0 rad.
     psi = pov_facing_psi_rad(jnp.array([0.0]), jnp.array([0.0]))
