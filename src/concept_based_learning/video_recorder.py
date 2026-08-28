@@ -96,7 +96,8 @@ class SidebarRenderer:
 def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                    target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                    wandb_step: int | None = None, distances=None, angles=None,
-                   video_output_path: str | None = None):
+                   video_output_path: str | None = None,
+                   draw_target_outline_overlay: bool = True):
     global CURRENT_VIDEO_THREAD
 
     if renderer is None:
@@ -121,6 +122,7 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
             "distances": distances,
             "angles": angles,
             "video_output_path": video_output_path,
+            "draw_target_outline_overlay": draw_target_outline_overlay,
         },
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
@@ -132,21 +134,37 @@ def add_active_agent(screen, active_agent_num: int):
     screen.blit(text_surface, (300, 300))
 
 
-def draw_target_outline(frame, target_idx, obj_x, obj_y, obj_w, obj_h, active):
+def draw_target_outline(
+    frame,
+    target_idx,
+    obj_x,
+    obj_y,
+    obj_w,
+    obj_h,
+    active,
+    *,
+    min_game_px: int = 1,
+):
     """
     Draw a red outline around the current target object on a single frame.
     frame: (3, H, W) numpy uint8 RGB
     target_idx: int index into object arrays
     obj_x, obj_y, obj_w, obj_h, active: 1D arrays of length max_objects
+    min_game_px: minimum bbox width/height in game pixels (centred on object)
     """
     if target_idx < 0 or target_idx >= len(active) or not active[target_idx]:
         return frame
     x = int(obj_x[target_idx])
     y = int(obj_y[target_idx])
-    w = int(obj_w[target_idx])
-    h = int(obj_h[target_idx])
+    w = max(int(obj_w[target_idx]), int(min_game_px))
+    h = max(int(obj_h[target_idx]), int(min_game_px))
     if w <= 0 or h <= 0:
         return frame
+    # Centre inflated rect on the object's geometric centre.
+    cx = float(obj_x[target_idx]) + float(obj_w[target_idx]) / 2.0
+    cy = float(obj_y[target_idx]) + float(obj_h[target_idx]) / 2.0
+    x = int(round(cx - w / 2.0))
+    y = int(round(cy - h / 2.0))
     _, H, W = frame.shape
     # Clip to frame bounds
     x1 = max(0, min(x, W - 1))
@@ -216,7 +234,8 @@ def _write_frames_mp4(frames_chw: np.ndarray, path: str, fps: int = 30) -> None:
 def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                   target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                   wandb_step: int | None = None, distances=None, angles=None,
-                  video_output_path: str | None = None):
+                  video_output_path: str | None = None,
+                  draw_target_outline_overlay: bool = True):
     try:
         use_wandb = wandb.run is not None
         if not use_wandb and not video_output_path:
@@ -272,7 +291,7 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             # Note: If the video is rotated/flipped, the transpose may need adjustment.
 
         # [Optional: Target outline] Draw red outline around current target object per frame
-        if target_obj_idxs is not None and objects_bbox is not None:
+        if draw_target_outline_overlay and target_obj_idxs is not None and objects_bbox is not None:
             ox, oy, ow, oh, oactive = objects_bbox
             for i in range(len(frames)):
                 idx = int(target_obj_idxs[i])

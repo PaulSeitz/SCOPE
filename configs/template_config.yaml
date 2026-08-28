@@ -68,6 +68,7 @@ EGO_ANGLE_BINS: null              # Replace sin/cos(ψ) with N overlapping world
 
 # Seaquest compatibility toggles.
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false           # Use old orientation-relative action mapper. Options: true/false.
+USE_POV_RELATIVE_MAPPER: false                     # Body-facing mapper + sin/cos(ψ) ego obs (view=toward target). Options: true/false.
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: true             # Prevent ascent near surface in legacy behavior. Options: true/false.
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false   # Guard near-surface deaths in legacy behavior. Options: true/false.
 

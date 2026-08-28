@@ -252,3 +252,66 @@ def test_skill_network_oc_and_pixel_forward():
     )
     assert q_bare_1.shape == (3,)
     assert jnp.allclose(q_bare_1, q_bare_2)
+
+
+def test_skill_network_pixel_blackout_zeros_cnn_input():
+    rng = jax.random.PRNGKey(0)
+    max_objects = 4
+    embed_dim = 16
+    objs = _fake_objects(max_objects=max_objects)
+    pixels = jnp.ones((2, 84, 84, 3), dtype=jnp.float32)
+    net = QNetwork(
+        action_dim=3,
+        input_mode="pixel_embed",
+        max_objects=max_objects,
+        hidden_size=16,
+        num_layers=1,
+        embed_dim=embed_dim,
+        pixel_cnn_channels=(8, 8),
+        pixel_paint_target_outline=False,
+        pixel_blackout=True,
+    )
+    vars_ = net.init(
+        rng,
+        jnp.zeros((8,)),
+        train=False,
+        target_idx=jnp.array(1, dtype=jnp.int32),
+        pixel_obs=pixels,
+    )
+    q_1 = net.apply(
+        vars_,
+        jnp.zeros((8,)),
+        train=False,
+        target_idx=jnp.array(1, dtype=jnp.int32),
+        pixel_obs=pixels,
+    )
+    q_2 = net.apply(
+        vars_,
+        jnp.zeros((8,)),
+        train=False,
+        target_idx=jnp.array(2, dtype=jnp.int32),
+        pixel_obs=jnp.zeros_like(pixels),
+    )
+    assert q_1.shape == (3,)
+    assert jnp.allclose(q_1, q_2)
+
+
+def test_draw_target_outline_min_game_px_expands_tiny_bbox():
+    from concept_based_learning.video_recorder import draw_target_outline
+
+    frame = np.zeros((3, 84, 84), dtype=np.uint8)
+    ox = np.array([40.0])
+    oy = np.array([40.0])
+    ow = np.array([1.0])
+    oh = np.array([1.0])
+    active = np.array([True])
+
+    out_small = draw_target_outline(
+        frame.copy(), 0, ox, oy, ow, oh, active, min_game_px=1
+    )
+    out_large = draw_target_outline(
+        frame.copy(), 0, ox, oy, ow, oh, active, min_game_px=10
+    )
+    assert int(np.max(out_small)) > 0
+    assert int(np.max(out_large)) > 0
+    assert int(np.sum(out_large > 0)) > int(np.sum(out_small > 0))

@@ -143,6 +143,18 @@ def main() -> None:
         help="Override HEURISTIC_MODE (e.g. nearest / env_specific) to match transfer eval",
     )
     parser.add_argument(
+        "--no-outline",
+        action="store_true",
+        default=False,
+        help="Disable target-outline painting for pixel_embed CNN input",
+    )
+    parser.add_argument(
+        "--black-pixel",
+        action="store_true",
+        default=False,
+        help="Zero out pixel_obs before the skill CNN (vision ablation)",
+    )
+    parser.add_argument(
         "--list-mods",
         action="store_true",
         help="Print selected mods and exit",
@@ -153,6 +165,7 @@ def main() -> None:
 
     from concept_based_learning.paper_eval.mods import mod_specs_for_env
     from concept_based_learning.pqn_visualizer import (
+        apply_visualizer_config_overrides,
         load_params_from_file,
         run_eval_rollout,
     )
@@ -181,9 +194,18 @@ def main() -> None:
     )
     cfg["SEED"] = int(args.seed)
     cfg["VIDEO_MAX_FRAMES"] = int(args.max_frames)
+    apply_visualizer_config_overrides(
+        cfg,
+        no_outline=bool(args.no_outline),
+        black_pixel=bool(args.black_pixel),
+        heuristic_mode=args.heuristic_mode,
+    )
     if args.heuristic_mode:
-        cfg["HEURISTIC_MODE"] = str(args.heuristic_mode)
         print(f"HEURISTIC_MODE override → {cfg['HEURISTIC_MODE']}")
+    if args.no_outline:
+        print("SKILL_PIXEL_PAINT_TARGET_OUTLINE=False")
+    if args.black_pixel:
+        print("SKILL_PIXEL_BLACKOUT=True")
 
     meta_params = None
     meta_path = args.meta
@@ -236,6 +258,9 @@ def main() -> None:
             angles=angles,
             video_key=f"paper_eval/{args.env}/{mod.key}",
             video_output_path=str(out_mp4),
+            draw_target_outline_overlay=bool(
+                eval_cfg.get("VISUALIZER_DRAW_TARGET_OUTLINE", True)
+            ),
         )
         wait_for_video_finish()
 

@@ -41,6 +41,7 @@ from concept_based_learning.observations.egocentric import (
     ego_obs_channels_per_frame,
     skill_ego_flat_dim,
 )
+from concept_based_learning.observations.pov_relative import resolve_action_mappers
 from concept_based_learning.training.skill_params import flatten_skill_params
 from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
 from concept_based_learning.pqn_visualizer import (
@@ -162,6 +163,7 @@ def outer_make_train(config, frozen_meta_params=None):
     heuristic_with_state_fn = resolve_heuristic_with_state_fn(
         config, env_name, components
     )
+    action_mapper, inverse_action_mapper = resolve_action_mappers(components, config)
 
     # Call the hierarchical training loop; returns (train_fn, eval_rollout_fn)
     train_fn, eval_rollout_fn = make_train(
@@ -172,8 +174,8 @@ def outer_make_train(config, frozen_meta_params=None):
         frozen_meta_params=frozen_meta_params,
         get_heuristic_target=heuristic_fn,
         no_target_idx=components.no_target_idx,
-        action_mapper=components.action_mapper,
-        inverse_action_mapper=components.inverse_action_mapper,
+        action_mapper=action_mapper,
+        inverse_action_mapper=inverse_action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
@@ -242,6 +244,7 @@ def outer_make_tandem_train(config):
     align_config_max_objects(config, env, env_name=env_name)
 
     heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
+    action_mapper, inverse_action_mapper = resolve_action_mappers(components, config)
 
     tandem_regions = make_tandem_train(
         config,
@@ -250,8 +253,8 @@ def outer_make_tandem_train(config):
         renderer,
         no_target_idx=components.no_target_idx,
         get_heuristic_target=heuristic_fn,
-        action_mapper=components.action_mapper,
-        inverse_action_mapper=components.inverse_action_mapper,
+        action_mapper=action_mapper,
+        inverse_action_mapper=inverse_action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         meta_mask_hook=components.meta_mask_hook,

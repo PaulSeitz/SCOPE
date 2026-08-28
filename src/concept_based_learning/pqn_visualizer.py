@@ -85,7 +85,12 @@ from concept_based_learning.environments.meta_target_persistence import (
     meta_q_stickiness_enabled,
     meta_target_persist_enabled,
 )
-from concept_based_learning.networks.skill_network import PIXEL_SKILL_INPUT_MODES, QNetwork
+from concept_based_learning.networks.skill_network import (
+    PIXEL_SKILL_INPUT_MODES,
+    QNetwork,
+    q_network_from_config,
+)
+from concept_based_learning.observations.pov_relative import resolve_action_mappers
 from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -97,6 +102,24 @@ from concept_based_learning.video_recorder import (
 def _project_root() -> Path:
     """Return the repository root (two levels above this file)."""
     return Path(__file__).resolve().parents[2]
+
+
+def apply_visualizer_config_overrides(
+    config: dict,
+    *,
+    no_outline: bool = False,
+    black_pixel: bool = False,
+    heuristic_mode: str | None = None,
+) -> dict:
+    """Apply CLI ablation flags for live/recorded visualizer runs."""
+    if no_outline:
+        config["SKILL_PIXEL_PAINT_TARGET_OUTLINE"] = False
+        config["VISUALIZER_DRAW_TARGET_OUTLINE"] = False
+    if black_pixel:
+        config["SKILL_PIXEL_BLACKOUT"] = True
+    if heuristic_mode is not None:
+        config["HEURISTIC_MODE"] = str(heuristic_mode)
+    return config
 
 
 def _prepare_pygame_env() -> None:
@@ -873,7 +896,7 @@ def _make_jitted_greedy_episode_runner(
     heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
     heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
     no_target_idx = int(components.no_target_idx)
-    action_mapper = components.action_mapper
+    action_mapper, _ = resolve_action_mappers(components, config)
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
 
@@ -1107,20 +1130,7 @@ def run_greedy_eval_episodes(
     manager = EnvManager()
     components = manager.get_components(env_name)
 
-    skill_network = QNetwork(
-        action_dim=ego_action_dim,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
-        max_objects=int(config.get("MAX_OBJECTS", 35)),
-        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
-        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
-        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
-        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
-        pixel_paint_target_outline=bool(
-            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
-        ),
-    )
+    skill_network = q_network_from_config(config)
     meta_network = create_meta_network(config) if meta_params is not None else None
 
     rng = jax.random.PRNGKey(base_seed)
@@ -1248,7 +1258,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
     heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
-    action_mapper = components.action_mapper
+    action_mapper, _ = resolve_action_mappers(components, config)
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
     reset_policy_on_life_lost = bool(
@@ -1268,20 +1278,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         meta_network = create_meta_network(config)
 
     # Build the shared skill Q-network (one set of params per skill)
-    skill_network = QNetwork(
-        action_dim=ego_action_dim,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
-        max_objects=int(config.get("MAX_OBJECTS", 35)),
-        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
-        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
-        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
-        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
-        pixel_paint_target_outline=bool(
-            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
-        ),
-    )
+    skill_network = q_network_from_config(config)
 
     rng = jax.random.PRNGKey(seed)
     rng, rng_reset = jax.random.split(rng)
@@ -1797,7 +1794,7 @@ def run_live_visualization(
     heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
     heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
-    action_mapper = components.action_mapper
+    action_mapper, _ = resolve_action_mappers(components, config)
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
     reset_policy_on_life_lost = bool(
@@ -1816,20 +1813,7 @@ def run_live_visualization(
     if meta_params is not None:
         meta_network = create_meta_network(config)
 
-    skill_network = QNetwork(
-        action_dim=ego_action_dim,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
-        max_objects=int(config.get("MAX_OBJECTS", 35)),
-        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
-        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
-        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
-        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
-        pixel_paint_target_outline=bool(
-            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
-        ),
-    )
+    skill_network = q_network_from_config(config)
 
     rng = jax.random.PRNGKey(seed)
     rng, rng_reset = jax.random.split(rng)
@@ -2140,7 +2124,8 @@ def run_live_visualization(
             frame = np.stack([frame] * 3, axis=-1)
 
         # Add a red border around the selected target object (same style as videos).
-        if target_obj_idx != no_target_idx:
+        draw_viz_outline = bool(config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True))
+        if draw_viz_outline and target_obj_idx != no_target_idx:
             ox = np.array(obs.objects.x[-1])
             oy = np.array(obs.objects.y[-1])
             ow = np.array(obs.objects.width[-1])
@@ -2280,6 +2265,29 @@ def main():
         ),
     )
     parser.add_argument(
+        "--no-outline",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable target-outline painting for pixel_embed CNN input and skip "
+            "the red target box overlay in live/recorded visualization."
+        ),
+    )
+    parser.add_argument(
+        "--black-pixel",
+        action="store_true",
+        default=False,
+        help=(
+            "Zero out pixel_obs before the skill CNN (ablation: policy without vision)."
+        ),
+    )
+    parser.add_argument(
+        "--heuristic-mode",
+        type=str,
+        default=None,
+        help="Override HEURISTIC_MODE (e.g. nearest for RQ2 transfer eval).",
+    )
+    parser.add_argument(
         "--video-out",
         type=str,
         default=None,
@@ -2378,6 +2386,16 @@ def main():
         print(
             "REMAP_NAVIGATE_TO_COLLECT=True — NAVIGATE waypoints use the COLLECT skill head"
         )
+    apply_visualizer_config_overrides(
+        base_config,
+        no_outline=bool(args.no_outline),
+        black_pixel=bool(args.black_pixel),
+        heuristic_mode=args.heuristic_mode,
+    )
+    if args.no_outline:
+        print("SKILL_PIXEL_PAINT_TARGET_OUTLINE=False — no target ring for CNN or viz overlay")
+    if args.black_pixel:
+        print("SKILL_PIXEL_BLACKOUT=True — pixel_obs zeroed before skill CNN")
 
     # If requested, run live interactive visualization and exit.
     if not args.record:
@@ -2448,6 +2466,9 @@ def main():
         distances=distances,
         angles=angles,
         video_output_path=video_out,
+        draw_target_outline_overlay=bool(
+            base_config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True)
+        ),
     )
     wait_for_video_finish()
 

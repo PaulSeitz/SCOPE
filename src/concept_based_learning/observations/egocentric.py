@@ -307,6 +307,12 @@ def using_destroy_only_ego_extras() -> bool:
 
 def configure_ego_obs_from_config(config: dict) -> None:
     """Apply all ego observation toggles from a merged experiment config dict."""
+    from concept_based_learning.observations.pov_relative import (
+        configure_pov_relative_from_config,
+        using_pov_relative,
+    )
+
+    configure_pov_relative_from_config(config)
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
     set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
@@ -335,6 +341,8 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_bin_centers_px(dist_centers)
         set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
     angle_bins = config.get("EGO_ANGLE_BINS", None)
+    if using_pov_relative():
+        angle_bins = None
     set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
     set_ego_angle_sincos_snap(bool(config.get("EGO_ANGLE_SINCOS_SNAP", False)))
     set_ego_angle_bins_scalar(
@@ -1008,6 +1016,107 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     return stacked.astype(jnp.float32).flatten()
 
 
+def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
+    """POV-relative ego obs: view = toward target; ψ = facing − view; sin/cos(ψ)."""
+    from concept_based_learning.observations.pov_relative import pov_facing_psi_rad
+
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    (
+        distances,
+        thetas,
+        _psis_unused,
+        t_cxs,
+        t_cys,
+        p_cxs,
+        p_cys,
+        t_ws,
+        t_hs,
+    ) = jax.vmap(
+        lambda px, py, pw, ph, po, tx, ty, tw, th: _frame_geometry_target_aligned(
+            px,
+            py,
+            pw,
+            ph,
+            po,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        player.orientation,
+        t_x_hist,
+        t_y_hist,
+        t_w_hist,
+        t_h_hist,
+    )
+
+    psis = pov_facing_psi_rad(player.orientation, thetas)
+
+    rel_x = t_cxs - p_cxs
+    rel_y = t_cys - p_cys
+    d_rel_x = jnp.concatenate([jnp.zeros(1, dtype=rel_x.dtype), jnp.diff(rel_x)])
+    d_rel_y = jnp.concatenate([jnp.zeros(1, dtype=rel_y.dtype), jnp.diff(rel_y)])
+
+    facing_rad = player.orientation * (jnp.pi / 180.0)
+    cos_f = jnp.cos(facing_rad)
+    sin_f = jnp.sin(facing_rad)
+    v_forward = d_rel_x * cos_f + d_rel_y * sin_f
+    v_lateral = -d_rel_x * sin_f + d_rel_y * cos_f
+
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    if _USE_EGO_VELOCITY_FEATURES:
+        v_forward_norm = v_forward / MAX_SPEED
+        v_lateral_norm = v_lateral / MAX_SPEED
+    else:
+        v_forward_norm = jnp.zeros_like(v_forward, dtype=jnp.float32)
+        v_lateral_norm = jnp.zeros_like(v_lateral, dtype=jnp.float32)
+
+    channels = distance_features_from_pixels(distances)
+    if _USE_EGO_VELOCITY_FEATURES:
+        channels.extend([v_forward_norm, v_lateral_norm])
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    channels.extend([jnp.sin(psis), jnp.cos(psis)])
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
 def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     """Legacy 10-channel egocentric observations from pre-refactor training."""
     t_x_history = objects.x[:, target_idx]
@@ -1122,6 +1231,10 @@ def get_ego_obs(raw_observation, objects, target_idx):
 
     Toggle via `set_ego_obs_format(use_legacy=True/False)`.
     """
+    from concept_based_learning.observations.pov_relative import using_pov_relative
+
+    if using_pov_relative():
+        return _get_ego_obs_pov_relative(raw_observation, objects, target_idx)
     if _USE_LEGACY_EGO_OBS:
         return _get_ego_obs_legacy(raw_observation, objects, target_idx)
     return _get_ego_obs_target_aligned(raw_observation, objects, target_idx)

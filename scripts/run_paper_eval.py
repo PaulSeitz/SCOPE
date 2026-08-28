@@ -512,6 +512,17 @@ DISTANCE_ENCODE_PIPELINE_STEMS = (
     "phoenix_transfer_ego_angbins_distflags6",
 )
 
+# POV-relative mapper: train Seaquest 25M + full mod eval + RQ2 transfer (4 envs).
+POV_MAPPER_SUITE = "pov_mapper"
+POV_MAPPER_STEMS = (
+    "seaquest_skills_ego_pov_clip50",
+    "seaquest_skills_ego_pov_clip50_eval_full",
+    "pong_transfer_ego_pov_clip50",
+    "beamrider_transfer_ego_pov_clip50",
+    "asterix_transfer_ego_pov_clip50",
+    "freeway_transfer_ego_pov_clip50",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -564,6 +575,7 @@ SUITE_STEMS = {
     DISTANCE_ENCODE_PIPELINE_SUITE: DISTANCE_ENCODE_PIPELINE_STEMS,
     PIXEL_NOOUTLINE_SUITE: PIXEL_NOOUTLINE_STEMS,
     PQN_TRANSFER_SUITE: PQN_TRANSFER_STEMS,
+    POV_MAPPER_SUITE: POV_MAPPER_STEMS,
 }
 
 
@@ -1462,6 +1474,7 @@ _EVAL_OVERRIDE_KEYS = (
     # Pixel ablation: keep outline on/off from the eval YAML when architecture
     # is pinned to a train config that still paints by default.
     "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
+    "USE_POV_RELATIVE_MAPPER",
 )
 
 

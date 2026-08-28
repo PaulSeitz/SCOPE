@@ -58,6 +58,7 @@ class QNetwork(nn.Module):
     pixel_target_embed_dim: int = 16  # unused; kept for config compatibility
     pixel_outline_thickness: int = DEFAULT_OUTLINE_THICKNESS
     pixel_paint_target_outline: bool = True
+    pixel_blackout: bool = False
 
     @nn.compact
     def __call__(
@@ -119,6 +120,8 @@ class QNetwork(nn.Module):
             else:
                 # Ablation: same CNN, no target ring — expects transfer to collapse.
                 img = normalize_pixel_obs(pixel_obs)
+            if self.pixel_blackout:
+                img = jnp.zeros_like(img)
             # img: [..., T, H, W, C] already in [0, 1]
             if img.ndim < 4:
                 raise ValueError(
@@ -165,6 +168,25 @@ class QNetwork(nn.Module):
 
         x = nn.Dense(self.action_dim)(x)
         return x
+
+
+def q_network_from_config(config, *, action_dim: int | None = None) -> QNetwork:
+    """Build a skill QNetwork from a training/eval config dict."""
+    return QNetwork(
+        action_dim=int(action_dim if action_dim is not None else config["EGO_ACTION_DIM"]),
+        hidden_size=int(config["HIDDEN_SIZE"]),
+        num_layers=int(config["NUM_LAYERS"]),
+        input_mode=str(config.get("SKILL_INPUT_MODE", "ego")),
+        max_objects=int(config.get("MAX_OBJECTS", 35)),
+        embed_dim=int(config.get("SKILL_EMBED_DIM", 256)),
+        pixel_cnn_channels=tuple(config.get("SKILL_PIXEL_CNN_CHANNELS", (32, 64))),
+        pixel_cnn_kernel_size=tuple(config.get("SKILL_PIXEL_CNN_KERNEL_SIZE", (5, 5))),
+        pixel_target_embed_dim=int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16)),
+        pixel_paint_target_outline=bool(
+            config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
+        ),
+        pixel_blackout=bool(config.get("SKILL_PIXEL_BLACKOUT", False)),
+    )
 
 
 @chex.dataclass(frozen=True)
