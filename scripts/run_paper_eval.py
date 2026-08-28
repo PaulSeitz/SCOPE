@@ -601,23 +601,24 @@ POV_TURN_STEMS = (
 )
 
 # Virtual bilateral sectors (target-selected L/R or U/D) + forward-hemisphere φ.
-# Per arm: train → Seaquest mod eval @27k → Pong ZS → Beamrider ZS.
+# Order is shard-critical: 3 GPUs each own one full arm (train → eval → pong → beam).
 POV_FIXED2_SUITE = "pov_fixed2"
 POV_FIXED2_STEMS = (
-    # --- horizontal φ-bins8 ---
+    # --- trains (indices 0–2 → GPUs 0–2) ---
     "seaquest_skills_ego_pov_clip50_fixed2_psibins8",
-    "seaquest_skills_ego_pov_clip50_fixed2_psibins8_eval_full",
-    "pong_transfer_ego_pov_clip50_fixed2_psibins8",
-    "beamrider_transfer_ego_pov_clip50_fixed2_psibins8",
-    # --- horizontal sin/cos(φ) ---
     "seaquest_skills_ego_pov_clip50_fixed2_sincos",
-    "seaquest_skills_ego_pov_clip50_fixed2_sincos_eval_full",
-    "pong_transfer_ego_pov_clip50_fixed2_sincos",
-    "beamrider_transfer_ego_pov_clip50_fixed2_sincos",
-    # --- vertical φ-bins8 (consistent U/D on Seaquest, Pong-aligned) ---
     "seaquest_skills_ego_pov_clip50_fixed2_vert_psibins8",
+    # --- Seaquest full mod eval @ 27k ---
+    "seaquest_skills_ego_pov_clip50_fixed2_psibins8_eval_full",
+    "seaquest_skills_ego_pov_clip50_fixed2_sincos_eval_full",
     "seaquest_skills_ego_pov_clip50_fixed2_vert_psibins8_eval_full",
+    # --- Pong zero-shot ---
+    "pong_transfer_ego_pov_clip50_fixed2_psibins8",
+    "pong_transfer_ego_pov_clip50_fixed2_sincos",
     "pong_transfer_ego_pov_clip50_fixed2_vert_psibins8",
+    # --- Beamrider zero-shot ---
+    "beamrider_transfer_ego_pov_clip50_fixed2_psibins8",
+    "beamrider_transfer_ego_pov_clip50_fixed2_sincos",
     "beamrider_transfer_ego_pov_clip50_fixed2_vert_psibins8",
 )
 POV_FIXED2_TRAIN_SUITE = "pov_fixed2_train"
