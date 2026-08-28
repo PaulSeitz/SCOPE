@@ -45,6 +45,8 @@ EVAL_OVERRIDE_KEYS: tuple[str, ...] = (
     "EGO_LEGAL_ACTION_MASK",
     "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
     "USE_POV_RELATIVE_MAPPER",
+    "USE_POV_FIXED_BILATERAL",
+    "POV_BILATERAL_AXIS",
     "USE_POV_TURN_PRIMITIVES",
     "POV_TURN_STEP_DEG",
     "POV_TURN_INITIAL_HEADING_DEG",
@@ -59,6 +61,8 @@ EVAL_OVERRIDE_KEYS: tuple[str, ...] = (
 # Written next to checkpoints; must survive training even if runtime dict is mutated.
 EGO_PERSIST_KEYS: tuple[str, ...] = (
     "USE_POV_RELATIVE_MAPPER",
+    "USE_POV_FIXED_BILATERAL",
+    "POV_BILATERAL_AXIS",
     "USE_POV_TURN_PRIMITIVES",
     "POV_TURN_STEP_DEG",
     "POV_TURN_INITIAL_HEADING_DEG",

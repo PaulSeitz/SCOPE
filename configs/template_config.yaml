@@ -70,6 +70,8 @@ EGO_PSI_ANGLE_BINS: null          # POV-only: replace sin/cos(ψ) with N overlap
 # Seaquest compatibility toggles.
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false           # Use old orientation-relative action mapper. Options: true/false.
 USE_POV_RELATIVE_MAPPER: false                     # Body-facing mapper + sin/cos(ψ) ego obs (view=toward target). Options: true/false.
+USE_POV_FIXED_BILATERAL: false                     # Virtual L/R (or U/D) sectors from target geometry; forward-hemisphere φ obs. Requires USE_POV_RELATIVE_MAPPER. Options: true/false.
+POV_BILATERAL_AXIS: null                            # Override env profile axis for fixed bilateral: horizontal | vertical. null=use env profile. Options: null, horizontal, vertical.
 USE_POV_TURN_PRIMITIVES: false                     # POV-only: 6 turn primitives over a persistent internal heading (needs EGO_ACTION_DIM=6). Options: true/false.
 POV_TURN_STEP_DEG: 45.0                            # Degrees rotated per TURN_LEFT/TURN_RIGHT. Options: float in (0, 180].
 POV_TURN_INITIAL_HEADING_DEG: null                 # Heading at episode start / after reset. null=env POV profile bin-0 facing.

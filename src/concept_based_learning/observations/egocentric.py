@@ -336,11 +336,15 @@ def configure_ego_obs_from_config(config: dict) -> None:
         configure_pov_relative_from_config,
         using_pov_relative,
     )
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        configure_pov_fixed_bilateral_from_config,
+    )
     from concept_based_learning.observations.pov_turn import (
         configure_pov_turn_from_config,
     )
 
     configure_pov_relative_from_config(config)
+    configure_pov_fixed_bilateral_from_config(config)
     configure_pov_turn_from_config(config)
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
@@ -485,8 +489,13 @@ def _ego_velocity_channels_per_frame() -> int:
     """POV uses one signed view-radial approach channel; otherwise radial+tangential."""
     if not _USE_EGO_VELOCITY_FEATURES:
         return 0
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        using_pov_fixed_bilateral,
+    )
     from concept_based_learning.observations.pov_relative import using_pov_relative
 
+    if using_pov_fixed_bilateral():
+        return 0
     return 1 if using_pov_relative() else 2
 
 
@@ -1175,6 +1184,124 @@ def _get_ego_obs_pov_relative(raw_observation, objects, target_idx, heading_deg=
     return stacked.astype(jnp.float32).flatten()
 
 
+def _frame_geometry_fixed_bilateral(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+    axis: str,
+):
+    """Per-frame distance + forward-hemisphere φ under virtual bilateral sectors."""
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        forward_hemisphere_phi_rad,
+        target_sector_idx,
+    )
+
+    distance = aabb_surface_gap_px(
+        p_x,
+        p_y,
+        p_w,
+        p_h,
+        t_x,
+        t_y,
+        t_w,
+        t_h,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    sector = target_sector_idx(dx, dy, axis=axis)
+    phi = forward_hemisphere_phi_rad(dx, dy, sector, axis=axis)
+    return distance, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+
+
+def _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx):
+    """Virtual bilateral sectors: distance + forward-hemisphere φ (no velocity)."""
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        active_bilateral_axis,
+        forward_hemisphere_angle_bins,
+    )
+
+    axis = active_bilateral_axis()
+
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    distances, phis, t_cxs, t_cys, p_cxs, p_cys, t_ws, t_hs = jax.vmap(
+        lambda px, py, pw, ph, tx, ty, tw, th: _frame_geometry_fixed_bilateral(
+            px,
+            py,
+            pw,
+            ph,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+            axis=axis,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        t_x_hist,
+        t_y_hist,
+        t_w_hist,
+        t_h_hist,
+    )
+
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    channels = distance_features_from_pixels(distances)
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    if _EGO_PSI_ANGLE_BINS:
+        bin_feats = forward_hemisphere_angle_bins(phis, _EGO_PSI_ANGLE_BINS)
+        channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
+    else:
+        channels.extend([jnp.sin(phis), jnp.cos(phis)])
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
 def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     """Legacy 10-channel egocentric observations from pre-refactor training."""
     t_x_history = objects.x[:, target_idx]
@@ -1295,8 +1422,13 @@ def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
     facing it never commanded, so that case raises instead.
     """
     from concept_based_learning.observations.pov_relative import using_pov_relative
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        using_pov_fixed_bilateral,
+    )
     from concept_based_learning.observations.pov_turn import using_pov_turn_primitives
 
+    if using_pov_fixed_bilateral():
+        return _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx)
     if using_pov_relative():
         if heading_deg is None and using_pov_turn_primitives():
             raise ValueError(

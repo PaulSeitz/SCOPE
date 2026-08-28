@@ -58,39 +58,86 @@ _MOVE_SPECS: dict[str, tuple[int, int, list[int], list[int]]] = {
 
 # Facing reference angles (degrees, screen-Y-down) for mapper table bin 0 / bin 1.
 # Seaquest: left/right hull. Pong/Freeway/Breakout: vertical control, pinned facing.
+# ``bilateral_axis`` selects virtual sector geometry for USE_POV_FIXED_BILATERAL.
+# Vertical games use bin1 = +90° (down) for the second sector table when fixed bilateral
+# is on; legacy POV still reads sprite bin 0 only for those envs.
 _POV_PROFILES: dict[str, dict[str, Any]] = {
-    "seaquest": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
+    "seaquest": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
     "pong": {
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "vertical",
         "synthetic_orientation_deg": -90.0,
     },
     "freeway": {
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "vertical",
         "synthetic_orientation_deg": -90.0,
         "player_getter": lambda raw: raw.chicken,
     },
-    "breakout": {"facing_deg_bin0": -90.0, "facing_deg_bin1": -90.0},
-    "beamrider": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
-    "asterix": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
-    "tennis": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
+    "breakout": {
+        "facing_deg_bin0": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "vertical",
+    },
+    "beamrider": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "asterix": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "tennis": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
     "phoenix": {
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "vertical",
         "synthetic_orientation_deg": 90.0,
     },
     "skiing": {
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "vertical",
         "synthetic_orientation_deg": -90.0,
         "player_getter": lambda raw: raw.skier,
     },
-    "kangaroo": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
-    "choppercommand": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
-    "spaceinvaders": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
-    "montezumarevenge": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
-    "venture": {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0},
+    "kangaroo": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "choppercommand": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "spaceinvaders": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "montezumarevenge": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "venture": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
 }
 
 
@@ -106,6 +153,39 @@ def _player_orientation_deg(raw_obs, profile: dict[str, Any], player_getter) -> 
 def _facing_bin_idx(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndarray:
     ori = _player_orientation_deg(raw_obs, profile, player_getter)
     return (ori >= jnp.float32(180.0)).astype(jnp.int32)
+
+
+def _target_delta_xy(raw_obs, objects, target_idx, player_getter):
+    """Player→target centre offset for the latest stacked frame."""
+    from concept_based_learning.observations.egocentric import _center_y, _uses_bottom_edge_y
+
+    player = player_getter(raw_obs)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_obs)
+    p_cx = player.x[-1] + player.width[-1] / jnp.float32(2.0)
+    p_cy = _center_y(
+        player.y[-1], player.height[-1], y_is_bottom_edge=y_is_bottom_edge
+    )
+    t_cx = objects.x[-1, target_idx] + objects.width[-1, target_idx] / jnp.float32(2.0)
+    t_cy = _center_y(
+        objects.y[-1, target_idx],
+        objects.height[-1, target_idx],
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
+    return t_cx - p_cx, t_cy - p_cy
+
+
+def _mapper_sector_idx(raw_obs, objects, target_idx, profile, player_getter) -> jnp.ndarray:
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        bilateral_axis_from_profile,
+        target_sector_idx,
+        using_pov_fixed_bilateral,
+    )
+
+    if using_pov_fixed_bilateral():
+        dx, dy = _target_delta_xy(raw_obs, objects, target_idx, player_getter)
+        axis = bilateral_axis_from_profile(profile)
+        return target_sector_idx(dx, dy, axis=axis)
+    return _facing_bin_idx(raw_obs, profile, player_getter)
 
 
 def build_facing_action_table(
@@ -152,33 +232,42 @@ def make_facing_relative_mappers(
         )
     profile = _POV_PROFILES.get(game_key, {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0})
     noop, fire, move, mfire = _MOVE_SPECS[game_key]
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        active_bilateral_axis,
+        bilateral_facing_degrees,
+        using_pov_fixed_bilateral,
+    )
+
+    if using_pov_fixed_bilateral():
+        facing0, facing1 = bilateral_facing_degrees(profile, axis=active_bilateral_axis())
+    else:
+        facing0 = float(profile["facing_deg_bin0"])
+        facing1 = float(profile["facing_deg_bin1"])
     table0 = build_facing_action_table(
         noop_action=noop,
         fire_action=fire,
         move_table=move,
         move_fire_table=mfire,
-        facing_deg=float(profile["facing_deg_bin0"]),
+        facing_deg=facing0,
     )
     table1 = build_facing_action_table(
         noop_action=noop,
         fire_action=fire,
         move_table=move,
         move_fire_table=mfire,
-        facing_deg=float(profile["facing_deg_bin1"]),
+        facing_deg=facing1,
     )
     _getter = player_getter or profile.get("player_getter") or _default_get_player
     _noop_i = jnp.int32(noop)
     _fire_i = jnp.int32(fire)
 
     def mapper(ego_action, raw_obs, target_idx, objects):
-        del target_idx, objects
-        bin_idx = _facing_bin_idx(raw_obs, profile, _getter)
+        bin_idx = _mapper_sector_idx(raw_obs, objects, target_idx, profile, _getter)
         table = jnp.where(bin_idx == 0, table0, table1)
         return table[ego_action]
 
     def inverse_mapper(game_action, raw_obs, target_idx, objects):
-        del target_idx, objects
-        bin_idx = _facing_bin_idx(raw_obs, profile, _getter)
+        bin_idx = _mapper_sector_idx(raw_obs, objects, target_idx, profile, _getter)
         table = jnp.where(bin_idx == 0, table0, table1)
         game_action = jnp.asarray(game_action, dtype=jnp.int32)
         matches = table == game_action

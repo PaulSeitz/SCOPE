@@ -108,6 +108,10 @@ def configure_pov_turn_from_config(config: dict | None) -> None:
             "USE_POV_TURN_PRIMITIVES is incompatible with RELABEL_ALL_OBJECTS: the "
             "inverse mapper cannot recover which turn produced a game action."
         )
+    if enabled and bool(cfg.get("USE_POV_FIXED_BILATERAL", False)):
+        raise ValueError(
+            "USE_POV_TURN_PRIMITIVES is incompatible with USE_POV_FIXED_BILATERAL."
+        )
     _USE_POV_TURN = enabled
 
     step = cfg.get("POV_TURN_STEP_DEG")

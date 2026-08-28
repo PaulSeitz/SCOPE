@@ -600,6 +600,33 @@ POV_TURN_STEMS = (
     "pong_transfer_ego_pov_clip50_vel_psibins8_turn",
 )
 
+# Virtual bilateral sectors (target-selected L/R or U/D) + forward-hemisphere φ.
+# Per arm: train → Seaquest mod eval @27k → Pong ZS → Beamrider ZS.
+POV_FIXED2_SUITE = "pov_fixed2"
+POV_FIXED2_STEMS = (
+    # --- horizontal φ-bins8 ---
+    "seaquest_skills_ego_pov_clip50_fixed2_psibins8",
+    "seaquest_skills_ego_pov_clip50_fixed2_psibins8_eval_full",
+    "pong_transfer_ego_pov_clip50_fixed2_psibins8",
+    "beamrider_transfer_ego_pov_clip50_fixed2_psibins8",
+    # --- horizontal sin/cos(φ) ---
+    "seaquest_skills_ego_pov_clip50_fixed2_sincos",
+    "seaquest_skills_ego_pov_clip50_fixed2_sincos_eval_full",
+    "pong_transfer_ego_pov_clip50_fixed2_sincos",
+    "beamrider_transfer_ego_pov_clip50_fixed2_sincos",
+    # --- vertical φ-bins8 (consistent U/D on Seaquest, Pong-aligned) ---
+    "seaquest_skills_ego_pov_clip50_fixed2_vert_psibins8",
+    "seaquest_skills_ego_pov_clip50_fixed2_vert_psibins8_eval_full",
+    "pong_transfer_ego_pov_clip50_fixed2_vert_psibins8",
+    "beamrider_transfer_ego_pov_clip50_fixed2_vert_psibins8",
+)
+POV_FIXED2_TRAIN_SUITE = "pov_fixed2_train"
+POV_FIXED2_TRAIN_STEMS = (
+    "seaquest_skills_ego_pov_clip50_fixed2_psibins8",
+    "seaquest_skills_ego_pov_clip50_fixed2_sincos",
+    "seaquest_skills_ego_pov_clip50_fixed2_vert_psibins8",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -661,6 +688,8 @@ SUITE_STEMS = {
     POV_PSIBINS8_SUITE: POV_PSIBINS8_STEMS,
     POV_VEL_PSIBINS8_SUITE: POV_VEL_PSIBINS8_STEMS,
     POV_TURN_SUITE: POV_TURN_STEMS,
+    POV_FIXED2_SUITE: POV_FIXED2_STEMS,
+    POV_FIXED2_TRAIN_SUITE: POV_FIXED2_TRAIN_STEMS,
 }
 
 
@@ -1564,6 +1593,8 @@ _EVAL_OVERRIDE_KEYS = (
     # is pinned to a train config that still paints by default.
     "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
     "USE_POV_RELATIVE_MAPPER",
+    "USE_POV_FIXED_BILATERAL",
+    "POV_BILATERAL_AXIS",
     "USE_POV_TURN_PRIMITIVES",
     "POV_TURN_STEP_DEG",
     "POV_TURN_INITIAL_HEADING_DEG",
