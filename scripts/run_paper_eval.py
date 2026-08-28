@@ -522,6 +522,14 @@ POV_MAPPER_STEMS = (
     "asterix_transfer_ego_pov_clip50",
     "freeway_transfer_ego_pov_clip50",
 )
+# POV-relative mapper, unclipped distance: train + full mod eval only.
+POV_NOCLIP_SUITE = "pov_noclip"
+POV_NOCLIP_STEMS = (
+    "seaquest_skills_ego_pov_noclip",
+    "seaquest_skills_ego_pov_noclip_eval_full",
+)
+POV_NOCLIP_EVAL_SUITE = "pov_noclip_eval"
+POV_NOCLIP_EVAL_STEMS = ("seaquest_skills_ego_pov_noclip_eval_full",)
 
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
@@ -576,6 +584,8 @@ SUITE_STEMS = {
     PIXEL_NOOUTLINE_SUITE: PIXEL_NOOUTLINE_STEMS,
     PQN_TRANSFER_SUITE: PQN_TRANSFER_STEMS,
     POV_MAPPER_SUITE: POV_MAPPER_STEMS,
+    POV_NOCLIP_SUITE: POV_NOCLIP_STEMS,
+    POV_NOCLIP_EVAL_SUITE: POV_NOCLIP_EVAL_STEMS,
 }
 
 
