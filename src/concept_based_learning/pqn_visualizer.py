@@ -94,6 +94,15 @@ from concept_based_learning.observations.pov_relative import (
     resolve_action_mappers,
     using_pov_relative,
 )
+from concept_based_learning.observations.pov_turn import (
+    TURN_EGO_ACTION_NAMES,
+    heading_after,
+    initial_heading_deg,
+    make_turn_legal_mask_fn,
+    resolve_turn_mapper,
+    turn_step_deg,
+    using_pov_turn_primitives,
+)
 from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
     video_callback,
@@ -239,10 +248,17 @@ def _print_ego_runtime_summary(config: dict) -> None:
     clip_note = f"distance_clip={clip_px}px" if clip_px is not None else "distance_clip=off"
     stack = int(config.get("FRAME_STACK_SIZE", 4))
     ch = ego_obs_channels_per_frame()
+    if using_pov_turn_primitives():
+        pov_note = (
+            f"POV=turn_primitives(step={turn_step_deg()}°, "
+            f"init_heading={initial_heading_deg()}°)"
+        )
+    else:
+        pov_note = f"POV={using_pov_relative()}"
     print(
         "Visualizer ego runtime: "
         f"{ch} ch/frame × stack {stack} = {ch * stack} dim | "
-        f"POV={using_pov_relative()} | {clip_note} | "
+        f"{pov_note} | {clip_note} | "
         f"blocking={config.get('USE_EGO_BLOCKING_FEATURES')} | "
         f"weapon={config.get('USE_EGO_WEAPON_FEATURES')} | "
         f"heuristic={config.get('HEURISTIC_MODE')} | "
@@ -694,14 +710,19 @@ def _hud_target_distance_px(raw_obs, objects, target_obj_idx: int, last_frame_eg
     return distance_pixels_from_feature(float(last_frame_ego[0]))
 
 
-def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
+def _initial_heading_or_none():
+    """Heading seed for shape-probe ego obs; ``None`` unless turn primitives are on."""
+    if not using_pov_turn_primitives():
+        return None
+    return jnp.float32(initial_heading_deg())
+
+
+def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx, heading_deg=None):
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
-    if mode in ("ego", "ego_embed"):
-        return get_ego_obs(raw_obs, objects, target_idx)
+    if mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
+        return get_ego_obs(raw_obs, objects, target_idx, heading_deg)
     if mode == "oc_embed":
         return flatten_raw_observation(raw_obs)
-    if mode in PIXEL_SKILL_INPUT_MODES:
-        return get_ego_obs(raw_obs, objects, target_idx)
     raise ValueError(
         f"Unknown SKILL_INPUT_MODE={mode!r}. "
         "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
@@ -919,6 +940,8 @@ def _make_jitted_greedy_episode_runner(
     use_policy_state = heuristic_with_state is not None
     no_target_idx = int(components.no_target_idx)
     action_mapper, _ = resolve_action_mappers(components, config)
+    turn_action_mapper = resolve_turn_mapper(components, config)
+    use_turn_primitives = turn_action_mapper is not None
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
 
@@ -938,8 +961,17 @@ def _make_jitted_greedy_episode_runner(
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
     )
+    turn_legal_mask_fn = (
+        make_turn_legal_mask_fn(
+            turn_action_mapper,
+            noop_action=int(components.ego_mapper_noop_action),
+            fire_action=int(components.ego_mapper_fire_action),
+        )
+        if use_turn_primitives
+        else None
+    )
 
-    def _skill_game_action(obs, target):
+    def _skill_game_action(obs, target, heading):
         is_noop = is_meta_noop_target(
             target, config, noop_idx=int(noop_idx), enabled=noop_enabled
         )
@@ -950,7 +982,13 @@ def _make_jitted_greedy_episode_runner(
         safe_target = jnp.where(target == no_target, 0, target)
         raw_label = obs.objects.semantic_label[-1, safe_target]
         sk_idx = label_to_skill_idx(raw_label, num_skills)
-        ego_obs = _skill_input_from_obs(config, obs.raw_observation, obs.objects, safe_target)
+        ego_obs = _skill_input_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            safe_target,
+            heading if use_turn_primitives else None,
+        )
         pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
         q_all = apply_skill_q_all(
@@ -972,15 +1010,26 @@ def _make_jitted_greedy_episode_runner(
                 q_skill,
             )
         if use_legal_ego_mask:
-            legal = legal_ego_mask_fn(obs.raw_observation, safe_target, obs.objects)
+            legal = (
+                turn_legal_mask_fn(heading)
+                if use_turn_primitives
+                else legal_ego_mask_fn(obs.raw_observation, safe_target, obs.objects)
+            )
             q_skill = mask_q_with_legal_ego(q_skill, legal)
         ego_a = jnp.argmax(q_skill)
-        game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
+        if use_turn_primitives:
+            new_heading = heading_after(heading, ego_a)
+            game_a = turn_action_mapper(
+                ego_a, new_heading, obs.raw_observation, target, obs.objects
+            )
+        else:
+            new_heading = heading
+            game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
         game_a = jnp.where(is_fire, fire_action, game_a)
         # Idle / no-target: BeamRider needs FIRE to advance levels; default NOOP.
         game_a = jnp.where(target == no_target, idle_action, game_a)
         game_a = jnp.where(is_noop, 0, game_a)
-        return game_a.astype(jnp.int32)
+        return game_a.astype(jnp.int32), new_heading
 
     def run_episode(rng):
         rng, reset_key = jax.random.split(rng)
@@ -1087,7 +1136,10 @@ def _make_jitted_greedy_episode_runner(
                     config,
                 )[0].astype(jnp.int32)
 
-            game_a = _skill_game_action(obs, target)
+            game_a, new_heading = _skill_game_action(
+                obs, target, policy_state.heading_deg
+            )
+            policy_state = policy_state.replace(heading_deg=new_heading)
             new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
             metrics = update_metrics(metrics, state, new_state, new_obs, reward)
             new_done = jnp.logical_or(done, step_done)
@@ -1188,6 +1240,7 @@ def run_greedy_eval_episodes(
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        _initial_heading_or_none(),
     )
     validate_skill_checkpoint_ego_dim(config, int(dummy_ego.shape[-1]))
     if params_tree is not None:
@@ -1308,6 +1361,8 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper, _ = resolve_action_mappers(components, config)
+    turn_action_mapper = resolve_turn_mapper(components, config)
+    use_turn_primitives = turn_action_mapper is not None
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
     reset_policy_on_life_lost = bool(
@@ -1320,6 +1375,15 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
+    )
+    turn_legal_mask_fn = (
+        make_turn_legal_mask_fn(
+            turn_action_mapper,
+            noop_action=int(components.ego_mapper_noop_action),
+            fire_action=int(components.ego_mapper_fire_action),
+        )
+        if use_turn_primitives
+        else None
     )
 
     meta_network = None
@@ -1339,6 +1403,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        _initial_heading_or_none(),
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
     validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
@@ -1499,6 +1564,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 obs.raw_observation,
                 obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
+                policy_state.heading_deg if use_turn_primitives else None,
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
             pixel_obs = _skill_pixel_obs_from_obs(config, obs)
@@ -1566,22 +1632,39 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             if restrict_fire_for_non_destroy and active_skill_idx != 0:
                 q_active = q_active.at[fire_indices].set(-jnp.inf)
             if use_legal_ego_mask:
-                legal = legal_ego_mask_fn(
-                    obs.raw_observation,
-                    jnp.array(target_obj_idx, dtype=jnp.int32),
-                    obs.objects,
+                legal = (
+                    turn_legal_mask_fn(policy_state.heading_deg)
+                    if use_turn_primitives
+                    else legal_ego_mask_fn(
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
+                    )
                 )
                 q_active = mask_q_with_legal_ego(q_active, legal)
 
             chosen_ego = int(jnp.argmax(q_active))
-            global_action = int(
-                action_mapper(
-                    chosen_ego,
-                    obs.raw_observation,
-                    jnp.array(target_obj_idx, dtype=jnp.int32),
-                    obs.objects,
+            if use_turn_primitives:
+                new_heading = heading_after(policy_state.heading_deg, chosen_ego)
+                policy_state = policy_state.replace(heading_deg=new_heading)
+                global_action = int(
+                    turn_action_mapper(
+                        chosen_ego,
+                        new_heading,
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
+                    )
                 )
-            )
+            else:
+                global_action = int(
+                    action_mapper(
+                        chosen_ego,
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
+                    )
+                )
         # Step the environment
         prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
@@ -1844,6 +1927,8 @@ def run_live_visualization(
     heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper, _ = resolve_action_mappers(components, config)
+    turn_action_mapper = resolve_turn_mapper(components, config)
+    use_turn_primitives = turn_action_mapper is not None
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
     reset_policy_on_life_lost = bool(
@@ -1856,6 +1941,15 @@ def run_live_visualization(
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
+    )
+    turn_legal_mask_fn = (
+        make_turn_legal_mask_fn(
+            turn_action_mapper,
+            noop_action=int(components.ego_mapper_noop_action),
+            fire_action=int(components.ego_mapper_fire_action),
+        )
+        if use_turn_primitives
+        else None
     )
 
     meta_network = None
@@ -1876,6 +1970,7 @@ def run_live_visualization(
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        _initial_heading_or_none(),
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
     validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
@@ -2017,9 +2112,14 @@ def run_live_visualization(
         return int(target_obj_idx)
 
     skill_names = [str(n) for n in (config.get("SKILL_NAMES") or [])]
-    _ego_action_names = {a.value: a.name for a in EgocentricAction}
+    _ego_action_names = (
+        dict(enumerate(TURN_EGO_ACTION_NAMES))
+        if use_turn_primitives
+        else {a.value: a.name for a in EgocentricAction}
+    )
 
     def _policy_action(target_obj_idx):
+        nonlocal policy_state
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
@@ -2035,6 +2135,7 @@ def run_live_visualization(
             obs.raw_observation,
             obs.objects,
             jnp.array(target_obj_idx, dtype=jnp.int32),
+            policy_state.heading_deg if use_turn_primitives else None,
         )
         ego_obs_batch = ego_obs[jnp.newaxis, ...]
         pixel_obs = _skill_pixel_obs_from_obs(config, obs)
@@ -2091,22 +2192,39 @@ def run_live_visualization(
         if restrict_fire_for_non_destroy and active_skill_idx != 0:
             q_active = q_active.at[fire_indices].set(-jnp.inf)
         if use_legal_ego_mask:
-            legal = legal_ego_mask_fn(
-                obs.raw_observation,
-                jnp.array(target_obj_idx, dtype=jnp.int32),
-                obs.objects,
+            legal = (
+                turn_legal_mask_fn(policy_state.heading_deg)
+                if use_turn_primitives
+                else legal_ego_mask_fn(
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
+                )
             )
             q_active = mask_q_with_legal_ego(q_active, legal)
 
         chosen_ego = int(jnp.argmax(q_active))
-        global_action = int(
-            action_mapper(
-                chosen_ego,
-                obs.raw_observation,
-                jnp.array(target_obj_idx, dtype=jnp.int32),
-                obs.objects,
+        if use_turn_primitives:
+            new_heading = heading_after(policy_state.heading_deg, chosen_ego)
+            policy_state = policy_state.replace(heading_deg=new_heading)
+            global_action = int(
+                turn_action_mapper(
+                    chosen_ego,
+                    new_heading,
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
+                )
             )
-        )
+        else:
+            global_action = int(
+                action_mapper(
+                    chosen_ego,
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
+                )
+            )
         return global_action, active_skill_idx, chosen_ego, distance, angle
 
     # Warm first-frame compiles while the window stays responsive/visible.

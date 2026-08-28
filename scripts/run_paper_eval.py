@@ -51,9 +51,11 @@ Usage:
   #   GPU 1: retraining with constant SKILL_LR, then the same full eval
   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite clip_bins_nodecay --wait-deps --lean
 
-  # POV baseline recovery (4 GPUs: noclip / vel / ψ-bins8 / vel+ψ-bins8 in parallel):
-  python scripts/run_paper_eval.py --suite pov_baseline --gpus 0,1,2,3 --wait-deps --lean
-  python scripts/run_paper_eval.py --suite pov_baseline_train --gpus 0,1,2,3 --wait-deps --lean
+  # POV baseline recovery (3 GPUs: ψ-bins8 / vel+ψ-bins8 / vel+ψ-bins8+turn in parallel):
+  python scripts/run_paper_eval.py --suite pov_baseline --gpus 0,1,2 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite pov_baseline_train --gpus 0,1,2 --wait-deps --lean
+  # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
+  CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -536,35 +538,41 @@ POV_NOCLIP_STEMS = (
 POV_NOCLIP_EVAL_SUITE = "pov_noclip_eval"
 POV_NOCLIP_EVAL_STEMS = ("seaquest_skills_ego_pov_noclip_eval_full",)
 
-# POV baseline recovery: 4 parallel trains (noclip / vel / ψ-bins8 / vel+ψ-bins8),
-# then full Seaquest mod eval + Pong zs per arm, plus angbins reference eval.
+# POV baseline recovery: 3 parallel trains, then full Seaquest mod eval + Pong zs per
+# arm, plus the angbins reference eval.
+#
+# The arms form a ladder on top of POV clip50:
+#   psibins8            — ψ-bins instead of sin/cos(ψ) (angle encoding only)
+#   vel_psibins8        — + signed view-radial approach velocity
+#   vel_psibins8_turn   — same obs as vel_psibins8, but 6 turn primitives over a
+#                         persistent heading instead of 18 compass intentions.
+#                         Paired with vel_psibins8 this isolates the action space.
+#
+# Dropped from the earlier plan: the noclip train (clip50 is the better-understood
+# baseline) and the vel-only train (subsumed by vel_psibins8).
 POV_BASELINE_SUITE = "pov_baseline"
 POV_BASELINE_STEMS = (
-    # --- trains (indices 0–3 → GPUs 0–3) ---
-    "seaquest_skills_ego_pov_noclip",
-    "seaquest_skills_ego_pov_clip50_vel",
+    # --- trains (indices 0–2 → GPUs 0–2) ---
     "seaquest_skills_ego_pov_clip50_psibins8",
     "seaquest_skills_ego_pov_clip50_vel_psibins8",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn",
     # --- Seaquest full mod eval @ 27k ---
-    "seaquest_skills_ego_pov_noclip_eval_full",
-    "seaquest_skills_ego_pov_clip50_vel_eval_full",
     "seaquest_skills_ego_pov_clip50_psibins8_eval_full",
     "seaquest_skills_ego_pov_clip50_vel_psibins8_eval_full",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn_eval_full",
     # --- Pong zero-shot (transfer sanity) ---
-    "pong_transfer_ego_pov_noclip",
-    "pong_transfer_ego_pov_clip50_vel",
     "pong_transfer_ego_pov_clip50_psibins8",
     "pong_transfer_ego_pov_clip50_vel_psibins8",
+    "pong_transfer_ego_pov_clip50_vel_psibins8_turn",
     # --- Reference baseline (existing ckpts, eval-only) ---
     "seaquest_skills_ego_clip50_angbins_eval_full",
     "pong_transfer_ego_clip50_angbins",
 )
 POV_BASELINE_TRAIN_SUITE = "pov_baseline_train"
 POV_BASELINE_TRAIN_STEMS = (
-    "seaquest_skills_ego_pov_noclip",
-    "seaquest_skills_ego_pov_clip50_vel",
     "seaquest_skills_ego_pov_clip50_psibins8",
     "seaquest_skills_ego_pov_clip50_vel_psibins8",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn",
 )
 POV_VEL_SUITE = "pov_vel"
 POV_VEL_STEMS = (
@@ -583,6 +591,13 @@ POV_VEL_PSIBINS8_STEMS = (
     "seaquest_skills_ego_pov_clip50_vel_psibins8",
     "seaquest_skills_ego_pov_clip50_vel_psibins8_eval_full",
     "pong_transfer_ego_pov_clip50_vel_psibins8",
+)
+# Persistent-heading turn primitives (6 ego actions) on the vel+ψ-bins8 obs.
+POV_TURN_SUITE = "pov_turn"
+POV_TURN_STEMS = (
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn",
+    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn_eval_full",
+    "pong_transfer_ego_pov_clip50_vel_psibins8_turn",
 )
 
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
@@ -645,6 +660,7 @@ SUITE_STEMS = {
     POV_VEL_SUITE: POV_VEL_STEMS,
     POV_PSIBINS8_SUITE: POV_PSIBINS8_STEMS,
     POV_VEL_PSIBINS8_SUITE: POV_VEL_PSIBINS8_STEMS,
+    POV_TURN_SUITE: POV_TURN_STEMS,
 }
 
 
@@ -1548,6 +1564,10 @@ _EVAL_OVERRIDE_KEYS = (
     # is pinned to a train config that still paints by default.
     "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
     "USE_POV_RELATIVE_MAPPER",
+    "USE_POV_TURN_PRIMITIVES",
+    "POV_TURN_STEP_DEG",
+    "POV_TURN_INITIAL_HEADING_DEG",
+    "EGO_ACTION_DIM",
 )
 
 

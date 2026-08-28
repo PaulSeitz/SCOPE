@@ -272,6 +272,13 @@ def make_inverse_ego_action_mapper(
 def fire_ego_action_indices(ego_action_dim: int) -> jnp.ndarray:
     """Return the fire-capable ego action indices for a given action space size."""
     if ego_action_dim == 6:
+        from concept_based_learning.observations.pov_turn import (
+            TURN_FIRE_EGO_ACTION_INDICES,
+            using_pov_turn_primitives,
+        )
+
+        if using_pov_turn_primitives():
+            return TURN_FIRE_EGO_ACTION_INDICES
         return FIRE_EGO_ACTION_INDICES_6
     return FIRE_EGO_ACTION_INDICES
 

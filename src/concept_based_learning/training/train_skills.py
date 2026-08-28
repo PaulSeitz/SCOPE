@@ -28,6 +28,12 @@ from concept_based_learning.observations.action_space import (
     make_realized_ego_mask_fn,
     mask_q_with_legal_ego,
 )
+from concept_based_learning.observations.pov_turn import (
+    TURN_EGO_ACTION_DIM,
+    heading_after,
+    initial_heading_deg,
+    make_turn_legal_mask_fn,
+)
 from concept_based_learning.networks.skill_network import (
     OBJECT_CONDITIONED_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
@@ -116,6 +122,7 @@ def make_train(
     no_target_idx,
     action_mapper,
     inverse_action_mapper,
+    turn_action_mapper=None,
     extract_all_skills_rewards,
     extract_life_lost,
     fixed_target_idx_from_config,
@@ -208,8 +215,20 @@ def make_train(
     else:
         FIRE_EGO_ACTION_INDICES = fire_ego_action_indices(EGO_ACTION_DIM)
     NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
+    use_turn_primitives = turn_action_mapper is not None
+    if use_turn_primitives and int(EGO_ACTION_DIM) != TURN_EGO_ACTION_DIM:
+        raise ValueError(
+            f"USE_POV_TURN_PRIMITIVES needs EGO_ACTION_DIM={TURN_EGO_ACTION_DIM}, "
+            f"got {EGO_ACTION_DIM}."
+        )
     use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
-    if legal_ego_mask_fn is None:
+    if use_turn_primitives:
+        turn_legal_mask_fn = make_turn_legal_mask_fn(
+            turn_action_mapper,
+            noop_action=int(ego_mapper_noop_action),
+            fire_action=int(ego_mapper_fire_action),
+        )
+    elif legal_ego_mask_fn is None:
         legal_ego_mask_fn = make_realized_ego_mask_fn(
             action_mapper,
             noop_action=int(ego_mapper_noop_action),
@@ -314,25 +333,23 @@ def make_train(
         )
         return chosen_actions
 
-    def _skill_inputs(raw_obs, objects, target_idxs):
-        if skill_input_mode in ("ego", "ego_embed"):
-            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+    def _skill_inputs(raw_obs, objects, target_idxs, headings=None):
+        if skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
+            if headings is None:
+                return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs, headings)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
-        if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
-            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
             "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
-    def _skill_input_single(raw_obs, objects, target_idx):
-        if skill_input_mode in ("ego", "ego_embed"):
-            return get_ego_obs(raw_obs, objects, target_idx)
+    def _skill_input_single(raw_obs, objects, target_idx, heading=None):
+        if skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
+            return get_ego_obs(raw_obs, objects, target_idx, heading)
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
-        if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
-            return get_ego_obs(raw_obs, objects, target_idx)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
             "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
@@ -399,6 +416,9 @@ def make_train(
                 lambda x: jnp.expand_dims(x, axis=0), probe_obs.objects
             ),
             jnp.expand_dims(probe_target, axis=0),
+            jnp.full((1,), initial_heading_deg(), dtype=jnp.float32)
+            if use_turn_primitives
+            else None,
         )[0]
         probe_pixel = (
             probe_obs.pixel_observation
@@ -597,8 +617,14 @@ def make_train(
                     force_noop | meta_fire, 0, active_skills
                 )
 
+                step_headings = (
+                    policy_states.heading_deg if use_turn_primitives else None
+                )
                 ego_obses = _skill_inputs(
-                    last_obs.raw_observation, last_obs.objects, safe_target_idxs
+                    last_obs.raw_observation,
+                    last_obs.objects,
+                    safe_target_idxs,
+                    step_headings,
                 )
                 pixel_obses = (
                     last_obs.pixel_observation
@@ -640,11 +666,14 @@ def make_train(
                         mask_row, (config["NUM_ENVS"], EGO_ACTION_DIM)
                     )
                     if use_legal_ego_mask:
-                        dyn = jax.vmap(legal_ego_mask_fn)(
-                            last_obs.raw_observation,
-                            safe_target_idxs,
-                            last_obs.objects,
-                        )
+                        if use_turn_primitives:
+                            dyn = jax.vmap(turn_legal_mask_fn)(policy_states.heading_deg)
+                        else:
+                            dyn = jax.vmap(legal_ego_mask_fn)(
+                                last_obs.raw_observation,
+                                safe_target_idxs,
+                                last_obs.objects,
+                            )
                         mask = jnp.logical_and(mask, dyn)
 
                     ego_action = jax.vmap(eps_greedy_exploration)(_rngs, q_vals, eps, mask)
@@ -696,12 +725,27 @@ def make_train(
                     )
                 chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
-                global_actions = jax.vmap(action_mapper)(
-                    chosen_ego_actions,
-                    last_obs.raw_observation,
-                    target_obj_idxs,
-                    last_obs.objects,
-                )
+                if use_turn_primitives:
+                    # Integrate the turn first: the primitive moves along the heading
+                    # it just rotated to, so the mapper sees the post-turn heading.
+                    new_headings = jax.vmap(heading_after)(
+                        policy_states.heading_deg, chosen_ego_actions
+                    )
+                    policy_states = policy_states.replace(heading_deg=new_headings)
+                    global_actions = jax.vmap(turn_action_mapper)(
+                        chosen_ego_actions,
+                        new_headings,
+                        last_obs.raw_observation,
+                        target_obj_idxs,
+                        last_obs.objects,
+                    )
+                else:
+                    global_actions = jax.vmap(action_mapper)(
+                        chosen_ego_actions,
+                        last_obs.raw_observation,
+                        target_obj_idxs,
+                        last_obs.objects,
+                    )
                 global_actions = jnp.where(
                     meta_fire,
                     jnp.full_like(global_actions, meta_fire_action),
@@ -805,7 +849,10 @@ def make_train(
                 )
 
                 next_ego_obses = _skill_inputs(
-                    new_obs.raw_observation, new_obs.objects, safe_target_idxs
+                    new_obs.raw_observation,
+                    new_obs.objects,
+                    safe_target_idxs,
+                    policy_states.heading_deg if use_turn_primitives else None,
                 )
 
                 if relabel_all_objects:
@@ -1666,7 +1713,10 @@ def make_train(
                 raw_label = obs.objects.semantic_label[-1, target_obj_idxs]
                 active_skills = label_to_skill_idx(raw_label)
                 ego_obs = get_ego_obs(
-                    obs.raw_observation, obs.objects, target_obj_idxs
+                    obs.raw_observation,
+                    obs.objects,
+                    target_obj_idxs,
+                    policy_state.heading_deg if use_turn_primitives else None,
                 )
                 ego_obs_batch = ego_obs[np.newaxis, ...]
                 skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
@@ -1701,18 +1751,33 @@ def make_train(
                     q_active = q_vals[active_skills]
 
                 if use_legal_ego_mask:
-                    legal = legal_ego_mask_fn(
-                        obs.raw_observation, target_obj_idxs, obs.objects
+                    legal = (
+                        turn_legal_mask_fn(policy_state.heading_deg)
+                        if use_turn_primitives
+                        else legal_ego_mask_fn(
+                            obs.raw_observation, target_obj_idxs, obs.objects
+                        )
                     )
                     q_active = mask_q_with_legal_ego(q_active, legal)
 
                 chosen_ego = jnp.argmax(q_active)
-                global_action = action_mapper(
-                    chosen_ego,
-                    obs.raw_observation,
-                    target_obj_idxs,
-                    obs.objects,
-                )
+                if use_turn_primitives:
+                    new_heading = heading_after(policy_state.heading_deg, chosen_ego)
+                    policy_state = policy_state.replace(heading_deg=new_heading)
+                    global_action = turn_action_mapper(
+                        chosen_ego,
+                        new_heading,
+                        obs.raw_observation,
+                        target_obj_idxs,
+                        obs.objects,
+                    )
+                else:
+                    global_action = action_mapper(
+                        chosen_ego,
+                        obs.raw_observation,
+                        target_obj_idxs,
+                        obs.objects,
+                    )
                 if symbolic_collect_enabled and int(active_skills) == symbolic_collect_skill_idx:
                     global_action = jnp.int32(symbolic_collect_up_action)
                 active_skills = int(active_skills)

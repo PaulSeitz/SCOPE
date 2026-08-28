@@ -336,8 +336,12 @@ def configure_ego_obs_from_config(config: dict) -> None:
         configure_pov_relative_from_config,
         using_pov_relative,
     )
+    from concept_based_learning.observations.pov_turn import (
+        configure_pov_turn_from_config,
+    )
 
     configure_pov_relative_from_config(config)
+    configure_pov_turn_from_config(config)
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
     set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
@@ -1056,12 +1060,17 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     return stacked.astype(jnp.float32).flatten()
 
 
-def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
+def _get_ego_obs_pov_relative(raw_observation, objects, target_idx, heading_deg=None):
     """POV-relative ego obs: view = toward target; ψ = facing − view; sin/cos(ψ).
 
     When velocity is enabled, emit one signed **approach** channel in the view
     frame (line of sight to target): positive = target closing on the player,
     negative = receding. Lateral drift is omitted — view is locked on target.
+
+    ``heading_deg`` overrides the sprite orientation as the facing used for ψ,
+    which is how the POV turn primitives close their control loop. It is a single
+    scalar broadcast across the frame stack: the integrator only tracks the
+    current heading, so ψ history varies through the target bearing alone.
     """
     from concept_based_learning.observations.pov_relative import pov_facing_psi_rad
 
@@ -1107,7 +1116,13 @@ def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
         t_h_hist,
     )
 
-    psis = pov_facing_psi_rad(player.orientation, thetas)
+    if heading_deg is None:
+        facing_deg = player.orientation
+    else:
+        facing_deg = jnp.broadcast_to(
+            jnp.asarray(heading_deg, dtype=jnp.float32), thetas.shape
+        )
+    psis = pov_facing_psi_rad(facing_deg, thetas)
 
     rel_x = t_cxs - p_cxs
     rel_y = t_cys - p_cys
@@ -1268,16 +1283,29 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     return stacked_ego.astype(jnp.float32).flatten()
 
 
-def get_ego_obs(raw_observation, objects, target_idx):
+def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
     """
     Build egocentric observations using the currently selected format.
 
     Toggle via `set_ego_obs_format(use_legacy=True/False)`.
+
+    ``heading_deg`` is only meaningful under the POV mapper with turn primitives,
+    where ψ must be measured against the integrated heading rather than the
+    sprite orientation. Omitting it there would silently feed the network a
+    facing it never commanded, so that case raises instead.
     """
     from concept_based_learning.observations.pov_relative import using_pov_relative
+    from concept_based_learning.observations.pov_turn import using_pov_turn_primitives
 
     if using_pov_relative():
-        return _get_ego_obs_pov_relative(raw_observation, objects, target_idx)
+        if heading_deg is None and using_pov_turn_primitives():
+            raise ValueError(
+                "USE_POV_TURN_PRIMITIVES is on but get_ego_obs was called without "
+                "heading_deg. Pass PolicyState.heading_deg from the rollout carry."
+            )
+        return _get_ego_obs_pov_relative(
+            raw_observation, objects, target_idx, heading_deg
+        )
     if _USE_LEGACY_EGO_OBS:
         return _get_ego_obs_legacy(raw_observation, objects, target_idx)
     return _get_ego_obs_target_aligned(raw_observation, objects, target_idx)

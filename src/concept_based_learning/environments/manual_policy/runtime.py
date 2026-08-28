@@ -451,6 +451,7 @@ class ManualPolicy:
                 ),
                 interrupt_latched=stage_state.interrupt_latched,
                 aux0=jnp.where(take, states[i].aux0, stage_state.aux0),
+                heading_deg=stage_state.heading_deg,
             )
 
         # Advance sequence when stage done.

@@ -42,6 +42,7 @@ from concept_based_learning.observations.egocentric import (
     skill_ego_flat_dim,
 )
 from concept_based_learning.observations.pov_relative import resolve_action_mappers
+from concept_based_learning.observations.pov_turn import resolve_turn_mapper
 from concept_based_learning.training.skill_params import flatten_skill_params
 from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
 from concept_based_learning.pqn_visualizer import (
@@ -176,6 +177,7 @@ def outer_make_train(config, frozen_meta_params=None):
         no_target_idx=components.no_target_idx,
         action_mapper=action_mapper,
         inverse_action_mapper=inverse_action_mapper,
+        turn_action_mapper=resolve_turn_mapper(components, config),
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
@@ -245,6 +247,11 @@ def outer_make_tandem_train(config):
 
     heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
     action_mapper, inverse_action_mapper = resolve_action_mappers(components, config)
+    if resolve_turn_mapper(components, config) is not None:
+        raise SystemExit(
+            "USE_POV_TURN_PRIMITIVES is only wired for TRAIN_MODE=skills_only; the "
+            "tandem trainer does not carry the heading state."
+        )
 
     tandem_regions = make_tandem_train(
         config,

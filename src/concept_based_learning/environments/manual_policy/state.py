@@ -29,18 +29,26 @@ class PolicyState:
         True while an interrupt is held under hysteresis (within → release).
     aux0:
         Env-specific scratch (e.g. paired ladder-top slot while climbing).
+    heading_deg:
+        Persistent body heading (degrees, screen-Y-down) integrated by the POV
+        turn primitives. Unused — and pinned at the env's initial heading — when
+        ``USE_POV_TURN_PRIMITIVES`` is off.
     """
 
     plan_idx: jnp.ndarray
     mission_target: jnp.ndarray
     interrupt_latched: jnp.ndarray
     aux0: jnp.ndarray
+    heading_deg: jnp.ndarray
 
     @staticmethod
     def zero(*, no_target_idx: int = NO_TARGET_IDX) -> "PolicyState":
+        from concept_based_learning.observations.pov_turn import initial_heading_deg
+
         return PolicyState(
             plan_idx=jnp.int32(0),
             mission_target=jnp.int32(no_target_idx),
             interrupt_latched=jnp.bool_(False),
             aux0=jnp.int32(no_target_idx),
+            heading_deg=jnp.float32(initial_heading_deg()),
         )
