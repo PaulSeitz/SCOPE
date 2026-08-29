@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import jax.numpy as jnp
 
 from concept_based_learning.observations.action_space import EGO_MOVE_DELTAS_DEG
 from concept_based_learning.observations.egocentric import (
@@ -21,7 +22,20 @@ from concept_based_learning.observations.pov_relative import (
     _player_orientation_deg,
     using_pov_relative,
 )
-from concept_based_learning.observations.pov_fixed_bilateral import using_pov_fixed_bilateral
+from concept_based_learning.observations.pov_fixed_bilateral import (
+    active_bilateral_axis,
+    bilateral_facing_degrees,
+    forward_hemisphere_phi_rad,
+    target_sector_idx,
+    using_pov_fixed_bilateral,
+)
+from concept_based_learning.observations.pov_facing_frame import (
+    facing_frame_phi_rad,
+    resolve_facing_deg,
+    using_ego_pose_xy,
+    using_pov_facing_frame,
+    world_delta_to_facing_frame,
+)
 
 PANEL_WIDTH = 320
 
@@ -48,6 +62,12 @@ class LiveVizSnapshot:
     player_xy: tuple[float, float]
     target_xy: tuple[float, float] | None
     frame_idx: int
+    sector_idx: int | None = None
+    phi_rad: float | None = None
+    virtual_facing_deg: float | None = None
+    bilateral_axis: str | None = None
+    fwd_px: float | None = None
+    lat_px: float | None = None
 
 
 def ego_channel_labels() -> list[str]:
@@ -68,22 +88,29 @@ def ego_channel_labels() -> list[str]:
             labels.append("blocked")
     else:
         dist_n = ego_distance_channels_per_frame()
-        if dist_n == 1:
+        if using_pov_facing_frame() and using_ego_pose_xy() and dist_n == 2:
+            labels = ["fwd", "lat"]
+        elif dist_n == 1:
             labels = ["dist"]
         else:
             labels = [f"dist{i}" for i in range(dist_n)]
 
         ang_n = ego_angle_channels_per_frame()
-        if using_pov_fixed_bilateral() and ego_psi_angle_bins():
-            labels.extend([f"phi{i}" for i in range(ang_n)])
-        elif using_pov_fixed_bilateral():
-            labels.extend(["sin(phi)", "cos(phi)"])
-        elif using_pov_relative() and ego_psi_angle_bins():
-            labels.extend([f"psi{i}" for i in range(ang_n)])
-        elif ang_n == 2:
-            labels.extend(["sin(psi)", "cos(psi)"])
-        else:
-            labels.extend([f"theta{i}" for i in range(ang_n)])
+        if ang_n > 0:
+            if using_pov_facing_frame() and ego_psi_angle_bins():
+                labels.extend([f"phi{i}" for i in range(ang_n)])
+            elif using_pov_facing_frame():
+                labels.extend(["sin(phi)", "cos(phi)"])
+            elif using_pov_fixed_bilateral() and ego_psi_angle_bins():
+                labels.extend([f"phi{i}" for i in range(ang_n)])
+            elif using_pov_fixed_bilateral():
+                labels.extend(["sin(phi)", "cos(phi)"])
+            elif using_pov_relative() and ego_psi_angle_bins():
+                labels.extend([f"psi{i}" for i in range(ang_n)])
+            elif ang_n == 2:
+                labels.extend(["sin(psi)", "cos(psi)"])
+            else:
+                labels.extend([f"theta{i}" for i in range(ang_n)])
 
         from concept_based_learning.observations.egocentric import (
             _USE_EGO_SIZE_FEATURES,
@@ -132,6 +159,82 @@ def _blend_overlay(base: np.ndarray, overlay: np.ndarray, alpha: float) -> np.nd
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def virtual_mapper_facing_deg(env_name: str, sector_idx: int) -> float:
+    """Mapper table facing for the active virtual bilateral sector."""
+    profile = _POV_PROFILES.get(str(env_name).lower(), {})
+    facing0, facing1 = bilateral_facing_degrees(profile, axis=active_bilateral_axis())
+    return float(facing0 if int(sector_idx) == 0 else facing1)
+
+
+def mapper_bin_facing_deg(raw_obs, env_name: str) -> float:
+    """Body-table facing (0/180 or ±90) selected by sprite/synthetic orientation bin."""
+    profile = _POV_PROFILES.get(
+        str(env_name).lower(), {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0}
+    )
+    getter = profile.get("player_getter")
+    if getter is None:
+        from concept_based_learning.observations.action_space import _default_get_player
+
+        getter = _default_get_player
+    ori = float(_player_orientation_deg(raw_obs, profile, getter))
+    facing0 = float(profile.get("facing_deg_bin0", 0.0))
+    facing1 = float(profile.get("facing_deg_bin1", 180.0))
+    return facing1 if ori >= 180.0 else facing0
+
+
+def compute_fixed_bilateral_viz(
+    env_name: str,
+    player_xy: tuple[float, float],
+    target_xy: tuple[float, float] | None,
+) -> tuple[int | None, float | None, float | None, str | None]:
+    """Return (sector_idx, phi_rad, virtual_facing_deg, axis) for overlays."""
+    if target_xy is None:
+        return None, None, None, None
+    px, py = player_xy
+    tx, ty = target_xy
+    dx = float(tx - px)
+    dy = float(ty - py)
+    axis = active_bilateral_axis()
+    sector = int(target_sector_idx(jnp.float32(dx), jnp.float32(dy), axis=axis))
+    phi = float(
+        forward_hemisphere_phi_rad(
+            jnp.float32(dx),
+            jnp.float32(dy),
+            jnp.int32(sector),
+            axis=axis,
+        )
+    )
+    facing = virtual_mapper_facing_deg(env_name, sector)
+    return sector, phi, facing, axis
+
+
+def compute_facing_frame_viz(
+    raw_obs,
+    env_name: str,
+    player_xy: tuple[float, float],
+    target_xy: tuple[float, float] | None,
+) -> tuple[float, float | None, float | None, float | None]:
+    """Return (facing_deg, phi_rad, fwd_px, lat_px) for FPS overlays.
+
+    ``facing_deg`` is the mapper body-table angle (matches FORWARD), not raw
+    sprite convention angles that can look like up/down on Seaquest.
+    """
+    facing = mapper_bin_facing_deg(raw_obs, env_name)
+    if target_xy is None:
+        return facing, None, None, None
+    px, py = player_xy
+    tx, ty = target_xy
+    dx = float(tx - px)
+    dy = float(ty - py)
+    # Obs may use resolve_facing_deg (raw/synthetic); rotate with mapper facing so
+    # the panel matches the FORWARD axis the action tables use.
+    fwd, lat = world_delta_to_facing_frame(
+        jnp.float32(dx), jnp.float32(dy), jnp.float32(facing)
+    )
+    phi = float(facing_frame_phi_rad(fwd, lat))
+    return facing, phi, float(fwd), float(lat)
+
+
 def apply_pov_overlay(
     frame_rgb: np.ndarray,
     snapshot: LiveVizSnapshot,
@@ -174,8 +277,28 @@ def apply_pov_overlay(
             )
             frame = _blend_overlay(frame, wedge, 0.22)
             frame = np.ascontiguousarray(frame)
+        elif show_fov_wedge and using_pov_fixed_bilateral():
+            forward_deg = snapshot.virtual_facing_deg
+            if forward_deg is not None:
+                wedge = np.zeros_like(frame)
+                cv2.ellipse(
+                    wedge,
+                    (cx, cy),
+                    (48, 48),
+                    0.0,
+                    float(forward_deg) - 90.0,
+                    float(forward_deg) + 90.0,
+                    (0, 160, 200),
+                    -1,
+                    cv2.LINE_AA,
+                )
+                frame = _blend_overlay(frame, wedge, 0.22)
+                frame = np.ascontiguousarray(frame)
 
-    facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
+    if using_pov_fixed_bilateral() and snapshot.virtual_facing_deg is not None:
+        facing = snapshot.virtual_facing_deg
+    else:
+        facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
     if facing is not None:
         dx, dy = _deg_to_screen_vec(float(facing), 36.0)
         cv2.arrowedLine(
@@ -228,7 +351,18 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
     cv2.circle(canvas, (cx, cy), size // 2 - 2, (60, 60, 60), 1, cv2.LINE_AA)
     _draw_text(canvas, "compass", x0, y0 - 4, scale=0.34)
 
-    if snapshot.target_xy is not None:
+    if using_pov_fixed_bilateral() and snapshot.virtual_facing_deg is not None:
+        forward_deg = float(snapshot.virtual_facing_deg)
+        dx, dy = _deg_to_screen_vec(forward_deg, size * 0.34)
+        cv2.line(
+            canvas,
+            (cx, cy),
+            (int(cx + dx), int(cy + dy)),
+            (0, 160, 200),
+            1,
+            cv2.LINE_AA,
+        )
+    elif snapshot.target_xy is not None:
         view_deg = float(np.rad2deg(snapshot.angle_rad))
         dx, dy = _deg_to_screen_vec(view_deg, size * 0.38)
         cv2.line(
@@ -240,7 +374,10 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
             cv2.LINE_AA,
         )
 
-    facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
+    if using_pov_fixed_bilateral() and snapshot.virtual_facing_deg is not None:
+        facing = snapshot.virtual_facing_deg
+    else:
+        facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
     if facing is not None:
         dx, dy = _deg_to_screen_vec(float(facing), size * 0.32)
         cv2.arrowedLine(
@@ -254,7 +391,22 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
         )
 
     legend_y = y0 + size + 14
-    _draw_text(canvas, "cyan=view  yellow=body  magenta=ego move", x0, legend_y, scale=0.32)
+    if using_pov_fixed_bilateral():
+        _draw_text(
+            canvas,
+            "cyan=target  wedge=sector forward  yellow=virt facing",
+            x0,
+            legend_y,
+            scale=0.28,
+        )
+    else:
+        _draw_text(
+            canvas,
+            "cyan=view  yellow=body  magenta=ego move",
+            x0,
+            legend_y,
+            scale=0.28,
+        )
     return legend_y + 10
 
 
@@ -385,29 +537,59 @@ def render_detail_panel(
     y += 16
 
     if not np.isnan(snapshot.distance):
-        psi_deg = np.nan
-        facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
-        if facing is not None:
-            view_deg = float(np.rad2deg(snapshot.angle_rad))
-            psi_deg = ((float(facing) - view_deg + 180.0) % 360.0) - 180.0
-        psi_txt = f" psi={psi_deg:.1f}deg" if np.isfinite(psi_deg) else ""
-        head_txt = (
-            f" head={snapshot.heading_deg:.0f}deg"
-            if snapshot.heading_deg is not None
-            else ""
-        )
-        face_txt = (
-            f" face={snapshot.facing_deg:.0f}deg"
-            if snapshot.facing_deg is not None
-            else ""
-        )
-        _draw_text(
-            panel,
-            f"d={snapshot.distance:.1f}px view={np.rad2deg(snapshot.angle_rad):.0f}deg{psi_txt}{head_txt}{face_txt}",
-            x,
-            y,
-            scale=0.32,
-        )
+        if using_pov_fixed_bilateral() and snapshot.phi_rad is not None:
+            sector_txt = (
+                f" sector={snapshot.sector_idx}"
+                if snapshot.sector_idx is not None
+                else ""
+            )
+            axis_txt = (
+                f" axis={snapshot.bilateral_axis}"
+                if snapshot.bilateral_axis
+                else ""
+            )
+            face_txt = (
+                f" virt_face={snapshot.virtual_facing_deg:.0f}deg"
+                if snapshot.virtual_facing_deg is not None
+                else ""
+            )
+            _draw_text(
+                panel,
+                f"d={snapshot.distance:.1f}px phi={np.rad2deg(snapshot.phi_rad):.0f}deg"
+                f"{sector_txt}{axis_txt}{face_txt}",
+                x,
+                y,
+                scale=0.32,
+            )
+        else:
+            psi_deg = np.nan
+            facing = (
+                snapshot.heading_deg
+                if snapshot.heading_deg is not None
+                else snapshot.facing_deg
+            )
+            if facing is not None:
+                view_deg = float(np.rad2deg(snapshot.angle_rad))
+                psi_deg = ((float(facing) - view_deg + 180.0) % 360.0) - 180.0
+            psi_txt = f" psi={psi_deg:.1f}deg" if np.isfinite(psi_deg) else ""
+            head_txt = (
+                f" head={snapshot.heading_deg:.0f}deg"
+                if snapshot.heading_deg is not None
+                else ""
+            )
+            face_txt = (
+                f" face={snapshot.facing_deg:.0f}deg"
+                if snapshot.facing_deg is not None
+                else ""
+            )
+            _draw_text(
+                panel,
+                f"d={snapshot.distance:.1f}px view={np.rad2deg(snapshot.angle_rad):.0f}deg"
+                f"{psi_txt}{head_txt}{face_txt}",
+                x,
+                y,
+                scale=0.32,
+            )
         y += 18
 
     y = _draw_compass(panel, snapshot, x, y, size=88)

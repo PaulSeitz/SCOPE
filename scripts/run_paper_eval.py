@@ -628,6 +628,31 @@ POV_FIXED2_TRAIN_STEMS = (
     "seaquest_skills_ego_pov_clip50_fixed2_vert_psibins8",
 )
 
+# Facing-locked FPS ego (view=player facing). Two pose encodings:
+#   facing_psibins8 — distance + 8 full-circle φ bins
+#   facing_xy       — body-frame (fwd, lat), no angle
+# Order is shard-critical: trains first so 2 GPUs train in parallel.
+POV_FACING_SUITE = "pov_facing"
+POV_FACING_STEMS = (
+    # --- trains (indices 0–1 → GPUs 0–1) ---
+    "seaquest_skills_ego_pov_clip50_facing_psibins8",
+    "seaquest_skills_ego_pov_clip50_facing_xy",
+    # --- Seaquest full mod eval @ 27k ---
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_eval_full",
+    "seaquest_skills_ego_pov_clip50_facing_xy_eval_full",
+    # --- Pong zero-shot ---
+    "pong_transfer_ego_pov_clip50_facing_psibins8",
+    "pong_transfer_ego_pov_clip50_facing_xy",
+    # --- Beamrider zero-shot ---
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8",
+    "beamrider_transfer_ego_pov_clip50_facing_xy",
+)
+POV_FACING_TRAIN_SUITE = "pov_facing_train"
+POV_FACING_TRAIN_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8",
+    "seaquest_skills_ego_pov_clip50_facing_xy",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -691,6 +716,8 @@ SUITE_STEMS = {
     POV_TURN_SUITE: POV_TURN_STEMS,
     POV_FIXED2_SUITE: POV_FIXED2_STEMS,
     POV_FIXED2_TRAIN_SUITE: POV_FIXED2_TRAIN_STEMS,
+    POV_FACING_SUITE: POV_FACING_STEMS,
+    POV_FACING_TRAIN_SUITE: POV_FACING_TRAIN_STEMS,
 }
 
 
@@ -1596,6 +1623,8 @@ _EVAL_OVERRIDE_KEYS = (
     "USE_POV_RELATIVE_MAPPER",
     "USE_POV_FIXED_BILATERAL",
     "POV_BILATERAL_AXIS",
+    "USE_POV_FACING_FRAME",
+    "EGO_POSE_XY",
     "USE_POV_TURN_PRIMITIVES",
     "POV_TURN_STEP_DEG",
     "POV_TURN_INITIAL_HEADING_DEG",

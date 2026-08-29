@@ -94,6 +94,7 @@ from concept_based_learning.observations.pov_relative import (
     resolve_action_mappers,
     using_pov_relative,
 )
+from concept_based_learning.observations.pov_fixed_bilateral import using_pov_fixed_bilateral
 from concept_based_learning.observations.pov_turn import (
     TURN_EGO_ACTION_NAMES,
     heading_after,
@@ -109,11 +110,24 @@ from concept_based_learning.video_recorder import (
     wait_for_video_finish,
     draw_target_outline,
 )
+from concept_based_learning.visualizer_debug_panel import (
+    LiveVizSnapshot,
+    PANEL_WIDTH,
+    apply_pov_overlay,
+    blank_detail_panel,
+    compute_fixed_bilateral_viz,
+    compose_display,
+    player_facing_deg,
+    render_detail_panel,
+)
 
 
 def _project_root() -> Path:
     """Return the repository root (two levels above this file)."""
     return Path(__file__).resolve().parents[2]
+
+
+POV_MODE_CHOICES = ("auto", "relative", "fixed-bilateral", "facing", "turn")
 
 
 def apply_visualizer_config_overrides(
@@ -122,6 +136,9 @@ def apply_visualizer_config_overrides(
     no_outline: bool = False,
     black_pixel: bool = False,
     heuristic_mode: str | None = None,
+    pov_mode: str = "auto",
+    pov_bilateral_axis: str | None = None,
+    ego_phi_bins: int | None = None,
 ) -> dict:
     """Apply CLI ablation flags for live/recorded visualizer runs."""
     if no_outline:
@@ -131,6 +148,43 @@ def apply_visualizer_config_overrides(
         config["SKILL_PIXEL_BLACKOUT"] = True
     if heuristic_mode is not None:
         config["HEURISTIC_MODE"] = str(heuristic_mode)
+
+    mode = str(pov_mode or "auto").lower().strip()
+    if mode not in POV_MODE_CHOICES:
+        raise ValueError(
+            f"Unknown pov_mode={pov_mode!r} (expected one of {POV_MODE_CHOICES})"
+        )
+    if mode == "relative":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = False
+        config["USE_POV_FACING_FRAME"] = False
+        config["USE_POV_TURN_PRIMITIVES"] = False
+    elif mode == "fixed-bilateral":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = True
+        config["USE_POV_FACING_FRAME"] = False
+        config["USE_POV_TURN_PRIMITIVES"] = False
+        config["USE_EGO_VELOCITY_FEATURES"] = False
+    elif mode == "facing":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = False
+        config["USE_POV_FACING_FRAME"] = True
+        config["USE_POV_TURN_PRIMITIVES"] = False
+    elif mode == "turn":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = False
+        config["USE_POV_FACING_FRAME"] = False
+        config["USE_POV_TURN_PRIMITIVES"] = True
+
+    if pov_bilateral_axis is not None:
+        config["POV_BILATERAL_AXIS"] = str(pov_bilateral_axis).lower().strip()
+
+    if ego_phi_bins is not None:
+        if int(ego_phi_bins) <= 0:
+            config["EGO_PSI_ANGLE_BINS"] = None
+        else:
+            config["EGO_PSI_ANGLE_BINS"] = int(ego_phi_bins)
+
     return config
 
 
@@ -244,6 +298,11 @@ def bootstrap_pygame_window(
 
 def _print_ego_runtime_summary(config: dict) -> None:
     """Log ego/mapper knobs actually wired into globals (debug OOD visualizer runs)."""
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        active_bilateral_axis,
+        using_pov_fixed_bilateral,
+    )
+
     clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
     clip_note = f"distance_clip={clip_px}px" if clip_px is not None else "distance_clip=off"
     stack = int(config.get("FRAME_STACK_SIZE", 4))
@@ -253,8 +312,17 @@ def _print_ego_runtime_summary(config: dict) -> None:
             f"POV=turn_primitives(step={turn_step_deg()}°, "
             f"init_heading={initial_heading_deg()}°)"
         )
+    elif using_pov_fixed_bilateral():
+        phi_note = (
+            f"phi_bins{config.get('EGO_PSI_ANGLE_BINS')}"
+            if config.get("EGO_PSI_ANGLE_BINS")
+            else "phi_sincos"
+        )
+        pov_note = (
+            f"POV=fixed_bilateral(axis={active_bilateral_axis()}, {phi_note})"
+        )
     else:
-        pov_note = f"POV={using_pov_relative()}"
+        pov_note = f"POV=relative({using_pov_relative()})"
     print(
         "Visualizer ego runtime: "
         f"{ch} ch/frame × stack {stack} = {ch * stack} dim | "
@@ -1761,6 +1829,7 @@ def run_live_visualization(
     display_backend: str = "pygame",
     pygame_screen=None,
     pygame_font=None,
+    step_mode: bool = False,
 ):
     """
     Run a live, interactive visualization loop.
@@ -1806,6 +1875,10 @@ def run_live_visualization(
     clock = None
     wait_ms = max(1, int(round(1000.0 / max(display_fps, 1))))
     cv2 = None
+    W, H = 160, 210
+    detail_mode = False
+    last_snapshot: LiveVizSnapshot | None = None
+    paused = bool(step_mode)
 
     if display_backend == "pygame":
         if screen is None or font is None:
@@ -1851,67 +1924,120 @@ def run_live_visualization(
         cv2.imshow(window_name, canvas)
         cv2.waitKey(1)
 
-    def _show_rgb_frame(frame_rgb: np.ndarray, overlay: str | None = None) -> None:
-        """Show an HxWx3 RGB uint8 frame scaled to window_size."""
-        if frame_rgb.dtype != np.uint8:
-            frame_rgb = frame_rgb.astype(np.uint8)
-        if not frame_rgb.flags["C_CONTIGUOUS"]:
-            frame_rgb = np.ascontiguousarray(frame_rgb)
+    def _game_window_size() -> tuple[int, int]:
+        return (W * scale + PANEL_WIDTH, H * scale)
+
+    def _resize_window() -> None:
+        nonlocal window_size, screen
+        window_size = _game_window_size()
+        if display_backend == "pygame":
+            screen = pygame.display.set_mode(
+                window_size, pygame.SHOWN | pygame.RESIZABLE
+            )
+            _raise_pygame_window()
+        else:
+            cv2.resizeWindow(window_name, window_size[0], window_size[1])
+
+    def _show_canvas(canvas_rgb: np.ndarray) -> None:
+        """Show a pre-composited HxWx3 RGB uint8 canvas."""
+        if canvas_rgb.dtype != np.uint8:
+            canvas_rgb = canvas_rgb.astype(np.uint8)
+        if not canvas_rgb.flags["C_CONTIGUOUS"]:
+            canvas_rgb = np.ascontiguousarray(canvas_rgb)
         if display_backend == "pygame":
             surf = pygame.surfarray.make_surface(
-                np.ascontiguousarray(frame_rgb.transpose(1, 0, 2))
+                np.ascontiguousarray(canvas_rgb.transpose(1, 0, 2))
             )
-            surf = pygame.transform.scale(surf, window_size)
+            if surf.get_size() != window_size:
+                surf = pygame.transform.scale(surf, window_size)
+            screen.fill((20, 20, 20))
             screen.blit(surf, (0, 0))
-            if overlay:
-                text_surface = font.render(overlay, True, (255, 255, 255))
-                tx = (window_size[0] - text_surface.get_width()) // 2
-                ty = window_size[1] - text_surface.get_height() - 10
-                screen.blit(text_surface, (tx, ty))
             pygame.display.flip()
             pygame.event.pump()
             return
-        bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        bgr = cv2.resize(bgr, window_size, interpolation=cv2.INTER_NEAREST)
-        if overlay:
-            cv2.putText(
-                bgr,
-                overlay,
-                (8, window_size[1] - 12),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
+        bgr = cv2.cvtColor(canvas_rgb, cv2.COLOR_RGB2BGR)
+        if (bgr.shape[1], bgr.shape[0]) != window_size:
+            bgr = cv2.resize(bgr, window_size, interpolation=cv2.INTER_NEAREST)
         cv2.imshow(window_name, bgr)
         cv2.waitKey(1)
 
-    def _poll_input() -> str | None:
-        """Poll UI input. Returns 'quit', 'reset', or None."""
+    def _show_rgb_frame(frame_rgb: np.ndarray, overlay: str | None = None) -> None:
+        if detail_mode and last_snapshot is not None:
+            panel = render_detail_panel(
+                last_snapshot,
+                height=H,
+                ego_action_names=_ego_action_names,
+                stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            )
+        else:
+            panel = blank_detail_panel(H)
+        canvas = compose_display(
+            frame_rgb,
+            scale=scale,
+            panel_rgb=panel,
+            overlay=overlay,
+        )
+        _show_canvas(canvas)
+
+    def _poll_input(*, blocking: bool = False) -> str | None:
+        """Poll UI input.
+
+        Returns one of: quit, reset, step, toggle_pause, toggle_detail, debug, or None.
+        """
+        step_keys_pygame = (
+            pygame.K_SPACE,
+            pygame.K_n,
+            pygame.K_PERIOD,
+            pygame.K_RIGHT,
+            pygame.K_RETURN,
+        )
         if display_backend == "pygame":
+            if blocking:
+                while True:
+                    for event in pygame.event.get():
+                        cmd = _handle_pygame_event(event, step_keys_pygame)
+                        if cmd is not None:
+                            return cmd
+                    pygame.time.wait(16)
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    return "quit"
-                if event.type == pygame.KEYDOWN and event.key in (
-                    pygame.K_q,
-                    pygame.K_ESCAPE,
-                ):
-                    return "quit"
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-                    return "reset"
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_s:
-                    debug_heuristic_snapshot(
-                        obs.raw_observation,
-                        obs.objects,
-                        jnp.array(prev_target_idx, dtype=jnp.int32),
-                    )
+                cmd = _handle_pygame_event(event, step_keys_pygame)
+                if cmd is not None:
+                    return cmd
             return None
-        key = cv2.waitKey(wait_ms) & 0xFF
+
+        delay = 0 if blocking else wait_ms
+        key = cv2.waitKey(max(1, delay)) & 0xFF
         if key in (ord("q"), ord("Q"), 27):
             return "quit"
         if key in (ord("r"), ord("R")):
             return "reset"
+        if key in (ord("s"), ord("S")):
+            return "debug"
+        if key in (ord("f"), ord("F")):
+            return "toggle_pause"
+        if key in (ord("m"), ord("M")):
+            return "toggle_detail"
+        if key in (ord(" "), ord("n"), ord("N"), ord("."), 13, 83):
+            return "step"
+        return None
+
+    def _handle_pygame_event(event, step_keys) -> str | None:
+        if event.type == pygame.QUIT:
+            return "quit"
+        if event.type != pygame.KEYDOWN:
+            return None
+        if event.key in (pygame.K_q, pygame.K_ESCAPE):
+            return "quit"
+        if event.key == pygame.K_r:
+            return "reset"
+        if event.key == pygame.K_s:
+            return "debug"
+        if event.key == pygame.K_f:
+            return "toggle_pause"
+        if event.key == pygame.K_m:
+            return "toggle_detail"
+        if event.key in step_keys:
+            return "step"
         return None
 
     _show_status("Creating environment...")
@@ -2019,20 +2145,15 @@ def run_live_visualization(
     if sample_frame.ndim == 2:
         sample_frame = np.stack([sample_frame] * 3, axis=-1)
     H, W, _ = sample_frame.shape
-    window_size = (W * scale, H * scale)
-    if display_backend == "pygame":
-        if screen.get_size() != window_size:
-            screen = pygame.display.set_mode(
-                window_size, pygame.SHOWN | pygame.RESIZABLE
-            )
-        font = pygame.font.Font(None, 20)
-        clock = pygame.time.Clock()
-        _raise_pygame_window()
-    else:
-        cv2.resizeWindow(window_name, window_size[0], window_size[1])
+    _resize_window()
 
     _show_rgb_frame(sample_frame, overlay="Warming up first step compiles...")
     _log("First frame shown in window")
+
+    if display_backend == "pygame" and clock is None:
+        font = pygame.font.Font(None, 20)
+        clock = pygame.time.Clock()
+        _raise_pygame_window()
 
     running = True
     prev_target_idx = no_target_idx
@@ -2044,7 +2165,7 @@ def run_live_visualization(
 
     def reset_env_episode():
         nonlocal obs, state, prev_target_idx, mission_target_idx, policy_state
-        nonlocal persist_steps_remaining, suspended_mission_idx, rng
+        nonlocal persist_steps_remaining, suspended_mission_idx, rng, last_snapshot
         rng_local, rng_reset_local = jax.random.split(rng)
         obs_local, state_local = env.reset(rng_reset_local)
         obs = obs_local
@@ -2055,6 +2176,8 @@ def run_live_visualization(
         policy_state = initial_policy_state(no_target_idx)
         persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
         suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+        last_snapshot = None
+        last_snapshot = None
 
     def _select_target(step_key):
         nonlocal mission_target_idx, persist_steps_remaining, suspended_mission_idx
@@ -2123,9 +2246,9 @@ def run_live_visualization(
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
-            return 0, 0, 0, np.nan, np.nan
+            return 0, 0, 0, np.nan, np.nan, None, None
         if is_meta_fire:
-            return meta_fire_game_action, 0, 1, np.nan, np.nan
+            return meta_fire_game_action, 0, 1, np.nan, np.nan, None, None
 
         raw_label = obs.objects.semantic_label[-1, target_obj_idx]
         active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
@@ -2225,27 +2348,166 @@ def run_live_visualization(
                     obs.objects,
                 )
             )
-        return global_action, active_skill_idx, chosen_ego, distance, angle
+        return (
+            global_action,
+            active_skill_idx,
+            chosen_ego,
+            distance,
+            angle,
+            np.asarray(ego_obs, dtype=np.float32),
+            np.asarray(q_active, dtype=np.float32),
+        )
+
+    def _control_overlay(base: str) -> str:
+        mode = "STEP" if paused else f"PLAY {display_fps}fps"
+        detail = " detail=ON" if detail_mode else ""
+        return (
+            f"{base} | {mode}{detail} | space/. step  f play/pause  m detail  r reset  q quit"
+        )
+
+    def _build_snapshot(
+        frame: np.ndarray,
+        overlay: str,
+        target_obj_idx: int,
+        global_action: int,
+        active_skill_idx: int,
+        chosen_ego: int,
+        distance: float,
+        angle: float,
+        ego_obs: np.ndarray | None,
+        q_vals_active: np.ndarray | None,
+        skill_name: str,
+        ego_name: str,
+    ) -> LiveVizSnapshot:
+        player = _get_player(obs.raw_observation)
+        y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+        p_cx = float(player.x[-1] + player.width[-1] / 2.0)
+        p_cy = float(
+            _center_y(
+                player.y[-1],
+                player.height[-1],
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+        target_xy = None
+        if target_obj_idx != no_target_idx:
+            t_cx = float(
+                obs.objects.x[-1, target_obj_idx]
+                + obs.objects.width[-1, target_obj_idx] / 2.0
+            )
+            t_cy = float(
+                _center_y(
+                    obs.objects.y[-1, target_obj_idx],
+                    obs.objects.height[-1, target_obj_idx],
+                    y_is_bottom_edge=y_is_bottom_edge,
+                )
+            )
+            target_xy = (t_cx, t_cy)
+
+        facing = None
+        sector_idx = None
+        phi_rad = None
+        virtual_facing_deg = None
+        bilateral_axis = None
+        if using_pov_fixed_bilateral() and target_xy is not None:
+            sector_idx, phi_rad, virtual_facing_deg, bilateral_axis = (
+                compute_fixed_bilateral_viz(env_name, (p_cx, p_cy), target_xy)
+            )
+        elif using_pov_relative() or use_turn_primitives:
+            try:
+                facing = player_facing_deg(obs.raw_observation, env_name)
+            except Exception:
+                facing = None
+        heading = (
+            float(policy_state.heading_deg)
+            if use_turn_primitives
+            else None
+        )
+        return LiveVizSnapshot(
+            frame_rgb=frame,
+            overlay_text=overlay,
+            target_obj_idx=int(target_obj_idx),
+            no_target_idx=int(no_target_idx),
+            global_action=int(global_action),
+            active_skill_idx=int(active_skill_idx),
+            chosen_ego=int(chosen_ego),
+            distance=float(distance),
+            angle_rad=float(angle) if not np.isnan(angle) else 0.0,
+            ego_obs=ego_obs,
+            q_vals_active=q_vals_active,
+            skill_name=skill_name,
+            ego_name=ego_name,
+            heading_deg=heading,
+            facing_deg=facing,
+            player_xy=(p_cx, p_cy),
+            target_xy=target_xy,
+            frame_idx=int(frame_count),
+            sector_idx=sector_idx,
+            phi_rad=phi_rad,
+            virtual_facing_deg=virtual_facing_deg,
+            bilateral_axis=bilateral_axis,
+        )
+
+    def _redraw_last() -> None:
+        if last_snapshot is None:
+            return
+        frame = last_snapshot.frame_rgb
+        if detail_mode:
+            frame = apply_pov_overlay(frame, last_snapshot)
+        _show_rgb_frame(frame, overlay=last_snapshot.overlay_text)
 
     # Warm first-frame compiles while the window stays responsive/visible.
     _show_status("Compiling heuristic / policy / env.step...")
     _log("Warmup: heuristic + policy + env.step (can take a bit)...")
     rng, warm_key = jax.random.split(rng)
     warm_target = _select_target(warm_key)
-    warm_action, _, _, _, _ = _policy_action(warm_target)
+    warm_action, _, _, _, _, _, _ = _policy_action(warm_target)
     obs, state, _reward, _done, _info = env.step(state, int(warm_action))
     obs, state = jax.device_get((obs, state))
     prev_target_idx = warm_target
     _log("Warmup done — entering live loop")
-    _log(f"Ready — live loop at {display_fps} FPS (q/esc quit, r reset)")
+    if step_mode:
+        _log(
+            "Step mode — space/. advance one frame, f toggle play, m detail panel, "
+            "r reset, q quit"
+        )
+    else:
+        _log(
+            f"Auto-play at {display_fps} FPS (f pause, space step while paused, "
+            "m detail, q quit, r reset)"
+        )
 
     while running and (frame_limit is None or frame_count < frame_limit):
-        action = _poll_input()
-        if action == "quit":
+        advance = not paused
+        cmd = _poll_input(blocking=paused and not advance)
+        if cmd == "quit":
             running = False
             break
-        if action == "reset":
+        if cmd == "reset":
             reset_env_episode()
+            continue
+        if cmd == "debug":
+            debug_heuristic_snapshot(
+                obs.raw_observation,
+                obs.objects,
+                jnp.array(prev_target_idx, dtype=jnp.int32),
+            )
+            _redraw_last()
+            continue
+        if cmd == "toggle_pause":
+            paused = not paused
+            _redraw_last()
+            continue
+        if cmd == "toggle_detail":
+            detail_mode = not detail_mode
+            _redraw_last()
+            continue
+        if cmd == "step":
+            advance = True
+
+        if not advance:
+            _redraw_last()
+            continue
 
         if frame_count < 5:
             _log(f"frame {frame_count}: select target...")
@@ -2255,9 +2517,15 @@ def run_live_visualization(
 
         if frame_count < 5:
             _log(f"frame {frame_count}: policy action (target={target_obj_idx})...")
-        global_action, active_skill_idx, chosen_ego, distance, angle = _policy_action(
-            target_obj_idx
-        )
+        (
+            global_action,
+            active_skill_idx,
+            chosen_ego,
+            distance,
+            angle,
+            ego_obs_np,
+            q_active_np,
+        ) = _policy_action(target_obj_idx)
         skill_name = (
             skill_names[active_skill_idx]
             if 0 <= active_skill_idx < len(skill_names)
@@ -2270,7 +2538,6 @@ def run_live_visualization(
                 f"frame {frame_count}: env.step(action={global_action}) "
                 f"skill={skill_name} ego={ego_name}..."
             )
-        # Step env
         prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
         obs, state = jax.device_get((obs, state))
@@ -2283,14 +2550,12 @@ def run_live_visualization(
 
         if frame_count < 5:
             _log(f"frame {frame_count}: render...")
-        # Render current frame
         base_state = unwrap_base_env_state(state.atari_state)
         frame = renderer.render(base_state)
         frame = np.array(jax.device_get(frame), dtype=np.uint8)
         if frame.ndim == 2:
             frame = np.stack([frame] * 3, axis=-1)
 
-        # Add a red border around the selected target object (same style as videos).
         draw_viz_outline = bool(config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True))
         if draw_viz_outline and target_obj_idx != no_target_idx:
             ox = np.array(obs.objects.x[-1])
@@ -2319,15 +2584,36 @@ def run_live_visualization(
             )
             frame = np.transpose(frame_chw, (1, 2, 0))
 
-        overlay = f"{skill_name} ego={ego_name} game={global_action}"
+        overlay_base = f"{skill_name} ego={ego_name} game={global_action}"
         if not np.isnan(distance):
-            overlay = f"{overlay} d={distance:.1f}px a={angle:.2f}"
+            overlay_base = f"{overlay_base} d={distance:.1f}px a={angle:.2f}"
+        overlay = _control_overlay(overlay_base)
+
+        last_snapshot = _build_snapshot(
+            frame,
+            overlay,
+            target_obj_idx,
+            global_action,
+            active_skill_idx,
+            chosen_ego,
+            distance,
+            angle,
+            ego_obs_np,
+            q_active_np,
+            skill_name,
+            ego_name,
+        )
+        display_frame = (
+            apply_pov_overlay(frame, last_snapshot) if detail_mode else frame
+        )
         if frame_count < 5:
             _log(f"frame {frame_count}: display...")
-        _show_rgb_frame(frame, overlay=overlay)
-        if display_backend == "pygame":
+        _show_rgb_frame(display_frame, overlay=overlay)
+        if not paused and display_backend == "pygame" and clock is not None:
             clock.tick(display_fps)
         frame_count += 1
+        if step_mode and cmd == "step":
+            paused = True
         if frame_count < 5:
             _log(f"frame {frame_count - 1}: done")
 
@@ -2377,6 +2663,15 @@ def main():
         help=(
             "Cap total frames. Record mode defaults to VIDEO_MAX_FRAMES from config (600). "
             "Live pygame mode runs until you close the window unless this is set."
+        ),
+    )
+    parser.add_argument(
+        "--step",
+        action="store_true",
+        default=False,
+        help=(
+            "Start paused in frame-step mode (space/. advances one frame). "
+            "Default is auto-play at --fps."
         ),
     )
     parser.add_argument(
@@ -2486,14 +2781,47 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pov-mode",
+        type=str,
+        choices=list(POV_MODE_CHOICES),
+        default="auto",
+        help=(
+            "Override ego obs + action mapper mode. "
+            "'relative' = sprite-facing POV with view locked on target; "
+            "'fixed-bilateral' = virtual L/R (or U/D) sectors + forward-hemisphere φ; "
+            "'facing' = FPS body frame (view=player facing); "
+            "'turn' = POV turn primitives; 'auto' = use checkpoint/paper-config as-is."
+        ),
+    )
+    parser.add_argument(
+        "--pov-bilateral-axis",
+        type=str,
+        choices=["horizontal", "vertical"],
+        default=None,
+        help=(
+            "Virtual sector axis for --pov-mode fixed-bilateral. "
+            "Default follows the env profile (seaquest=horizontal, pong=vertical)."
+        ),
+    )
+    parser.add_argument(
+        "--ego-phi-bins",
+        type=int,
+        default=None,
+        help=(
+            "Forward-hemisphere φ encoding for fixed-bilateral: N triangular bins "
+            "(e.g. 8) or 0 for sin/cos(φ). Only applied when set."
+        ),
+    )
+    parser.add_argument(
         "--paper-config",
         type=str,
         default=None,
         help=(
             "Paper-eval train/eval YAML merged after the checkpoint sidecar "
             "(ego clip, POV mapper, transfer MAX_OBJECTS, heuristic, etc.). "
-            "Use seaquest_skills_ego_pov_clip50_eval_full.yaml for RQ1 or "
-            "pong_transfer_ego_pov_clip50.yaml for Pong transfer."
+            "Fixed-bilateral examples: "
+            "seaquest_skills_ego_pov_clip50_fixed2_psibins8_eval_full.yaml, "
+            "pong_transfer_ego_pov_clip50_fixed2_psibins8.yaml."
         ),
     )
     parser.add_argument(
@@ -2577,7 +2905,17 @@ def main():
         no_outline=bool(args.no_outline),
         black_pixel=bool(args.black_pixel),
         heuristic_mode=args.heuristic_mode,
+        pov_mode=args.pov_mode,
+        pov_bilateral_axis=args.pov_bilateral_axis,
+        ego_phi_bins=args.ego_phi_bins,
     )
+    if args.pov_mode != "auto":
+        print(f"POV mode override: {args.pov_mode}")
+    if args.pov_bilateral_axis is not None:
+        print(f"POV bilateral axis override: {args.pov_bilateral_axis}")
+    if args.ego_phi_bins is not None:
+        enc = f"phi_bins{args.ego_phi_bins}" if args.ego_phi_bins > 0 else "phi_sincos"
+        print(f"Ego φ encoding override: {enc}")
     configure_ego_obs_from_config(base_config)
     configure_label_routing_from_config(base_config)
     _print_ego_runtime_summary(base_config)
@@ -2597,6 +2935,7 @@ def main():
             display_backend=args.display,
             pygame_screen=pygame_screen,
             pygame_font=pygame_font,
+            step_mode=args.step,
         )
         return
 

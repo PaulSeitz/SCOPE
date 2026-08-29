@@ -282,8 +282,15 @@ def ego_angle_bins() -> int | None:
 
 def ego_angle_channels_per_frame() -> int:
     """Pose angle block width: ``n`` bins, or 2 for sin/cos(ψ)."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_ego_pose_xy,
+        using_pov_facing_frame,
+    )
     from concept_based_learning.observations.pov_relative import using_pov_relative
 
+    # Cartesian body pose replaces the angle block entirely.
+    if using_pov_facing_frame() and using_ego_pose_xy():
+        return 0
     if using_pov_relative() and _EGO_PSI_ANGLE_BINS:
         return int(_EGO_PSI_ANGLE_BINS)
     if _EGO_ANGLE_BINS:
@@ -339,12 +346,16 @@ def configure_ego_obs_from_config(config: dict) -> None:
     from concept_based_learning.observations.pov_fixed_bilateral import (
         configure_pov_fixed_bilateral_from_config,
     )
+    from concept_based_learning.observations.pov_facing_frame import (
+        configure_pov_facing_frame_from_config,
+    )
     from concept_based_learning.observations.pov_turn import (
         configure_pov_turn_from_config,
     )
 
     configure_pov_relative_from_config(config)
     configure_pov_fixed_bilateral_from_config(config)
+    configure_pov_facing_frame_from_config(config)
     configure_pov_turn_from_config(config)
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
@@ -417,6 +428,14 @@ def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
 
 def ego_distance_channels_per_frame() -> int:
     """Distance block width: flag indicators, ``n`` bins, or 1 scalar channel."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_ego_pose_xy,
+        using_pov_facing_frame,
+    )
+
+    # Facing-frame Cartesian pose: (fwd, lat) instead of scalar distance.
+    if using_pov_facing_frame() and using_ego_pose_xy():
+        return 2
     if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
         return len(_EGO_DISTANCE_FLAG_THRESHOLDS_PX)
     if _EGO_DISTANCE_BINS:
@@ -1225,6 +1244,147 @@ def _frame_geometry_fixed_bilateral(
     return distance, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
 
 
+def _xy_features_from_pixels(fwd_px: jnp.ndarray, lat_px: jnp.ndarray) -> list[jnp.ndarray]:
+    """Normalize body-frame (fwd, lat) with the active distance clip (or screen size)."""
+    if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
+        if float(_EGO_DISTANCE_CLIP_MAX_PX) == 0.0:
+            zeros = jnp.zeros_like(fwd_px, dtype=jnp.float32)
+            return [zeros, zeros]
+        return [
+            jnp.clip(fwd_px, -cap, cap) / cap,
+            jnp.clip(lat_px, -cap, cap) / cap,
+        ]
+    return [fwd_px / SCREEN_WIDTH, lat_px / SCREEN_HEIGHT]
+
+
+def _frame_geometry_facing(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    facing_deg,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+):
+    """Per-frame AABB gap + body-frame (fwd, lat, φ) under facing-locked FPS."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        facing_frame_phi_rad,
+        world_delta_to_facing_frame,
+    )
+
+    distance = aabb_surface_gap_px(
+        p_x,
+        p_y,
+        p_w,
+        p_h,
+        t_x,
+        t_y,
+        t_w,
+        t_h,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+    phi = facing_frame_phi_rad(fwd, lat)
+    return distance, fwd, lat, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+
+
+def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
+    """Facing-locked FPS: polar (dist, φ) or Cartesian (fwd, lat); no velocity."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        resolve_facing_deg,
+        using_ego_pose_xy,
+    )
+
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    # Single scalar facing (mapper also uses latest / synthetic); broadcast over stack.
+    facing_scalar = resolve_facing_deg(raw_observation)
+    facing_hist = jnp.broadcast_to(
+        jnp.asarray(facing_scalar, dtype=jnp.float32), player.x.shape
+    )
+
+    distances, fwds, lats, phis, t_cxs, t_cys, p_cxs, p_cys, t_ws, t_hs = jax.vmap(
+        lambda px, py, pw, ph, face, tx, ty, tw, th: _frame_geometry_facing(
+            px,
+            py,
+            pw,
+            ph,
+            face,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        facing_hist,
+        t_x_hist,
+        t_y_hist,
+        t_w_hist,
+        t_h_hist,
+    )
+
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    if using_ego_pose_xy():
+        channels = _xy_features_from_pixels(fwds, lats)
+    else:
+        channels = distance_features_from_pixels(distances)
+        if _EGO_PSI_ANGLE_BINS:
+            bin_feats = triangular_angle_bins(phis, _EGO_PSI_ANGLE_BINS)
+            channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
+        else:
+            channels.extend([jnp.sin(phis), jnp.cos(phis)])
+
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
 def _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx):
     """Virtual bilateral sectors: distance + forward-hemisphere φ (no velocity)."""
     from concept_based_learning.observations.pov_fixed_bilateral import (
@@ -1425,10 +1585,15 @@ def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
     from concept_based_learning.observations.pov_fixed_bilateral import (
         using_pov_fixed_bilateral,
     )
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_pov_facing_frame,
+    )
     from concept_based_learning.observations.pov_turn import using_pov_turn_primitives
 
     if using_pov_fixed_bilateral():
         return _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx)
+    if using_pov_facing_frame():
+        return _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx)
     if using_pov_relative():
         if heading_deg is None and using_pov_turn_primitives():
             raise ValueError(
