@@ -243,4 +243,5 @@ alg:
   DESTROY_INTERRUPT_RANGE: 40.0     # Seaquest: DESTROY (sharks/subs) steal nearer COLLECT within this AABB gap. <=0 disables. Options: float.
   AVOID_INTERRUPT_RANGE: 55.0       # Seaquest: AVOID (torpedoes) steal DESTROY/COLLECT within this AABB gap. Larger than DESTROY_INTERRUPT_RANGE. <=0 disables. Options: float.
   COLLECT_REQUIRES_NO_DESTROY: false # Seaquest: if any selectable DESTROY exists, never target COLLECT (nearest shark/sub wins). Does not steal NAVIGATE / surface WP. Options: true/false.
+  COLLECT_EDGE_MARGIN_PX: 0.0       # Seaquest: soft midfield COLLECT. Prefer divers with centre x in [margin, 160-margin]; fall back to edge divers if none. <=0 disables. Options: float.
   FREEWAY_THREAT_DIST_THRESH: null  # Freeway threat gating threshold. Options: float > 0 or null.

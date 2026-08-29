@@ -625,3 +625,59 @@ def test_meta_mask_overrides_batched_objects_surface_gate():
     assert out.shape == (num_envs, n_slots)
     assert bool(out[0, SURFACE_DUMMY_IDX]) is True
     assert bool(out[1, SURFACE_DUMMY_IDX]) is False
+
+
+def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
+    """With margin>0, a farther midfield diver beats a nearer edge diver."""
+    # Player near left; edge diver just outside the sub; mid diver farther right.
+    raw = _make_raw(px=40.0, py=100.0)
+    objs = _make_objects(diver_xy=(2.0, 100.0))  # centre ~6, outside margin=24
+    objs.x = objs.x.at[:, 2].set(110.0)  # centre ~114, midfield, farther
+    objs.y = objs.y.at[:, 2].set(100.0)
+    objs.active = objs.active.at[:, 2].set(1.0)
+
+    without = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
+    with_mid = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_edge_margin_px=24.0,
+        )
+    )
+    assert without == 1  # nearer edge diver
+    assert with_mid == 2  # midfield preference
+
+
+def test_midfield_margin_falls_back_to_edge_when_no_mid_diver():
+    raw = _make_raw(px=40.0, py=100.0)
+    objs = _make_objects(diver_xy=(2.0, 100.0))
+    target = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_edge_margin_px=24.0,
+        )
+    )
+    assert target == 1
+
+
+def test_midfield_margin_zero_keeps_nearest_edge_diver():
+    raw = _make_raw(px=40.0, py=100.0)
+    objs = _make_objects(diver_xy=(2.0, 100.0))
+    objs.x = objs.x.at[:, 2].set(110.0)
+    objs.y = objs.y.at[:, 2].set(100.0)
+    objs.active = objs.active.at[:, 2].set(1.0)
+    target = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_edge_margin_px=0.0,
+        )
+    )
+    assert target == 1

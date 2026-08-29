@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from concept_based_learning.environments.manual_policy.state import PolicyState
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     AVOID_INTERRUPT_RANGE as SEAQUEST_AVOID_INTERRUPT_RANGE,
+    COLLECT_EDGE_MARGIN_PX as SEAQUEST_COLLECT_EDGE_MARGIN_PX,
     DESTROY_INTERRUPT_RANGE as SEAQUEST_DESTROY_INTERRUPT_RANGE,
     DIVER_LANE_Y_PX as SEAQUEST_DIVER_LANE_Y_PX,
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
@@ -70,6 +71,11 @@ def _seaquest_collect_requires_no_destroy(config) -> bool:
     return bool(config.get("COLLECT_REQUIRES_NO_DESTROY", False))
 
 
+def _seaquest_collect_edge_margin_px(config) -> float:
+    """Soft midfield COLLECT preference; ``<=0`` disables (allow edge divers)."""
+    return float(config.get("COLLECT_EDGE_MARGIN_PX", SEAQUEST_COLLECT_EDGE_MARGIN_PX))
+
+
 def _seaquest_heuristic_kwargs(config) -> dict:
     return {
         "danger_close_range": _seaquest_danger_close_range(config),
@@ -77,6 +83,7 @@ def _seaquest_heuristic_kwargs(config) -> dict:
         "avoid_interrupt_range": _seaquest_avoid_interrupt_range(config),
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
         "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
+        "collect_edge_margin_px": _seaquest_collect_edge_margin_px(config),
     }
 
 

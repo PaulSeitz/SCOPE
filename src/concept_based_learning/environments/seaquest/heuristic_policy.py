@@ -9,6 +9,10 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
 - Optional ``COLLECT_REQUIRES_NO_DESTROY``: if any selectable DESTROY exists,
   never target a diver (nearest shark/sub wins). Surface WP / NAVIGATE are
   unchanged. Use this so COLLECT is not asked to fight.
+- Optional ``COLLECT_EDGE_MARGIN_PX``: soft midfield COLLECT preference. When
+  > 0 and any lane-clear diver has centre x in ``[margin, 160-margin]``,
+  edge divers are skipped so COLLECT is not trained on edge-suicide rushes.
+  If no midfield diver is available, edge divers remain selectable.
 - Surface sub (slot 29) is ignored unless the player is near the surface and
   within ``SURFACE_SUB_NEAR_RANGE``.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
@@ -73,6 +77,14 @@ O2_CRITICAL_ENEMY_INTERRUPT_RANGE = 0.0
 # A diver's lane is blocked if a DESTROY shares this vertical band (centre Δy).
 # Overridable via config ``DIVER_LANE_Y_PX``.
 DIVER_LANE_Y_PX = 14.0
+# Soft COLLECT curriculum: when ``COLLECT_EDGE_MARGIN_PX`` > 0, prefer divers
+# whose centre x lies in ``[margin, SCREEN_W - margin]``. If any midfield
+# lane-clear diver exists, edge divers are ignored; otherwise edge divers
+# remain selectable (fall back). Meta risk triage stays in the heuristic;
+# COLLECT skills should not learn "don't chase far/edge targets".
+# Overridable via ``COLLECT_EDGE_MARGIN_PX`` (``<=0`` disables).
+COLLECT_EDGE_MARGIN_PX = 0.0
+SEAQUEST_SCREEN_W = 160.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
 PLAYER_UNDERWATER_Y = 52.0
@@ -253,6 +265,7 @@ def _select_target(
     avoid_interrupt_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
+    collect_edge_margin_px=None,
 ):
     """Nearest object by AABB surface gap; lane-clear COLLECT; surface WP."""
     del prev_target_idx
@@ -264,11 +277,14 @@ def _select_target(
         avoid_interrupt_range = AVOID_INTERRUPT_RANGE
     if diver_lane_y_px is None:
         diver_lane_y_px = DIVER_LANE_Y_PX
+    if collect_edge_margin_px is None:
+        collect_edge_margin_px = COLLECT_EDGE_MARGIN_PX
     collect_requires_no_destroy = bool(collect_requires_no_destroy)
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
     destroy_interrupt_range = jnp.asarray(destroy_interrupt_range, dtype=jnp.float32)
     avoid_interrupt_range = jnp.asarray(avoid_interrupt_range, dtype=jnp.float32)
     diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
+    collect_edge_margin_px = jnp.asarray(collect_edge_margin_px, dtype=jnp.float32)
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     danger_close_range = _oxygen_scaled_interrupt_range(oxygen, danger_close_range)
     destroy_interrupt_range = _oxygen_scaled_interrupt_range(
@@ -326,6 +342,29 @@ def _select_target(
     blocks = jnp.logical_and(blocks, idxs[:, None] != idxs[None, :])
     diver_blocked = jnp.logical_and(is_collect, jnp.any(blocks, axis=1))
     selectable_nearest = jnp.logical_and(selectable, jnp.logical_not(diver_blocked))
+
+    # Soft midfield COLLECT: if any lane-clear midfield diver exists, drop edge
+    # divers from nearest scoring so COLLECT is not trained on edge rushes.
+    cx = ox.astype(jnp.float32) + ow.astype(jnp.float32) / 2.0
+    in_midfield = jnp.logical_and(
+        cx >= collect_edge_margin_px,
+        cx <= (jnp.float32(SEAQUEST_SCREEN_W) - collect_edge_margin_px),
+    )
+    mid_collect = jnp.logical_and(
+        selectable_nearest,
+        jnp.logical_and(is_collect, in_midfield),
+    )
+    edge_collect = jnp.logical_and(
+        is_collect,
+        jnp.logical_not(in_midfield),
+    )
+    drop_edge_collect = jnp.logical_and(
+        collect_edge_margin_px > 0.0,
+        jnp.logical_and(jnp.any(mid_collect), edge_collect),
+    )
+    selectable_nearest = jnp.logical_and(
+        selectable_nearest, jnp.logical_not(drop_edge_collect)
+    )
 
     nearest_dist = jnp.where(selectable_nearest, distances, jnp.inf)
     best_idx = jnp.argmin(nearest_dist).astype(jnp.int32)
@@ -439,6 +478,7 @@ def get_heuristic_target_with_state(
     avoid_interrupt_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
+    collect_edge_margin_px=None,
 ):
     del rng
     target = _select_target(
@@ -450,6 +490,7 @@ def get_heuristic_target_with_state(
         avoid_interrupt_range=avoid_interrupt_range,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
+        collect_edge_margin_px=collect_edge_margin_px,
     )
     # Persist DESTROY/COLLECT only (AVOID is reactive; surface WP is re-forced).
     labels = objects.semantic_label[-1]
@@ -473,6 +514,7 @@ def get_heuristic_target(
     avoid_interrupt_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
+    collect_edge_margin_px=None,
 ):
     """Stateless wrapper."""
     del rng
@@ -485,4 +527,5 @@ def get_heuristic_target(
         avoid_interrupt_range=avoid_interrupt_range,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
+        collect_edge_margin_px=collect_edge_margin_px,
     )

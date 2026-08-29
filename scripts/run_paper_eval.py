@@ -653,6 +653,40 @@ POV_FACING_TRAIN_STEMS = (
     "seaquest_skills_ego_pov_clip50_facing_xy",
 )
 
+# Facing FPS + soft midfield COLLECT curriculum (edge-margin heuristic).
+# Arms: xy+mid, φ-bins8+mid, xy+clip100 (no mid), xy+noclip (no mid).
+# Order is shard-critical: trains first so GPUs start on training.
+POV_FACING_COLLECT_SUITE = "pov_facing_collect"
+POV_FACING_COLLECT_STEMS = (
+    # --- trains (indices 0–3; with 3 GPUs the 4th waits / resumes) ---
+    "seaquest_skills_ego_pov_clip50_facing_xy_mid",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_mid",
+    "seaquest_skills_ego_pov_clip100_facing_xy",
+    "seaquest_skills_ego_pov_noclip_facing_xy",
+    # --- Seaquest full mod eval @ 27k ---
+    "seaquest_skills_ego_pov_clip50_facing_xy_mid_eval_full",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_mid_eval_full",
+    "seaquest_skills_ego_pov_clip100_facing_xy_eval_full",
+    "seaquest_skills_ego_pov_noclip_facing_xy_eval_full",
+    # --- Pong zero-shot ---
+    "pong_transfer_ego_pov_clip50_facing_xy_mid",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_mid",
+    "pong_transfer_ego_pov_clip100_facing_xy",
+    "pong_transfer_ego_pov_noclip_facing_xy",
+    # --- Beamrider zero-shot ---
+    "beamrider_transfer_ego_pov_clip50_facing_xy_mid",
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8_mid",
+    "beamrider_transfer_ego_pov_clip100_facing_xy",
+    "beamrider_transfer_ego_pov_noclip_facing_xy",
+)
+POV_FACING_COLLECT_TRAIN_SUITE = "pov_facing_collect_train"
+POV_FACING_COLLECT_TRAIN_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_xy_mid",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_mid",
+    "seaquest_skills_ego_pov_clip100_facing_xy",
+    "seaquest_skills_ego_pov_noclip_facing_xy",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -718,6 +752,8 @@ SUITE_STEMS = {
     POV_FIXED2_TRAIN_SUITE: POV_FIXED2_TRAIN_STEMS,
     POV_FACING_SUITE: POV_FACING_STEMS,
     POV_FACING_TRAIN_SUITE: POV_FACING_TRAIN_STEMS,
+    POV_FACING_COLLECT_SUITE: POV_FACING_COLLECT_STEMS,
+    POV_FACING_COLLECT_TRAIN_SUITE: POV_FACING_COLLECT_TRAIN_STEMS,
 }
 
 
@@ -1598,6 +1634,7 @@ _EVAL_OVERRIDE_KEYS = (
     "AVOID_INTERRUPT_RANGE",
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
+    "COLLECT_EDGE_MARGIN_PX",
     # Ego layout must follow the transfer YAML / ckpt (scalar snap flags included).
     "USE_LEGACY_EGO_OBS",
     "USE_EGO_SIZE_FEATURES",
