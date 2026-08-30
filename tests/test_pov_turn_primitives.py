@@ -61,15 +61,16 @@ def test_seaquest_initial_heading_is_profile_bin0_facing():
     assert turn_step_deg() == pytest.approx(45.0)
 
 
-def test_pong_initial_heading_points_up():
+def test_pong_initial_heading_points_into_field():
+    """Pong player is on the right; facing 180° looks left into the court."""
     configure_pov_turn_from_config({**SEAQUEST_TURN_CFG, "ENV_NAME": "pong"})
-    assert initial_heading_deg() == pytest.approx(-90.0)
+    assert initial_heading_deg() == pytest.approx(180.0)
 
 
 def test_policy_state_seeds_heading_from_config():
     configure_pov_turn_from_config({**SEAQUEST_TURN_CFG, "ENV_NAME": "pong"})
     state = initial_policy_state(-1)
-    assert float(state.heading_deg) == pytest.approx(-90.0)
+    assert float(state.heading_deg) == pytest.approx(180.0)
 
 
 def test_turns_integrate_over_time_and_wrap():
@@ -176,24 +177,22 @@ def test_mapper_ignores_target_and_object_geometry():
         assert got == baseline
 
 
-def test_pong_legal_mask_rejects_horizontal_heading():
-    """Pong's move table maps horizontal headings to NOOP; the mask must catch it."""
+def test_pong_legal_mask_rejects_into_field_heading():
+    """Pong's move table maps into-field headings to NOOP; the mask must catch it."""
     configure_pov_turn_from_config({**SEAQUEST_TURN_CFG, "ENV_NAME": "pong"})
     mapper, _ = make_turn_primitive_mappers("pong")
     legal = make_turn_legal_mask_fn(mapper, noop_action=0, fire_action=1)
 
-    # Heading up: FORWARD moves the paddle, so every primitive is legal.
+    # Default facing into the court (180°): FORWARD is NOOP (no horizontal control).
+    mask_into = legal(jnp.float32(180.0))
+    assert not bool(mask_into[TURN_FORWARD])
+    assert bool(mask_into[TURN_NOOP])
+    assert bool(mask_into[TURN_FIRE])
+
+    # Heading up: FORWARD moves the paddle vertically, so it is legal.
     mask_up = legal(jnp.float32(-90.0))
     assert bool(mask_up[TURN_FORWARD])
-
-    # Heading right: FORWARD maps to NOOP (no horizontal control in Pong).
-    mask_right = legal(jnp.float32(0.0))
-    assert not bool(mask_right[TURN_FORWARD])
-    # Stationary primitives stay available regardless.
-    assert bool(mask_right[TURN_NOOP])
-    assert bool(mask_right[TURN_FIRE])
-    assert mask_right.shape == (TURN_EGO_ACTION_DIM,)
-
+    assert mask_into.shape == (TURN_EGO_ACTION_DIM,)
 
 def test_heading_replaces_sprite_orientation_in_psi():
     """ψ must come from the commanded heading, not the sprite, or the loop is open."""

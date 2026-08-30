@@ -1,15 +1,24 @@
 """Visualizer POV mode CLI overrides."""
 
+import jax.numpy as jnp
+
 from concept_based_learning.observations.egocentric import (
     configure_ego_obs_from_config,
     ego_obs_channels_per_frame,
+)
+from concept_based_learning.observations.pov_facing_frame import (
+    using_ego_pose_xy,
+    using_pov_facing_frame,
 )
 from concept_based_learning.observations.pov_fixed_bilateral import (
     active_bilateral_axis,
     using_pov_fixed_bilateral,
 )
 from concept_based_learning.pqn_visualizer import apply_visualizer_config_overrides
-from concept_based_learning.visualizer_debug_panel import compute_fixed_bilateral_viz
+from concept_based_learning.visualizer_debug_panel import (
+    compute_facing_frame_viz,
+    compute_fixed_bilateral_viz,
+)
 
 
 def test_apply_visualizer_fixed_bilateral_mode():
@@ -56,14 +65,29 @@ def test_apply_visualizer_facing_mode():
         ego_phi_bins=8,
     )
     configure_ego_obs_from_config(cfg)
-    from concept_based_learning.observations.pov_facing_frame import (
-        using_pov_facing_frame,
-    )
-
     assert cfg["USE_POV_FACING_FRAME"] is True
     assert cfg["USE_POV_FIXED_BILATERAL"] is False
     assert using_pov_facing_frame()
+    assert not using_ego_pose_xy()
     assert ego_obs_channels_per_frame() >= 9
+
+
+def test_apply_visualizer_facing_xy_mode():
+    cfg = apply_visualizer_config_overrides(
+        {
+            "ENV_NAME": "seaquest",
+            "USE_EGO_BLOCKING_FEATURES": True,
+            "USE_EGO_WEAPON_FEATURES": False,
+            "USE_EGO_SIZE_FEATURES": False,
+        },
+        pov_mode="facing",
+        ego_pose_xy=True,
+        ego_phi_bins=0,
+    )
+    configure_ego_obs_from_config(cfg)
+    assert using_pov_facing_frame()
+    assert using_ego_pose_xy()
+    assert ego_obs_channels_per_frame() >= 3
 
 
 def test_compute_fixed_bilateral_viz_horizontal():
@@ -84,3 +108,32 @@ def test_compute_fixed_bilateral_viz_horizontal():
     assert axis == "horizontal"
     assert facing == 0.0
     assert phi is not None
+
+
+def test_compute_facing_frame_viz_horizontal_forward():
+    class _Player:
+        orientation = jnp.array([90.0])
+
+    class _Raw:
+        player = _Player()
+
+    configure_ego_obs_from_config(
+        {
+            "ENV_NAME": "seaquest",
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_FACING_FRAME": True,
+            "USE_EGO_VELOCITY_FEATURES": False,
+            "EGO_POSE_XY": False,
+        }
+    )
+    # Raw Seaquest 90° (right) bins to mapper facing 0° (screen-right).
+    facing, phi, fwd, lat = compute_facing_frame_viz(
+        _Raw(),
+        "seaquest",
+        player_xy=(80.0, 100.0),
+        target_xy=(120.0, 100.0),
+    )
+    assert facing == 0.0
+    assert fwd is not None and fwd > 0
+    assert abs(lat) < 1e-4
+    assert phi is not None and abs(phi) < 1e-3

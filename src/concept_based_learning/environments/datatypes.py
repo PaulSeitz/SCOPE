@@ -55,11 +55,17 @@ def remap_navigate_to_collect() -> bool:
 
 
 def configure_label_routing_from_config(config: Dict[str, Any] | None) -> None:
-    """Apply ``REMAP_NAVIGATE_TO_COLLECT`` from a training / eval config dict."""
+    """Apply label-routing knobs from a training / eval config dict."""
     if not config:
         set_remap_navigate_to_collect(False)
-        return
-    set_remap_navigate_to_collect(bool(config.get("REMAP_NAVIGATE_TO_COLLECT", False)))
+    else:
+        set_remap_navigate_to_collect(bool(config.get("REMAP_NAVIGATE_TO_COLLECT", False)))
+    # Pong-only: keep next to other label remaps so train/eval/viz all pick it up.
+    from concept_based_learning.environments.pong.pong_label import (
+        configure_pong_ball_label_from_config,
+    )
+
+    configure_pong_ball_label_from_config(config)
 
 
 def label_to_skill_idx(label, num_skills: int):

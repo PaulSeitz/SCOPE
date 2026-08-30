@@ -48,6 +48,7 @@ VISUALIZER_FPS: 15                # FPS for local visualization output. Options:
 # ---------------------------
 ALG_NAME: "hierarchical_pqn"      # Run identifier used in names/logs. Options: string.
 ENV_NAME: "seaquest"              # Environment name. Options seen: "seaquest","freeway","phoenix","spaceinvaders","choppercommand","beamrider","breakout","pong","kangaroo","tennis","skiing","asterix","montezumarevenge","venture".
+PONG_BALL_AS_DESTROY: false       # Label Pong ball as DESTROY (skill 0) instead of COLLECT. Fun / transfer ablation. Options: true/false.
 TRAIN_MODE: "tandem"              # Training pipeline. Options: "skills_only","meta_only","tandem".
 
 GAME_MODS: null                   # Train-time environment mods. Options: null or list[string].

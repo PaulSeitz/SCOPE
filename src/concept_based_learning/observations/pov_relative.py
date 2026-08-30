@@ -41,26 +41,37 @@ def configure_pov_relative_from_config(config: dict | None) -> None:
 # Per-env move specs: (noop, fire, move_table[8], move_fire_table[8])
 _MOVE_SPECS: dict[str, tuple[int, int, list[int], list[int]]] = {
     "seaquest": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
-    "pong": (0, 1, [0, 3, 3, 3, 0, 2, 2, 2], [5, 3, 3, 3, 5, 2, 2, 2]),
+    "pong": (0, 1, [0, 3, 3, 3, 0, 2, 2, 2], [1, 5, 5, 5, 1, 4, 4, 4]),
     "freeway": (0, 0, [0, 2, 2, 2, 0, 1, 1, 1], [0, 2, 2, 2, 0, 1, 1, 1]),
     "breakout": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [2, 2, 1, 3, 3, 3, 1, 2]),
     "beamrider": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "asterix": (0, 0, [2, 7, 4, 8, 3, 6, 1, 5], [2, 7, 4, 8, 3, 6, 1, 5]),
+    # TODO(POV_BACKLOG): tennis copied Pong's 1-D paddle table but supports 8-way
+    # movement — see docs/POV_FRAME_BACKLOG.md and ``scripts/pov_frame_playground.py``.
     "tennis": (0, 1, [0, 3, 3, 3, 0, 2, 2, 2], [5, 3, 3, 3, 5, 2, 2, 2]),
     "phoenix": (0, 1, [2, 2, 4, 3, 3, 3, 0, 2], [5, 5, 7, 6, 6, 6, 1, 5]),
     "skiing": (0, 0, [0, 2, 2, 2, 0, 1, 1, 1], [0, 2, 2, 2, 0, 1, 1, 1]),
+    # TODO(POV_BACKLOG): skiing — only LEFT/RIGHT in ACTION_SET; table wrong. See backlog.
     "kangaroo": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
+    # TODO(POV_BACKLOG): choppercommand — ALE RIGHT moves the heli left; see backlog.
     "choppercommand": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
+    # TODO(POV_BACKLOG): spaceinvaders — Seaquest ALE table but ACTION_SET has 6 entries;
+    # indices 6–9 are out of range. See docs/POV_FRAME_BACKLOG.md.
     "spaceinvaders": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "montezumarevenge": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "venture": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
 }
 
-# Facing reference angles (degrees, screen-Y-down) for mapper table bin 0 / bin 1.
-# Seaquest: left/right hull. Pong/Freeway/Breakout: vertical control, pinned facing.
-# ``bilateral_axis`` selects virtual sector geometry for USE_POV_FIXED_BILATERAL.
-# Vertical games use bin1 = +90° (down) for the second sector table when fixed bilateral
-# is on; legacy POV still reads sprite bin 0 only for those envs.
+# Per-env view axes: the body facings (screen degrees, y down) the player can
+# actually point along. ``facing_deg_bin0`` / ``facing_deg_bin1`` are both the
+# mapper table angles *and* the angles the observation frame is built in.
+#
+# Two-axis envs turn left/right and pick their axis from the sprite orientation.
+# Single-axis envs cannot turn, so they pin ``single_view_axis`` and look into the
+# field (Pong's paddle faces the court, bottom-of-screen shooters face up).
+#
+# ``bilateral_axis`` is unrelated: it only selects virtual sector geometry for
+# USE_POV_FIXED_BILATERAL, which ignores sprite orientation entirely.
 _POV_PROFILES: dict[str, dict[str, Any]] = {
     "seaquest": {
         "facing_deg_bin0": 0.0,
@@ -68,27 +79,35 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "horizontal",
     },
     "pong": {
-        "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": 90.0,
+        # Player paddle at x≈140 (right). Face into the field (−x) so FPS view /
+        # FORWARD point at the opponent; horizontal motion is NOOP, LEFT/RIGHT
+        # strafe the paddle (fairest Seaquest→Pong transfer).
+        "facing_deg_bin0": 180.0,
+        "facing_deg_bin1": 180.0,
+        "single_view_axis": True,
         "bilateral_axis": "vertical",
-        "synthetic_orientation_deg": -90.0,
     },
     "freeway": {
+        # Chicken crosses upward; no turning.
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": 90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
         "bilateral_axis": "vertical",
-        "synthetic_orientation_deg": -90.0,
         "player_getter": lambda raw: raw.chicken,
     },
     "breakout": {
+        # Paddle at the bottom, ball and bricks above.
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": 90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
         "bilateral_axis": "vertical",
     },
     "beamrider": {
-        "facing_deg_bin0": 0.0,
-        "facing_deg_bin1": 180.0,
-        "bilateral_axis": "horizontal",
+        # Ship at the bottom strafing left/right, enemies come down the beams.
+        "facing_deg_bin0": -90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
+        "bilateral_axis": "vertical",
     },
     "asterix": {
         "facing_deg_bin0": 0.0,
@@ -101,16 +120,18 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "horizontal",
     },
     "phoenix": {
+        # Ship at the bottom, birds above.
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": 90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
         "bilateral_axis": "vertical",
-        "synthetic_orientation_deg": 90.0,
     },
     "skiing": {
+        # Skier descends; obstacles approach from below the viewport.
         "facing_deg_bin0": -90.0,
-        "facing_deg_bin1": 90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
         "bilateral_axis": "vertical",
-        "synthetic_orientation_deg": -90.0,
         "player_getter": lambda raw: raw.skier,
     },
     "kangaroo": {
@@ -124,9 +145,11 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "horizontal",
     },
     "spaceinvaders": {
-        "facing_deg_bin0": 0.0,
-        "facing_deg_bin1": 180.0,
-        "bilateral_axis": "horizontal",
+        # Cannon at the bottom strafing left/right, invaders above.
+        "facing_deg_bin0": -90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
+        "bilateral_axis": "vertical",
     },
     "montezumarevenge": {
         "facing_deg_bin0": 0.0,
@@ -141,18 +164,62 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def _player_orientation_deg(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndarray:
-    player = player_getter(raw_obs)
-    ori = player.orientation[-1]
-    synthetic = profile.get("synthetic_orientation_deg")
-    if synthetic is not None:
-        return jnp.asarray(synthetic, dtype=jnp.float32)
-    return ori
+# JAXAtari's ``ObjectObservation.orientation`` measures 0° = up, 90° = right,
+# 180° = down, 270° = left. Every body-frame computation here uses screen angles
+# (0° = right, 90° = down, 180° = left, −90° = up), so sprite values need a shift.
+_SPRITE_ORIENTATION_OFFSET_DEG: float = -90.0
+
+# JAXAtari also reports orientation 0.0 for "inactive / no direction yet", which
+# must not be read as a real facing (it would alias to −90° after the shift).
+_SPRITE_ORIENTATION_UNSET_DEG: float = 0.0
+
+
+def _wrap180_deg(deg: jnp.ndarray) -> jnp.ndarray:
+    return (deg + jnp.float32(180.0)) % jnp.float32(360.0) - jnp.float32(180.0)
+
+
+def view_axes_deg(profile: dict[str, Any]) -> tuple[float, float]:
+    """Declared body-facing angles (screen degrees) for view axis 0 and 1."""
+    return (
+        float(profile.get("facing_deg_bin0", 0.0)),
+        float(profile.get("facing_deg_bin1", 180.0)),
+    )
+
+
+def has_single_view_axis(profile: dict[str, Any]) -> bool:
+    """True when the player body cannot turn, so only view axis 0 is reachable."""
+    if bool(profile.get("single_view_axis", False)):
+        return True
+    axis0, axis1 = view_axes_deg(profile)
+    return abs(axis0 - axis1) < 1e-6
 
 
 def _facing_bin_idx(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndarray:
-    ori = _player_orientation_deg(raw_obs, profile, player_getter)
-    return (ori >= jnp.float32(180.0)).astype(jnp.int32)
+    """Which declared view axis the player body currently points along."""
+    if has_single_view_axis(profile):
+        return jnp.int32(0)
+    axis0, axis1 = view_axes_deg(profile)
+    ori = jnp.asarray(player_getter(raw_obs).orientation[-1], dtype=jnp.float32)
+    screen_deg = ori + jnp.float32(_SPRITE_ORIENTATION_OFFSET_DEG)
+    prefers_axis1 = jnp.abs(_wrap180_deg(screen_deg - jnp.float32(axis1))) < jnp.abs(
+        _wrap180_deg(screen_deg - jnp.float32(axis0))
+    )
+    unset = (
+        jnp.abs(ori - jnp.float32(_SPRITE_ORIENTATION_UNSET_DEG)) < jnp.float32(1e-3)
+    )
+    return jnp.where(unset, jnp.int32(0), prefers_axis1.astype(jnp.int32))
+
+
+def _player_orientation_deg(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndarray:
+    """Body facing in screen degrees, snapped to the env's declared view axis.
+
+    This deliberately never returns a raw sprite angle: the observation frame and
+    the action mapper both resolve their facing through this function, so keying
+    it on the same per-env axis table is what stops the two frames drifting apart.
+    """
+    axis0, axis1 = view_axes_deg(profile)
+    bin_idx = _facing_bin_idx(raw_obs, profile, player_getter)
+    return jnp.where(bin_idx == 0, jnp.float32(axis0), jnp.float32(axis1))
 
 
 def _target_delta_xy(raw_obs, objects, target_idx, player_getter):

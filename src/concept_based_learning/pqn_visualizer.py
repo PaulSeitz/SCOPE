@@ -95,6 +95,10 @@ from concept_based_learning.observations.pov_relative import (
     using_pov_relative,
 )
 from concept_based_learning.observations.pov_fixed_bilateral import using_pov_fixed_bilateral
+from concept_based_learning.observations.pov_facing_frame import (
+    using_ego_pose_xy,
+    using_pov_facing_frame,
+)
 from concept_based_learning.observations.pov_turn import (
     TURN_EGO_ACTION_NAMES,
     heading_after,
@@ -115,6 +119,7 @@ from concept_based_learning.visualizer_debug_panel import (
     PANEL_WIDTH,
     apply_pov_overlay,
     blank_detail_panel,
+    compute_facing_frame_viz,
     compute_fixed_bilateral_viz,
     compose_display,
     player_facing_deg,
@@ -139,6 +144,7 @@ def apply_visualizer_config_overrides(
     pov_mode: str = "auto",
     pov_bilateral_axis: str | None = None,
     ego_phi_bins: int | None = None,
+    ego_pose_xy: bool | None = None,
 ) -> dict:
     """Apply CLI ablation flags for live/recorded visualizer runs."""
     if no_outline:
@@ -170,6 +176,7 @@ def apply_visualizer_config_overrides(
         config["USE_POV_FIXED_BILATERAL"] = False
         config["USE_POV_FACING_FRAME"] = True
         config["USE_POV_TURN_PRIMITIVES"] = False
+        config["USE_EGO_VELOCITY_FEATURES"] = False
     elif mode == "turn":
         config["USE_POV_RELATIVE_MAPPER"] = True
         config["USE_POV_FIXED_BILATERAL"] = False
@@ -184,6 +191,9 @@ def apply_visualizer_config_overrides(
             config["EGO_PSI_ANGLE_BINS"] = None
         else:
             config["EGO_PSI_ANGLE_BINS"] = int(ego_phi_bins)
+
+    if ego_pose_xy is not None:
+        config["EGO_POSE_XY"] = bool(ego_pose_xy)
 
     return config
 
@@ -312,6 +322,14 @@ def _print_ego_runtime_summary(config: dict) -> None:
             f"POV=turn_primitives(step={turn_step_deg()}°, "
             f"init_heading={initial_heading_deg()}°)"
         )
+    elif using_pov_facing_frame():
+        if using_ego_pose_xy():
+            pose_note = "pose=xy(fwd,lat)"
+        elif config.get("EGO_PSI_ANGLE_BINS"):
+            pose_note = f"pose=polar(phi_bins{config.get('EGO_PSI_ANGLE_BINS')})"
+        else:
+            pose_note = "pose=polar(phi_sincos)"
+        pov_note = f"POV=facing_fps({pose_note})"
     elif using_pov_fixed_bilateral():
         phi_note = (
             f"phi_bins{config.get('EGO_PSI_ANGLE_BINS')}"
@@ -570,13 +588,11 @@ def infer_skill_hparams_from_params(
     ckpt_ego_in = None
     if mode in ("ego", "ego_embed"):
         channels_per_frame = ego_obs_channels_per_frame()
+        # Only infer stack from Dense_0 when the *full* ego channel count divides
+        # the checkpoint width. Falling back to pose-only channels invents bogus
+        # stacks when eval drops weapon extras (e.g. 20 / pose2 → 10 instead of 4).
         if channels_per_frame > 0 and first_in % channels_per_frame == 0:
             frame_stack_size = first_in // channels_per_frame
-        elif ego_pose_channels_per_frame() > 0:
-            pose_in = min(in_dims) if in_dims else first_in
-            pose_ch = ego_pose_channels_per_frame()
-            if pose_in % pose_ch == 0:
-                frame_stack_size = pose_in // pose_ch
         ckpt_ego_in = first_in
 
     out = {
@@ -720,11 +736,13 @@ def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
     raise ValueError(
         f"Skill checkpoint expects MLP input size {ckpt_in}, but this environment's "
         f"egocentric observation length is {ego_feat_dim}. "
-        f"Ego length is {channels_per_frame} × frame stack. Set FRAME_STACK_SIZE to "
-        f"{need_stack} (and ENV_NAME to the game the checkpoint was trained on), or pass "
-        f"the matching *_config.yaml via a checkpoint saved by main.py. Also ensure "
-        "USE_LEGACY_EGO_OBS / USE_EGO_SIZE_FEATURES / USE_EGO_VELOCITY_FEATURES "
-        "match the checkpoint's training configuration."
+        f"Ego length is {channels_per_frame} × frame stack "
+        f"(FRAME_STACK_SIZE={config.get('FRAME_STACK_SIZE')}). "
+        f"Set FRAME_STACK_SIZE to {need_stack} if the stack is wrong, and keep "
+        "USE_EGO_WEAPON_FEATURES / USE_EGO_BLOCKING_FEATURES / EGO_POSE_XY / "
+        "EGO_PSI_ANGLE_BINS matching the Seaquest training checkpoint "
+        "(weapon extras still emit 2 channels on Pong/Beamrider). "
+        "Prefer --paper-config with PAPER_EVAL_ARCHITECTURE_OF so train knobs stay aligned."
     )
 
 
@@ -2409,7 +2427,16 @@ def run_live_visualization(
         phi_rad = None
         virtual_facing_deg = None
         bilateral_axis = None
-        if using_pov_fixed_bilateral() and target_xy is not None:
+        fwd_px = None
+        lat_px = None
+        if using_pov_facing_frame():
+            facing, phi_rad, fwd_px, lat_px = compute_facing_frame_viz(
+                obs.raw_observation,
+                env_name,
+                (p_cx, p_cy),
+                target_xy,
+            )
+        elif using_pov_fixed_bilateral() and target_xy is not None:
             sector_idx, phi_rad, virtual_facing_deg, bilateral_axis = (
                 compute_fixed_bilateral_viz(env_name, (p_cx, p_cy), target_xy)
             )
@@ -2446,6 +2473,8 @@ def run_live_visualization(
             phi_rad=phi_rad,
             virtual_facing_deg=virtual_facing_deg,
             bilateral_axis=bilateral_axis,
+            fwd_px=fwd_px,
+            lat_px=lat_px,
         )
 
     def _redraw_last() -> None:
@@ -2727,6 +2756,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pong-ball-destroy",
+        action="store_true",
+        default=False,
+        help=(
+            "Label the Pong ball as DESTROY instead of COLLECT so the DESTROY "
+            "skill head is used (fun transfer ablation)."
+        ),
+    )
+    parser.add_argument(
         "--no-outline",
         action="store_true",
         default=False,
@@ -2808,8 +2846,17 @@ def main():
         type=int,
         default=None,
         help=(
-            "Forward-hemisphere φ encoding for fixed-bilateral: N triangular bins "
-            "(e.g. 8) or 0 for sin/cos(φ). Only applied when set."
+            "Angle encoding bins for fixed-bilateral / facing FPS: N triangular "
+            "bins (e.g. 8) or 0 for sin/cos. Only applied when set."
+        ),
+    )
+    parser.add_argument(
+        "--ego-pose-xy",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Facing FPS pose encoding: --ego-pose-xy for body-frame (fwd, lat); "
+            "--no-ego-pose-xy for polar (distance, φ). Default follows config."
         ),
     )
     parser.add_argument(
@@ -2819,9 +2866,9 @@ def main():
         help=(
             "Paper-eval train/eval YAML merged after the checkpoint sidecar "
             "(ego clip, POV mapper, transfer MAX_OBJECTS, heuristic, etc.). "
-            "Fixed-bilateral examples: "
-            "seaquest_skills_ego_pov_clip50_fixed2_psibins8_eval_full.yaml, "
-            "pong_transfer_ego_pov_clip50_fixed2_psibins8.yaml."
+            "Facing FPS examples: "
+            "seaquest_skills_ego_pov_clip50_facing_psibins8_eval_full.yaml, "
+            "seaquest_skills_ego_pov_clip50_facing_xy_eval_full.yaml."
         ),
     )
     parser.add_argument(
@@ -2900,6 +2947,9 @@ def main():
         print(
             "REMAP_NAVIGATE_TO_COLLECT=True — NAVIGATE waypoints use the COLLECT skill head"
         )
+    if args.pong_ball_destroy:
+        base_config["PONG_BALL_AS_DESTROY"] = True
+        print("PONG_BALL_AS_DESTROY=True — Pong ball labeled DESTROY (uses DESTROY skill)")
     apply_visualizer_config_overrides(
         base_config,
         no_outline=bool(args.no_outline),
@@ -2908,6 +2958,7 @@ def main():
         pov_mode=args.pov_mode,
         pov_bilateral_axis=args.pov_bilateral_axis,
         ego_phi_bins=args.ego_phi_bins,
+        ego_pose_xy=args.ego_pose_xy,
     )
     if args.pov_mode != "auto":
         print(f"POV mode override: {args.pov_mode}")
@@ -2916,6 +2967,8 @@ def main():
     if args.ego_phi_bins is not None:
         enc = f"phi_bins{args.ego_phi_bins}" if args.ego_phi_bins > 0 else "phi_sincos"
         print(f"Ego φ encoding override: {enc}")
+    if args.ego_pose_xy is not None:
+        print(f"Ego pose XY override: {args.ego_pose_xy}")
     configure_ego_obs_from_config(base_config)
     configure_label_routing_from_config(base_config)
     _print_ego_runtime_summary(base_config)

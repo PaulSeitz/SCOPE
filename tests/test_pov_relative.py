@@ -55,6 +55,11 @@ def test_seaquest_facing_table_matches_legacy_right_facing():
 
 
 def test_seaquest_pov_mapper_matches_legacy_tables():
+    """Parity with the hand-written tables, using the sprite values Seaquest emits.
+
+    ``get_orientation`` in jax_seaquest returns 90° for right, 270° for left and
+    0.0 while the sub has no direction yet (which falls back to facing right).
+    """
     mapper, _ = make_facing_relative_mappers("seaquest")
 
     class _Player:
@@ -63,26 +68,19 @@ def test_seaquest_pov_mapper_matches_legacy_tables():
     class _Raw:
         player = _Player()
 
-    raw = _Raw()
-    for ego in range(18):
-        legacy = int(
-            _legacy_orientation_relative_mapper(
-                jnp.int32(ego), raw, jnp.int32(0), None
+    for sprite_ori in (0.0, 90.0, 270.0):
+        raw = _Raw()
+        raw.player.orientation = jnp.array([sprite_ori])
+        for ego in range(18):
+            legacy = int(
+                _legacy_orientation_relative_mapper(
+                    jnp.int32(ego), raw, jnp.int32(0), None
+                )
             )
-        )
-        built = int(mapper(jnp.int32(ego), raw, jnp.int32(0), None))
-        assert built == legacy, f"ego={ego} legacy={legacy} built={built}"
-
-    raw_left = _Raw()
-    raw_left.player.orientation = jnp.array([180.0])
-    for ego in range(18):
-        legacy = int(
-            _legacy_orientation_relative_mapper(
-                jnp.int32(ego), raw_left, jnp.int32(0), None
+            built = int(mapper(jnp.int32(ego), raw, jnp.int32(0), None))
+            assert built == legacy, (
+                f"ego={ego} sprite_ori={sprite_ori} legacy={legacy} built={built}"
             )
-        )
-        built = int(mapper(jnp.int32(ego), raw_left, jnp.int32(0), None))
-        assert built == legacy, f"ego={ego} left legacy={legacy} built={built}"
 
 
 def test_pov_velocity_adds_single_approach_channel():
@@ -151,6 +149,7 @@ def test_forward_spam_differs_from_target_aligned_on_pong_vertical_profile():
     from concept_based_learning.observations.pov_relative import (
         make_facing_relative_mappers,
     )
+    from jaxatari.environment import JAXAtariAction as Atari
 
     pov_mapper, _ = make_facing_relative_mappers("pong")
 
@@ -165,7 +164,7 @@ def test_forward_spam_differs_from_target_aligned_on_pong_vertical_profile():
         y = jnp.array([80.0])
         width = jnp.array([8.0])
         height = jnp.array([8.0])
-        orientation = jnp.array([-90.0])
+        orientation = jnp.array([180.0])
 
     class _Raw:
         ball = _Ball()
@@ -183,5 +182,28 @@ def test_forward_spam_differs_from_target_aligned_on_pong_vertical_profile():
     ego_forward = jnp.int32(2)
     aligned = int(pong_action_mapper(ego_forward, raw, target, objs))
     pov = int(pov_mapper(ego_forward, raw, target, objs))
-    # Target-aligned rotates FORWARD toward ball; POV-relative does not.
+    # Into-field facing: FORWARD has no horizontal control → NOOP.
+    assert pov == int(Atari.NOOP)
+    # Target-aligned still rotates FORWARD toward the ball (usually non-NOOP).
     assert aligned != pov or aligned == 0
+
+
+def test_pong_facing_looks_into_the_field():
+    """Pong is single-axis facing left (180°) toward the opponent, not paddle-up."""
+    from concept_based_learning.observations.pov_facing_frame import resolve_facing_deg
+    from concept_based_learning.observations.pov_relative import (
+        _POV_PROFILES,
+        has_single_view_axis,
+    )
+
+    profile = _POV_PROFILES["pong"]
+    assert has_single_view_axis(profile)
+    assert float(profile["facing_deg_bin0"]) == pytest.approx(180.0)
+
+    class _Player:
+        orientation = jnp.array([0.0])  # ignored: the axis is pinned
+
+    class _Raw:
+        player = _Player()
+
+    assert float(resolve_facing_deg(_Raw(), env_name="pong")) == pytest.approx(180.0)

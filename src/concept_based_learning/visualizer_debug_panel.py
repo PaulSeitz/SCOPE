@@ -31,7 +31,6 @@ from concept_based_learning.observations.pov_fixed_bilateral import (
 )
 from concept_based_learning.observations.pov_facing_frame import (
     facing_frame_phi_rad,
-    resolve_facing_deg,
     using_ego_pose_xy,
     using_pov_facing_frame,
     world_delta_to_facing_frame,
@@ -167,19 +166,8 @@ def virtual_mapper_facing_deg(env_name: str, sector_idx: int) -> float:
 
 
 def mapper_bin_facing_deg(raw_obs, env_name: str) -> float:
-    """Body-table facing (0/180 or ±90) selected by sprite/synthetic orientation bin."""
-    profile = _POV_PROFILES.get(
-        str(env_name).lower(), {"facing_deg_bin0": 0.0, "facing_deg_bin1": 180.0}
-    )
-    getter = profile.get("player_getter")
-    if getter is None:
-        from concept_based_learning.observations.action_space import _default_get_player
-
-        getter = _default_get_player
-    ori = float(_player_orientation_deg(raw_obs, profile, getter))
-    facing0 = float(profile.get("facing_deg_bin0", 0.0))
-    facing1 = float(profile.get("facing_deg_bin1", 180.0))
-    return facing1 if ori >= 180.0 else facing0
+    """Body-table facing for the view axis the player currently points along."""
+    return player_facing_deg(raw_obs, env_name)
 
 
 def compute_fixed_bilateral_viz(
@@ -214,11 +202,7 @@ def compute_facing_frame_viz(
     player_xy: tuple[float, float],
     target_xy: tuple[float, float] | None,
 ) -> tuple[float, float | None, float | None, float | None]:
-    """Return (facing_deg, phi_rad, fwd_px, lat_px) for FPS overlays.
-
-    ``facing_deg`` is the mapper body-table angle (matches FORWARD), not raw
-    sprite convention angles that can look like up/down on Seaquest.
-    """
+    """Return (facing_deg, phi_rad, fwd_px, lat_px) for FPS overlays."""
     facing = mapper_bin_facing_deg(raw_obs, env_name)
     if target_xy is None:
         return facing, None, None, None
@@ -226,8 +210,6 @@ def compute_facing_frame_viz(
     tx, ty = target_xy
     dx = float(tx - px)
     dy = float(ty - py)
-    # Obs may use resolve_facing_deg (raw/synthetic); rotate with mapper facing so
-    # the panel matches the FORWARD axis the action tables use.
     fwd, lat = world_delta_to_facing_frame(
         jnp.float32(dx), jnp.float32(dy), jnp.float32(facing)
     )
@@ -261,22 +243,24 @@ def apply_pov_overlay(
             1,
             cv2.LINE_AA,
         )
-        if show_fov_wedge and using_pov_relative() and not using_pov_fixed_bilateral():
-            view_deg = float(np.rad2deg(snapshot.angle_rad))
-            wedge = np.zeros_like(frame)
-            cv2.ellipse(
-                wedge,
-                (cx, cy),
-                (48, 48),
-                0.0,
-                view_deg - 90.0,
-                view_deg + 90.0,
-                (0, 160, 200),
-                -1,
-                cv2.LINE_AA,
-            )
-            frame = _blend_overlay(frame, wedge, 0.22)
-            frame = np.ascontiguousarray(frame)
+        if show_fov_wedge and using_pov_facing_frame():
+            # FPS: view = player/mapper facing (not locked on target).
+            view_deg = snapshot.facing_deg
+            if view_deg is not None:
+                wedge = np.zeros_like(frame)
+                cv2.ellipse(
+                    wedge,
+                    (cx, cy),
+                    (48, 48),
+                    0.0,
+                    float(view_deg) - 90.0,
+                    float(view_deg) + 90.0,
+                    (0, 160, 200),
+                    -1,
+                    cv2.LINE_AA,
+                )
+                frame = _blend_overlay(frame, wedge, 0.22)
+                frame = np.ascontiguousarray(frame)
         elif show_fov_wedge and using_pov_fixed_bilateral():
             forward_deg = snapshot.virtual_facing_deg
             if forward_deg is not None:
@@ -294,6 +278,23 @@ def apply_pov_overlay(
                 )
                 frame = _blend_overlay(frame, wedge, 0.22)
                 frame = np.ascontiguousarray(frame)
+        elif show_fov_wedge and using_pov_relative():
+            # Classic POV: view locked on selected target.
+            view_deg = float(np.rad2deg(snapshot.angle_rad))
+            wedge = np.zeros_like(frame)
+            cv2.ellipse(
+                wedge,
+                (cx, cy),
+                (48, 48),
+                0.0,
+                view_deg - 90.0,
+                view_deg + 90.0,
+                (0, 160, 200),
+                -1,
+                cv2.LINE_AA,
+            )
+            frame = _blend_overlay(frame, wedge, 0.22)
+            frame = np.ascontiguousarray(frame)
 
     if using_pov_fixed_bilateral() and snapshot.virtual_facing_deg is not None:
         facing = snapshot.virtual_facing_deg
@@ -362,6 +363,17 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
             1,
             cv2.LINE_AA,
         )
+    elif using_pov_facing_frame() and snapshot.facing_deg is not None:
+        forward_deg = float(snapshot.facing_deg)
+        dx, dy = _deg_to_screen_vec(forward_deg, size * 0.34)
+        cv2.line(
+            canvas,
+            (cx, cy),
+            (int(cx + dx), int(cy + dy)),
+            (0, 160, 200),
+            1,
+            cv2.LINE_AA,
+        )
     elif snapshot.target_xy is not None:
         view_deg = float(np.rad2deg(snapshot.angle_rad))
         dx, dy = _deg_to_screen_vec(view_deg, size * 0.38)
@@ -391,7 +403,15 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
         )
 
     legend_y = y0 + size + 14
-    if using_pov_fixed_bilateral():
+    if using_pov_facing_frame():
+        _draw_text(
+            canvas,
+            "cyan=target  wedge=FPS facing  yellow=forward",
+            x0,
+            legend_y,
+            scale=0.28,
+        )
+    elif using_pov_fixed_bilateral():
         _draw_text(
             canvas,
             "cyan=target  wedge=sector forward  yellow=virt facing",
@@ -536,8 +556,44 @@ def render_detail_panel(
     )
     y += 16
 
-    if not np.isnan(snapshot.distance):
-        if using_pov_fixed_bilateral() and snapshot.phi_rad is not None:
+    if not np.isnan(snapshot.distance) or (
+        using_pov_facing_frame() and using_ego_pose_xy()
+        and snapshot.fwd_px is not None
+    ):
+        if using_pov_facing_frame():
+            face_txt = (
+                f" face={snapshot.facing_deg:.0f}deg"
+                if snapshot.facing_deg is not None
+                else ""
+            )
+            if using_ego_pose_xy() and snapshot.fwd_px is not None:
+                _draw_text(
+                    panel,
+                    f"fwd={snapshot.fwd_px:.1f} lat={snapshot.lat_px:.1f}"
+                    f"{face_txt}",
+                    x,
+                    y,
+                    scale=0.32,
+                )
+            else:
+                phi_txt = (
+                    f" phi={np.rad2deg(snapshot.phi_rad):.0f}deg"
+                    if snapshot.phi_rad is not None
+                    else ""
+                )
+                d_txt = (
+                    f"d={snapshot.distance:.1f}px"
+                    if not np.isnan(snapshot.distance)
+                    else "d=n/a"
+                )
+                _draw_text(
+                    panel,
+                    f"{d_txt}{phi_txt}{face_txt}",
+                    x,
+                    y,
+                    scale=0.32,
+                )
+        elif using_pov_fixed_bilateral() and snapshot.phi_rad is not None:
             sector_txt = (
                 f" sector={snapshot.sector_idx}"
                 if snapshot.sector_idx is not None

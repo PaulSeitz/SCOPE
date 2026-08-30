@@ -59,7 +59,7 @@ def configure_pov_facing_frame_from_config(config: dict | None) -> None:
 
 
 def resolve_facing_deg(raw_observation, *, env_name: str | None = None) -> jnp.ndarray:
-    """Latest-frame facing deg used for obs (matches mapper, including synthetic)."""
+    """Latest-frame facing deg for obs: the env's declared view axis, as the mapper uses."""
     from concept_based_learning.observations.action_space import _default_get_player
     from concept_based_learning.observations.pov_relative import (
         _POV_PROFILES,

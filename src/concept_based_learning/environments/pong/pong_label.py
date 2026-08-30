@@ -4,6 +4,7 @@ from concept_based_learning.environments.labeling_wrapper import JaxatariSemanti
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_COLLECT,
+    LABEL_DESTROY,
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import (
@@ -12,6 +13,28 @@ from concept_based_learning.environments.skill_rewards import (
     penalize_collect_death_from_config,
 )
 from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
+
+# When True, the Pong ball is labeled DESTROY instead of COLLECT so the DESTROY
+# skill head is selected (fun / transfer ablation). Rewards still use the
+# generic extractor (ball never "dies", so DESTROY kill reward stays near 0).
+_PONG_BALL_AS_DESTROY: bool = False
+
+
+def set_pong_ball_as_destroy(enabled: bool) -> None:
+    global _PONG_BALL_AS_DESTROY
+    _PONG_BALL_AS_DESTROY = bool(enabled)
+
+
+def pong_ball_as_destroy() -> bool:
+    return _PONG_BALL_AS_DESTROY
+
+
+def configure_pong_ball_label_from_config(config: dict | None) -> None:
+    """Apply ``PONG_BALL_AS_DESTROY`` from a training / eval / visualizer config."""
+    if not config:
+        set_pong_ball_as_destroy(False)
+        return
+    set_pong_ball_as_destroy(bool(config.get("PONG_BALL_AS_DESTROY", False)))
 
 
 def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
@@ -38,7 +61,7 @@ pong_action_mapper, pong_inverse_action_mapper = make_target_aligned_action_mapp
     noop_action=0,
     fire_action=1,
     move_table=     [0, 3, 3, 3, 0, 2, 2, 2],  # R DR D DL L UL U UR
-    move_fire_table=[5, 3, 3, 3, 5, 2, 2, 2],
+    move_fire_table=[1, 5, 5, 5, 1, 4, 4, 4],  # FIRE into field; RIGHTFIRE up; LEFTFIRE down
 )
 
 
@@ -58,7 +81,8 @@ class PongSemanticWrapper(JaxatariSemanticBaseWrapper):
         # Ball active: it resets to center after a point, it never truly disappears.
         # Use AABB overlap (rising-edge) for COLLECT reward — ball never gets destroyed.
         ball_active = jnp.ones(1, dtype=jnp.int32)
-        ball_label = jnp.array([LABEL_COLLECT], dtype=jnp.int32)
+        ball_label_id = LABEL_DESTROY if _PONG_BALL_AS_DESTROY else LABEL_COLLECT
+        ball_label = jnp.array([ball_label_id], dtype=jnp.int32)
 
         pad_size = self.game_max_objects - 1
         pad_x = jnp.zeros(pad_size, dtype=ball_x.dtype)
