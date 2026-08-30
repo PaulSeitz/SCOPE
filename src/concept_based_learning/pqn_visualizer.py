@@ -2930,6 +2930,14 @@ def main():
             base_config, args.paper_config, project_root=_project_root()
         )
         print(f"Merged paper-eval config: {args.paper_config}")
+    # Same as mod-eval harness: transfer YAMLs can disagree with the source
+    # skill ego layout (e.g. weapon channels). Sidecar wins for obs dim.
+    if skill_path is not None:
+        from concept_based_learning.paper_eval.eval_harness import (
+            _overlay_ego_flags_from_skill_config,
+        )
+
+        base_config = _overlay_ego_flags_from_skill_config(base_config, skill_path)
     if params_tree is not None:
         base_config = align_config_with_skill_checkpoint(base_config, params_tree)
 
@@ -2938,10 +2946,13 @@ def main():
     if args.wandb_mode is not None:
         base_config["WANDB_MODE"] = args.wandb_mode
 
-    # Keep explicit CLI env override authoritative for cross-env transfer runs,
-    # even when checkpoint-side *_config.yaml is present.
+    # Keep explicit CLI env / seed overrides authoritative after checkpoint +
+    # paper-config merges (sidecar always carries train SEED=44).
     if args.env_name is not None:
         base_config["ENV_NAME"] = args.env_name
+    if args.seed is not None:
+        base_config["SEED"] = int(args.seed)
+        print(f"SEED override: {base_config['SEED']}")
     if args.remap_navigate_to_collect:
         base_config["REMAP_NAVIGATE_TO_COLLECT"] = True
         print(

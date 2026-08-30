@@ -58,6 +58,13 @@ Usage:
   python scripts/run_paper_eval.py --suite pov_facing_v2 --gpus 0,1 --wait-deps --lean
   python scripts/run_paper_eval.py --suite pov_facing_v2_eval --gpus 0,1 --wait-deps --lean
   python scripts/run_paper_eval.py --suite pov_facing_v2_phase2 --gpus 0,1 --wait-deps --lean
+  # Facing v2 breadth (3 tmux sessions — pin GPUs; do not use --gpus here):
+  #   GPU0: φ8 zero-shot BR+PH → Phoenix from-scratch φ8
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu0 --wait-deps --lean
+  #   GPU1: φ8+mid zero-shot BR+PH → Beamrider from-scratch φ8
+  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu1 --wait-deps --lean
+  #   GPU2: Seaquest noclip facing_xy → SQ mods + Pong/PH/BR zero-shot
+  CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu2 --wait-deps --lean
   # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
   CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
 
@@ -723,6 +730,34 @@ POV_FACING_V2_PHASE2_STEMS = (
     "beamrider_transfer_ego_pov_clip50_facing_xy_v2",
 )
 
+# Three pinned tmux sessions (do NOT use --gpus; keep chains on one device each):
+#   CUDA_VISIBLE_DEVICES=0 … --suite pov_facing_v2_gpu0
+#   CUDA_VISIBLE_DEVICES=1 … --suite pov_facing_v2_gpu1
+#   CUDA_VISIBLE_DEVICES=2 … --suite pov_facing_v2_gpu2
+# GPU0: φ-bins8 zero-shot BR+PH (base) → Phoenix from-scratch facing φ-bins8
+POV_FACING_V2_GPU0_SUITE = "pov_facing_v2_gpu0"
+POV_FACING_V2_GPU0_STEMS = (
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8_v2",
+    "phoenix_transfer_ego_pov_clip50_facing_psibins8_v2",
+    "phoenix_from_scratch_ego_pov_facing_psibins8",
+)
+# GPU1: φ-bins8+mid zero-shot BR+PH (base) → Beamrider from-scratch facing φ-bins8
+POV_FACING_V2_GPU1_SUITE = "pov_facing_v2_gpu1"
+POV_FACING_V2_GPU1_STEMS = (
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8_mid_v2",
+    "phoenix_transfer_ego_pov_clip50_facing_psibins8_mid_v2",
+    "beamrider_from_scratch_ego_pov_facing_psibins8",
+)
+# GPU2: Seaquest noclip facing_xy train → SQ mods + Pong/PH/BR zero-shot base
+POV_FACING_V2_GPU2_SUITE = "pov_facing_v2_gpu2"
+POV_FACING_V2_GPU2_STEMS = (
+    "seaquest_skills_ego_pov_noclip_facing_xy_v2",
+    "seaquest_skills_ego_pov_noclip_facing_xy_v2_eval_full",
+    "pong_transfer_ego_pov_noclip_facing_xy_v2",
+    "phoenix_transfer_ego_pov_noclip_facing_xy_v2",
+    "beamrider_transfer_ego_pov_noclip_facing_xy_v2",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -794,6 +829,9 @@ SUITE_STEMS = {
     POV_FACING_V2_TRAIN_SUITE: POV_FACING_V2_TRAIN_STEMS,
     POV_FACING_V2_EVAL_SUITE: POV_FACING_V2_EVAL_STEMS,
     POV_FACING_V2_PHASE2_SUITE: POV_FACING_V2_PHASE2_STEMS,
+    POV_FACING_V2_GPU0_SUITE: POV_FACING_V2_GPU0_STEMS,
+    POV_FACING_V2_GPU1_SUITE: POV_FACING_V2_GPU1_STEMS,
+    POV_FACING_V2_GPU2_SUITE: POV_FACING_V2_GPU2_STEMS,
 }
 
 
