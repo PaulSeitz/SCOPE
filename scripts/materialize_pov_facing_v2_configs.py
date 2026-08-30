@@ -74,11 +74,18 @@ def _seaquest_train_stem_for_transfer(transfer_stem: str) -> str:
 
 
 def _patch_yaml(text: str, old_stem: str, new_stem: str) -> str:
-    sq_old = _seaquest_train_stem_for_transfer(old_stem) if "transfer" in old_stem else None
-    sq_new = _v2_stem(sq_old) if sq_old else None
-    out = text.replace(old_stem, new_stem)
-    if sq_old and sq_new:
-        out = out.replace(sq_old, sq_new)
+    # eval_full YAMLs name themselves ``<train>_eval_full`` but every ckpt /
+    # REQUIRES / SAVE_PATH field still uses the train stem. Replace the train
+    # stem first so those fields pick up ``_v2`` (the eval_full filename is a
+    # prefix extension of the same train stem, so it updates in the same pass).
+    if old_stem.endswith("_eval_full"):
+        train_old = old_stem[: -len("_eval_full")]
+        out = text.replace(train_old, f"{train_old}_v2")
+    else:
+        out = text.replace(old_stem, new_stem)
+        if "transfer" in old_stem:
+            sq_old = _seaquest_train_stem_for_transfer(old_stem)
+            out = out.replace(sq_old, _v2_stem(sq_old))
     if out.startswith("#"):
         first_nl = out.find("\n")
         header = out[:first_nl]

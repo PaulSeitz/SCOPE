@@ -55,7 +55,9 @@ Usage:
   python scripts/run_paper_eval.py --suite pov_baseline --gpus 0,1,2 --wait-deps --lean
   python scripts/run_paper_eval.py --suite pov_baseline_train --gpus 0,1,2 --wait-deps --lean
   # Post-facingfix retrain (invalidates pre-2026-08-30 facing-frame ckpts):
-  bash scripts/run_pov_facing_v2_retrain.sh phase1 --gpus 0,1 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite pov_facing_v2 --gpus 0,1 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite pov_facing_v2_eval --gpus 0,1 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite pov_facing_v2_phase2 --gpus 0,1 --wait-deps --lean
   # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
   CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
 
@@ -706,6 +708,12 @@ POV_FACING_V2_TRAIN_STEMS = (
     "seaquest_skills_ego_pov_clip50_facing_psibins8_v2",
     "seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2",
 )
+# Re-run Seaquest mod eval after ckpt-path fix (no retraining).
+POV_FACING_V2_EVAL_SUITE = "pov_facing_v2_eval"
+POV_FACING_V2_EVAL_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_eval_full",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2_eval_full",
+)
 POV_FACING_V2_PHASE2_SUITE = "pov_facing_v2_phase2"
 POV_FACING_V2_PHASE2_STEMS = (
     "seaquest_skills_ego_pov_clip50_facing_xy_v2",
@@ -784,6 +792,7 @@ SUITE_STEMS = {
     POV_FACING_COLLECT_TRAIN_SUITE: POV_FACING_COLLECT_TRAIN_STEMS,
     POV_FACING_V2_SUITE: POV_FACING_V2_STEMS,
     POV_FACING_V2_TRAIN_SUITE: POV_FACING_V2_TRAIN_STEMS,
+    POV_FACING_V2_EVAL_SUITE: POV_FACING_V2_EVAL_STEMS,
     POV_FACING_V2_PHASE2_SUITE: POV_FACING_V2_PHASE2_STEMS,
 }
 

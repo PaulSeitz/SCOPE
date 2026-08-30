@@ -1,12 +1,12 @@
-# Full Seaquest mod eval for seaquest_skills_ego_pov_clip50_facing_psibins8_mid @ 27k. (facingfix v2 retrain)
+# Full Seaquest mod eval for seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2 @ 27k. (facingfix v2 retrain)
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: skills
 PAPER_EVAL_MODS: seaquest
 PAPER_EVAL_REQUIRES_RQ1:
-- seaquest_skills_ego_pov_clip50_facing_psibins8_mid
-PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_mid/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
-PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_pov_clip50_facing_psibins8_mid
+- seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2
 NUM_SEEDS: 1
 ALG_NAME: hierarchical_pqn
 TRAIN_MODE: skills_only
@@ -15,7 +15,7 @@ USE_POV_RELATIVE_MAPPER: true
 USE_POV_FIXED_BILATERAL: false
 USE_POV_FACING_FRAME: true
 EGO_POSE_XY: false
-SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_mid
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_mid_v2
 WANDB_RUN_NAME: sq_paper_rq1_eval_ego_pov_clip50_facing_psibins8_mid_full_v2
 WANDB_TAGS:
 - suite:pov_facing_v2
