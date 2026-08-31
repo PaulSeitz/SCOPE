@@ -65,6 +65,13 @@ Usage:
   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu1 --wait-deps --lean
   #   GPU2: Seaquest noclip facing_xy → SQ mods + Pong/PH/BR zero-shot
   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu2 --wait-deps --lean
+
+  # Facing ablations (clip20 / noclip / sincos / φ-deg); materialize configs first:
+  python scripts/materialize_pov_facing_ablation_schedule.py
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_ablation_gpu0 --wait-deps --lean
+  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite pov_facing_ablation_gpu1 --wait-deps --lean
+  CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py --suite pov_facing_ablation_gpu2 --wait-deps --lean
+  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_ablation_phideg --wait-deps --lean
   # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
   CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
 
@@ -758,6 +765,60 @@ POV_FACING_V2_GPU2_STEMS = (
     "beamrider_transfer_ego_pov_noclip_facing_xy_v2",
 )
 
+# Facing ablations: clip20 / noclip / sincos / φ-deg-scalar (each full pipeline).
+POV_FACING_ABLATION_SUITE = "pov_facing_ablation"
+POV_FACING_ABLATION_STEMS = (
+    "seaquest_skills_ego_pov_clip20_facing_psibins8_v2",
+    "seaquest_skills_ego_pov_clip20_facing_psibins8_v2_eval_full",
+    "pong_transfer_ego_pov_clip20_facing_psibins8_v2",
+    "phoenix_transfer_ego_pov_clip20_facing_psibins8_v2",
+    "seaquest_skills_ego_pov_noclip_facing_psibins8_v2",
+    "seaquest_skills_ego_pov_noclip_facing_psibins8_v2_eval_full",
+    "pong_transfer_ego_pov_noclip_facing_psibins8_v2",
+    "phoenix_transfer_ego_pov_noclip_facing_psibins8_v2",
+    "seaquest_skills_ego_pov_clip50_facing_sincos_v2",
+    "seaquest_skills_ego_pov_clip50_facing_sincos_v2_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_sincos_v2",
+    "phoenix_transfer_ego_pov_clip50_facing_sincos_v2",
+    "seaquest_skills_ego_pov_clip50_facing_phideg_v2",
+    "seaquest_skills_ego_pov_clip50_facing_phideg_v2_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_phideg_v2",
+    "phoenix_transfer_ego_pov_clip50_facing_phideg_v2",
+)
+# Three pinned GPUs + phase2 for φ-deg (or run full suite serially):
+#   CUDA_VISIBLE_DEVICES=0 … --suite pov_facing_ablation_gpu0
+#   CUDA_VISIBLE_DEVICES=1 … --suite pov_facing_ablation_gpu1
+#   CUDA_VISIBLE_DEVICES=2 … --suite pov_facing_ablation_gpu2
+#   CUDA_VISIBLE_DEVICES=0 … --suite pov_facing_ablation_phideg  (after gpu0 train)
+POV_FACING_ABLATION_GPU0_SUITE = "pov_facing_ablation_gpu0"
+POV_FACING_ABLATION_GPU0_STEMS = (
+    "seaquest_skills_ego_pov_clip20_facing_psibins8_v2",
+    "seaquest_skills_ego_pov_clip20_facing_psibins8_v2_eval_full",
+    "pong_transfer_ego_pov_clip20_facing_psibins8_v2",
+    "phoenix_transfer_ego_pov_clip20_facing_psibins8_v2",
+)
+POV_FACING_ABLATION_GPU1_SUITE = "pov_facing_ablation_gpu1"
+POV_FACING_ABLATION_GPU1_STEMS = (
+    "seaquest_skills_ego_pov_noclip_facing_psibins8_v2",
+    "seaquest_skills_ego_pov_noclip_facing_psibins8_v2_eval_full",
+    "pong_transfer_ego_pov_noclip_facing_psibins8_v2",
+    "phoenix_transfer_ego_pov_noclip_facing_psibins8_v2",
+)
+POV_FACING_ABLATION_GPU2_SUITE = "pov_facing_ablation_gpu2"
+POV_FACING_ABLATION_GPU2_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_sincos_v2",
+    "seaquest_skills_ego_pov_clip50_facing_sincos_v2_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_sincos_v2",
+    "phoenix_transfer_ego_pov_clip50_facing_sincos_v2",
+)
+POV_FACING_ABLATION_PHIDEG_SUITE = "pov_facing_ablation_phideg"
+POV_FACING_ABLATION_PHIDEG_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_phideg_v2",
+    "seaquest_skills_ego_pov_clip50_facing_phideg_v2_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_phideg_v2",
+    "phoenix_transfer_ego_pov_clip50_facing_phideg_v2",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -832,6 +893,11 @@ SUITE_STEMS = {
     POV_FACING_V2_GPU0_SUITE: POV_FACING_V2_GPU0_STEMS,
     POV_FACING_V2_GPU1_SUITE: POV_FACING_V2_GPU1_STEMS,
     POV_FACING_V2_GPU2_SUITE: POV_FACING_V2_GPU2_STEMS,
+    POV_FACING_ABLATION_SUITE: POV_FACING_ABLATION_STEMS,
+    POV_FACING_ABLATION_GPU0_SUITE: POV_FACING_ABLATION_GPU0_STEMS,
+    POV_FACING_ABLATION_GPU1_SUITE: POV_FACING_ABLATION_GPU1_STEMS,
+    POV_FACING_ABLATION_GPU2_SUITE: POV_FACING_ABLATION_GPU2_STEMS,
+    POV_FACING_ABLATION_PHIDEG_SUITE: POV_FACING_ABLATION_PHIDEG_STEMS,
 }
 
 
@@ -1724,6 +1790,7 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_DISTANCE_CLIP_MAX_PX",
     "EGO_ANGLE_BINS",
     "EGO_PSI_ANGLE_BINS",
+    "EGO_PSI_ANGLE_SCALAR",
     "EGO_ANGLE_BINS_SCALAR",
     "EGO_ANGLE_SINCOS_SNAP",
     "EGO_DISTANCE_BINS",

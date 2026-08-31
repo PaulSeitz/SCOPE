@@ -327,6 +327,8 @@ def _print_ego_runtime_summary(config: dict) -> None:
             pose_note = "pose=xy(fwd,lat)"
         elif config.get("EGO_PSI_ANGLE_BINS"):
             pose_note = f"pose=polar(phi_bins{config.get('EGO_PSI_ANGLE_BINS')})"
+        elif config.get("EGO_PSI_ANGLE_SCALAR"):
+            pose_note = "pose=polar(phi_deg_scalar)"
         else:
             pose_note = "pose=polar(phi_sincos)"
         pov_note = f"POV=facing_fps({pose_note})"

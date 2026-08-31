@@ -136,6 +136,45 @@ def test_polar_channel_count_psibins8():
     _teardown()
 
 
+def test_polar_channel_count_phi_deg_scalar():
+    from concept_based_learning.observations.egocentric import (
+        psi_angle_deg_scalar,
+        using_ego_psi_angle_scalar,
+    )
+
+    _configure_facing(
+        EGO_PSI_ANGLE_BINS=None,
+        EGO_PSI_ANGLE_SCALAR=True,
+        EGO_POSE_XY=False,
+    )
+    assert using_ego_psi_angle_scalar()
+    assert ego_angle_channels_per_frame() == 1
+    with_scalar = ego_obs_channels_per_frame()
+    configure_ego_obs_from_config({**FACING_BASE_CFG, "EGO_PSI_ANGLE_BINS": None})
+    with_sincos = ego_obs_channels_per_frame()
+    assert with_scalar == with_sincos - 1
+    assert float(psi_angle_deg_scalar(jnp.float32(0.0))) == pytest.approx(0.0)
+    assert float(psi_angle_deg_scalar(jnp.float32(jnp.pi / 2.0))) == pytest.approx(
+        90.0 / 180.0, abs=1e-5
+    )
+    assert float(psi_angle_deg_scalar(jnp.float32(-jnp.pi))) == pytest.approx(
+        -1.0, abs=1e-5
+    )
+    _teardown()
+
+
+def test_psi_scalar_mutually_exclusive_with_bins():
+    with pytest.raises(ValueError, match="EGO_PSI_ANGLE_SCALAR requires"):
+        configure_ego_obs_from_config(
+            {
+                **FACING_BASE_CFG,
+                "EGO_PSI_ANGLE_BINS": 8,
+                "EGO_PSI_ANGLE_SCALAR": True,
+            }
+        )
+    _teardown()
+
+
 def test_xy_channel_count_no_angle():
     _configure_facing(EGO_POSE_XY=True, EGO_PSI_ANGLE_BINS=None)
     assert using_ego_pose_xy()

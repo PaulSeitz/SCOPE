@@ -61,6 +61,8 @@ _EGO_ANGLE_BINS_SCALAR: bool = False
 _EGO_ANGLE_SINCOS_SNAP: bool = False
 # POV-only: replace sin/cos(ψ) with overlapping triangular bins on ψ (aim offset).
 _EGO_PSI_ANGLE_BINS: int | None = None
+# POV-only: when ψ bins are off, emit one scalar = round(deg(ψ)) in [-180,180] / 180.
+_EGO_PSI_ANGLE_SCALAR: bool = False
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -263,6 +265,16 @@ def ego_psi_angle_bins() -> int | None:
     return _EGO_PSI_ANGLE_BINS
 
 
+def set_ego_psi_angle_scalar(enabled: bool) -> None:
+    """POV-only: one channel with signed degree ψ/φ (rounded, ÷180), not sin/cos."""
+    global _EGO_PSI_ANGLE_SCALAR
+    _EGO_PSI_ANGLE_SCALAR = bool(enabled)
+
+
+def using_ego_psi_angle_scalar() -> bool:
+    return _EGO_PSI_ANGLE_SCALAR
+
+
 def set_ego_angle_bins_scalar(enabled: bool) -> None:
     """Use one scalar tier channel instead of N angle-bin channels."""
     global _EGO_ANGLE_BINS_SCALAR
@@ -293,6 +305,8 @@ def ego_angle_channels_per_frame() -> int:
         return 0
     if using_pov_relative() and _EGO_PSI_ANGLE_BINS:
         return int(_EGO_PSI_ANGLE_BINS)
+    if using_pov_relative() and _EGO_PSI_ANGLE_SCALAR:
+        return 1
     if _EGO_ANGLE_BINS:
         if _EGO_ANGLE_SINCOS_SNAP:
             return 2
@@ -307,6 +321,23 @@ def quantize_angle_sincos(theta: jnp.ndarray, n_bins: int) -> tuple[jnp.ndarray,
     idx = (jnp.floor(t * n).astype(jnp.int32) % n).astype(jnp.float32)
     center = (idx + 0.5) * (jnp.float32(2.0) * jnp.pi) / n - jnp.pi
     return jnp.sin(center), jnp.cos(center)
+
+
+def psi_angle_deg_scalar(theta: jnp.ndarray) -> jnp.ndarray:
+    """Rounded signed degrees in [-180, 180], normalized to [-1, 1]."""
+    deg = jnp.round(jnp.rad2deg(jnp.asarray(theta, dtype=jnp.float32)))
+    deg = (deg + 180.0) % 360.0 - 180.0
+    return (deg / 180.0).astype(jnp.float32)
+
+
+def _psi_angle_feature_channels(theta: jnp.ndarray) -> list[jnp.ndarray]:
+    """POV ψ/φ block: triangular bins, degree scalar, or sin/cos."""
+    if _EGO_PSI_ANGLE_BINS:
+        bin_feats = triangular_angle_bins(theta, _EGO_PSI_ANGLE_BINS)
+        return [bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))]
+    if _EGO_PSI_ANGLE_SCALAR:
+        return [psi_angle_deg_scalar(theta)]
+    return [jnp.sin(theta), jnp.cos(theta)]
 
 
 def triangular_angle_bins(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
@@ -399,6 +430,12 @@ def configure_ego_obs_from_config(config: dict) -> None:
         bool(config.get("EGO_ANGLE_BINS_SCALAR", False))
         and not bool(config.get("EGO_ANGLE_SINCOS_SNAP", False))
     )
+    psi_scalar = bool(config.get("EGO_PSI_ANGLE_SCALAR", False))
+    if psi_scalar and psi_bins not in (None, "", False):
+        raise ValueError(
+            "EGO_PSI_ANGLE_SCALAR requires EGO_PSI_ANGLE_BINS: null (mutually exclusive)."
+        )
+    set_ego_psi_angle_scalar(psi_scalar)
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
     # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
     weapon = config.get(
@@ -1176,11 +1213,7 @@ def _get_ego_obs_pov_relative(raw_observation, objects, target_idx, heading_deg=
         channels.append(v_approach / MAX_SPEED)
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
-    if _EGO_PSI_ANGLE_BINS:
-        bin_feats = triangular_angle_bins(psis, _EGO_PSI_ANGLE_BINS)
-        channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
-    else:
-        channels.extend([jnp.sin(psis), jnp.cos(psis)])
+    channels.extend(_psi_angle_feature_channels(psis))
     if _USE_EGO_BLOCKING_FEATURES:
         channels.append(
             _los_blocked_stacked(
@@ -1355,11 +1388,7 @@ def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
         channels = _xy_features_from_pixels(fwds, lats)
     else:
         channels = distance_features_from_pixels(distances)
-        if _EGO_PSI_ANGLE_BINS:
-            bin_feats = triangular_angle_bins(phis, _EGO_PSI_ANGLE_BINS)
-            channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
-        else:
-            channels.extend([jnp.sin(phis), jnp.cos(phis)])
+        channels.extend(_psi_angle_feature_channels(phis))
 
     if _USE_EGO_SIZE_FEATURES:
         channels.extend([size_w, size_h])
@@ -1439,7 +1468,7 @@ def _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx):
         bin_feats = forward_hemisphere_angle_bins(phis, _EGO_PSI_ANGLE_BINS)
         channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
     else:
-        channels.extend([jnp.sin(phis), jnp.cos(phis)])
+        channels.extend(_psi_angle_feature_channels(phis))
     if _USE_EGO_BLOCKING_FEATURES:
         channels.append(
             _los_blocked_stacked(
