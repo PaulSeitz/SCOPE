@@ -8,7 +8,8 @@ from concept_based_learning.observations.egocentric import player_object_aabb_ga
 
 NO_TARGET_IDX = -1
 # AABB surface-gap danger range for AVOID objects.
-CLOSE_DANGER_RANGE = 15.0
+# Slightly ahead of contact so AVOID (shield/strafe) engages before a salvo lands.
+CLOSE_DANGER_RANGE = 25.0
 # Added to gap for enemy bullets that are clearly moving away from the player
 # (e.g. already past the ship on x), so approaching shots win when ranking threats.
 RECEDING_AVOID_PENALTY = 80.0

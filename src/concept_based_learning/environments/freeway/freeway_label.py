@@ -7,7 +7,7 @@ from concept_based_learning.environments.labeling_wrapper import (
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_AVOID,
-    LABEL_NAVIGATE,
+    LABEL_COLLECT,
 )
 from concept_based_learning.environments.skill_rewards import (
     avoid_survival_reward_from_config,
@@ -43,9 +43,10 @@ FREEWAY_CHICKEN_HIT_H = 10
 FREEWAY_CAR_HIT_W = 8
 FREEWAY_CAR_HIT_H = 8
 
-# Fixed NAVIGATE goal sits at the last slot after meta NOOP + 10 cars.
+# Fixed top COLLECT goal sits at the last slot after meta NOOP + 10 cars.
 NAVIGATE_GOAL_IDX = FREEWAY_NUM_LANES + 1  # slot 11 in stacked objects
 COLLECT_GOAL_IDX = NAVIGATE_GOAL_IDX  # back-compat alias
+FREEWAY_GOAL_LABEL = LABEL_COLLECT
 
 # World direction angle table (RIGHT=0°, DOWNRIGHT=45°, …, UPRIGHT=-45°)
 _WORLD_DIR_ANGLES = jnp.array(
@@ -62,10 +63,18 @@ _CHICKEN_HIT_INSET_Y_BOTTOM = jnp.int32(0)
 
 
 def _apply_chicken_hitbox(raw_obs):
-    """Expose the same effective chicken AABB JAXAtari uses for car collisions."""
+    """Expose the same effective chicken AABB JAXAtari uses for car collisions.
+
+    Keeps Freeway's bottom-edge ``y`` convention (smaller y = higher on screen).
+    Only width/height and x are adjusted for insets; expanding the top inset grows
+    ``height`` upward without rewriting ``y`` as a top-left coordinate (that used
+    to leave ego/heuristic treating top-edge y as bottom-edge, shifting the player
+    centre ~hit_h px upward and flipping near-lane ahead/behind).
+    """
     chicken = raw_obs.chicken
     eff_x = chicken.x + _CHICKEN_HIT_INSET_X
-    eff_y = chicken.y - chicken.height + _CHICKEN_HIT_INSET_Y_TOP
+    # Bottom edge stays put when y_bottom inset is 0; taller hitbox expands upward.
+    eff_y = chicken.y - _CHICKEN_HIT_INSET_Y_BOTTOM
     eff_w = chicken.width - 2 * _CHICKEN_HIT_INSET_X
     eff_h = chicken.height - _CHICKEN_HIT_INSET_Y_TOP - _CHICKEN_HIT_INSET_Y_BOTTOM
     return raw_obs.replace(
@@ -119,7 +128,7 @@ freeway_inverse_action_mapper = make_inverse_ego_action_mapper(
 
 class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
-        # 1 meta NOOP + 10 cars + 1 fixed top NAVIGATE goal = 12 total slots
+        # 1 meta NOOP + 10 cars + 1 fixed top COLLECT goal = 12 total slots
         super().__init__(env, max_objects=12)
 
     def _patch_raw_observation(self, obs):
@@ -157,7 +166,7 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
         car_w = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_W, dtype=jnp.int32)
         car_h = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_H, dtype=jnp.int32)
 
-        # Fixed NAVIGATE goal: placed so the chicken's effective hitbox (which extends
+        # Fixed COLLECT goal: placed so the chicken's effective hitbox (which extends
         # 2px above sprite top due to chicken_hit_inset_y_top=-2) overlaps it exactly
         # when the chicken reaches the scoring line.
         goal_x      = jnp.array([FREEWAY_CHICKEN_X + 1], dtype=jnp.int32)   # match chicken x-inset
@@ -168,7 +177,10 @@ class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
         goal_w      = jnp.array([FREEWAY_CHICKEN_HIT_W], dtype=jnp.int32)
         goal_h      = jnp.array([FREEWAY_CHICKEN_HIT_H], dtype=jnp.int32)
         goal_active = jnp.array([1], dtype=jnp.int32)
-        goal_label  = jnp.array([LABEL_NAVIGATE], dtype=jnp.int32)
+        # Use Seaquest's well-trained COLLECT head for zero-shot crossing. NAVIGATE
+        # was used previously, but its sparse Seaquest surface usage transferred
+        # backward movement here.
+        goal_label  = jnp.array([FREEWAY_GOAL_LABEL], dtype=jnp.int32)
         goal_visual_id = jnp.array([-1], dtype=jnp.int32)
         goal_offscreen = jnp.array([0], dtype=jnp.int32)  # fixed goal never scrolls
 

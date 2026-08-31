@@ -13,7 +13,7 @@ Targeting priority:
   3. TARGET a car directly ahead (smaller y) if it is imminently dangerous:
        AABB x-overlap / small gap AND vertical surface gap < Y_AHEAD_THRESH
   4. TARGET a car in the same lane if approaching within IN_LANE_TTC_FRAMES.
-  5. Otherwise select the NAVIGATE goal (nearest by AABB surface gap).
+  5. Otherwise select the fixed top COLLECT goal.
 """
 
 import jax.numpy as jnp
@@ -26,7 +26,7 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.observations.egocentric import player_object_aabb_gaps
 
 NO_TARGET_IDX = -1  # unused in practice: the top navigate goal is always present
-NAVIGATE_GOAL_IDX = 11  # slot 0=NOOP, 1-10=cars, 11=navigate goal
+NAVIGATE_GOAL_IDX = 11  # back-compat name: slot 11 is now the top COLLECT goal
 COLLECT_GOAL_IDX = NAVIGATE_GOAL_IDX  # back-compat alias
 
 # Ahead car: edge-to-edge vertical gap and horizontal proximity.
@@ -83,6 +83,8 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     labels = objects.semantic_label[-1]
 
     is_avoid   = labels == LABEL_AVOID
+    # LABEL_NAVIGATE remains accepted for old checkpoints/observations, while
+    # current Freeway observations label the top waypoint as COLLECT.
     is_navigate = jnp.logical_or(labels == LABEL_NAVIGATE, labels == LABEL_COLLECT)
     valid_avoid   = jnp.logical_and(active, is_avoid)
     valid_navigate = jnp.logical_and(active, is_navigate)

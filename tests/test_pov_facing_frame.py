@@ -106,7 +106,8 @@ def test_mapper_follows_sprite_facing_not_target():
         y = jnp.array([80.0])
         width = jnp.array([8.0])
         height = jnp.array([8.0])
-        orientation = jnp.array([180.0])  # sprite faces left
+        # JAXAtari sprite: 0=up, 90=right, 180=down, 270=left.
+        orientation = jnp.array([270.0])  # sprite faces left
 
     class _Raw:
         player = _Player()

@@ -133,6 +133,7 @@ def make_train(
     legal_ego_mask_fn=None,
     ego_mapper_noop_action=0,
     ego_mapper_fire_action=1,
+    no_target_game_action=0,
 ):
     """
     Factory that creates a `train(rng, params, batch_stats)` function.
@@ -607,7 +608,13 @@ def make_train(
                     enabled=meta_fire_enabled,
                 )
                 force_noop = jnp.logical_or(no_target, meta_noop)
-                idle_action = jnp.int32(int(config.get("NO_TARGET_GAME_ACTION", 0)))
+                idle_action = jnp.int32(
+                    int(
+                        config["NO_TARGET_GAME_ACTION"]
+                        if config.get("NO_TARGET_GAME_ACTION") is not None
+                        else no_target_game_action
+                    )
+                )
 
                 raw_labels = jax.vmap(
                     lambda labels, idx: labels[-1, idx]
@@ -1702,7 +1709,10 @@ def make_train(
                 active_skills = 0
                 combined_q = np.array([0.0, 0.0, 0.0])
             elif target_obj_idxs == no_target_idx:
-                global_action = int(config.get("NO_TARGET_GAME_ACTION", 0))
+                _idle = config.get("NO_TARGET_GAME_ACTION")
+                global_action = int(
+                    _idle if _idle is not None else no_target_game_action
+                )
                 active_skills = 0
                 combined_q = np.array([0.0, 0.0, 0.0])
             elif eval_meta_fire:

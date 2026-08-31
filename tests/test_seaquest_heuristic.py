@@ -11,7 +11,6 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_COLLECT,
     LABEL_DESTROY,
-    LABEL_NAVIGATE,
 )
 from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
 from concept_based_learning.environments.seaquest.heuristic_policy import (
@@ -28,6 +27,7 @@ from concept_based_learning.environments.seaquest.heuristic_policy import (
     get_heuristic_target,
 )
 from concept_based_learning.environments.seaquest.label import (
+    SEAQUEST_SURFACE_LABEL,
     SURFACE_WP_SLOT_CX,
     SURFACE_WP_SUB_CLEAR_PX,
     select_surface_waypoint_x,
@@ -100,7 +100,7 @@ def _make_objects(
     labels = labels.at[:, 17:29].set(LABEL_DESTROY)
     labels = labels.at[:, SURFACE_SUB_IDX].set(LABEL_AVOID)
     labels = labels.at[:, 30:34].set(LABEL_AVOID)
-    labels = labels.at[:, SURFACE_DUMMY_IDX].set(LABEL_NAVIGATE)
+    labels = labels.at[:, SURFACE_DUMMY_IDX].set(SEAQUEST_SURFACE_LABEL)
     active = active.at[:, SURFACE_DUMMY_IDX].set(1.0)
     y = y.at[:, SURFACE_DUMMY_IDX].set(44.0)
 
@@ -153,6 +153,10 @@ def _make_objects(
         active=active,
         semantic_label=labels,
     )
+
+
+def test_surface_waypoint_uses_collect_skill():
+    assert SEAQUEST_SURFACE_LABEL == LABEL_COLLECT
 
 
 def test_surface_waypoint_picks_nearest_slot_without_sub():

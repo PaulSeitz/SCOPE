@@ -1,0 +1,64 @@
+# Pong zero-shot pixel — seaquest_skills_pixel_pov (facing-relative mapper).
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: transfer
+PAPER_EVAL_MODS: pong
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_pixel_pov
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_pixel_pov/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_pixel_pov
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: pong
+USE_LEGACY_EGO_OBS: false
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+USE_POV_RELATIVE_MAPPER: true
+USE_POV_FACING_FRAME: false
+SAVE_PATH: ./outputs/models/paper_eval/rq2/pong_transfer_pixel_pov
+WANDB_RUN_NAME: po_paper_rq2_transfer_pixel_pov
+WANDB_TAGS:
+- suite:thesis_facing
+- rq:2
+- env:pong
+- phase:zero_shot
+- skill_input:pixel_embed
+- mapper:pov_facing
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SKILL_INPUT_MODE: pixel_embed
+HEURISTIC_MODE: nearest
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
+
+META_PIXEL_DO_RESIZE: true
+META_PIXEL_USE_NATIVE_DOWNSCALING: true
+META_PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+META_PIXEL_GRAYSCALE: true
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 2
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: nearest
+  SKILL_INPUT_MODE: pixel_embed
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: true
+  USE_EGO_SHOT_FEATURES: false

@@ -66,12 +66,10 @@ Usage:
   #   GPU2: Seaquest noclip facing_xy → SQ mods + Pong/PH/BR zero-shot
   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu2 --wait-deps --lean
 
-  # Facing ablations (clip20 / noclip / sincos / φ-deg); materialize configs first:
-  python scripts/materialize_pov_facing_ablation_schedule.py
-  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_ablation_gpu0 --wait-deps --lean
-  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite pov_facing_ablation_gpu1 --wait-deps --lean
-  CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py --suite pov_facing_ablation_gpu2 --wait-deps --lean
-  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_ablation_phideg --wait-deps --lean
+  # Facing / thesis overnight (φ8 clip50 COLLECT-surface ego + POV-mapper pixel/OC):
+  #   python scripts/materialize_thesis_facing_suite.py
+  #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
+  #     --suite thesis_facing --gpus 0,1 --wait-deps --lean --resume
   # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
   CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
 
@@ -283,6 +281,47 @@ THESIS_TIER_A_STEMS = (
     # --- RQ3 pixel tandem ---
     "seaquest_tandem_pixel_ego_clip50_angbins",
     "seaquest_tandem_pixel_ego_clip50_angbins_eval",
+)
+
+# Overnight paper spine: facing φ8 clip50 COLLECT-surface ego + POV-mapper pixel/OC.
+# Ego/pixel/OC skill trains are fresh stems (surface/goal relabel + mapper lockout).
+# --resume only skips existing seaquest_pqn / pqn_oc / heuristic ckpts.
+THESIS_FACING_SUITE = "thesis_facing"
+THESIS_FACING_STEMS = (
+    # --- RQ1 trains ---
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_collectsurface",
+    "seaquest_skills_pixel_pov",
+    "seaquest_skills_oc_pov",
+    "seaquest_pqn",
+    "seaquest_pqn_oc",
+    # --- RQ1 evals ---
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_collectsurface_eval_full",
+    "seaquest_skills_pixel_pov_eval_full",
+    "seaquest_skills_oc_pov_eval_full",
+    "seaquest_skills_pixel_pov_eval_nooutline",
+    "seaquest_pqn_eval",
+    "seaquest_pqn_oc_eval",
+    "seaquest_heuristic_random",
+    # --- RQ2 ego zero-shot ---
+    "pong_transfer_ego_pov_clip50_facing_psibins8_collectsurface",
+    "tennis_transfer_ego_pov_clip50_facing_psibins8_collectsurface",
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8_collectsurface",
+    "freeway_transfer_ego_pov_clip50_facing_psibins8_collectsurface",
+    "asterix_transfer_ego_pov_clip50_facing_psibins8_collectsurface",
+    "phoenix_transfer_ego_pov_clip50_facing_psibins8_collectsurface",
+    # --- RQ2 pixel / OC zero-shot (same facing-relative mapper) ---
+    "pong_transfer_pixel_pov",
+    "tennis_transfer_pixel_pov",
+    "beamrider_transfer_pixel_pov",
+    "freeway_transfer_pixel_pov",
+    "asterix_transfer_pixel_pov",
+    "phoenix_transfer_pixel_pov",
+    "pong_transfer_oc_pov",
+    "tennis_transfer_oc_pov",
+    "beamrider_transfer_oc_pov",
+    "freeway_transfer_oc_pov",
+    "asterix_transfer_oc_pov",
+    "phoenix_transfer_oc_pov",
 )
 
 # Tier B: 5M finetune + post-eval on all RQ2 envs × ego/pixel/oc.
@@ -855,6 +894,7 @@ SUITE_STEMS = {
     CLIP_BINS_NODECAY_SUITE: CLIP_BINS_NODECAY_STEMS,
     CLIP50_ANGBINS_FULL_SUITE: CLIP50_ANGBINS_FULL_STEMS,
     THESIS_TIER_A_SUITE: THESIS_TIER_A_STEMS,
+    THESIS_FACING_SUITE: THESIS_FACING_STEMS,
     THESIS_TIER_B_SUITE: THESIS_TIER_B_STEMS,
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
@@ -2156,6 +2196,9 @@ def main() -> None:
             "Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem "
             "(1 GPU sequential). "
             f"{THESIS_TIER_A_SUITE} (alias {THESIS_FINAL_SUITE}): ground-up Tier A — "
+            "legacy clip50_angbins ego (pre-facing). Prefer "
+            f"{THESIS_FACING_SUITE} for the overnight facing φ8 clip50 spine "
+            "(COLLECT-surface ego + pixel/oc POV-mapper retrains + RQ2 zero-shot). "
             "RQ1 all arms + full SQ eval + RQ2 ego transfer (6 envs) + RQ3 pixel "
             "tandem (~2–3 GPUs overnight with --wait-deps). "
             f"{THESIS_TIER_B_SUITE}: RQ2 finetune 5M (use --post-eval). "

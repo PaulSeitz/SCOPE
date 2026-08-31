@@ -1,0 +1,64 @@
+# Pixel no-outline ablation: same seaquest_skills_pixel_pov ckpt, outline paint OFF.
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: skills
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_pixel_pov
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_pixel_pov/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_pixel_pov
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: seaquest
+USE_LEGACY_EGO_OBS: false
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+USE_POV_RELATIVE_MAPPER: true
+USE_POV_FACING_FRAME: false
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_pixel_pov_nooutline
+WANDB_RUN_NAME: sq_paper_rq1_eval_pixel_pov_nooutline
+WANDB_TAGS:
+- suite:thesis_facing
+- rq:1
+- env:seaquest
+- phase:mod_eval
+- skill_input:pixel_embed
+- mapper:pov_facing
+- probe:nooutline
+GAME_MODS: null
+SKILL_INPUT_MODE: pixel_embed
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
+META_PIXEL_DO_RESIZE: true
+META_PIXEL_USE_NATIVE_DOWNSCALING: true
+META_PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+META_PIXEL_GRAYSCALE: true
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 35
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: pixel_embed
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: true
+  SKILL_PIXEL_CNN_CHANNELS:
+  - 16
+  - 32
+  SKILL_PIXEL_PAINT_TARGET_OUTLINE: false

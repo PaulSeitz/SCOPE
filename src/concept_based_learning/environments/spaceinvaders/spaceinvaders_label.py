@@ -44,6 +44,38 @@ class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
         # 36 Enemies + 3 Enemy Bullets + 1 UFO = 40 active objects
         super().__init__(env, max_objects=41)
 
+    def _patch_player_aabb(self, obs, env_state):
+        """Align ``player.x`` with the rendered / collidable cannon AABB.
+
+        Jaxatari's internal ``player_x`` is a right-side anchor: the sprite is
+        drawn at ``player_x - width`` and bullets spawn near that visual centre.
+        Older jaxatari builds reported ``player.x = player_x``, shifting ego
+        centres ~7px right of the cannon so shots looked (and aimed) off-bore.
+        """
+        base = self._unwrap_env_state(env_state)
+        player = obs.raw_observation.player
+        width = jnp.asarray(player.width)
+        w_latest = width[-1] if width.ndim > 0 else width
+        left = jnp.asarray(base.player_x, dtype=player.x.dtype) - jnp.asarray(
+            w_latest, dtype=player.x.dtype
+        )
+        if player.x.ndim == 0:
+            new_x = left
+        else:
+            new_x = player.x.at[-1].set(left)
+        return obs.replace(
+            raw_observation=obs.raw_observation.replace(player=player.replace(x=new_x))
+        )
+
+    def reset(self, key=None):
+        obs, env_state = super().reset(key)
+        return self._patch_player_aabb(obs, env_state), env_state
+
+    def step(self, state, action):
+        obs, env_state, reward, done, info = super().step(state, action)
+        obs = self._patch_player_aabb(obs, env_state)
+        return obs, env_state, reward, done, info
+
     def _substep_env_state_events(self, prev_env_state, next_env_state):
         """
         Detect enemy kills this substep.

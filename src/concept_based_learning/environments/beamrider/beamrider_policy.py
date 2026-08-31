@@ -2,14 +2,15 @@
 
 Player sits on the bottom beams (y≈164) and shoots upward. Targeting priority:
 
-  1. AVOID (shots / falling rocks / lane blockers / bouncer) when in our lane
-     or within CLOSE_AVOID_RANGE (AABB surface gap).
-  2. DESTROY (UFOs / meteoroids / kamikaze / mothership) when on our beam
-     ahead and within DESTROY_SHOOT_RANGE.
-  3. COLLECT (coins / rejuvenator life) when no DESTROY sits in front of it
-     on the same lane.
-  4. Else nearest active DESTROY (to move toward a beam with enemies), else
-     NO_TARGET.
+  1. AVOID (shots / chasing meteoroids / falling rocks / lane blockers /
+     bouncer / shot rejuvenator debris) when in our lane or within
+     CLOSE_AVOID_RANGE (AABB surface gap).
+  2. DESTROY (UFOs / kamikaze / mothership) when on our beam ahead and within
+     DESTROY_SHOOT_RANGE.
+  3. COLLECT (coins / intact rejuvenator life) when no DESTROY sits in front
+     of it on the same lane.
+  4. Else nearest active DESTROY on a reachable beam (lanes 1–5; outer
+     diagonals 0/6 are approach-only and ignored), else NO_TARGET.
 
 All proximity checks use AABB surface gap (skill ego distance metric).
 """
@@ -33,6 +34,18 @@ LANE_X_THRESH = 10.0
 CLOSE_AVOID_RANGE = 30.0
 # DESTROY: shoot when in-lane ahead or within this surface gap.
 DESTROY_SHOOT_RANGE = 90.0
+# JAXAtari beam geometry (7 diagonal lanes; 0/6 are unreachable approach rails).
+_TOP_CLIP = 43.0
+_TOP_LANES_X = jnp.array([38.0, 61.0, 71.0, 81.0, 91.0, 102.0, 123.0], dtype=jnp.float32)
+_LANE_DX_OVER_DY = jnp.array([-0.5, -0.25, -0.13, 0.0, 0.13, 0.25, 0.5], dtype=jnp.float32)
+
+
+def _on_unreachable_outer_beam(o_cx, o_cy):
+    """True when object centre sits on diagonal beams 0 or 6 (player cannot engage)."""
+    dy = o_cy - _TOP_CLIP
+    lane_x_at_y = _TOP_LANES_X[None, :] + _LANE_DX_OVER_DY[None, :] * dy[:, None]
+    lane_id = jnp.argmin(jnp.abs(lane_x_at_y - o_cx[:, None]), axis=1)
+    return jnp.logical_or(lane_id == 0, lane_id == 6)
 
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
@@ -51,6 +64,8 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     is_avoid = labels == LABEL_AVOID
     is_destroy = labels == LABEL_DESTROY
     is_collect = labels == LABEL_COLLECT
+    on_outer_beam = _on_unreachable_outer_beam(o_cx, o_cy)
+    reachable_beam = jnp.logical_not(on_outer_beam)
 
     # ------------------------------------------------------------------
     # 1. AVOID: in-lane threats or anything within CLOSE_AVOID_RANGE
@@ -70,8 +85,11 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     destroy_shootable = jnp.logical_and(
         jnp.logical_and(active, is_destroy),
         jnp.logical_and(
-            jnp.logical_and(in_lane, ahead),
-            distances <= DESTROY_SHOOT_RANGE,
+            reachable_beam,
+            jnp.logical_and(
+                jnp.logical_and(in_lane, ahead),
+                distances <= DESTROY_SHOOT_RANGE,
+            ),
         ),
     )
     have_destroy = jnp.any(destroy_shootable)
@@ -79,8 +97,11 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
         jnp.int32
     )
 
-    # Fallback DESTROY: any active enemy (when nothing is in shoot range yet).
-    any_destroy = jnp.logical_and(active, is_destroy)
+    # Fallback DESTROY: reachable beams only (ignore outer 0/6 approach rails).
+    any_destroy = jnp.logical_and(
+        jnp.logical_and(active, is_destroy),
+        reachable_beam,
+    )
     have_any_destroy = jnp.any(any_destroy)
     any_destroy_idx = jnp.argmin(jnp.where(any_destroy, distances, jnp.inf)).astype(
         jnp.int32
@@ -99,7 +120,9 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     d_cy = o_cy[:, None]
     c_cx = o_cx[None, :]
     c_cy = o_cy[None, :]
-    d_active_destroy = jnp.logical_and(active, is_destroy)[:, None]
+    d_active_destroy = jnp.logical_and(
+        jnp.logical_and(active, is_destroy), reachable_beam
+    )[:, None]
     same_lane_as_collect = jnp.abs(d_cx - c_cx) <= LANE_X_THRESH
     between = jnp.logical_and(d_cy < p_cy, d_cy >= c_cy)
     blocking = jnp.logical_and(

@@ -53,10 +53,50 @@ asterix_action_mapper, asterix_inverse_action_mapper = make_target_aligned_actio
 _N_LANES = 8
 _ASTERIX_MAX_OBJECTS = 17  # 16 game + 1 NOOP
 
+# JAXAtari player_direction: 1 = left, 2 = right (sprite index, not screen bearing).
+# Map to ObjectObservation.orientation so POV facing tracks turns.
+_ASTERIX_ORI_LEFT = 270.0
+_ASTERIX_ORI_RIGHT = 90.0
+
+
+def asterix_sprite_orientation_from_direction(player_direction) -> jnp.ndarray:
+    """JAXAtari sprite orientation for POV facing (90=right, 270=left)."""
+    direction = jnp.asarray(player_direction, dtype=jnp.int32)
+    return jnp.where(
+        direction == 2,
+        jnp.float32(_ASTERIX_ORI_RIGHT),
+        jnp.float32(_ASTERIX_ORI_LEFT),
+    )
+
 
 class AsterixSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         super().__init__(env, max_objects=_ASTERIX_MAX_OBJECTS)
+
+    def _patch_player_facing_from_direction(self, obs, env_state):
+        """Stamp walk direction into player.orientation for facing-frame POV."""
+        player = obs.raw_observation.player
+        base = self._unwrap_env_state(env_state)
+        sprite_ori = asterix_sprite_orientation_from_direction(base.player_direction)
+        new_player = player.replace(
+            orientation=jnp.full_like(
+                jnp.asarray(player.orientation, dtype=jnp.float32),
+                sprite_ori,
+            )
+        )
+        return obs.replace(
+            raw_observation=obs.raw_observation.replace(player=new_player)
+        )
+
+    def step(self, state, action):
+        obs, env_state, reward, done, info = super().step(state, action)
+        obs = self._patch_player_facing_from_direction(obs, env_state)
+        return obs, env_state, reward, done, info
+
+    def reset(self, key=None):
+        obs, env_state = super().reset(key)
+        obs = self._patch_player_facing_from_direction(obs, env_state)
+        return obs, env_state
 
     def _substep_env_state_events(self, prev_env_state, next_env_state):
         """

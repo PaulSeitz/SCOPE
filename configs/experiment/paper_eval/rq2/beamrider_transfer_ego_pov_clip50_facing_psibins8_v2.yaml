@@ -1,4 +1,4 @@
-# Beamrider zero-shot — seaquest_skills_ego_pov_clip50_facing_psibins8_v2.
+# Beamrider zero-shot ego — facing φ8 clip50 (Seaquest-trained).
 PAPER_EVAL_RQ: 2
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: transfer
@@ -20,7 +20,7 @@ EGO_POSE_XY: false
 SAVE_PATH: ./outputs/models/paper_eval/rq2/beamrider_transfer_ego_pov_clip50_facing_psibins8_v2
 WANDB_RUN_NAME: br_paper_rq2_transfer_ego_pov_clip50_facing_psibins8_v2
 WANDB_TAGS:
-- suite:pov_facing_v2
+- suite:thesis_facing
 - rq:2
 - env:beamrider
 - phase:zero_shot
@@ -36,7 +36,6 @@ USE_EGO_SHOT_FEATURES: false
 EGO_DISTANCE_CLIP_MAX_PX: 50
 EGO_PSI_ANGLE_BINS: 8
 EGO_LEGAL_ACTION_MASK: false
-NO_TARGET_GAME_ACTION: 1
 GAME_MODS: null
 EVAL_GAME_MODS: null
 SKILL_INPUT_MODE: ego

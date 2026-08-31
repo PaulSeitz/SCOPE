@@ -3,16 +3,24 @@
 Observation entities (jax_montezumarevenge):
   enemies, items, doors, ropes, conveyors, platforms.
 
+Ladders exist only in env state (not in the object observation).  This wrapper
+injects virtual 1px COLLECT waypoints from ``env_state.ladders_*`` (Kangaroo
+pattern) and patches player leaves that jaxatari emits as length-1 vectors.
+
 Lasers exist in env state but are not exposed in the object observation, so
 they are omitted here.
 
-Layout (game_max_objects=23, +1 meta NOOP → 24):
-  [0-2]   enemies    (AVOID)
-  [3-5]   items      (COLLECT)
-  [6-7]   doors      (NAVIGATE)
-  [8-9]   ropes      (NAVIGATE)
-  [10]    conveyors  (BLOCKER)
-  [11-22] platforms  (BLOCKER)
+Layout (game_max_objects=31, +1 meta NOOP → 32):
+  [0-2]   enemies           (AVOID)
+  [3-6]   ladder bottoms    (COLLECT waypoints)
+  [7-10]  ladder tops       (COLLECT waypoints)
+  [11-13] items             (COLLECT)
+  [14-15] doors             (NAVIGATE)
+  [16-17] ropes             (NAVIGATE)
+  [18]    conveyors         (BLOCKER)
+  [19-30] platforms         (BLOCKER)
+
+With meta-NOOP prepended, planner slots are +1 (enemies start at 1).
 """
 
 from __future__ import annotations
@@ -61,18 +69,165 @@ montezuma_action_mapper, montezuma_inverse_action_mapper = make_target_aligned_a
 )
 
 _N_ENEMIES = 3
+_N_LADDERS = 4  # MAX_LADDERS_PER_ROOM
+_N_WAYPOINTS = _N_LADDERS * 2  # bottom then top
 _N_ITEMS = 3
 _N_DOORS = 2
 _N_ROPES = 2
 _N_CONVEYORS = 1
 _N_PLATFORMS = 12
-_N_GAME = _N_ENEMIES + _N_ITEMS + _N_DOORS + _N_ROPES + _N_CONVEYORS + _N_PLATFORMS  # 23
+_N_GAME = (
+    _N_ENEMIES
+    + _N_WAYPOINTS
+    + _N_ITEMS
+    + _N_DOORS
+    + _N_ROPES
+    + _N_CONVEYORS
+    + _N_PLATFORMS
+)  # 31
 _MONTEZUMA_MAX_OBJECTS = _N_GAME + 1  # + meta NOOP
+
+# Standing player height in jax_montezumarevenge; waypoint y = floor - half.
+_PLAYER_STAND_HEIGHT = 20
+_PLAYER_STAND_HALF = _PLAYER_STAND_HEIGHT // 2
+# Climb shaft centre is ladders_x + 8 (see jax_montezumarevenge climb snap).
+_LADDER_SHAFT_HALF = 8
+# Raise top waypoints so arrive does not fire mid-climb.
+_TOP_WAYPOINT_LIFT_PX = 12
+
+# Game-layout indices (before meta-NOOP). Policy slots = these + 1.
+WP_BOT0 = _N_ENEMIES  # 3
+WP_TOP0 = _N_ENEMIES + _N_LADDERS  # 7
+ITEM0 = _N_ENEMIES + _N_WAYPOINTS  # 11
+DOOR0 = ITEM0 + _N_ITEMS  # 14
+
+
+def _squeeze_trailing_singleton(leaf):
+    """Collapse a trailing size-1 axis (jaxatari player leaves as length-1 vectors)."""
+    leaf = jnp.asarray(leaf)
+    if leaf.ndim >= 1 and leaf.shape[-1] == 1:
+        return jnp.squeeze(leaf, axis=-1)
+    return leaf
+
+
+def _orientation_from_player_dir(player_dir):
+    """Map Montezuma ``player_dir`` ±1 → Kangaroo-style degrees (right=90, left=270)."""
+    return jnp.where(
+        jnp.asarray(player_dir) == 1,
+        jnp.float32(90.0),
+        jnp.float32(270.0),
+    )
+
+
+def _ladder_waypoints_from_state(env_state):
+    """Build bottom/top 1px COLLECT waypoints from ``env_state.ladders_*``."""
+    lad_cx = env_state.ladders_x.astype(jnp.float32) + float(_LADDER_SHAFT_HALF)
+    active = env_state.ladders_active.astype(jnp.int32)
+    bot_y = env_state.ladders_bottom.astype(jnp.float32) - float(_PLAYER_STAND_HALF)
+    top_y = (
+        env_state.ladders_top.astype(jnp.float32)
+        - float(_PLAYER_STAND_HALF)
+        - float(_TOP_WAYPOINT_LIFT_PX)
+    )
+    ones = jnp.ones_like(lad_cx)
+    return {
+        "bot_x": lad_cx,
+        "bot_y": bot_y,
+        "top_x": lad_cx,
+        "top_y": top_y,
+        "w": ones,
+        "h": ones,
+        "active": active,
+    }
 
 
 class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
         super().__init__(env, max_objects=_MONTEZUMA_MAX_OBJECTS)
+
+    def _patch_raw_observation(self, semantic_obs, env_state):
+        """Squeeze player (stack,1) leaves, stamp facing, inject ladder waypoints."""
+        unwrapped = self._unwrap_env_state(env_state.atari_state)
+
+        player = semantic_obs.raw_observation.player
+        new_player = player.replace(
+            x=_squeeze_trailing_singleton(player.x),
+            y=_squeeze_trailing_singleton(player.y),
+            width=_squeeze_trailing_singleton(player.width),
+            height=_squeeze_trailing_singleton(player.height),
+            active=_squeeze_trailing_singleton(player.active),
+            orientation=_squeeze_trailing_singleton(player.orientation),
+            state=_squeeze_trailing_singleton(player.state),
+        )
+        ori = _orientation_from_player_dir(unwrapped.player_dir)
+        cur_ori = new_player.orientation
+        if cur_ori.ndim == 0:
+            new_ori = ori.astype(jnp.float32)
+        else:
+            new_ori = jnp.asarray(cur_ori, dtype=jnp.float32).at[-1].set(ori)
+        new_player = new_player.replace(orientation=new_ori)
+        semantic_obs = semantic_obs.replace(
+            raw_observation=semantic_obs.raw_observation.replace(player=new_player)
+        )
+        return self._inject_ladder_waypoints(semantic_obs, unwrapped)
+
+    def _inject_ladder_waypoints(self, semantic_obs, env_state):
+        """Fill reserved COLLECT waypoint slots from current room ladders."""
+        wp = _ladder_waypoints_from_state(env_state)
+        objects = semantic_obs.objects
+        # Object arrays are [stack, max_objects] after meta prepend.
+        # Game layout starts at meta_reserved_slots (usually 1).
+        meta = self.meta_reserved_slots
+        bot0 = meta + WP_BOT0
+        top0 = meta + WP_TOP0
+        n = _N_LADDERS
+
+        def _set_block(leaf, start, values, cast=True):
+            vals = jnp.asarray(values)
+            if cast:
+                vals = vals.astype(leaf.dtype)
+            # Broadcast across frame stack: write identical waypoints on every frame.
+            stacked = jnp.broadcast_to(vals, (leaf.shape[0], n))
+            return leaf.at[:, start : start + n].set(stacked)
+
+        new_x = _set_block(objects.x, bot0, wp["bot_x"])
+        new_x = _set_block(new_x, top0, wp["top_x"])
+        new_y = _set_block(objects.y, bot0, wp["bot_y"])
+        new_y = _set_block(new_y, top0, wp["top_y"])
+        new_w = _set_block(objects.width, bot0, wp["w"])
+        new_w = _set_block(new_w, top0, wp["w"])
+        new_h = _set_block(objects.height, bot0, wp["h"])
+        new_h = _set_block(new_h, top0, wp["h"])
+        new_act = _set_block(objects.active, bot0, wp["active"])
+        new_act = _set_block(new_act, top0, wp["active"])
+
+        labels = jnp.full(n, LABEL_COLLECT, dtype=objects.semantic_label.dtype)
+        new_lab = objects.semantic_label.at[:, bot0 : bot0 + n].set(
+            jnp.broadcast_to(labels, (objects.semantic_label.shape[0], n))
+        )
+        new_lab = new_lab.at[:, top0 : top0 + n].set(
+            jnp.broadcast_to(labels, (new_lab.shape[0], n))
+        )
+
+        return semantic_obs.replace(
+            objects=objects.replace(
+                x=new_x,
+                y=new_y,
+                width=new_w,
+                height=new_h,
+                active=new_act,
+                semantic_label=new_lab,
+            )
+        )
+
+    def reset(self, key=None):
+        semantic_obs, state = super().reset(key)
+        return self._patch_raw_observation(semantic_obs, state), state
+
+    def step(self, state, action):
+        semantic_obs, new_state, reward, done, info = super().step(state, action)
+        semantic_obs = self._patch_raw_observation(semantic_obs, new_state)
+        return semantic_obs, new_state, reward, done, info
 
     def _substep_collect_events(self, prev_env_state, next_env_state):
         """Item pickup → was_collected (items_active 1→0 without life loss)."""
@@ -84,8 +239,8 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         collected = jnp.logical_and(item_died, jnp.logical_not(life_lost)).astype(
             jnp.int32
         )
-        # Slot layout: enemies | items | doors | ropes | conveyors | platforms
-        zeros_before = jnp.zeros(_N_ENEMIES, dtype=jnp.int32)
+        # Slot layout: enemies | waypoints | items | doors | ropes | conveyors | platforms
+        zeros_before = jnp.zeros(_N_ENEMIES + _N_WAYPOINTS, dtype=jnp.int32)
         zeros_after = jnp.zeros(
             _N_DOORS + _N_ROPES + _N_CONVEYORS + _N_PLATFORMS, dtype=jnp.int32
         )
@@ -109,15 +264,40 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         conveyors = obs.conveyors
         platforms = obs.platforms
 
+        # Ladder waypoints: reserved inactive slots; filled from env_state in patch.
+        wp_zeros = jnp.zeros(_N_LADDERS, dtype=enemies.x.dtype)
+        wp_ones = jnp.ones(_N_LADDERS, dtype=enemies.x.dtype)
+        wp_inactive = jnp.zeros(_N_LADDERS, dtype=jnp.int32)
+
         all_x = jnp.concatenate(
-            [enemies.x, items.x, doors.x, ropes.x, conveyors.x, platforms.x]
+            [
+                enemies.x,
+                wp_zeros,
+                wp_zeros,
+                items.x,
+                doors.x,
+                ropes.x,
+                conveyors.x,
+                platforms.x,
+            ]
         )
         all_y = jnp.concatenate(
-            [enemies.y, items.y, doors.y, ropes.y, conveyors.y, platforms.y]
+            [
+                enemies.y,
+                wp_zeros,
+                wp_zeros,
+                items.y,
+                doors.y,
+                ropes.y,
+                conveyors.y,
+                platforms.y,
+            ]
         )
         all_w = jnp.concatenate(
             [
                 enemies.width,
+                wp_ones,
+                wp_ones,
                 items.width,
                 doors.width,
                 ropes.width,
@@ -128,6 +308,8 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_h = jnp.concatenate(
             [
                 enemies.height,
+                wp_ones,
+                wp_ones,
                 items.height,
                 doors.height,
                 ropes.height,
@@ -138,6 +320,8 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_active = jnp.concatenate(
             [
                 enemies.active.astype(jnp.int32),
+                wp_inactive,
+                wp_inactive,
                 items.active.astype(jnp.int32),
                 doors.active.astype(jnp.int32),
                 ropes.active.astype(jnp.int32),
@@ -148,6 +332,7 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_labels = jnp.concatenate(
             [
                 jnp.full(_N_ENEMIES, LABEL_AVOID, dtype=jnp.int32),
+                jnp.full(_N_WAYPOINTS, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_ITEMS, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_DOORS, LABEL_NAVIGATE, dtype=jnp.int32),
                 jnp.full(_N_ROPES, LABEL_NAVIGATE, dtype=jnp.int32),

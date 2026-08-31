@@ -80,7 +80,7 @@ EGO_NAMES = {
 # (synthetic orientation) instead of reading a sprite orientation.
 ENV_VIEW_AXES: dict[str, tuple[str, ...]] = {
     "seaquest": ("right", "left"),
-    "tennis": ("right", "left"),
+    "tennis": ("down (top court)", "up (bottom court)"),
     "kangaroo": ("right", "left"),
     "montezumarevenge": ("right", "left"),
     "venture": ("right", "left"),
@@ -94,7 +94,7 @@ ENV_VIEW_AXES: dict[str, tuple[str, ...]] = {
     # Unresolved: asterix moves in 4 directions with no meaningful hull facing,
     # and skiing's declared axis is kept at 'up' only to preserve the previous
     # behaviour while its move table is still wrong (see playground check 2).
-    "asterix": ("UNRESOLVED (currently right/left)",),
+    "asterix": ("right", "left"),
     "skiing": ("UNRESOLVED (physically down, declared up)",),
 }
 
@@ -136,8 +136,27 @@ def expected_ego_move(phi_deg: float) -> int:
 
 def make_raw_env(env: str):
     from jaxatari import make as make_atari_env
+    from jaxatari.wrappers import AtariWrapper
 
-    return make_atari_env(env)
+    base = make_atari_env(env)
+    if env == "asterix":
+        from concept_based_learning.environments.asterix.asterix_label import (
+            AsterixSemanticWrapper,
+        )
+
+        wrapped = AtariWrapper(
+            base, sticky_actions=0.0, episodic_life=False, first_fire=True, noop_max=0
+        )
+        wrapped._cbl_frame_stack_size = 1
+        wrapped._cbl_frame_skip = 1
+        wrapped._cbl_clip_reward = False
+        return AsterixSemanticWrapper(wrapped)
+    return base
+
+
+def _playground_obs(obs):
+    """Unwrap SemanticObservation from env wrappers used in paper-eval paths."""
+    return obs.raw_observation if hasattr(obs, "raw_observation") else obs
 
 
 def action_set_of(raw_env):
@@ -155,6 +174,7 @@ def resolve_ale(action_set, emitted: int) -> int:
 
 
 def player_of(obs, env: str):
+    obs = _playground_obs(obs)
     getter = _POV_PROFILES.get(env, {}).get("player_getter") or _default_get_player
     return getter(obs)
 

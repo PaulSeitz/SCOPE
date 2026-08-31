@@ -96,29 +96,37 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
 
-    def step(self, state, action):
-        """Override step to trick the network's orientation distribution."""
-        obs, env_state, reward, done, info = super().step(state, action)
+    def _patch_player_facing_and_shield(self, obs, env_state):
+        """Fix facing to up and stamp visible shield-on into ``player.state``.
 
-        # Stabilize orientation for target-aligned ego action mapping (ship faces upward).
-        new_player = obs.raw_observation.player.replace(
-            orientation=jnp.full_like(obs.raw_observation.player.orientation, 90.0)
+        ``player.state > 0`` means the ability sprite is active (same cue a human
+        sees). Cooldown is *not* exposed — that would leak hidden timer state.
+        """
+        player = obs.raw_observation.player
+        base = self._unwrap_env_state(env_state)
+        shield_on = jnp.asarray(base.invincibility).astype(jnp.bool_)
+        shield_flag = jnp.where(shield_on, jnp.int32(1), jnp.int32(0))
+        st = jnp.asarray(getattr(player, "state", 0))
+        if st.ndim == 0:
+            new_state = jnp.full_like(player.x, shield_flag).astype(jnp.int32)
+        else:
+            new_state = jnp.full_like(st, shield_flag).astype(st.dtype)
+        new_player = player.replace(
+            orientation=jnp.full_like(player.orientation, 90.0),
+            state=new_state,
         )
-        new_raw_obs = obs.raw_observation.replace(player=new_player)
-        obs = obs.replace(raw_observation=new_raw_obs)
+        return obs.replace(raw_observation=obs.raw_observation.replace(player=new_player))
 
+    def step(self, state, action):
+        """Override step to stabilize facing and expose shield-active on player.state."""
+        obs, env_state, reward, done, info = super().step(state, action)
+        obs = self._patch_player_facing_and_shield(obs, env_state)
         return obs, env_state, reward, done, info
 
     def reset(self, key=None):
-        """Override reset to trick the network's orientation distribution."""
+        """Override reset to stabilize facing and expose shield-active on player.state."""
         obs, env_state = super().reset(key)
-
-        new_player = obs.raw_observation.player.replace(
-            orientation=jnp.full_like(obs.raw_observation.player.orientation, 90.0)
-        )
-        new_raw_obs = obs.raw_observation.replace(player=new_player)
-        obs = obs.replace(raw_observation=new_raw_obs)
-
+        obs = self._patch_player_facing_and_shield(obs, env_state)
         return obs, env_state
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:

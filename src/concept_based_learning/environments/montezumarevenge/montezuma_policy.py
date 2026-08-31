@@ -1,63 +1,128 @@
-"""Env-specific Montezuma's Revenge heuristic meta-policy.
+"""Montezuma's Revenge manual policy: room-4 ladder waypoints + skull AVOID.
 
-Platformer with enemies (AVOID), collectibles (COLLECT), and doors/ropes
-(NAVIGATE). Targeting priority:
+Plan (first room / room_id 4 — classic key path):
+  1. Center ladder BOT (climb down from spawn on the top floor)
+  2. Key item (COLLECT until inactive)
+  3. Center ladder BOT → TOP (climb back up)
+  4. Left door (NAVIGATE until inactive)
 
-  1. AVOID when within CLOSE_AVOID_RANGE (AABB surface gap).
-  2. Else nearest COLLECT.
-  3. Else nearest NAVIGATE (door / rope).
-  4. Else NO_TARGET.
+Interrupt:
+  AVOID rolling skull when within range (hysteresis release).
+
+Slot layout after meta-NOOP (see montezuma_label.py):
+  enemies            = 1..3   (AVOID)
+  ladder bottoms     = 4..7   (COLLECT waypoints; plan uses center = 4)
+  ladder tops        = 8..11  (COLLECT waypoints; plan uses center = 8)
+  items              = 12..14 (COLLECT; key = 12)
+  doors              = 15..16 (NAVIGATE; left = 15)
+  ropes / conveyors / platforms = 17..31
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
 
-from concept_based_learning.environments.datatypes import (
-    LABEL_AVOID,
-    LABEL_COLLECT,
-    LABEL_NAVIGATE,
+from concept_based_learning.environments.datatypes import LABEL_AVOID
+from concept_based_learning.environments.manual_policy import (
+    Interrupt,
+    ManualPolicySpec,
+    NavigateTo,
+    Sequence,
+    compile_policy,
 )
-from concept_based_learning.observations.egocentric import player_object_aabb_gaps
+from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
 
-NO_TARGET_IDX = -1
-CLOSE_AVOID_RANGE = 24.0
+# Center ladder (index 0) after meta-NOOP.
+_L0_BOT, _L0_TOP = 4, 8
+_KEY_SLOT = 12
+_LEFT_DOOR_SLOT = 15
+_ENEMY_SLOT0 = 1
+_ENEMY_SLOT1 = 3
+
+LADDER_ARRIVE = 8.0
+LADDER_TOP_ARRIVE = 12.0
+LADDER_TOP_PLATFORM_DY_MIN = 8.0
+LADDER_TOP_PLATFORM_DY_MAX = 22.0
+LADDER_TOP_PLATFORM_X_SLACK = 28.0
+
+# Skull AVOID disc + hysteresis (AABB surface gap via Interrupt defaults).
+SKULL_AVOID_RANGE = 28.0
+SKULL_AVOID_RELEASE = 40.0
+# Legacy alias kept for tests.
+CLOSE_AVOID_RANGE = SKULL_AVOID_RANGE
 
 
-def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
-    del prev_target_idx, rng
-
-    distances, *_ = player_object_aabb_gaps(raw_observation, objects)
-    active = objects.active[-1] > 0.5
-    labels = objects.semantic_label[-1]
-
-    is_avoid = labels == LABEL_AVOID
-    is_collect = labels == LABEL_COLLECT
-    is_navigate = labels == LABEL_NAVIGATE
-
-    avoid_threat = jnp.logical_and(
-        jnp.logical_and(active, is_avoid),
-        distances <= CLOSE_AVOID_RANGE,
-    )
-    have_avoid = jnp.any(avoid_threat)
-    avoid_idx = jnp.argmin(jnp.where(avoid_threat, distances, jnp.inf)).astype(
-        jnp.int32
-    )
-
-    collect_mask = jnp.logical_and(active, is_collect)
-    have_collect = jnp.any(collect_mask)
-    collect_idx = jnp.argmin(jnp.where(collect_mask, distances, jnp.inf)).astype(
-        jnp.int32
+def _wp(slot: int, arrive: float = LADDER_ARRIVE) -> NavigateTo:
+    return NavigateTo(
+        slot=slot,
+        arrive_dist=arrive,
+        complete_when="arrive",
+        skip_if_inactive=False,
     )
 
-    navigate_mask = jnp.logical_and(active, is_navigate)
-    have_navigate = jnp.any(navigate_mask)
-    navigate_idx = jnp.argmin(jnp.where(navigate_mask, distances, jnp.inf)).astype(
-        jnp.int32
+
+def _wp_top(slot: int) -> NavigateTo:
+    return NavigateTo(
+        slot=slot,
+        arrive_dist=LADDER_TOP_ARRIVE,
+        complete_when="arrive",
+        skip_if_inactive=False,
+        platform_reach_dy_min=LADDER_TOP_PLATFORM_DY_MIN,
+        platform_reach_dy_max=LADDER_TOP_PLATFORM_DY_MAX,
+        platform_reach_x_slack=LADDER_TOP_PLATFORM_X_SLACK,
     )
 
-    target = jnp.array(NO_TARGET_IDX, dtype=jnp.int32)
-    target = jnp.where(have_navigate, navigate_idx, target)
-    target = jnp.where(have_collect, collect_idx, target)
-    target = jnp.where(have_avoid, avoid_idx, target)
-    return target.astype(jnp.int32)
+
+def _collect_item(slot: int) -> NavigateTo:
+    return NavigateTo(
+        slot=slot,
+        arrive_dist=10.0,
+        complete_when="inactive",
+        skip_if_inactive=True,
+    )
+
+
+def _open_door(slot: int) -> NavigateTo:
+    return NavigateTo(
+        slot=slot,
+        arrive_dist=12.0,
+        complete_when="either",
+        skip_if_inactive=True,
+    )
+
+
+def _skull_threat_mask(raw, objects, ctx, plan_target):
+    """Restrict AVOID interrupt to enemy slots (rolling skull in room 4)."""
+    del raw, objects, plan_target
+    idxs = jnp.arange(ctx.n, dtype=jnp.int32)
+    return jnp.logical_and(idxs >= _ENEMY_SLOT0, idxs <= _ENEMY_SLOT1)
+
+
+MONTEZUMA_L1_STAGES = (
+    # Spawn is already on the top floor near the center ladder — go down first.
+    _wp(_L0_BOT),
+    _collect_item(_KEY_SLOT),
+    _wp(_L0_BOT),
+    _wp_top(_L0_TOP),
+    _open_door(_LEFT_DOOR_SLOT),
+)
+
+MONTEZUMA_POLICY = compile_policy(
+    ManualPolicySpec(
+        plan=Sequence(stages=MONTEZUMA_L1_STAGES),
+        interrupts=(
+            Interrupt(
+                labels=(LABEL_AVOID,),
+                within_x=SKULL_AVOID_RANGE,
+                within_y=SKULL_AVOID_RANGE,
+                release_x=SKULL_AVOID_RELEASE,
+                release_y=SKULL_AVOID_RELEASE,
+                threat_mask=_skull_threat_mask,
+            ),
+        ),
+        no_target_idx=NO_TARGET_IDX,
+    )
+)
+
+get_heuristic_target = MONTEZUMA_POLICY.as_legacy_heuristic()
+get_heuristic_target_with_state = MONTEZUMA_POLICY.as_stateful_heuristic()

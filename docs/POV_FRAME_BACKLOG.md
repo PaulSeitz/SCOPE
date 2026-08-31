@@ -14,14 +14,22 @@
 - **Pong `move_fire_table`** — `FORWARD_F`/`BACKWARD_F` were `LEFTFIRE` (paddle down);
   now `FIRE` into the field; lateral fire uses `RIGHTFIRE`/`LEFTFIRE`.
 
+## Fixed (2026-08-31)
+
+- **spaceinvaders `_MOVE_SPECS`** — was using Seaquest full-ALE ids; `env.step` indexes the
+  compact 6-action `ACTION_SET`, so ego RIGHT became LEFT. Now matches
+  `spaceinvaders_label.py`: `[2,2,0,3,3,3,0,2]` / `[4,4,1,5,5,5,1,4]`.
+- **tennis `_MOVE_SPECS` + facing** — 8-way table + court-side vertical facing
+  (top → down, bottom → up); sprite L/R walk direction no longer sets view axis.
+- **asterix facing** — stamp `player.orientation` from `player_direction`
+  (1=left, 2=right) in semantic wrapper; JAXAtari raw obs leaves orientation at 0.
+
 ## Open — low priority until post-eval
 
 | Env | Symptom | Likely fix |
 |-----|---------|------------|
-| **tennis** | 1 probe moves AWAY; table is Pong's 1-D paddle spec | Full 8-way table from measured `ACTION_SET` displacement |
 | **skiing** | `BACK_*` ego actions move AWAY; only LEFT/RIGHT in `ACTION_SET` | Custom 2-D strafe table (like Freeway) |
 | **choppercommand** | 3 probes move AWAY; ALE RIGHT displaces left | Per-env table from measured movement, not Seaquest copy |
-| **spaceinvaders** | `BACKWARD` resolves to `RIGHTFIRE`; indices 6–9 OOB | 6-action `ACTION_SET` table: `[NOOP,FIRE,RIGHT,LEFT,RIGHTFIRE,LEFTFIRE]` |
 
 Code markers: search `TODO(POV_BACKLOG)` in `src/concept_based_learning/observations/pov_relative.py`.
 

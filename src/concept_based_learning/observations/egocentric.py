@@ -66,9 +66,18 @@ _EGO_PSI_ANGLE_SCALAR: bool = False
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
-    """Select legacy (10ch) or target-aligned (7ch) ego observation format."""
+    """Select legacy (10ch) or target-aligned / POV ego observation format.
+
+    Legacy 10-ch ego is disabled for the current paper eval — it is incompatible
+    with the facing-frame feature layout and must not leak into overnight runs.
+    """
+    if use_legacy:
+        raise RuntimeError(
+            "USE_LEGACY_EGO_OBS is disabled for the current eval. "
+            "Use the facing-frame ego path (USE_POV_FACING_FRAME) instead."
+        )
     global _USE_LEGACY_EGO_OBS
-    _USE_LEGACY_EGO_OBS = bool(use_legacy)
+    _USE_LEGACY_EGO_OBS = False
 
 
 def set_ego_size_features(enabled: bool) -> None:
@@ -1632,6 +1641,12 @@ def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
         return _get_ego_obs_pov_relative(
             raw_observation, objects, target_idx, heading_deg
         )
+    # Legacy 10-ch ego path disabled for paper eval (see set_ego_obs_format).
+    # if _USE_LEGACY_EGO_OBS:
+    #     return _get_ego_obs_legacy(raw_observation, objects, target_idx)
     if _USE_LEGACY_EGO_OBS:
-        return _get_ego_obs_legacy(raw_observation, objects, target_idx)
+        raise RuntimeError(
+            "Legacy ego obs is commented out for this eval; "
+            "set USE_LEGACY_EGO_OBS: false."
+        )
     return _get_ego_obs_target_aligned(raw_observation, objects, target_idx)

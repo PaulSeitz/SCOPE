@@ -156,6 +156,7 @@ from concept_based_learning.environments.montezumarevenge.montezuma_label import
 )
 from concept_based_learning.environments.montezumarevenge.montezuma_policy import (
     get_heuristic_target as montezuma_get_heuristic_target,
+    get_heuristic_target_with_state as montezuma_get_heuristic_with_state,
     NO_TARGET_IDX as montezuma_NO_TARGET_IDX,
 )
 from concept_based_learning.environments.venture.venture_label import (
@@ -390,6 +391,28 @@ class EnvComponents:
     # Game-action ids used by action_mapper for NOOP / stationary FIRE (legal-mask).
     ego_mapper_noop_action: int = 0
     ego_mapper_fire_action: int = 1
+    # Game action when the heuristic returns no_target_idx (Beamrider: FIRE to
+    # advance sectors when the screen is empty). Config ``NO_TARGET_GAME_ACTION``
+    # overrides this when set.
+    no_target_game_action: int = 0
+
+
+def resolve_no_target_game_action(
+    config: Dict[str, Any] | None,
+    components: "EnvComponents | None" = None,
+) -> int:
+    """Idle game action when no object is targeted.
+
+    Prefer explicit ``NO_TARGET_GAME_ACTION`` in config; otherwise the env
+    component default (Beamrider → FIRE=1 so empty screens still advance).
+    """
+    if config is not None:
+        raw = config.get("NO_TARGET_GAME_ACTION", None)
+        if raw is not None and raw != "":
+            return int(raw)
+    if components is not None:
+        return int(components.no_target_game_action)
+    return 0
 
 
 class EnvManager:
@@ -549,6 +572,9 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
+            # Empty-screen sector advance requires FIRE; without a target the
+            # skill policy never runs, so idle must not stay on NOOP.
+            no_target_game_action=1,
         )
 
         self._registry["kangaroo"] = EnvComponents(
@@ -639,6 +665,8 @@ class EnvManager:
             resolve_curriculum_mods=_default_resolve_curriculum_mods,
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
+            get_heuristic_with_state=montezuma_get_heuristic_with_state,
+            reset_policy_on_life_lost=True,
         )
         # Alias accepted by jaxatari.make("montezuma_revenge").
         self._registry["montezuma_revenge"] = self._registry["montezumarevenge"]

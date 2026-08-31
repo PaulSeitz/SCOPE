@@ -51,7 +51,11 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     configure_label_routing_from_config,
 )
-from concept_based_learning.environments.env_manager import EnvManager, align_config_max_objects
+from concept_based_learning.environments.env_manager import (
+    EnvManager,
+    align_config_max_objects,
+    resolve_no_target_game_action,
+)
 from concept_based_learning.environments.heuristics import (
     initial_policy_state,
     resolve_heuristic_target_fn,
@@ -1066,7 +1070,7 @@ def _make_jitted_greedy_episode_runner(
         is_fire = is_meta_fire_target(
             target, config, fire_idx=int(fire_idx), enabled=fire_enabled
         )
-        idle_action = jnp.int32(int(config.get("NO_TARGET_GAME_ACTION", 0)))
+        idle_action = jnp.int32(resolve_no_target_game_action(config, components))
         safe_target = jnp.where(target == no_target, 0, target)
         raw_label = obs.objects.semantic_label[-1, safe_target]
         sk_idx = label_to_skill_idx(raw_label, num_skills)
@@ -1630,7 +1634,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             distance = np.nan
             angle = np.nan
         elif target_obj_idx == no_target_idx:
-            global_action = int(config.get("NO_TARGET_GAME_ACTION", 0))
+            global_action = resolve_no_target_game_action(config, components)
             active_skill_idx = 0
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan
@@ -2266,7 +2270,10 @@ def run_live_visualization(
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         if target_obj_idx == no_target_idx or is_meta_noop:
-            return 0, 0, 0, np.nan, np.nan, None, None
+            # Beamrider empty-screen advance: FIRE via NO_TARGET_GAME_ACTION /
+            # EnvComponents.no_target_game_action (not hardcoded NOOP).
+            idle = 0 if is_meta_noop else resolve_no_target_game_action(config, components)
+            return idle, 0, 0, np.nan, np.nan, None, None
         if is_meta_fire:
             return meta_fire_game_action, 0, 1, np.nan, np.nan, None, None
 

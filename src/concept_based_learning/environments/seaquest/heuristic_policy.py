@@ -7,8 +7,9 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   even when they are farther than the diver, so lanes are cleared before
   diving in for a collect.
 - Optional ``COLLECT_REQUIRES_NO_DESTROY``: if any selectable DESTROY exists,
-  never target a diver (nearest shark/sub wins). Surface WP / NAVIGATE are
-  unchanged. Use this so COLLECT is not asked to fight.
+  never target a diver (nearest shark/sub wins). The surface waypoint is
+  still forced by index (not nearest-COLLECT) so this flag does not steal
+  a required surface. Use this so COLLECT is not asked to fight.
 - Optional ``COLLECT_EDGE_MARGIN_PX``: soft midfield COLLECT preference. When
   > 0 and any lane-clear diver has centre x in ``[margin, 160-margin]``,
   edge divers are skipped so COLLECT is not trained on edge-suicide rushes.
@@ -142,7 +143,7 @@ def _surface_required_from_raw(raw_observation, objects=None):
     """True when surfacing is required and the approach is clear enough.
 
     Life start sits at y≈46 while oxygen fills 0→64. Treating that as
-    ``oxygen_low`` would force the surface NAVIGATE waypoint every life and
+    ``oxygen_low`` would force the surface COLLECT waypoint every life and
     trap skills on an already-reached target. Low O2 only forces surface once
     underwater, or while refilling at the surface with divers on board.
 
@@ -431,7 +432,7 @@ def _select_target(
     target_idx = jnp.where(any_avoid_interrupt, best_avoid_idx, target_idx)
     if collect_requires_no_destroy:
         # Any live shark/sub beats COLLECT so the collector is never the fighter.
-        # Does not steal NAVIGATE / surface WP (those still use the interrupt band).
+        # Does not steal the surface waypoint: that is re-forced by index below.
         any_destroy = jnp.any(jnp.logical_and(is_destroy, selectable))
         destroy_any_dist = jnp.where(
             jnp.logical_and(is_destroy, selectable), distances, jnp.inf

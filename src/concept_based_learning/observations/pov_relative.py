@@ -46,18 +46,19 @@ _MOVE_SPECS: dict[str, tuple[int, int, list[int], list[int]]] = {
     "breakout": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [2, 2, 1, 3, 3, 3, 1, 2]),
     "beamrider": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "asterix": (0, 0, [2, 7, 4, 8, 3, 6, 1, 5], [2, 7, 4, 8, 3, 6, 1, 5]),
-    # TODO(POV_BACKLOG): tennis copied Pong's 1-D paddle table but supports 8-way
-    # movement — see docs/POV_FRAME_BACKLOG.md and ``scripts/pov_frame_playground.py``.
-    "tennis": (0, 1, [0, 3, 3, 3, 0, 2, 2, 2], [5, 3, 3, 3, 5, 2, 2, 2]),
+    # Full 18-action ALE set (matches tennis_label.py). Measured 2026-08-31:
+    # all 8 compass dirs displace toward the probe under facing-relative mapping.
+    "tennis": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "phoenix": (0, 1, [2, 2, 4, 3, 3, 3, 0, 2], [5, 5, 7, 6, 6, 6, 1, 5]),
     "skiing": (0, 0, [0, 2, 2, 2, 0, 1, 1, 1], [0, 2, 2, 2, 0, 1, 1, 1]),
     # TODO(POV_BACKLOG): skiing — only LEFT/RIGHT in ACTION_SET; table wrong. See backlog.
     "kangaroo": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     # TODO(POV_BACKLOG): choppercommand — ALE RIGHT moves the heli left; see backlog.
     "choppercommand": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
-    # TODO(POV_BACKLOG): spaceinvaders — Seaquest ALE table but ACTION_SET has 6 entries;
-    # indices 6–9 are out of range. See docs/POV_FRAME_BACKLOG.md.
-    "spaceinvaders": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
+    # Compact ACTION_SET: 0=NOOP,1=FIRE,2=RIGHT,3=LEFT,4=RIGHTFIRE,5=LEFTFIRE
+    # (same layout as spaceinvaders_label.py / breakout). Do NOT use Seaquest ALE ids —
+    # env.step indexes ACTION_SET, so ALE RIGHT=3 would become LEFT.
+    "spaceinvaders": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [4, 4, 1, 5, 5, 5, 1, 4]),
     "montezumarevenge": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "venture": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
 }
@@ -115,9 +116,13 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "horizontal",
     },
     "tennis": {
-        "facing_deg_bin0": 0.0,
-        "facing_deg_bin1": 180.0,
-        "bilateral_axis": "horizontal",
+        # Top half of court faces down (+y), bottom half faces up (−y). Sprite
+        # orientation is only L/R walk direction — not court bearing.
+        "facing_deg_bin0": 90.0,
+        "facing_deg_bin1": -90.0,
+        "bilateral_axis": "vertical",
+        "court_side_vertical_facing": True,
+        "court_midline_y": 108.0,
     },
     "phoenix": {
         # Ship at the bottom, birds above.
@@ -198,6 +203,12 @@ def _facing_bin_idx(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndar
     """Which declared view axis the player body currently points along."""
     if has_single_view_axis(profile):
         return jnp.int32(0)
+    if bool(profile.get("court_side_vertical_facing", False)):
+        player = player_getter(raw_obs)
+        y = jnp.asarray(player.y[-1], dtype=jnp.float32)
+        mid = jnp.float32(profile.get("court_midline_y", 108.0))
+        # Top court (smaller y) → bin 0 (face down); bottom → bin 1 (face up).
+        return jnp.where(y < mid, jnp.int32(0), jnp.int32(1)).astype(jnp.int32)
     axis0, axis1 = view_axes_deg(profile)
     ori = jnp.asarray(player_getter(raw_obs).orientation[-1], dtype=jnp.float32)
     screen_deg = ori + jnp.float32(_SPRITE_ORIENTATION_OFFSET_DEG)

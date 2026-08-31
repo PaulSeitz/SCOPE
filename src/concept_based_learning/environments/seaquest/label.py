@@ -8,7 +8,6 @@ from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
     LABEL_COLLECT,
-    LABEL_NAVIGATE,
     LABEL_AVOID,
     SemanticState,
 )
@@ -47,6 +46,7 @@ SURFACE_WP_SLOT_CX = (28.0, 80.0, 132.0)
 SURFACE_WP_SUB_CLEAR_PX = 40.0
 # Surface sub is the last of the 25 enemy slots (12 sharks + 12 subs + 1).
 _SURFACE_SUB_ENEMY_SLOT = 24
+SEAQUEST_SURFACE_LABEL = LABEL_COLLECT
 
 
 def select_surface_waypoint_x(
@@ -100,8 +100,19 @@ SURFACE_Y_THRESHOLD = 52.0
 
 
 def set_seaquest_action_mapper(use_legacy: bool) -> None:
+    """Enable/disable the pre-facing orientation-relative Seaquest mapper.
+
+    Paper-eval / facing-frame runs must keep this False. The legacy path let
+    skills like COLLECT collapse onto FORWARD without reading the screen
+    (FORWARD = body-forward, independent of the selected target).
+    """
+    if use_legacy:
+        raise RuntimeError(
+            "USE_LEGACY_SEAQUEST_ACTION_MAPPER is disabled for the current eval. "
+            "Use USE_POV_RELATIVE_MAPPER (facing-relative) instead."
+        )
     global _USE_LEGACY_SEAQUEST_ACTION_MAPPER
-    _USE_LEGACY_SEAQUEST_ACTION_MAPPER = bool(use_legacy)
+    _USE_LEGACY_SEAQUEST_ACTION_MAPPER = False
 
 
 def using_legacy_seaquest_action_mapper() -> bool:
@@ -203,10 +214,20 @@ def _legacy_orientation_relative_mapper(ego_action, raw_obs, target_idx, objects
 
 
 def seaquest_action_mapper(ego_action, raw_obs, target_idx, objects):
+    # Legacy orientation-relative mapper removed from the live path
+    # (see set_seaquest_action_mapper). Kept as _legacy_orientation_relative_mapper
+    # below for archaeology only — do not re-enable for paper eval.
+    # if _USE_LEGACY_SEAQUEST_ACTION_MAPPER:
+    #     mapped_action = _legacy_orientation_relative_mapper(...)
     if _USE_LEGACY_SEAQUEST_ACTION_MAPPER:
-        mapped_action = _legacy_orientation_relative_mapper(ego_action, raw_obs, target_idx, objects)
-    else:
-        mapped_action = _target_aligned_seaquest_action_mapper(ego_action, raw_obs, target_idx, objects)
+        raise RuntimeError(
+            "Legacy Seaquest action mapper is commented out for this eval; "
+            "set USE_LEGACY_SEAQUEST_ACTION_MAPPER: false and use "
+            "USE_POV_RELATIVE_MAPPER: true."
+        )
+    mapped_action = _target_aligned_seaquest_action_mapper(
+        ego_action, raw_obs, target_idx, objects
+    )
 
     near_surface = raw_obs.player.y[-1] <= SURFACE_Y_THRESHOLD
     surface_target_exception = target_idx == SURFACE_DUMMY_IDX
@@ -306,7 +327,9 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         surface_w = jnp.reshape(player_w.astype(jnp.int32), (1,))
         surface_h = jnp.array([_SURFACE_WAYPOINT_H], dtype=jnp.int32)
         surface_active = jnp.array([1], dtype=jnp.int32)
-        surface_label = jnp.array([LABEL_NAVIGATE], dtype=jnp.int32)
+        # Surface arrival and diver pickup are both "reach this object" tasks.
+        # Reuse the better-trained COLLECT head instead of a sparse NAVIGATE head.
+        surface_label = jnp.array([SEAQUEST_SURFACE_LABEL], dtype=jnp.int32)
         surface_offscreen = jnp.array([0], dtype=jnp.int32)
 
         final_x         = jnp.concatenate([all_x,         surface_x])

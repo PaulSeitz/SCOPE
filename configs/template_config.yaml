@@ -203,6 +203,9 @@ alg:
 
   # Heuristic target policy.
   HEURISTIC_MODE: "env_specific"    # Heuristic target selector. Options: "env_specific","nearest","sweep" (sweep only for SpaceInvaders).
+  # Game action when no object is targeted. Beamrider defaults to FIRE (1) via
+  # EnvComponents so empty sectors still advance; other envs default to NOOP (0).
+  NO_TARGET_GAME_ACTION: null
 
   # Action masking / symbolic behavior.
   RESTRICT_FIRE_FOR_NON_DESTROY: false # Block FIRE for non-destroy skills. Options: true/false.

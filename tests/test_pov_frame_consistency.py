@@ -41,16 +41,30 @@ SPRITE_LEFT = 270.0
 SPRITE_UNSET = 0.0
 
 
-def _raw_obs(env: str, sprite_ori: float):
-    """Minimal stacked raw observation carrying just a player orientation."""
+def _raw_obs(env: str, sprite_ori: float, *, player_y: float | None = None):
+    """Minimal stacked raw observation carrying player orientation (and y for tennis)."""
+    profile = _POV_PROFILES.get(env, {})
+    if player_y is None:
+        if bool(profile.get("court_side_vertical_facing", False)):
+            player_y = 20.0  # top court by default
+        else:
+            player_y = 80.0
 
     class _Player:
         orientation = jnp.array([sprite_ori], dtype=jnp.float32)
+        y = jnp.array([player_y], dtype=jnp.float32)
+        x = jnp.array([80.0], dtype=jnp.float32)
+        width = jnp.array([8.0], dtype=jnp.float32)
+        height = jnp.array([8.0], dtype=jnp.float32)
 
     obs = type("_Raw", (), {})()
     for attr in ("player", "chicken", "skier"):
         setattr(obs, attr, _Player())
     return obs
+
+
+def _uses_court_side_facing(env: str) -> bool:
+    return bool(_POV_PROFILES.get(env, {}).get("court_side_vertical_facing", False))
 
 
 def _wrap180(deg: float) -> float:
@@ -115,6 +129,8 @@ def test_two_axis_envs_follow_sprite_orientation(env):
     """Sprite 90 deg means facing right, 270 means left, in screen-angle terms."""
     if has_single_view_axis(_POV_PROFILES[env]):
         pytest.skip(f"{env} declares one view axis")
+    if _uses_court_side_facing(env):
+        pytest.skip(f"{env} uses court-side vertical facing, not sprite bearing")
     right = float(resolve_facing_deg(_raw_obs(env, SPRITE_RIGHT), env_name=env))
     left = float(resolve_facing_deg(_raw_obs(env, SPRITE_LEFT), env_name=env))
     assert abs(_wrap180(right - (SPRITE_RIGHT + _SPRITE_ORIENTATION_OFFSET_DEG))) < 1e-3
@@ -196,3 +212,68 @@ def test_pong_single_axis_maps_lateral_to_paddle_travel():
     assert int(table[11]) == 4  # RIGHTFIRE (paddle up + fire)
     assert int(table[12]) == 5  # LEFTFIRE (paddle down + fire)
     assert int(table[13]) == fire
+
+
+def test_spaceinvaders_uses_compact_action_set_not_ale_ids():
+    """Facing up: body-right strafes screen-right (compact 2), not ALE RIGHT=3.
+
+    JaxSpaceInvaders.ACTION_SET is [NOOP, FIRE, RIGHT, LEFT, RIGHTFIRE, LEFTFIRE].
+    Emitting ALE ids (3/4/…) makes ``env.step`` index the compact set and invert L/R.
+    """
+    facing = float(resolve_facing_deg(_raw_obs("spaceinvaders", SPRITE_UNSET), env_name="spaceinvaders"))
+    assert facing == pytest.approx(-90.0)
+
+    noop, fire, move, mfire = _MOVE_SPECS["spaceinvaders"]
+    assert move == [2, 2, 0, 3, 3, 3, 0, 2]
+    assert mfire == [4, 4, 1, 5, 5, 5, 1, 4]
+    table = build_facing_action_table(
+        noop_action=noop, fire_action=fire, move_table=move,
+        move_fire_table=mfire, facing_deg=facing,
+    )
+    # FORWARD into the field has no horizontal axis → NOOP; strafe L/R work.
+    assert int(table[2]) == noop  # FORWARD
+    assert int(table[3]) == 2  # RIGHT → compact RIGHT
+    assert int(table[4]) == 3  # LEFT → compact LEFT
+    assert int(table[1]) == fire
+    assert int(table[11]) == 4  # RIGHT_FIRE → RIGHTFIRE
+    assert int(table[12]) == 5  # LEFT_FIRE → LEFTFIRE
+
+    _, lat_right, phi_right = _body_pose(40.0, 0.0, facing)
+    _, lat_left, phi_left = _body_pose(-40.0, 0.0, facing)
+    assert lat_right > 0.0 > lat_left
+    assert int(table[_ego_for_bearing(phi_right)]) == 2
+    assert int(table[_ego_for_bearing(phi_left)]) == 3
+
+
+def test_tennis_facing_follows_court_side_not_sprite():
+    """Top court faces down (+y screen); bottom court faces up (−y)."""
+    top = float(
+        resolve_facing_deg(_raw_obs("tennis", SPRITE_RIGHT, player_y=20.0), env_name="tennis")
+    )
+    bottom = float(
+        resolve_facing_deg(_raw_obs("tennis", SPRITE_RIGHT, player_y=140.0), env_name="tennis")
+    )
+    assert top == pytest.approx(90.0)
+    assert bottom == pytest.approx(-90.0)
+    # Walk direction sprite must not flip court bearing.
+    top_left_sprite = float(
+        resolve_facing_deg(_raw_obs("tennis", SPRITE_LEFT, player_y=20.0), env_name="tennis")
+    )
+    assert top_left_sprite == pytest.approx(90.0)
+
+
+def test_asterix_facing_follows_player_direction():
+    from concept_based_learning.environments.asterix.asterix_label import (
+        asterix_sprite_orientation_from_direction,
+    )
+
+    assert float(asterix_sprite_orientation_from_direction(1)) == pytest.approx(270.0)
+    assert float(asterix_sprite_orientation_from_direction(2)) == pytest.approx(90.0)
+    right = float(
+        resolve_facing_deg(_raw_obs("asterix", SPRITE_RIGHT), env_name="asterix")
+    )
+    left = float(
+        resolve_facing_deg(_raw_obs("asterix", SPRITE_LEFT), env_name="asterix")
+    )
+    assert right == pytest.approx(0.0)
+    assert left == pytest.approx(180.0)

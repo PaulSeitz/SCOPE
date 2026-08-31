@@ -37,12 +37,27 @@ class _FakeProjectiles:
 
 
 class _FakePlayer:
-    def __init__(self, n_frames: int, orientation=90.0, x=10.0, y=45.0, width=4.0, height=11.0):
+    def __init__(
+        self,
+        n_frames: int,
+        orientation=90.0,
+        x=10.0,
+        y=45.0,
+        width=4.0,
+        height=11.0,
+        state=0.0,
+    ):
         self.x = jnp.full((n_frames,), x, dtype=jnp.float32)
         self.y = jnp.full((n_frames,), y, dtype=jnp.float32)
         self.width = jnp.full((n_frames,), width, dtype=jnp.float32)
         self.height = jnp.full((n_frames,), height, dtype=jnp.float32)
         self.orientation = jnp.full((n_frames,), orientation, dtype=jnp.float32)
+        if isinstance(state, (list, tuple)) or (
+            hasattr(state, "shape") and getattr(state, "ndim", 0) > 0
+        ):
+            self.state = jnp.asarray(state, dtype=jnp.float32)
+        else:
+            self.state = jnp.full((n_frames,), state, dtype=jnp.float32)
 
 
 class _FakeRawObs:
@@ -55,12 +70,21 @@ class _FakeRawObs:
 
 
 class _FakeObjects:
-    def __init__(self, n_frames, target_x, target_w=4.0, n_objects=2, label=LABEL_DESTROY):
+    def __init__(
+        self,
+        n_frames,
+        target_x,
+        target_w=4.0,
+        target_y=45.0,
+        target_h=1.0,
+        n_objects=2,
+        label=LABEL_DESTROY,
+    ):
         self.x = jnp.zeros((n_frames, n_objects), dtype=jnp.float32)
         self.x = self.x.at[:, 0].set(target_x)
         self.width = jnp.full((n_frames, n_objects), target_w, dtype=jnp.float32)
-        self.y = jnp.zeros((n_frames, n_objects), dtype=jnp.float32)
-        self.height = jnp.ones((n_frames, n_objects), dtype=jnp.float32)
+        self.y = jnp.full((n_frames, n_objects), target_y, dtype=jnp.float32)
+        self.height = jnp.full((n_frames, n_objects), target_h, dtype=jnp.float32)
         self.active = jnp.ones((n_frames, n_objects), dtype=jnp.int32)
         self.semantic_label = jnp.full(
             (n_frames, n_objects), label, dtype=jnp.int32
@@ -73,9 +97,9 @@ class _FakeSingleProjectile:
 
 
 class _FakeSingleProjectileObs:
-    def __init__(self, projectile_active):
+    def __init__(self, projectile_active, player_state=0.0):
         n = projectile_active.shape[0]
-        self.player = _FakePlayer(n)
+        self.player = _FakePlayer(n, state=player_state)
         self.player_projectile = _FakeSingleProjectile(projectile_active)
 
 
@@ -131,10 +155,10 @@ def test_latch_weapon_state_ready_aimed_wasted():
 
 
 def test_seaquest_facing_enemy_yes_when_target_co_located_vertically():
-    """Surface WP shares player x — must not invent a rightward aim bias."""
+    """Same centre x in the punch/shot band — must not invent a rightward aim bias."""
     configure_skill_ego_features(enabled=True, env_name="seaquest")
     n = 2
-    # Player facing left (270) with target at same centre x → aim N/A → YES.
+    # Player facing left (270) with target at same centre x → L/R N/A, y-aligned → YES.
     raw = _FakeRawObs(
         jnp.ones((n,), dtype=jnp.float32),
         orientation=270.0,
@@ -144,6 +168,24 @@ def test_seaquest_facing_enemy_yes_when_target_co_located_vertically():
     extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
     assert float(extras[0, 1]) == FACING_ENEMY_YES
     assert float(extras[1, 1]) == FACING_ENEMY_YES
+
+
+def test_seaquest_facing_enemy_no_when_target_overhead():
+    """Horizontal weapons cannot hit far above — even on the facing side."""
+    configure_skill_ego_features(enabled=True, env_name="seaquest")
+    raw = _FakeRawObs(jnp.array([0.0]), orientation=90.0, x=40.0)
+    objects = _FakeObjects(1, target_x=80.0, target_y=0.0)  # well above player y=45
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert float(extras[0, 1]) == FACING_ENEMY_NO
+
+
+def test_kangaroo_facing_enemy_no_for_overhead_coco():
+    """Falling coco above the kangaroo is not punchable with a horizontal punch."""
+    configure_skill_ego_features(enabled=True, env_name="kangaroo")
+    raw = _FakeRawObs(jnp.array([0.0]), orientation=270.0, x=80.0)
+    objects = _FakeObjects(1, target_x=78.0, target_y=0.0)  # ~above, slight left
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert float(extras[0, 1]) == FACING_ENEMY_NO
 
 
 def test_seaquest_can_fire_and_facing_enemy_when_aimed():
@@ -196,16 +238,38 @@ def test_seaquest_facing_enemy_updates_when_target_crosses():
     assert float(extras[2, 1]) == FACING_ENEMY_NO
 
 
-def test_phoenix_can_fire_facing_always_yes():
+def test_phoenix_can_fire_is_shield_active_not_projectile():
+    """Phoenix reuses the can_fire slot for visible shield-on (player.state)."""
+    from concept_based_learning.observations.skill_ego_features import (
+        discrete_skill_ego_flags,
+        phoenix_can_fire,
+        phoenix_shield_active,
+    )
+
     configure_skill_ego_features(enabled=True, env_name="phoenix")
-    raw = _FakeSingleProjectileObs(jnp.array([1.0, 0.0]))
+    # Projectile in flight on frame 0, ready on frame 1 — must NOT drive the channel.
+    raw = _FakeSingleProjectileObs(
+        jnp.array([1.0, 0.0]),
+        player_state=jnp.array([0.0, 1.0]),
+    )
     extras = build_skill_ego_extras_stacked(raw)
     assert extras.shape == (2, 2)
-    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
-    assert float(extras[1, 0]) == CAN_FIRE_READY
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT  # shield off
+    assert float(extras[1, 0]) == CAN_FIRE_READY  # shield on
     assert float(extras[0, 1]) == FACING_ENEMY_YES
     assert float(extras[1, 1]) == FACING_ENEMY_YES
+    assert discrete_skill_ego_flags()[0].name == "shield_active"
+    # Legal-fire helper still tracks the projectile.
+    assert float(phoenix_can_fire(raw)) == CAN_FIRE_READY
+    assert float(phoenix_shield_active(raw)) == CAN_FIRE_READY
 
+
+def test_phoenix_shield_off_even_when_projectile_ready():
+    configure_skill_ego_features(enabled=True, env_name="phoenix")
+    raw = _FakeSingleProjectileObs(jnp.array([0.0, 0.0]), player_state=0.0)
+    extras = build_skill_ego_extras_stacked(raw)
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[1, 0]) == CAN_FIRE_IN_FLIGHT
 
 def test_spaceinvaders_can_fire():
     configure_skill_ego_features(enabled=True, env_name="spaceinvaders")
@@ -213,6 +277,29 @@ def test_spaceinvaders_can_fire():
     extras = build_skill_ego_extras_stacked(raw)
     assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
     assert float(extras[1, 0]) == CAN_FIRE_READY
+
+
+def test_kangaroo_facing_enemy_matches_punch_side():
+    """Kangaroo punch is L/R-facing; facing_enemy must not stay stuck at +1."""
+    configure_skill_ego_features(enabled=True, env_name="kangaroo")
+    # Facing left (270); monkey to the right → not aimed.
+    raw = _FakeRawObs(
+        jnp.array([0.0, 0.0]),
+        orientation=270.0,
+        x=10.0,
+    )
+    objects = _FakeObjects(2, target_x=40.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert extras.shape == (2, 2)
+    assert float(extras[0, 0]) == CAN_FIRE_READY
+    assert float(extras[0, 1]) == FACING_ENEMY_NO
+
+    # Same facing, target to the left → aimed.
+    objects_left = _FakeObjects(2, target_x=0.0)
+    extras_left = build_skill_ego_extras_stacked(
+        raw, objects=objects_left, target_idx=0
+    )
+    assert float(extras_left[0, 1]) == FACING_ENEMY_YES
 
 
 def test_choppercommand_can_fire():

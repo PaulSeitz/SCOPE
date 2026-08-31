@@ -3,13 +3,17 @@
 When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains two channels:
 
   can_fire       +1 weapon ready / -1 shot in flight
-  facing_enemy   +1 facing the target's L/R side / -1 not
+                 (Phoenix: +1 shield active / -1 shield off — visible ability
+                 sprite via ``player.state``, not the hidden cooldown timer)
+  facing_enemy   +1 weapon can plausibly hit (L/R facing matches *and*
+                 centres share a vertical band) / -1 not
                  (always +1 on envs whose shot direction is not L/R-gated)
 
 ``facing_enemy`` is pure geometry (player ori + player/target centres). It is
 always visible — not latched on fire — so skills can turn before shooting.
-When centres nearly share an x (``|Δx| < 2px``), aim is treated as N/A (+1)
-so vertical NAVIGATE waypoints do not invent a rightward bias.
+Nearly identical x (``|Δx| < 2px``) skips the L/R check so co-located targets
+do not invent a rightward bias, but a vertical band (``|Δy| < 28px``) is
+still required so overhead threats (falling coco, surface WP) stay un-aimed.
 Occupancy histograms list both channels in ``DISCRETE_SKILL_EGO_FLAGS``.
 
 ``USE_EGO_SHOT_BETWEEN`` (requires weapon features) appends one *binary*
@@ -85,12 +89,36 @@ class DiscreteSkillEgoFlag(NamedTuple):
     level_offset: float = 0.0
 
 
+def discrete_skill_ego_flags() -> tuple[DiscreteSkillEgoFlag, ...]:
+    """Active discrete weapon extras (can_fire / shield_active, facing, optional shot_between)."""
+    can_fire_name = "shield_active" if _ENV_NAME == "phoenix" else "can_fire"
+    flags = (
+        DiscreteSkillEgoFlag(
+            offset=0,
+            name=can_fire_name,
+            n_levels=2,
+            level_offset=1.0,  # {-1,+1} → {0,1} after clamp
+        ),
+        DiscreteSkillEgoFlag(
+            offset=1,
+            name="facing_enemy",
+            n_levels=2,
+            level_offset=1.0,
+        ),
+    )
+    if _USE_EGO_SHOT_BETWEEN:
+        return flags + (_SHOT_BETWEEN_FLAG,)
+    return flags
+
+
+# Keep the module-level registry for docs / older imports; runtime uses
+# ``discrete_skill_ego_flags()`` so Phoenix can rename the first channel.
 DISCRETE_SKILL_EGO_FLAGS: tuple[DiscreteSkillEgoFlag, ...] = (
     DiscreteSkillEgoFlag(
         offset=0,
         name="can_fire",
         n_levels=2,
-        level_offset=1.0,  # {-1,+1} → {0,1} after clamp
+        level_offset=1.0,
     ),
     DiscreteSkillEgoFlag(
         offset=1,
@@ -105,17 +133,8 @@ _SHOT_BETWEEN_FLAG = DiscreteSkillEgoFlag(
     n_levels=2,
     level_offset=0.0,  # {0,1}
 )
-
-
-def discrete_skill_ego_flags() -> tuple[DiscreteSkillEgoFlag, ...]:
-    """Active discrete weapon extras (can_fire, facing, optional shot_between)."""
-    flags = DISCRETE_SKILL_EGO_FLAGS
-    if _USE_EGO_SHOT_BETWEEN:
-        return flags + (_SHOT_BETWEEN_FLAG,)
-    return flags
-
-# Envs where shot direction follows left/right player facing (Seaquest-style).
-_FACING_LR_AIM_ENVS = frozenset({"seaquest", "choppercommand"})
+# Envs where the weapon / punch aims along left/right player facing.
+_FACING_LR_AIM_ENVS = frozenset({"seaquest", "choppercommand", "kangaroo"})
 
 
 def configure_ego_weapon_features(
@@ -344,32 +363,46 @@ def _shot_between_per_frame(
 # a deadzone, ``t_cx >= p_cx`` falsely marks it "to the right" and biases
 # facing_enemy toward rightward facing.
 _FACING_LR_DEADZONE_PX = 2.0
+# Horizontal punch / torpedo only hits near the player's band. Targets far
+# above/below (falling coco, surface WP) must not count as aimed.
+_FACING_LR_Y_ALIGN_PX = 28.0
 
 
 def _facing_toward_target_lr(
     player_ori: jnp.ndarray,
     player_x: jnp.ndarray,
     player_w: jnp.ndarray,
+    player_y: jnp.ndarray,
+    player_h: jnp.ndarray,
     target_x: jnp.ndarray,
     target_w: jnp.ndarray,
+    target_y: jnp.ndarray,
+    target_h: jnp.ndarray,
 ) -> jnp.ndarray:
     """
-    True when left/right facing matches the target's horizontal side.
+    True when the weapon can plausibly hit: L/R facing matches the target's
+    horizontal side *and* centres share a vertical band.
 
     Raw-geometry only. Works for jaxatari L/R oris (90=right, 270=left) and
     for 0/180: ``orientation < 180`` → facing right.
 
-    Horizontally overlapping / near-coincident centres (``|Δx| < deadzone``)
-    return True (aim N/A) so vertical NAVIGATE targets do not invent an L/R bias.
+    Horizontally overlapping centres (``|Δx| < deadzone``) skip the L/R check
+    so a co-located target does not invent a rightward bias, but still require
+    the vertical band (overhead threats stay un-aimed).
     """
     facing_right = player_ori < 180.0
     p_cx = player_x.astype(jnp.float32) + player_w.astype(jnp.float32) / 2.0
     t_cx = target_x.astype(jnp.float32) + target_w.astype(jnp.float32) / 2.0
+    p_cy = player_y.astype(jnp.float32) + player_h.astype(jnp.float32) / 2.0
+    t_cy = target_y.astype(jnp.float32) + target_h.astype(jnp.float32) / 2.0
     dx = t_cx - p_cx
+    dy = t_cy - p_cy
     no_lr = jnp.abs(dx) < jnp.float32(_FACING_LR_DEADZONE_PX)
+    y_ok = jnp.abs(dy) < jnp.float32(_FACING_LR_Y_ALIGN_PX)
     target_right = dx > 0.0
-    aimed = jnp.logical_not(jnp.logical_xor(facing_right, target_right))
-    return jnp.where(no_lr, True, aimed)
+    side_ok = jnp.logical_not(jnp.logical_xor(facing_right, target_right))
+    lr_ok = jnp.where(no_lr, True, side_ok)
+    return jnp.logical_and(lr_ok, y_ok)
 
 
 def _facing_enemy_per_frame(
@@ -391,8 +424,12 @@ def _facing_enemy_per_frame(
         player.orientation.astype(jnp.float32),
         player.x,
         player.width,
+        player.y,
+        player.height,
         objects.x[:, idx],
         objects.width[:, idx],
+        objects.y[:, idx],
+        objects.height[:, idx],
     )
     return jnp.where(aimed, FACING_ENEMY_YES, FACING_ENEMY_NO).astype(jnp.float32)
 
@@ -428,10 +465,34 @@ def _weapon_channels_stacked(
     *,
     projectile_attr: str,
     projectile_slot: int | None = None,
+    can_fire_from_player_state: bool = False,
 ) -> jnp.ndarray:
-    """Per-frame weapon extras: [can_fire, facing_enemy] (+ shot_between) (+ shot_dx, shot_dy)."""
+    """Per-frame weapon extras: [can_fire, facing_enemy] (+ shot_between) (+ shot_dx, shot_dy).
+
+    When ``can_fire_from_player_state`` is True (Phoenix), the first channel is
+    shield-active from ``player.state`` (+1 on / -1 off) instead of projectile ready.
+    """
     stack_len = _stack_len(raw_observation)
-    if not hasattr(raw_observation, projectile_attr):
+    if can_fire_from_player_state:
+        player = _get_player(raw_observation)
+        st = jnp.asarray(getattr(player, "state", 0), dtype=jnp.float32)
+        if st.ndim == 0:
+            st = jnp.full((stack_len,), st)
+        elif st.shape[0] != stack_len:
+            st = jnp.broadcast_to(st.reshape(-1)[0], (stack_len,))
+        can_fire = jnp.where(
+            st > 0.5,
+            jnp.float32(CAN_FIRE_READY),
+            jnp.float32(CAN_FIRE_IN_FLIGHT),
+        )
+        if hasattr(raw_observation, projectile_attr):
+            projectiles = getattr(raw_observation, projectile_attr)
+            in_flight = _player_projectile_active_per_frame(
+                projectiles.active, projectile_slot
+            )
+        else:
+            in_flight = jnp.zeros((stack_len,), dtype=jnp.float32)
+    elif not hasattr(raw_observation, projectile_attr):
         can_fire = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
         in_flight = jnp.zeros((stack_len,), dtype=jnp.float32)
     else:
@@ -486,10 +547,10 @@ def build_skill_ego_extras_stacked(
     ``shot_between`` and/or ``shot_dx/dy`` when those flags are on, else
     ``[stack_len, 0]``.
 
-    ``objects`` / ``target_idx`` drive ``facing_enemy`` on L/R envs
-    (Seaquest, Chopper Command) and shot-to-target Δx/Δy when the shot
-    flag is on; other envs keep ``facing_enemy=+1`` and shot Δ=0 if no
-    projectile is present.
+    ``objects`` / ``target_idx`` drive ``facing_enemy`` on L/R-aim envs
+    (Seaquest, Chopper Command, Kangaroo) and shot-to-target Δx/Δy when
+    the shot flag is on; other envs keep ``facing_enemy=+1`` and shot Δ=0
+    if no projectile is present.
     """
     stack_len = _stack_len(raw_observation)
     if not _USE_EGO_WEAPON_FEATURES:
@@ -508,6 +569,7 @@ def build_skill_ego_extras_stacked(
         return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="player_projectile",
+            can_fire_from_player_state=True,
             **common,
         )
     if _ENV_NAME == "spaceinvaders":
@@ -531,8 +593,12 @@ def build_skill_ego_extras_stacked(
             **common,
         )
 
+    # Default: always-ready weapon (no projectile attr) + geometry facing_enemy
+    # for L/R-aim envs (e.g. Kangaroo punch). Non-L/R envs still get +1.
     ready = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
-    facing = jnp.full((stack_len,), FACING_ENEMY_YES, dtype=jnp.float32)
+    facing = _facing_enemy_per_frame(
+        raw_observation, objects, target_idx, stack_len
+    )
     channels = [ready, facing]
     if _USE_EGO_SHOT_BETWEEN:
         channels.append(jnp.zeros((stack_len,), dtype=jnp.float32))
@@ -560,8 +626,23 @@ def seaquest_can_fire(raw_observation) -> jnp.ndarray:
 
 
 def phoenix_can_fire(raw_observation) -> jnp.ndarray:
-    """Latest-frame can_fire helper (Phoenix player projectile)."""
+    """Latest-frame player-projectile ready helper (legal-fire masking).
+
+    Distinct from the Phoenix ego ``can_fire`` channel, which encodes shield-active.
+    """
     return _latest_can_fire(raw_observation, "player_projectile")
+
+
+def phoenix_shield_active(raw_observation) -> jnp.ndarray:
+    """Latest-frame shield-active (+1 / -1) from stamped ``player.state``."""
+    player = _get_player(raw_observation)
+    st = jnp.asarray(getattr(player, "state", 0), dtype=jnp.float32)
+    latest = st[-1] if st.ndim > 0 else st
+    return jnp.where(
+        latest > 0.5,
+        jnp.float32(CAN_FIRE_READY),
+        jnp.float32(CAN_FIRE_IN_FLIGHT),
+    )
 
 
 def spaceinvaders_can_fire(raw_observation) -> jnp.ndarray:

@@ -189,6 +189,7 @@ def outer_make_train(config, frozen_meta_params=None):
         ),
         ego_mapper_noop_action=int(components.ego_mapper_noop_action),
         ego_mapper_fire_action=int(components.ego_mapper_fire_action),
+        no_target_game_action=int(components.no_target_game_action),
     )
     return train_fn, eval_rollout_fn, renderer
 
