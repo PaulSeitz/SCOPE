@@ -45,6 +45,10 @@ Usage:
   #     --suite clip100_collectsurface_probe --wait-deps --lean
   #   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
   #     --suite clip150_collectsurface_probe --wait-deps --lean
+  # Facing distance ablations (direction-only then distflags5; sequential 1 GPU):
+  #   python scripts/materialize_facing_distance_ablation.py
+  #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
+  #     --suite facing_distance_ablation --wait-deps --lean --resume
   #   python scripts/materialize_thesis_tier_b_facing.py
   #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
   #     --suite thesis_tier_b_facing --post-eval --gpus 0,1 --wait-deps --lean --resume
@@ -366,6 +370,23 @@ CLIP150_COLLECTSURFACE_PROBE_STEMS = (
     "seaquest_skills_ego_pov_clip150_facing_psibins8_collectsurface",
     "seaquest_skills_ego_pov_clip150_facing_psibins8_collectsurface_eval_full",
     "pong_transfer_ego_pov_clip150_facing_psibins8_collectsurface",
+)
+
+# Facing φ8 COLLECT-surface: direction-only (clip0) then 5 nested distance tiers.
+# Order is execution order: each arm train → eval_full → pong → beamrider (1 GPU sequential).
+# Materialize: python scripts/materialize_facing_distance_ablation.py
+FACING_DISTANCE_ABLATION_SUITE = "facing_distance_ablation"
+FACING_DISTANCE_ABLATION_STEMS = (
+    # --- nodist (clip0) ---
+    "seaquest_skills_ego_pov_clip0_facing_psibins8_collectsurface",
+    "seaquest_skills_ego_pov_clip0_facing_psibins8_collectsurface_eval_full",
+    "pong_transfer_ego_pov_clip0_facing_psibins8_collectsurface",
+    "beamrider_transfer_ego_pov_clip0_facing_psibins8_collectsurface",
+    # --- distflags5 [15, 25, 50, 100, 200] ---
+    "seaquest_skills_ego_pov_facing_psibins8_collectsurface_distflags5",
+    "seaquest_skills_ego_pov_facing_psibins8_collectsurface_distflags5_eval_full",
+    "pong_transfer_ego_pov_facing_psibins8_collectsurface_distflags5",
+    "beamrider_transfer_ego_pov_facing_psibins8_collectsurface_distflags5",
 )
 
 # Tier C: 25M from-scratch + post-eval (ego/pixel) + RQ3 meta/tandem extras.
@@ -956,6 +977,7 @@ SUITE_STEMS = {
     THESIS_TIER_B_FACING_SUITE: THESIS_TIER_B_FACING_STEMS,
     CLIP100_COLLECTSURFACE_PROBE_SUITE: CLIP100_COLLECTSURFACE_PROBE_STEMS,
     CLIP150_COLLECTSURFACE_PROBE_SUITE: CLIP150_COLLECTSURFACE_PROBE_STEMS,
+    FACING_DISTANCE_ABLATION_SUITE: FACING_DISTANCE_ABLATION_STEMS,
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_TIER_C_FACING_SUITE: THESIS_TIER_C_FACING_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
@@ -1022,6 +1044,7 @@ SUITE_RTPT: dict[str, str] = {
     THESIS_TIER_C_FACING_SUITE: "extras",
     CLIP100_COLLECTSURFACE_PROBE_SUITE: "clip100",
     CLIP150_COLLECTSURFACE_PROBE_SUITE: "clip150",
+    FACING_DISTANCE_ABLATION_SUITE: "dist_abl",
     DISTBINS8_PIPELINE_SUITE: "distbins",
     KANGAROO_LIFETIME_SUITE: "kangaroo",
     CLIP50_LIFETIME_PIPELINE_SUITE: "lifetime",
