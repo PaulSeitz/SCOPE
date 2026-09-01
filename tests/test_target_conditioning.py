@@ -11,6 +11,7 @@ from concept_based_learning.environments.datatypes import LABEL_DESTROY
 from concept_based_learning.networks.skill_network import QNetwork
 from concept_based_learning.observations.target_conditioning import (
     build_oc_object_matrix,
+    build_oc_psi_features,
     gather_object_rows,
     oc_per_object_feature_dim,
     outline_mask,
@@ -47,6 +48,102 @@ def _fake_objects(max_objects: int = 4, stack: int = 2) -> _FakeObjects:
     return _FakeObjects(
         x=x, y=y, width=w, height=h, active=active, semantic_label=labels
     )
+
+
+@chex.dataclass
+class _FakePlayer:
+    x: chex.Array
+    y: chex.Array
+    width: chex.Array
+    height: chex.Array
+    orientation: chex.Array
+
+
+@chex.dataclass
+class _FakeRawObs:
+    player: _FakePlayer
+
+
+def _fake_raw_obs(
+    stack: int = 2,
+    *,
+    orientation: float = 90.0,
+    x: float = 10.0,
+    y: float = 20.0,
+) -> _FakeRawObs:
+    return _FakeRawObs(
+        player=_FakePlayer(
+            x=jnp.full((stack,), x, dtype=jnp.float32),
+            y=jnp.full((stack,), y, dtype=jnp.float32),
+            width=jnp.full((stack,), 8.0, dtype=jnp.float32),
+            height=jnp.full((stack,), 8.0, dtype=jnp.float32),
+            orientation=jnp.full((stack,), orientation, dtype=jnp.float32),
+        )
+    )
+
+
+def test_build_oc_psi_features_target_to_right_of_player():
+    objs = _fake_objects()
+    raw = _fake_raw_obs(orientation=90.0, x=10.0, y=20.0)
+    # Target at slot 1: center (45, 54) — to the right of player center (14, 24).
+    psi_feat = build_oc_psi_features(
+        raw,
+        objs,
+        jnp.array(1, dtype=jnp.int32),
+        max_objects=4,
+    )
+    assert psi_feat.shape == (2,)
+    assert float(psi_feat[1]) > 0.5  # cos(ψ) ≈ 1 when facing target
+
+
+def test_skill_network_oc_psi_changes_q_with_facing():
+    max_objects = 4
+    objs = _fake_objects(max_objects=max_objects)
+    rng = jax.random.PRNGKey(1)
+    embed_dim = 16
+    net = QNetwork(
+        action_dim=3,
+        input_mode="oc_embed",
+        max_objects=max_objects,
+        hidden_size=16,
+        num_layers=1,
+        embed_dim=embed_dim,
+        oc_psi_features=True,
+    )
+    raw_face = _fake_raw_obs(orientation=90.0)
+    raw_away = _fake_raw_obs(orientation=270.0)
+    psi_face = build_oc_psi_features(
+        raw_face, objs, jnp.array(1, dtype=jnp.int32), max_objects=max_objects
+    )
+    vars_ = net.init(
+        rng,
+        jnp.zeros((embed_dim,)),
+        train=False,
+        target_idx=jnp.array(1, dtype=jnp.int32),
+        objects=objs,
+        oc_psi=psi_face,
+    )
+    q_face = net.apply(
+        vars_,
+        jnp.zeros((embed_dim,)),
+        train=False,
+        target_idx=jnp.array(1, dtype=jnp.int32),
+        objects=objs,
+        oc_psi=psi_face,
+    )
+    psi_away = build_oc_psi_features(
+        raw_away, objs, jnp.array(1, dtype=jnp.int32), max_objects=max_objects
+    )
+    q_away = net.apply(
+        vars_,
+        jnp.zeros((embed_dim,)),
+        train=False,
+        target_idx=jnp.array(1, dtype=jnp.int32),
+        objects=objs,
+        oc_psi=psi_away,
+    )
+    assert q_face.shape == (3,)
+    assert not jnp.allclose(q_face, q_away)
 
 
 def test_outline_mask_is_hollow_border():

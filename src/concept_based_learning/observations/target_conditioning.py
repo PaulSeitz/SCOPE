@@ -15,7 +15,9 @@ import math
 import jax
 import jax.numpy as jnp
 
+from concept_based_learning.observations.action_space import _default_get_player
 from concept_based_learning.observations.egocentric import SCREEN_HEIGHT, SCREEN_WIDTH
+from concept_based_learning.observations.pov_relative import pov_facing_psi_rad
 
 # Outline thickness in pixel-observation coordinates (after any resize).
 DEFAULT_OUTLINE_THICKNESS = 2
@@ -278,3 +280,60 @@ def gather_object_rows(
 def oc_per_object_feature_dim(objects, max_objects: int) -> int:
     """Probe per-object channel count ``F`` (Dense input width for skill OC)."""
     return int(build_oc_object_matrix(objects, max_objects=max_objects).shape[-1])
+
+
+def _player_center_screen(raw_obs) -> tuple[jnp.ndarray, jnp.ndarray]:
+    player = _default_get_player(raw_obs)
+    px = jnp.asarray(player.x[..., -1], dtype=jnp.float32) + (
+        jnp.asarray(player.width[..., -1], dtype=jnp.float32) / 2.0
+    )
+    py = jnp.asarray(player.y[..., -1], dtype=jnp.float32) + (
+        jnp.asarray(player.height[..., -1], dtype=jnp.float32) / 2.0
+    )
+    return px, py
+
+
+def _player_facing_deg(raw_obs) -> jnp.ndarray:
+    player = _default_get_player(raw_obs)
+    return jnp.asarray(player.orientation[..., -1], dtype=jnp.float32)
+
+
+def build_oc_psi_features(
+    raw_obs,
+    objects,
+    target_idx,
+    *,
+    max_objects: int,
+) -> jnp.ndarray:
+    """
+    Aim-offset features for skill ``oc_embed`` under facing-relative control.
+
+    Returns ``[..., 2]`` with ``sin(ψ), cos(ψ)`` where ψ = player facing minus
+    bearing to the selected target (same convention as POV ego ``sin/cos(ψ)``).
+  """
+    objs = _last_frame_objects(objects)
+    px, py = _player_center_screen(raw_obs)
+    cx = jnp.asarray(objs.x, dtype=jnp.float32) + (
+        jnp.asarray(objs.width, dtype=jnp.float32) / 2.0
+    )
+    cy = jnp.asarray(objs.y, dtype=jnp.float32) + (
+        jnp.asarray(objs.height, dtype=jnp.float32) / 2.0
+    )
+    centers = jnp.stack([cx, cy], axis=-1)
+    gathered = gather_object_rows(
+        centers, target_idx, max_objects=max_objects
+    )
+    obj_lead = centers.shape[:-2]
+    extra = len(gathered.shape) - len(obj_lead) - 1
+    if extra > 0:
+        px = px[..., None]
+        py = py[..., None]
+    dx = gathered[..., 0] - px
+    dy = gathered[..., 1] - py
+    theta = jnp.arctan2(dy, dx)
+    psi = pov_facing_psi_rad(_player_facing_deg(raw_obs), theta)
+    return jnp.stack([jnp.sin(psi), jnp.cos(psi)], axis=-1)
+
+
+def oc_psi_feature_dim() -> int:
+    return 2

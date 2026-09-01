@@ -37,8 +37,14 @@ objects ──► [M, F]   (all labeled leaves; F shared across envs)
      Dense(SKILL_EMBED_DIM) per row   ← shared weights, input always F
               │
               ▼
-         [M, D] ──gather(target_idx)──► [D] ──► MLP ──► Q
+         [M, D] ──gather(target_idx)──► [D] ──► concat sin(ψ), cos(ψ) ──► MLP ──► Q
 ```
+
+- When `SKILL_OC_PSI_FEATURES: true` (POV facing-relative mapper ablation), ψ is
+  player facing minus bearing to the gathered target — same convention as POV ego
+  `sin/cos(ψ)`. This tells the head whether the player is looking toward or away
+  from the target under body-relative control, without switching to target-aligned
+  FORWARD semantics.
 
 - Uses the **entire** labeled object observation (bbox, active, visual_id, state,
   orientation, semantic_label, flags, …) — the same object leaves meta attaches
@@ -50,8 +56,9 @@ objects ──► [M, F]   (all labeled leaves; F shared across envs)
     into a giant vector — “which object” is selection, not a portable ID code.
 - Relabel-all-objects uses the same shared Dense and gathers `K` target rows.
 
-Implementation: `build_oc_object_matrix` + `gather_object_rows` in
-`observations/target_conditioning.py`; Dense lives in `QNetwork`.
+Implementation: `build_oc_object_matrix` + `gather_object_rows` + optional
+`build_oc_psi_features` in `observations/target_conditioning.py`; Dense lives in
+`QNetwork`.
 
 ### Meta `META_INPUT_MODE: oc_embed`
 
@@ -99,6 +106,7 @@ when `F` is shared.
 See `configs/template_config.yaml`:
 
 - `SKILL_INPUT_MODE`
+- `SKILL_OC_PSI_FEATURES` — concat `sin(ψ), cos(ψ)` on skill `oc_embed` (POV facing mapper)
 - `SKILL_EMBED_DIM` — used by `ego_embed`, skill `oc_embed` (per-object), pixel CNN proj
 - `SKILL_PIXEL_CNN_CHANNELS` / `SKILL_PIXEL_CNN_KERNEL_SIZE`
 - `SKILL_PIXEL_PAINT_TARGET_OUTLINE` — paint target ring for `pixel_embed` (default true)

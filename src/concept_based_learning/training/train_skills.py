@@ -43,6 +43,7 @@ from concept_based_learning.networks.skill_network import (
 )
 from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
+from concept_based_learning.observations.target_conditioning import build_oc_psi_features
 from concept_based_learning.environments.meta_target_mask import (
     is_meta_fire_target,
     is_meta_noop_target,
@@ -256,6 +257,9 @@ def make_train(
     )
     use_pixel_skill = skill_input_mode in PIXEL_SKILL_INPUT_MODES
     use_object_skill = skill_input_mode in OBJECT_CONDITIONED_SKILL_INPUT_MODES
+    use_oc_psi = skill_input_mode == "oc_embed" and bool(
+        config.get("SKILL_OC_PSI_FEATURES", False)
+    )
     skill_bootstrap_chunk_steps = resolve_skill_chunk_steps(
         num_steps=int(config["NUM_STEPS"]),
         num_envs=int(config["NUM_ENVS"]),
@@ -291,6 +295,7 @@ def make_train(
         pixel_paint_target_outline=bool(
             config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
         ),
+        oc_psi_features=use_oc_psi,
     )
     use_learned_meta_policy = frozen_meta_params is not None
     if use_learned_meta_policy:
@@ -389,6 +394,8 @@ def make_train(
                     target_idx=probe_target,
                     pixel_obs=probe_pixel,
                     objects=probe_objects,
+                    raw_obs=probe_obs.raw_observation if use_oc_psi else None,
+                    oc_psi=probe_oc_psi,
                 )
                 params_local = network_variables["params"]
                 batch_stats_local = network_variables.get("batch_stats", {})
@@ -440,6 +447,17 @@ def make_train(
             ego_feat_dim = skill_embed_dim
         else:
             ego_feat_dim = int(probe_ego.shape[-1])
+
+        probe_oc_psi = (
+            build_oc_psi_features(
+                probe_obs.raw_observation,
+                probe_obs.objects,
+                probe_target,
+                max_objects=MAX_OBJECTS,
+            )
+            if use_oc_psi
+            else None
+        )
 
         def _skill_counter(states, field: str):
             if isinstance(states, tuple):
@@ -640,6 +658,16 @@ def make_train(
                 )
 
                 def compute_skill_actions(train_state, skill_idx, ego_for_skill):
+                    oc_psi_step = (
+                        build_oc_psi_features(
+                            last_obs.raw_observation,
+                            last_obs.objects,
+                            safe_target_idxs,
+                            max_objects=MAX_OBJECTS,
+                        )
+                        if use_oc_psi
+                        else None
+                    )
                     q_vals = skill_network.apply(
                         {"params": train_state.params, "batch_stats": train_state.batch_stats},
                         ego_for_skill,
@@ -647,6 +675,7 @@ def make_train(
                         target_idx=safe_target_idxs,
                         pixel_obs=pixel_obses if use_pixel_skill else None,
                         objects=last_obs.objects if use_object_skill else None,
+                        oc_psi=oc_psi_step,
                     )
                     _rngs = jax.random.split(rng_skill, config["NUM_ENVS"])
                     eps = jnp.full(config["NUM_ENVS"], eps_scheduler(train_state.n_updates))
@@ -978,6 +1007,25 @@ def make_train(
                     relabel_mask = base_valid[:, jnp.newaxis]
                     object_idx_all = safe_target_idxs[:, jnp.newaxis]
 
+                if use_oc_psi:
+                    oc_psi_all = jax.vmap(
+                        lambda raw, objs, idxs: build_oc_psi_features(
+                            raw, objs, idxs, max_objects=MAX_OBJECTS
+                        ),
+                        in_axes=(0, 0, 0),
+                    )(last_obs.raw_observation, last_obs.objects, object_idx_all)
+                    next_oc_psi_all = jax.vmap(
+                        lambda raw, objs, idxs: build_oc_psi_features(
+                            raw, objs, idxs, max_objects=MAX_OBJECTS
+                        ),
+                        in_axes=(0, 0, 0),
+                    )(new_obs.raw_observation, new_obs.objects, object_idx_all)
+                else:
+                    oc_psi_all = jnp.zeros(
+                        (config["NUM_ENVS"], object_idx_all.shape[1], 2),
+                        dtype=jnp.float32,
+                    )
+                    next_oc_psi_all = oc_psi_all
 
                 # Prefer info["env_reward"] so CLIP_REWARD does not distort logged returns.
                 log_rewards = logging_env_reward(info, raw_rewards)
@@ -1049,6 +1097,8 @@ def make_train(
                     relabel_mask=relabel_mask,
                     done=new_done,
                     env_reward=raw_rewards,
+                    oc_psi_all=oc_psi_all,
+                    next_oc_psi_all=next_oc_psi_all,
                 )
 
                 return (
@@ -1170,6 +1220,7 @@ def make_train(
                         target_idx=target_idx_all,
                         pixel_obs=next_pixel_obs_all,
                         objects=next_objects_all,
+                        oc_psi=transitions.next_oc_psi_all if use_oc_psi else None,
                         chunk_steps=skill_bootstrap_chunk_steps,
                         train=False,
                         chunk=True,
@@ -1236,6 +1287,11 @@ def make_train(
                         target_idx=transitions.target_idx,
                         pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                         objects=transitions.next_objects if use_object_skill else None,
+                        oc_psi=(
+                            transitions.next_oc_psi_all[:, :, 0]
+                            if use_oc_psi
+                            else None
+                        ),
                         chunk_steps=skill_bootstrap_chunk_steps,
                         train=False,
                         chunk=use_pixel_skill,
@@ -1265,6 +1321,11 @@ def make_train(
                         target_idx=transitions.target_idx,
                         pixel_obs=transitions.next_pixel_obs if use_pixel_skill else None,
                         objects=transitions.next_objects if use_object_skill else None,
+                        oc_psi=(
+                            transitions.next_oc_psi_all[:, :, 0]
+                            if use_oc_psi
+                            else None
+                        ),
                         chunk_steps=skill_bootstrap_chunk_steps,
                         train=False,
                         chunk=use_pixel_skill,
@@ -1325,6 +1386,9 @@ def make_train(
                             mb_objects = (
                                 minibatch["objects"] if use_object_skill else None
                             )
+                            mb_oc_psi = (
+                                minibatch["oc_psi_all"] if use_oc_psi else None
+                            )
                             if debug_inputs:
                                 maybe_jax_check_skill_minibatch(
                                     config,
@@ -1343,6 +1407,7 @@ def make_train(
                                 target_idx=mb_target_idx,
                                 pixel_obs=mb_pixel_obs,
                                 objects=mb_objects,
+                                oc_psi=mb_oc_psi,
                             )
                             chosen_action_qvals = jnp.take_along_axis(
                                 q_vals,
@@ -1412,6 +1477,8 @@ def make_train(
                         train_batch["pixel_obs"] = transitions.pixel_obs
                     if use_object_skill:
                         train_batch["objects"] = transitions.objects
+                    if use_oc_psi:
+                        train_batch["oc_psi_all"] = transitions.oc_psi_all
                     minibatches = jax.tree.map(
                         lambda x: preprocess_transition(x, _rng), train_batch
                     )
@@ -1749,6 +1816,16 @@ def make_train(
                         target_idx=jnp.array(target_obj_idxs, dtype=jnp.int32),
                         pixel_obs=eval_pixel_obs,
                         objects=obs.objects if use_object_skill else None,
+                        oc_psi=(
+                            build_oc_psi_features(
+                                obs.raw_observation,
+                                obs.objects,
+                                jnp.array(target_obj_idxs, dtype=jnp.int32),
+                                max_objects=MAX_OBJECTS,
+                            )
+                            if use_oc_psi
+                            else None
+                        ),
                     )
                 )(train_states)
                 q_vals = jnp.squeeze(q_vals, axis=1)

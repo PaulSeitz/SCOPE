@@ -98,6 +98,7 @@ from concept_based_learning.observations.pov_relative import (
     resolve_action_mappers,
     using_pov_relative,
 )
+from concept_based_learning.observations.target_conditioning import build_oc_psi_features
 from concept_based_learning.observations.pov_fixed_bilateral import using_pov_fixed_bilateral
 from concept_based_learning.observations.pov_facing_frame import (
     using_ego_pose_xy,
@@ -644,6 +645,8 @@ def apply_skill_q_all(
     target_idx,
     pixel_obs=None,
     objects=None,
+    raw_obs=None,
+    oc_psi=None,
     stack_size: int,
     destroy_skill_idx: int = 0,
 ):
@@ -659,6 +662,8 @@ def apply_skill_q_all(
                 target_idx=target_idx,
                 pixel_obs=pixel_obs,
                 objects=objects,
+                raw_obs=raw_obs,
+                oc_psi=oc_psi,
             )
 
         return jax.vmap(apply_one)(params_tree)
@@ -679,6 +684,8 @@ def apply_skill_q_all(
                 target_idx=target_idx,
                 pixel_obs=pixel_obs,
                 objects=objects,
+                raw_obs=raw_obs,
+                oc_psi=oc_psi,
             )
         )
     return jnp.stack(qs)
@@ -837,6 +844,19 @@ def _skill_pixel_obs_from_obs(config: dict, obs):
             "PixelAndObjectObsWrapper, but it is missing."
         )
     return obs.pixel_observation
+
+
+def _skill_oc_psi_from_obs(config: dict, raw_obs, objects, target_idx, max_objects: int):
+    """Aim-offset sin/cos(ψ) for OC POV skill heads (player facing vs target bearing)."""
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode != "oc_embed" or not bool(config.get("SKILL_OC_PSI_FEATURES", False)):
+        return None
+    return build_oc_psi_features(
+        raw_obs,
+        objects,
+        target_idx,
+        max_objects=max_objects,
+    )
 
 
 def _propose_meta_target(
@@ -1090,6 +1110,14 @@ def _make_jitted_greedy_episode_runner(
             target_idx=safe_target,
             pixel_obs=pixel_obs,
             objects=obs.objects,
+            raw_obs=obs.raw_observation,
+            oc_psi=_skill_oc_psi_from_obs(
+                config,
+                obs.raw_observation,
+                obs.objects,
+                safe_target,
+                int(config.get("MAX_OBJECTS", 35)),
+            ),
             stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
             destroy_skill_idx=_destroy_skill_idx(config),
         )
@@ -1508,6 +1536,13 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         init_pixel = _skill_pixel_obs_from_obs(config, obs)
         if init_pixel is not None:
             init_pixel = jnp.expand_dims(init_pixel, 0)
+        init_oc_psi = _skill_oc_psi_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            jnp.array(0, dtype=jnp.int32),
+            int(config.get("MAX_OBJECTS", 35)),
+        )
         network_vars = skill_network.init(
             jax.random.PRNGKey(seed + 1),
             init_x,
@@ -1515,6 +1550,8 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             target_idx=jnp.array(0, dtype=jnp.int32),
             pixel_obs=init_pixel,
             objects=obs.objects,
+            raw_obs=obs.raw_observation if init_oc_psi is not None else None,
+            oc_psi=init_oc_psi,
         )
         base_params = network_vars["params"]
 
@@ -1526,7 +1563,15 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     # JIT skill Q eval once — the old per-step jax.vmap.apply was the reason
     # skills_only end videos appeared to hang after "Recording...".
-    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch, objects_batch):
+    def _apply_all_skills(
+        params_stack,
+        ego_batch,
+        target_idx_arr,
+        pixel_batch,
+        objects_batch,
+        raw_obs_batch,
+        oc_psi_batch,
+    ):
         return apply_skill_q_all(
             skill_network,
             params_stack,
@@ -1534,6 +1579,8 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             target_idx=target_idx_arr,
             pixel_obs=pixel_batch,
             objects=objects_batch,
+            raw_obs=raw_obs_batch,
+            oc_psi=oc_psi_batch,
             stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
             destroy_skill_idx=_destroy_skill_idx(config),
         )
@@ -1714,6 +1761,14 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 target_idx_arr,
                 pixel_batch,
                 obs.objects,
+                obs.raw_observation,
+                _skill_oc_psi_from_obs(
+                    config,
+                    obs.raw_observation,
+                    obs.objects,
+                    target_idx_arr[0],
+                    int(config.get("MAX_OBJECTS", 35)),
+                ),
             )  # [num_skills, 1, ego_action_dim]
             q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, ego_action_dim]
 
@@ -2132,6 +2187,13 @@ def run_live_visualization(
         init_pixel = _skill_pixel_obs_from_obs(config, obs)
         if init_pixel is not None:
             init_pixel = jnp.expand_dims(init_pixel, 0)
+        init_oc_psi = _skill_oc_psi_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            jnp.array(0, dtype=jnp.int32),
+            int(config.get("MAX_OBJECTS", 35)),
+        )
         network_vars = skill_network.init(
             jax.random.PRNGKey(seed + 1),
             init_x,
@@ -2139,6 +2201,8 @@ def run_live_visualization(
             target_idx=jnp.array(0, dtype=jnp.int32),
             pixel_obs=init_pixel,
             objects=obs.objects,
+            raw_obs=obs.raw_observation if init_oc_psi is not None else None,
+            oc_psi=init_oc_psi,
         )
         base_params = network_vars["params"]
         params_tree = jax.tree_util.tree_map(
@@ -2147,7 +2211,15 @@ def run_live_visualization(
         )
 
     # JIT skill Q eval once (same fix as record-mode eval rollouts).
-    def _apply_all_skills(params_stack, ego_batch, target_idx_arr, pixel_batch, objects_batch):
+    def _apply_all_skills(
+        params_stack,
+        ego_batch,
+        target_idx_arr,
+        pixel_batch,
+        objects_batch,
+        raw_obs_batch,
+        oc_psi_batch,
+    ):
         return apply_skill_q_all(
             skill_network,
             params_stack,
@@ -2155,6 +2227,8 @@ def run_live_visualization(
             target_idx=target_idx_arr,
             pixel_obs=pixel_batch,
             objects=objects_batch,
+            raw_obs=raw_obs_batch,
+            oc_psi=oc_psi_batch,
             stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
             destroy_skill_idx=_destroy_skill_idx(config),
         )
@@ -2334,6 +2408,14 @@ def run_live_visualization(
             jnp.asarray([target_obj_idx], dtype=jnp.int32),
             pixel_batch,
             obs.objects,
+            obs.raw_observation,
+            _skill_oc_psi_from_obs(
+                config,
+                obs.raw_observation,
+                obs.objects,
+                jnp.asarray(target_obj_idx, dtype=jnp.int32),
+                int(config.get("MAX_OBJECTS", 35)),
+            ),
         )
         q_vals = jnp.squeeze(q_vals, axis=1)
 

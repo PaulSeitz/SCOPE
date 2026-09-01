@@ -10,6 +10,7 @@ from flax.training.train_state import TrainState
 from concept_based_learning.observations.target_conditioning import (
     DEFAULT_OUTLINE_THICKNESS,
     build_oc_object_matrix,
+    build_oc_psi_features,
     gather_object_rows,
     normalize_pixel_obs,
     paint_target_outline_pixels,
@@ -59,6 +60,7 @@ class QNetwork(nn.Module):
     pixel_outline_thickness: int = DEFAULT_OUTLINE_THICKNESS
     pixel_paint_target_outline: bool = True
     pixel_blackout: bool = False
+    oc_psi_features: bool = False
 
     @nn.compact
     def __call__(
@@ -69,6 +71,8 @@ class QNetwork(nn.Module):
         target_idx=None,
         pixel_obs=None,
         objects=None,
+        raw_obs=None,
+        oc_psi=None,
     ):
         del train  # LayerNorm path does not use batch stats.
         mode = str(self.input_mode).lower().strip()
@@ -97,6 +101,22 @@ class QNetwork(nn.Module):
             x = gather_object_rows(
                 obj_h, target_idx, max_objects=self.max_objects
             )
+            if self.oc_psi_features:
+                if oc_psi is None:
+                    if raw_obs is None:
+                        raise ValueError(
+                            "oc_psi_features=True requires raw_obs or oc_psi "
+                            "(player facing vs target bearing)."
+                        )
+                    psi_feat = build_oc_psi_features(
+                        raw_obs,
+                        objects,
+                        target_idx,
+                        max_objects=self.max_objects,
+                    )
+                else:
+                    psi_feat = jnp.asarray(oc_psi, dtype=jnp.float32)
+                x = jnp.concatenate([x, psi_feat], axis=-1)
         elif mode in ("pixel_embed", "pixel_embedding", "cnn", "pixel_embed_cond"):
             # ``pixel_embed_cond`` is an alias: target identity is the painted
             # outline, not a learned slot embedding.
@@ -186,6 +206,7 @@ def q_network_from_config(config, *, action_dim: int | None = None) -> QNetwork:
             config.get("SKILL_PIXEL_PAINT_TARGET_OUTLINE", True)
         ),
         pixel_blackout=bool(config.get("SKILL_PIXEL_BLACKOUT", False)),
+        oc_psi_features=bool(config.get("SKILL_OC_PSI_FEATURES", False)),
     )
 
 
@@ -214,6 +235,8 @@ class Transition:
     relabel_mask: chex.Array
     done: chex.Array
     env_reward: chex.Array
+    oc_psi_all: chex.Array
+    next_oc_psi_all: chex.Array
 
 
 class CustomTrainState(TrainState):

@@ -73,6 +73,7 @@ def skill_network_q_max(
     target_idx: jnp.ndarray,
     pixel_obs: jnp.ndarray | None,
     objects=None,
+    oc_psi: jnp.ndarray | None = None,
     chunk_steps: int,
     train: bool = False,
     chunk: bool = False,
@@ -87,6 +88,7 @@ def skill_network_q_max(
             target_idx=target_idx,
             pixel_obs=pixel_obs,
             objects=objects,
+            oc_psi=oc_psi,
             chunk_steps=chunk_steps,
             train=train,
         )
@@ -97,6 +99,7 @@ def skill_network_q_max(
         target_idx=target_idx,
         pixel_obs=pixel_obs,
         objects=objects,
+        oc_psi=oc_psi,
     )
     return jnp.max(q, axis=-1)
 
@@ -110,6 +113,7 @@ def chunked_skill_network_q_max(
     target_idx: jnp.ndarray,
     pixel_obs: jnp.ndarray | None,
     objects=None,
+    oc_psi: jnp.ndarray | None = None,
     chunk_steps: int,
     train: bool = False,
 ) -> jnp.ndarray:
@@ -122,7 +126,7 @@ def chunked_skill_network_q_max(
     num_steps = int(ego_obs.shape[0])
     chunk_steps = max(1, min(int(chunk_steps), num_steps))
 
-    def _apply(ego, tgt, pix, objs):
+    def _apply(ego, tgt, pix, objs, psi):
         return apply_fn(
             {"params": params, "batch_stats": batch_stats},
             ego,
@@ -130,10 +134,11 @@ def chunked_skill_network_q_max(
             target_idx=tgt,
             pixel_obs=pix,
             objects=objs,
+            oc_psi=psi,
         )
 
     if chunk_steps >= num_steps:
-        q = _apply(ego_obs, target_idx, pixel_obs, objects)
+        q = _apply(ego_obs, target_idx, pixel_obs, objects, oc_psi)
         return jnp.max(q, axis=-1)
 
     padded_steps = ((num_steps + chunk_steps - 1) // chunk_steps) * chunk_steps
@@ -142,6 +147,7 @@ def chunked_skill_network_q_max(
     target_padded = _pad_time_axis(target_idx, pad)
     pixel_padded = _pad_time_axis(pixel_obs, pad) if pixel_obs is not None else None
     objects_padded = _pad_time_tree(objects, pad)
+    oc_psi_padded = _pad_time_axis(oc_psi, pad) if oc_psi is not None else None
 
     num_chunks = padded_steps // chunk_steps
     chunks_ego = ego_padded.reshape(num_chunks, chunk_steps, *ego_padded.shape[1:])
@@ -159,6 +165,11 @@ def chunked_skill_network_q_max(
         if objects_padded is not None
         else None
     )
+    chunks_oc_psi = (
+        oc_psi_padded.reshape(num_chunks, chunk_steps, *oc_psi_padded.shape[1:])
+        if oc_psi_padded is not None
+        else None
+    )
 
     def _chunk_fn(_carry, i):
         ego_c = chunks_ego[i]
@@ -169,7 +180,8 @@ def chunked_skill_network_q_max(
             if chunks_objects is None
             else jax.tree_util.tree_map(lambda x: x[i], chunks_objects)
         )
-        q = _apply(ego_c, target_c, pixel_c, objects_c)
+        psi_c = None if chunks_oc_psi is None else chunks_oc_psi[i]
+        q = _apply(ego_c, target_c, pixel_c, objects_c, psi_c)
         return None, jnp.max(q, axis=-1)
 
     _, q_chunks = jax.lax.scan(_chunk_fn, None, jnp.arange(num_chunks))
