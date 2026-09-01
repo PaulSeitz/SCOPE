@@ -281,7 +281,7 @@ def run_sequential_eval(
     start_rtpt({
         "RTPT_ENABLED": True,
         "RTPT_NAME_INITIALS": "PS",
-        "RTPT_EXPERIMENT_NAME": "HRL_fulleval",
+        "RTPT_EXPERIMENT_NAME": "fulleval",
         "RTPT_STEP_EVERY": 10,
         # start_rtpt computes max_iterations from TOTAL_TIMESTEPS/NUM_STEPS/NUM_ENVS;
         # pass total_updates directly by faking 1-step-per-env-step.

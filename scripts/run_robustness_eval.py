@@ -328,7 +328,7 @@ def run_robustness_eval(
     output_path: Path,
     rtpt_enabled: bool = True,
     rtpt_name_initials: str = "PS",
-    rtpt_experiment_name: str = "HRL_robustness_eval",
+    rtpt_experiment_name: str = "robustness",
     rtpt_step_every: int = 1,
 ) -> dict[str, Any]:
     total_episodes = len(agent_keys) * len(mod_specs) * num_seeds * num_episodes
@@ -539,8 +539,8 @@ def main() -> None:
     parser.add_argument(
         "--rtpt-name",
         type=str,
-        default="HRL_robustness_eval",
-        help="RTPT experiment name shown on the cluster (default: HRL_robustness_eval).",
+        default="robustness",
+        help="RTPT experiment name shown on the cluster (default: robustness).",
     )
     parser.add_argument(
         "--rtpt-initials",

@@ -51,7 +51,7 @@ from concept_based_learning.training.rtpt_progress import (  # noqa: E402
 INPUT_DIR = PROJECT_ROOT / "configs" / "experiment" / "input_ablation"
 QSTICK_DIR = PROJECT_ROOT / "configs" / "experiment" / "q_stickiness_eval"
 DEFAULT_INPUT_MANIFEST = INPUT_DIR / "manifest_multi_env.yaml"
-INPUT_ABLATION_RTPT_BASE = "HRL_input_ablation"
+INPUT_ABLATION_RTPT_BASE = "ablation"
 
 INPUT_ABLATION_ENVS = ("seaquest", "spaceinvaders", "freeway", "beamrider")
 INPUT_VARIANT_KEYS = [
@@ -153,7 +153,7 @@ def _shard_manifest_entries(
 
 
 def _input_ablation_rtpt_name(manifest_shard: str | None = None) -> str:
-    """RTPT label on the cluster: HRL_input_ablation, HRL_input_ablation1, …"""
+    """RTPT label on the cluster: ablation, ablation2, …"""
     if manifest_shard is None:
         return INPUT_ABLATION_RTPT_BASE
     shard_idx, _ = _parse_manifest_shard(manifest_shard)

@@ -38,10 +38,13 @@ Usage:
   bash scripts/prepare_thesis_final_run.sh                  # archive + remove ckpts
   python scripts/run_paper_eval.py --suite thesis_tier_a --gpus 0,1 --wait-deps --lean \\
     --batch-tag thesis_tier_a_$(date +%Y%m%d)
-  # Clip100 COLLECT-surface probe (Pong distance-tier hypothesis):
-  #   python scripts/materialize_clip100_collectsurface_probe.py
+  # Clip100/150 COLLECT-surface probes (Pong distance-tier hypothesis):
+  #   python scripts/materialize_clip_collectsurface_probe.py --clip 100
+  #   python scripts/materialize_clip_collectsurface_probe.py --clip 150
   #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
   #     --suite clip100_collectsurface_probe --wait-deps --lean
+  #   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
+  #     --suite clip150_collectsurface_probe --wait-deps --lean
   #   python scripts/materialize_thesis_tier_b_facing.py
   #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
   #     --suite thesis_tier_b_facing --post-eval --gpus 0,1 --wait-deps --lean --resume
@@ -150,7 +153,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 DEFAULT_JAXATARI_FORK = Path("/home/paul/Documents/JAXAtari-seaquest-robustness")
 CONFIG_DIR = PROJECT_ROOT / "configs" / "experiment" / "paper_eval"
 MODS_DIR = CONFIG_DIR / "mods"
-RTPT_BASE = "HRL_paper_eval"
+RTPT_BASE = "HRL"
 DEFAULT_SEED = 44
 TRIAL_STEPS_DEFAULT = 16384  # one update at 128×128
 # Full-game horizon for all paper_eval mod/transfer tables (trial/smoke stay short).
@@ -352,6 +355,13 @@ CLIP100_COLLECTSURFACE_PROBE_STEMS = (
     "seaquest_skills_ego_pov_clip100_facing_psibins8_collectsurface",
     "seaquest_skills_ego_pov_clip100_facing_psibins8_collectsurface_eval_full",
     "pong_transfer_ego_pov_clip100_facing_psibins8_collectsurface",
+)
+
+CLIP150_COLLECTSURFACE_PROBE_SUITE = "clip150_collectsurface_probe"
+CLIP150_COLLECTSURFACE_PROBE_STEMS = (
+    "seaquest_skills_ego_pov_clip150_facing_psibins8_collectsurface",
+    "seaquest_skills_ego_pov_clip150_facing_psibins8_collectsurface_eval_full",
+    "pong_transfer_ego_pov_clip150_facing_psibins8_collectsurface",
 )
 
 # Tier C: 25M from-scratch + post-eval (ego/pixel) + RQ3 meta/tandem extras.
@@ -920,6 +930,7 @@ SUITE_STEMS = {
     THESIS_TIER_B_SUITE: THESIS_TIER_B_STEMS,
     THESIS_TIER_B_FACING_SUITE: THESIS_TIER_B_FACING_STEMS,
     CLIP100_COLLECTSURFACE_PROBE_SUITE: CLIP100_COLLECTSURFACE_PROBE_STEMS,
+    CLIP150_COLLECTSURFACE_PROBE_SUITE: CLIP150_COLLECTSURFACE_PROBE_STEMS,
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
@@ -963,6 +974,82 @@ SUITE_STEMS = {
     POV_FACING_ABLATION_GPU2_SUITE: POV_FACING_ABLATION_GPU2_STEMS,
     POV_FACING_ABLATION_PHIDEG_SUITE: POV_FACING_ABLATION_PHIDEG_STEMS,
 }
+
+# Short nvidia-smi / RTPT labels (1–2 tokens; project-generic, not run-specific).
+SUITE_RTPT: dict[str, str] = {
+    SKILL_RESHAPE_SUITE: "reshape",
+    DESTROY_ABLATION_SUITE: "destroy",
+    DESTROY_URGENCY_SUITE: "urgency",
+    COLLECT_SHOT_PROBES_SUITE: "collect",
+    EGO_POSE_PROBES_SUITE: "ego_pose",
+    COLLECT_COMBAT_PROBES_SUITE: "combat",
+    NO_SURFACE_DEATH_SUITE: "surface",
+    EGO_CLIP_BINS_SUITE: "clip_bins",
+    CLIP_BINS_NODECAY_SUITE: "nodecay",
+    CLIP50_ANGBINS_FULL_SUITE: "angbins",
+    THESIS_TIER_A_SUITE: "thesis",
+    THESIS_FINAL_SUITE: "thesis",
+    THESIS_FACING_SUITE: "thesis",
+    THESIS_TIER_B_SUITE: "finetune",
+    THESIS_TIER_B_FACING_SUITE: "finetune",
+    THESIS_TIER_C_SUITE: "extras",
+    CLIP100_COLLECTSURFACE_PROBE_SUITE: "clip100",
+    CLIP150_COLLECTSURFACE_PROBE_SUITE: "clip150",
+    DISTBINS8_PIPELINE_SUITE: "distbins",
+    KANGAROO_LIFETIME_SUITE: "kangaroo",
+    CLIP50_LIFETIME_PIPELINE_SUITE: "lifetime",
+    TIERSCALAR_PIPELINE_SUITE: "tier_scalar",
+    ANGSCALAR_ONLY_PIPELINE_SUITE: "ang_scalar",
+    SCALAR_ABLATION_DUAL_SUITE: "scalar",
+    MINIMAL_ABLATION_SUITE: "min_abl",
+    MINIMAL_ABLATION_TRAIN_SUITE: "min_train",
+    CLIP_LOW_PIPELINE_SUITE: "clip_low",
+    CLIP_SWEEP_PIPELINE_SUITE: "clip_sweep",
+    DISTANCE_ENCODE_PIPELINE_SUITE: "dist_enc",
+    PIXEL_NOOUTLINE_SUITE: "nooutline",
+    PQN_TRANSFER_SUITE: "pqn",
+    POV_MAPPER_SUITE: "pov",
+    POV_NOCLIP_SUITE: "noclip",
+    POV_NOCLIP_EVAL_SUITE: "noclip",
+    POV_BASELINE_SUITE: "pov_base",
+    POV_BASELINE_TRAIN_SUITE: "pov_train",
+    POV_VEL_SUITE: "pov_vel",
+    POV_PSIBINS8_SUITE: "psi8",
+    POV_VEL_PSIBINS8_SUITE: "vel_psi8",
+    POV_TURN_SUITE: "turn",
+    POV_FIXED2_SUITE: "fixed2",
+    POV_FIXED2_TRAIN_SUITE: "fixed2",
+    POV_FACING_SUITE: "facing",
+    POV_FACING_TRAIN_SUITE: "facing",
+    POV_FACING_COLLECT_SUITE: "facing",
+    POV_FACING_COLLECT_TRAIN_SUITE: "facing",
+    POV_FACING_V2_SUITE: "facing2",
+    POV_FACING_V2_TRAIN_SUITE: "facing2",
+    POV_FACING_V2_EVAL_SUITE: "facing2",
+    POV_FACING_V2_PHASE2_SUITE: "facing2",
+    POV_FACING_V2_GPU0_SUITE: "facing2",
+    POV_FACING_V2_GPU1_SUITE: "facing2",
+    POV_FACING_V2_GPU2_SUITE: "facing2",
+    POV_FACING_ABLATION_SUITE: "facing_abl",
+    POV_FACING_ABLATION_GPU0_SUITE: "facing_abl",
+    POV_FACING_ABLATION_GPU1_SUITE: "facing_abl",
+    POV_FACING_ABLATION_GPU2_SUITE: "facing_abl",
+    POV_FACING_ABLATION_PHIDEG_SUITE: "facing_abl",
+}
+
+
+def _rtpt_label_from_suite(suite: str) -> str:
+    """Derive a short cluster label from a suite slug."""
+    if suite in SUITE_RTPT:
+        return SUITE_RTPT[suite]
+    tokens = [t for t in suite.split("_") if t not in ("suite", "train", "eval", "probe")]
+    if tokens and tokens[0].startswith("clip"):
+        return tokens[0]
+    if len(tokens) == 1:
+        return tokens[0]
+    if len(tokens) >= 2:
+        return f"{tokens[0]}_{tokens[1]}"
+    return RTPT_BASE
 
 
 def _default_batch_tag() -> str:
@@ -1092,23 +1179,14 @@ def _rtpt_name(
     *,
     suite: str | None = None,
 ) -> str:
-    suite_rtpt = {
-        THESIS_TIER_A_SUITE: "sq_full_eval",
-        THESIS_FINAL_SUITE: "sq_full_eval",
-        THESIS_TIER_B_SUITE: "sq_full_eval_ft",
-        THESIS_TIER_B_FACING_SUITE: "sq_full_eval_ft_facing",
-        THESIS_TIER_C_SUITE: "sq_full_eval_extra",
-        PIXEL_NOOUTLINE_SUITE: "pix_nooutline",
-        PQN_TRANSFER_SUITE: "pqn_xfer",
-    }
-    if suite and suite in suite_rtpt:
-        base = suite_rtpt[suite]
-    elif suite:
-        base = f"{RTPT_BASE}_{suite}"
+    if suite:
+        base = _rtpt_label_from_suite(suite)
     elif rq is not None:
-        base = f"{RTPT_BASE}_rq{rq}"
+        base = f"rq{rq}"
     else:
         base = RTPT_BASE
+    if base != RTPT_BASE and not base.startswith(f"{RTPT_BASE}_"):
+        base = f"{RTPT_BASE}_{base}"
     if shard is None:
         return base
     return f"{base}_s{_parse_shard(shard)[0] + 1}"

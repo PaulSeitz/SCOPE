@@ -42,7 +42,7 @@ from concept_based_learning.training.rtpt_progress import (  # noqa: E402
 )
 
 CONFIG_DIR = PROJECT_ROOT / "configs" / "experiment" / "feature_eval"
-RTPT_BASE = "HRL_feature_eval"
+RTPT_BASE = "features"
 DEFAULT_SEED = 44
 TRIAL_STEPS_DEFAULT = 32768
 

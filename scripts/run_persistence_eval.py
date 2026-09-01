@@ -407,7 +407,7 @@ def run_persistence_eval(
     start_rtpt({
         "RTPT_ENABLED": True,
         "RTPT_NAME_INITIALS": "PS",
-        "RTPT_EXPERIMENT_NAME": "HRL_persistence_eval",
+        "RTPT_EXPERIMENT_NAME": "persistence",
         "RTPT_STEP_EVERY": 10,
         "TOTAL_TIMESTEPS": total_updates,
         "NUM_STEPS": 1,

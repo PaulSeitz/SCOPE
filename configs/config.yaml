@@ -14,7 +14,7 @@ WANDB_TAGS: []                # Extra tags merged in main.py wandb.init (see exp
 # --- RTPT cluster progress (nvidia-smi / ETA; like tqdm) ---
 RTPT_ENABLED: true
 RTPT_NAME_INITIALS: "PS"
-RTPT_EXPERIMENT_NAME: "jaxtari_HRL"    # null -> ALG_NAME_ENV_NAME_TRAIN_MODE
+RTPT_EXPERIMENT_NAME: "HRL"    # null -> ALG_NAME_ENV_NAME_TRAIN_MODE
 # Host sync every N training updates (rollout+grad), not env frames. 1 = PPO-style every update.
 RTPT_STEP_EVERY: 10
 
