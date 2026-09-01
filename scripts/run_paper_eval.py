@@ -48,6 +48,10 @@ Usage:
   #   python scripts/materialize_thesis_tier_b_facing.py
   #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
   #     --suite thesis_tier_b_facing --post-eval --gpus 0,1 --wait-deps --lean --resume
+  # Tier C facing (after B): 25M scratch + RQ3 meta/tandem + tandem-scratch BR/FR/AS:
+  #   python scripts/materialize_thesis_tier_c_facing.py
+  #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
+  #     --suite thesis_tier_c_facing --post-eval --gpus 0,1 --wait-deps --lean --resume
 
   # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
   python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
@@ -377,6 +381,27 @@ THESIS_TIER_C_STEMS = tuple(
     "seaquest_meta_oc_ego_skills_clip50_eval",
     "seaquest_tandem_oc_ego_clip50_angbins",
     "seaquest_tandem_oc_ego_clip50_angbins_eval",
+)
+
+# Tier C facing: POV mapper + facing φ8 ego; RQ3 meta/tandem from collectsurface ckpt.
+# Materialize: python scripts/materialize_thesis_tier_c_facing.py
+THESIS_TIER_C_FACING_SUITE = "thesis_tier_c_facing"
+_TIER_C_TANDEM_SCRATCH_ENVS = ("beamrider", "freeway", "asterix")
+THESIS_TIER_C_FACING_STEMS = tuple(
+    f"{env}_from_scratch_ego_pov_collectsurface" for env in THESIS_TIER_B_ENVS
+) + tuple(
+    f"{env}_from_scratch_pixel_pov" for env in THESIS_TIER_B_ENVS
+) + (
+    "seaquest_meta_pixel_ego_pov",
+    "seaquest_meta_pixel_ego_pov_eval",
+    "seaquest_meta_oc_ego_pov",
+    "seaquest_meta_oc_ego_pov_eval",
+    "seaquest_tandem_oc_ego_pov",
+    "seaquest_tandem_oc_ego_pov_eval",
+) + tuple(
+    f"{env}_from_scratch_tandem_{meta}_ego_pov"
+    for env in _TIER_C_TANDEM_SCRATCH_ENVS
+    for meta in ("pixel", "oc")
 )
 
 # Alias: full ground-up batch = tier A (most users start here).
@@ -932,6 +957,7 @@ SUITE_STEMS = {
     CLIP100_COLLECTSURFACE_PROBE_SUITE: CLIP100_COLLECTSURFACE_PROBE_STEMS,
     CLIP150_COLLECTSURFACE_PROBE_SUITE: CLIP150_COLLECTSURFACE_PROBE_STEMS,
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
+    THESIS_TIER_C_FACING_SUITE: THESIS_TIER_C_FACING_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
     KANGAROO_LIFETIME_SUITE: KANGAROO_LIFETIME_STEMS,
@@ -993,6 +1019,7 @@ SUITE_RTPT: dict[str, str] = {
     THESIS_TIER_B_SUITE: "finetune",
     THESIS_TIER_B_FACING_SUITE: "finetune",
     THESIS_TIER_C_SUITE: "extras",
+    THESIS_TIER_C_FACING_SUITE: "extras",
     CLIP100_COLLECTSURFACE_PROBE_SUITE: "clip100",
     CLIP150_COLLECTSURFACE_PROBE_SUITE: "clip150",
     DISTBINS8_PIPELINE_SUITE: "distbins",
@@ -2308,6 +2335,9 @@ def main() -> None:
             f"{THESIS_TIER_B_FACING_SUITE}: RQ2 finetune 5M from thesis_facing ckpts "
             "(collectsurface / pixel_pov / oc_pov; use --post-eval). "
             f"{THESIS_TIER_C_SUITE}: RQ2 from-scratch 25M + RQ3 meta/OC tandem "
+            "(legacy angbins; use --post-eval). "
+            f"{THESIS_TIER_C_FACING_SUITE}: facing POV spine — scratch ego/pixel, "
+            "RQ3 meta/tandem from collectsurface, tandem-scratch BR/FR/AS "
             "(use --post-eval). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
