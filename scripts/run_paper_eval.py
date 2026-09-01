@@ -38,8 +38,13 @@ Usage:
   bash scripts/prepare_thesis_final_run.sh                  # archive + remove ckpts
   python scripts/run_paper_eval.py --suite thesis_tier_a --gpus 0,1 --wait-deps --lean \\
     --batch-tag thesis_tier_a_$(date +%Y%m%d)
-  # Tier B/C later: add --post-eval for finetune/scratch mod tables.
-  python scripts/run_paper_eval.py --suite thesis_tier_b --post-eval --gpus 0,1 --wait-deps --lean
+  # Clip100 COLLECT-surface probe (Pong distance-tier hypothesis):
+  #   python scripts/materialize_clip100_collectsurface_probe.py
+  #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
+  #     --suite clip100_collectsurface_probe --wait-deps --lean
+  #   python scripts/materialize_thesis_tier_b_facing.py
+  #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
+  #     --suite thesis_tier_b_facing --post-eval --gpus 0,1 --wait-deps --lean --resume
 
   # Minimal-engineering ablation — trains only tonight (3 GPUs, ~3h); eval tomorrow:
   python scripts/run_paper_eval.py --suite minimal_ablation_train --gpus 0,1,2 --wait-deps --lean
@@ -330,6 +335,23 @@ THESIS_TIER_B_ENVS = ("pong", "tennis", "beamrider", "freeway", "asterix", "phoe
 THESIS_TIER_B_MODES = ("ego", "pixel", "oc")
 THESIS_TIER_B_STEMS = tuple(
     f"{env}_finetune_{mode}" for env in THESIS_TIER_B_ENVS for mode in THESIS_TIER_B_MODES
+)
+
+# Tier B facing: 5M finetune from thesis_facing RQ1 ckpts (POV mapper + φ8 ego).
+# Materialize: python scripts/materialize_thesis_tier_b_facing.py
+THESIS_TIER_B_FACING_SUITE = "thesis_tier_b_facing"
+THESIS_TIER_B_FACING_STEMS = tuple(
+    f"{env}_finetune_ego_pov_collectsurface" if mode == "ego" else f"{env}_finetune_{mode}_pov"
+    for env in THESIS_TIER_B_ENVS
+    for mode in THESIS_TIER_B_MODES
+)
+
+# Clip100 distance probe: retrain COLLECT-surface φ8 + Pong zero-shot (Pong ~1px hypothesis).
+CLIP100_COLLECTSURFACE_PROBE_SUITE = "clip100_collectsurface_probe"
+CLIP100_COLLECTSURFACE_PROBE_STEMS = (
+    "seaquest_skills_ego_pov_clip100_facing_psibins8_collectsurface",
+    "seaquest_skills_ego_pov_clip100_facing_psibins8_collectsurface_eval_full",
+    "pong_transfer_ego_pov_clip100_facing_psibins8_collectsurface",
 )
 
 # Tier C: 25M from-scratch + post-eval (ego/pixel) + RQ3 meta/tandem extras.
@@ -896,6 +918,8 @@ SUITE_STEMS = {
     THESIS_TIER_A_SUITE: THESIS_TIER_A_STEMS,
     THESIS_FACING_SUITE: THESIS_FACING_STEMS,
     THESIS_TIER_B_SUITE: THESIS_TIER_B_STEMS,
+    THESIS_TIER_B_FACING_SUITE: THESIS_TIER_B_FACING_STEMS,
+    CLIP100_COLLECTSURFACE_PROBE_SUITE: CLIP100_COLLECTSURFACE_PROBE_STEMS,
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
@@ -1072,6 +1096,7 @@ def _rtpt_name(
         THESIS_TIER_A_SUITE: "sq_full_eval",
         THESIS_FINAL_SUITE: "sq_full_eval",
         THESIS_TIER_B_SUITE: "sq_full_eval_ft",
+        THESIS_TIER_B_FACING_SUITE: "sq_full_eval_ft_facing",
         THESIS_TIER_C_SUITE: "sq_full_eval_extra",
         PIXEL_NOOUTLINE_SUITE: "pix_nooutline",
         PQN_TRANSFER_SUITE: "pqn_xfer",
@@ -2201,7 +2226,9 @@ def main() -> None:
             "(COLLECT-surface ego + pixel/oc POV-mapper retrains + RQ2 zero-shot). "
             "RQ1 all arms + full SQ eval + RQ2 ego transfer (6 envs) + RQ3 pixel "
             "tandem (~2–3 GPUs overnight with --wait-deps). "
-            f"{THESIS_TIER_B_SUITE}: RQ2 finetune 5M (use --post-eval). "
+            f"{THESIS_TIER_B_SUITE}: RQ2 finetune 5M (legacy angbins; use --post-eval). "
+            f"{THESIS_TIER_B_FACING_SUITE}: RQ2 finetune 5M from thesis_facing ckpts "
+            "(collectsurface / pixel_pov / oc_pov; use --post-eval). "
             f"{THESIS_TIER_C_SUITE}: RQ2 from-scratch 25M + RQ3 meta/OC tandem "
             "(use --post-eval). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "

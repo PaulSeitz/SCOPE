@@ -1,0 +1,101 @@
+# Phoenix 5M finetune — pixel from seaquest_skills_pixel_pov (facing POV spine).
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: finetune
+PAPER_EVAL_KIND: skills
+PAPER_EVAL_MODS: phoenix
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_pixel_pov
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_pixel_pov
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: phoenix
+INIT_MODEL_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_pixel_pov/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+SAVE_PATH: ./outputs/models/paper_eval/rq2/phoenix_finetune_pixel_pov
+WANDB_RUN_NAME: ph_paper_rq2_finetune_pixel_pov
+WANDB_TAGS:
+- suite:thesis_tier_b_facing
+- rq:2
+- env:phoenix
+- phase:finetune
+- skill_input:pixel
+- mapper:pov_facing
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: true
+USE_EGO_WEAPON_FEATURES: true
+USE_EGO_SHOT_FEATURES: false
+
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+USE_POV_RELATIVE_MAPPER: true
+USE_POV_FACING_FRAME: false
+
+META_PIXEL_DO_RESIZE: true
+META_PIXEL_USE_NATIVE_DOWNSCALING: true
+META_PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+META_PIXEL_GRAYSCALE: true
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SKILL_INPUT_MODE: pixel_embed
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: true
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 21
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  SKILL_LR: 0.0005
+  SKILL_LR_FINISH: 0.0001
+  SKILL_LR_DECAY: 0.5
+  SKILL_REWARD_LAMBDA: 0.0
+  CLIP_REWARD: true
+  RESTRICT_FIRE_FOR_NON_DESTROY: false
+  FIRST_FIRE: true
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: true
+  FRAME_STACK_SIZE: 4
+  FRAME_SKIP: 4
+  TOTAL_TIMESTEPS: 4997120
+  NUM_ENVS: 128
+  NUM_STEPS: 128
+  NUM_EPOCHS: 4
+  NUM_MINIBATCHES: 64
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: false
+  RELABEL_K_OBJECTS: null
+  SKILL_BOOTSTRAP: q_lambda
+  EPS_START: 0.2
+  EPS_FINISH: 0.01
+  EPS_DECAY: 0.2
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: pixel_embed
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  SKILL_PIXEL_CNN_CHANNELS:
+  - 16
+  - 32
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: true
+  USE_EGO_SHOT_FEATURES: false
+  INIT_MODEL_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_pixel_pov/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
