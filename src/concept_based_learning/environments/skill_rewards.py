@@ -12,6 +12,8 @@ Reward magnitudes and trigger conditions:
              COLLECT_LIVING_PENALTY: replace approach with −0.01 every frame the
              collectible is still active and not collected this step (same clock
              as DESTROY living tax). NAVIGATE is unchanged.
+             COLLECT_SPARSE_ONLY: no approach shaping and no living tax (sparse
+             +1 / death only). Wins over COLLECT_LIVING_PENALTY when both set.
   DESTROY  : +1  when next_target.was_killed == 1 (set by env wrapper from raw state).
              Optional per-run extras (config flags, default off):
              DESTROY_Y_ALIGN: +0.01 when |Δy| to the target decreases.
@@ -130,6 +132,7 @@ class RewardContext:
     destroy_living_penalty: bool
     destroy_standoff_px: float
     collect_living_penalty: bool
+    collect_sparse_only: bool
 
 
 @dataclass(frozen=True)
@@ -351,7 +354,8 @@ def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
 def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Sparse contact success. Default dense term is approach progress (same
     # idea as NAVIGATE). Optional living tax replaces approach: delay costs,
-    # without telling the skill to close the gap.
+    # without telling the skill to close the gap. COLLECT_SPARSE_ONLY disables
+    # both dense terms (approach and living tax).
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
@@ -369,9 +373,13 @@ def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     )
     progressed = jnp.logical_and(both_active, next_dist < prev_dist)
     shaped = jnp.where(
-        ctx.collect_living_penalty,
-        living_tax,
-        jnp.where(progressed, COLLECT_PROGRESS_REWARD, 0.0),
+        ctx.collect_sparse_only,
+        0.0,
+        jnp.where(
+            ctx.collect_living_penalty,
+            living_tax,
+            jnp.where(progressed, COLLECT_PROGRESS_REWARD, 0.0),
+        ),
     )
     reward = jnp.where(success, COLLECT_SUCCESS_REWARD, shaped)
     return reward, success
@@ -512,6 +520,7 @@ def extract_skill_rewards(
     destroy_contact_fail: bool | None = None,
     destroy_living_penalty: bool | None = None,
     collect_living_penalty: bool | None = None,
+    collect_sparse_only: bool | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all skills against a single target.
@@ -536,6 +545,9 @@ def extract_skill_rewards(
             per-run DESTROY extras (see module docstring). ``None`` → config.
         collect_living_penalty:
             per-run COLLECT clock (replaces approach shaping). ``None`` → config.
+        collect_sparse_only:
+            if True, COLLECT gets no dense term (no approach, no living tax).
+            ``None`` → config ``COLLECT_SPARSE_ONLY``.
 
     Returns:
         rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
@@ -555,6 +567,9 @@ def extract_skill_rewards(
     collect_clock = collect_living_penalty_from_config(config)
     if collect_living_penalty is not None:
         collect_clock = bool(collect_living_penalty)
+    collect_sparse = collect_sparse_only_from_config(config)
+    if collect_sparse_only is not None:
+        collect_sparse = bool(collect_sparse_only)
 
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
@@ -578,6 +593,7 @@ def extract_skill_rewards(
         destroy_living_penalty=flags["destroy_living_penalty"],
         destroy_standoff_px=flags["destroy_standoff_px"],
         collect_living_penalty=collect_clock,
+        collect_sparse_only=collect_sparse,
     )
 
     died = ctx.life_lost > 0
@@ -654,6 +670,13 @@ def collect_living_penalty_from_config(config) -> bool:
     if config is None:
         return False
     return bool(config.get("COLLECT_LIVING_PENALTY", False))
+
+
+def collect_sparse_only_from_config(config) -> bool:
+    """If True, COLLECT has no dense approach / living-tax term (default False)."""
+    if config is None:
+        return False
+    return bool(config.get("COLLECT_SPARSE_ONLY", False))
 
 
 def penalize_collect_death_from_config(config) -> bool:

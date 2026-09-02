@@ -408,11 +408,81 @@ def test_navigate_keeps_approach_when_collect_living_on():
 def test_collect_living_penalty_from_config():
     from concept_based_learning.environments.skill_rewards import (
         collect_living_penalty_from_config,
+        collect_sparse_only_from_config,
     )
 
     assert collect_living_penalty_from_config(None) is False
     assert collect_living_penalty_from_config({}) is False
     assert collect_living_penalty_from_config({"COLLECT_LIVING_PENALTY": True}) is True
+    assert collect_sparse_only_from_config(None) is False
+    assert collect_sparse_only_from_config({}) is False
+    assert collect_sparse_only_from_config({"COLLECT_SPARSE_ONLY": True}) is True
+
+
+def test_collect_sparse_only_kills_approach():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_sparse_only=True
+    )
+    assert float(r[1]) == 0.0
+    assert not bool(d[1])
+
+
+def test_collect_sparse_only_beats_living_tax():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        collect_living_penalty=True,
+        collect_sparse_only=True,
+    )
+    assert float(r[1]) == 0.0
+    assert not bool(d[1])
+
+
+def test_collect_sparse_only_keeps_success_and_death():
+    # Contact success still +1.
+    prev_r, prev_t = _mk(10, 50, 20, 50, LABEL_COLLECT, tw=8, th=8)
+    next_r, next_t = _mk(20, 50, 20, 50, LABEL_COLLECT, tw=8, th=8)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_sparse_only=True
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_SUCCESS_REWARD)
+    assert bool(d[1])
+
+    # Death still overrides when opted in.
+    prev_c, prev_tc = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_c, next_tc = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    rc, dc = extract_skill_rewards(
+        prev_c,
+        next_c,
+        prev_tc,
+        next_tc,
+        jnp.int32(1),
+        penalize_collect_death=True,
+        collect_sparse_only=True,
+    )
+    assert float(rc[1]) == SKILL_DEATH_PENALTY
+    assert bool(dc[1])
+
+
+def test_collect_sparse_only_from_config_dict():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    next_r, next_t = _mk(20, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
+    r, _ = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        config={"COLLECT_SPARSE_ONLY": True},
+    )
+    assert float(r[1]) == 0.0
     prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
     next_r, next_t = _mk(10, 50, 40, 50, LABEL_COLLECT, tw=4, th=4)
     r, d = extract_skill_rewards(

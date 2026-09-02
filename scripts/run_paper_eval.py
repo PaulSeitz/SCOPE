@@ -74,6 +74,8 @@ Usage:
   python scripts/run_paper_eval.py --suite pov_facing_v2 --gpus 0,1 --wait-deps --lean
   python scripts/run_paper_eval.py --suite pov_facing_v2_eval --gpus 0,1 --wait-deps --lean
   python scripts/run_paper_eval.py --suite pov_facing_v2_phase2 --gpus 0,1 --wait-deps --lean
+  # COLLECT/DESTROY sparse reward arms (sequential; see tmp/collect_sparse_arms_LOG.md):
+  bash scripts/run_collect_sparse_arms.sh --gpus 0 --wait-deps --lean
   # Facing v2 breadth (3 tmux sessions — pin GPUs; do not use --gpus here):
   #   GPU0: φ8 zero-shot BR+PH → Phoenix from-scratch φ8
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu0 --wait-deps --lean
@@ -936,6 +938,21 @@ POV_FACING_ABLATION_PHIDEG_STEMS = (
     "phoenix_transfer_ego_pov_clip50_facing_phideg_v2",
 )
 
+# Honest-transfer reward ablations on facing φ8 clip50 v2 spine (sequential):
+#   Arm1 — COLLECT_SPARSE_ONLY (keep COLLECT death + DESTROY living/contact)
+#   Arm2 — Arm1 + DESTROY sparse (no living tax / contact-fail)
+# See tmp/collect_sparse_arms_LOG.md. Materialize:
+#   python scripts/materialize_collect_sparse_arms.py
+COLLECT_SPARSE_ARMS_SUITE = "collect_sparse_arms"
+COLLECT_SPARSE_ARMS_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_collect_sparse",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_collect_sparse_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_v2_collect_sparse",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_collect_sparse_destroy_sparse",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_collect_sparse_destroy_sparse_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_v2_collect_sparse_destroy_sparse",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -1021,6 +1038,7 @@ SUITE_STEMS = {
     POV_FACING_ABLATION_GPU1_SUITE: POV_FACING_ABLATION_GPU1_STEMS,
     POV_FACING_ABLATION_GPU2_SUITE: POV_FACING_ABLATION_GPU2_STEMS,
     POV_FACING_ABLATION_PHIDEG_SUITE: POV_FACING_ABLATION_PHIDEG_STEMS,
+    COLLECT_SPARSE_ARMS_SUITE: COLLECT_SPARSE_ARMS_STEMS,
 }
 
 # Short nvidia-smi / RTPT labels (1–2 tokens; project-generic, not run-specific).
@@ -1085,6 +1103,7 @@ SUITE_RTPT: dict[str, str] = {
     POV_FACING_ABLATION_GPU1_SUITE: "facing_abl",
     POV_FACING_ABLATION_GPU2_SUITE: "facing_abl",
     POV_FACING_ABLATION_PHIDEG_SUITE: "facing_abl",
+    COLLECT_SPARSE_ARMS_SUITE: "sparse",
 }
 
 
@@ -1964,6 +1983,12 @@ _EVAL_OVERRIDE_KEYS = (
     "HEURISTIC_MODE",
     "NO_TARGET_GAME_ACTION",
     "SKILL_DEATH_PENALIZE_COLLECT",
+    "COLLECT_SPARSE_ONLY",
+    "COLLECT_LIVING_PENALTY",
+    "DESTROY_CONTACT_FAIL",
+    "DESTROY_LIVING_PENALTY",
+    "DESTROY_Y_ALIGN",
+    "DESTROY_STANDOFF",
     "EVAL_GAME_MODS",
     "GAME_MODS",
     "SURFACE_DANGER_CLOSE_RANGE",
