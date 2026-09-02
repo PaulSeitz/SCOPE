@@ -150,6 +150,7 @@ def apply_visualizer_config_overrides(
     pov_bilateral_axis: str | None = None,
     ego_phi_bins: int | None = None,
     ego_pose_xy: bool | None = None,
+    legal_action_mask: bool | None = None,
 ) -> dict:
     """Apply CLI ablation flags for live/recorded visualizer runs."""
     if no_outline:
@@ -199,6 +200,9 @@ def apply_visualizer_config_overrides(
 
     if ego_pose_xy is not None:
         config["EGO_POSE_XY"] = bool(ego_pose_xy)
+
+    if legal_action_mask is not None:
+        config["EGO_LEGAL_ACTION_MASK"] = bool(legal_action_mask)
 
     return config
 
@@ -354,6 +358,7 @@ def _print_ego_runtime_summary(config: dict) -> None:
         f"{pov_note} | {clip_note} | "
         f"blocking={config.get('USE_EGO_BLOCKING_FEATURES')} | "
         f"weapon={config.get('USE_EGO_WEAPON_FEATURES')} | "
+        f"legal_ego_mask={config.get('EGO_LEGAL_ACTION_MASK')} | "
         f"heuristic={config.get('HEURISTIC_MODE')} | "
         f"env={config.get('ENV_NAME')}"
     )
@@ -2951,6 +2956,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--legal-action-mask",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Realizable-ego decode: mask Q for ego actions that map to NOOP "
+            "(e.g. FORWARD on honest Pong transfer). "
+            "--legal-action-mask enables; --no-legal-action-mask disables. "
+            "Default follows config."
+        ),
+    )
+    parser.add_argument(
         "--paper-config",
         type=str,
         default=None,
@@ -3061,6 +3077,7 @@ def main():
         pov_bilateral_axis=args.pov_bilateral_axis,
         ego_phi_bins=args.ego_phi_bins,
         ego_pose_xy=args.ego_pose_xy,
+        legal_action_mask=args.legal_action_mask,
     )
     if args.pov_mode != "auto":
         print(f"POV mode override: {args.pov_mode}")
@@ -3071,6 +3088,8 @@ def main():
         print(f"Ego φ encoding override: {enc}")
     if args.ego_pose_xy is not None:
         print(f"Ego pose XY override: {args.ego_pose_xy}")
+    if args.legal_action_mask is not None:
+        print(f"EGO_LEGAL_ACTION_MASK override: {args.legal_action_mask}")
     configure_ego_obs_from_config(base_config)
     configure_label_routing_from_config(base_config)
     _print_ego_runtime_summary(base_config)

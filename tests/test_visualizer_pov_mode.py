@@ -90,6 +90,15 @@ def test_apply_visualizer_facing_xy_mode():
     assert ego_obs_channels_per_frame() >= 3
 
 
+def test_apply_visualizer_legal_action_mask_override():
+    cfg = apply_visualizer_config_overrides({}, legal_action_mask=True)
+    assert cfg["EGO_LEGAL_ACTION_MASK"] is True
+    cfg = apply_visualizer_config_overrides(
+        {"EGO_LEGAL_ACTION_MASK": True}, legal_action_mask=False
+    )
+    assert cfg["EGO_LEGAL_ACTION_MASK"] is False
+
+
 def test_compute_fixed_bilateral_viz_horizontal():
     configure_ego_obs_from_config(
         {

@@ -63,6 +63,14 @@ _EGO_ANGLE_SINCOS_SNAP: bool = False
 _EGO_PSI_ANGLE_BINS: int | None = None
 # POV-only: when ψ bins are off, emit one scalar = round(deg(ψ)) in [-180,180] / 180.
 _EGO_PSI_ANGLE_SCALAR: bool = False
+# Facing-frame restrained pose: finite alphabet instead of continuous dist/φ.
+# ``lcr_nearfar``: 3-way lateral (left/center/right) × 2-way distance (near/far).
+# ``quadrant_nearfar``: 4-way body bearing × near/far.
+_EGO_RESTRAINED_POSE: str | None = None
+_EGO_RESTRAINED_LATERAL_BAND_PX: float = 8.0
+_EGO_RESTRAINED_NEAR_FAR_PX: float = 50.0
+
+RESTRAINED_POSE_CHOICES = ("lcr_nearfar", "quadrant_nearfar")
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -284,6 +292,107 @@ def using_ego_psi_angle_scalar() -> bool:
     return _EGO_PSI_ANGLE_SCALAR
 
 
+def set_ego_restrained_pose(
+    mode: str | None,
+    *,
+    lateral_band_px: float | None = None,
+    near_far_px: float | None = None,
+) -> None:
+    """Enable facing-frame restrained pose encoding (mutually exclusive modes)."""
+    global _EGO_RESTRAINED_POSE, _EGO_RESTRAINED_LATERAL_BAND_PX, _EGO_RESTRAINED_NEAR_FAR_PX
+    if mode in (None, "", False):
+        _EGO_RESTRAINED_POSE = None
+        return
+    key = str(mode).lower().strip()
+    if key not in RESTRAINED_POSE_CHOICES:
+        raise ValueError(
+            f"EGO_RESTRAINED_POSE must be one of {RESTRAINED_POSE_CHOICES}, got {mode!r}"
+        )
+    _EGO_RESTRAINED_POSE = key
+    if lateral_band_px is not None:
+        _EGO_RESTRAINED_LATERAL_BAND_PX = float(lateral_band_px)
+    if near_far_px is not None:
+        _EGO_RESTRAINED_NEAR_FAR_PX = float(near_far_px)
+
+
+def using_ego_restrained_pose() -> bool:
+    return _EGO_RESTRAINED_POSE is not None
+
+
+def ego_restrained_pose_mode() -> str | None:
+    return _EGO_RESTRAINED_POSE
+
+
+def restrained_pose_channels_per_frame() -> int:
+    if _EGO_RESTRAINED_POSE == "lcr_nearfar":
+        return 5
+    if _EGO_RESTRAINED_POSE == "quadrant_nearfar":
+        return 6
+    return 0
+
+
+def restrained_lcr_nearfar_channels(
+    lat_px: jnp.ndarray,
+    distance_px: jnp.ndarray,
+    *,
+    lateral_band_px: float,
+    near_far_px: float,
+) -> list[jnp.ndarray]:
+    """One-hot lateral (L/C/R) + one-hot distance tier (near/far)."""
+    band = jnp.float32(lateral_band_px)
+    thresh = jnp.float32(near_far_px)
+    lat = jnp.asarray(lat_px, dtype=jnp.float32)
+    dist = jnp.asarray(distance_px, dtype=jnp.float32)
+    is_center = jnp.abs(lat) < band
+    is_right = lat >= band
+    is_left = lat <= -band
+    is_near = dist <= thresh
+    is_far = dist > thresh
+    return [is_left, is_center, is_right, is_near, is_far]
+
+
+def restrained_quadrant_nearfar_channels(
+    phi: jnp.ndarray,
+    distance_px: jnp.ndarray,
+    *,
+    near_far_px: float,
+) -> list[jnp.ndarray]:
+    """One-hot body bearing quadrant + one-hot near/far."""
+    thresh = jnp.float32(near_far_px)
+    ang = jnp.asarray(phi, dtype=jnp.float32)
+    dist = jnp.asarray(distance_px, dtype=jnp.float32)
+    quarter = jnp.float32(jnp.pi / 4.0)
+    three_quarter = jnp.float32(3.0 * jnp.pi / 4.0)
+    is_ahead = jnp.abs(ang) < quarter
+    is_right = jnp.logical_and(ang >= quarter, ang < three_quarter)
+    is_behind = jnp.abs(ang) >= three_quarter
+    is_left = jnp.logical_and(ang <= -quarter, ang > -three_quarter)
+    is_near = dist <= thresh
+    is_far = dist > thresh
+    return [is_ahead, is_right, is_behind, is_left, is_near, is_far]
+
+
+def _restrained_pose_feature_channels(
+    lat_px: jnp.ndarray,
+    phi: jnp.ndarray,
+    distance_px: jnp.ndarray,
+) -> list[jnp.ndarray]:
+    if _EGO_RESTRAINED_POSE == "lcr_nearfar":
+        return restrained_lcr_nearfar_channels(
+            lat_px,
+            distance_px,
+            lateral_band_px=_EGO_RESTRAINED_LATERAL_BAND_PX,
+            near_far_px=_EGO_RESTRAINED_NEAR_FAR_PX,
+        )
+    if _EGO_RESTRAINED_POSE == "quadrant_nearfar":
+        return restrained_quadrant_nearfar_channels(
+            phi,
+            distance_px,
+            near_far_px=_EGO_RESTRAINED_NEAR_FAR_PX,
+        )
+    raise RuntimeError(f"unknown restrained pose mode {_EGO_RESTRAINED_POSE!r}")
+
+
 def set_ego_angle_bins_scalar(enabled: bool) -> None:
     """Use one scalar tier channel instead of N angle-bin channels."""
     global _EGO_ANGLE_BINS_SCALAR
@@ -309,8 +418,10 @@ def ego_angle_channels_per_frame() -> int:
     )
     from concept_based_learning.observations.pov_relative import using_pov_relative
 
-    # Cartesian body pose replaces the angle block entirely.
+    # Facing-frame Cartesian pose replaces the angle block entirely.
     if using_pov_facing_frame() and using_ego_pose_xy():
+        return 0
+    if using_ego_restrained_pose():
         return 0
     if using_pov_relative() and _EGO_PSI_ANGLE_BINS:
         return int(_EGO_PSI_ANGLE_BINS)
@@ -445,6 +556,20 @@ def configure_ego_obs_from_config(config: dict) -> None:
             "EGO_PSI_ANGLE_SCALAR requires EGO_PSI_ANGLE_BINS: null (mutually exclusive)."
         )
     set_ego_psi_angle_scalar(psi_scalar)
+    restrained = config.get("EGO_RESTRAINED_POSE", None)
+    if restrained not in (None, "", False):
+        set_ego_restrained_pose(
+            str(restrained),
+            lateral_band_px=config.get("EGO_RESTRAINED_LATERAL_BAND_PX", 8.0),
+            near_far_px=config.get("EGO_RESTRAINED_NEAR_FAR_PX", 50.0),
+        )
+        set_ego_psi_angle_bins(None)
+        set_ego_psi_angle_scalar(False)
+        set_ego_distance_flag_thresholds_px(None)
+        set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_bins(None)
+    else:
+        set_ego_restrained_pose(None)
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
     # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
     weapon = config.get(
@@ -482,6 +607,8 @@ def ego_distance_channels_per_frame() -> int:
     # Facing-frame Cartesian pose: (fwd, lat) instead of scalar distance.
     if using_pov_facing_frame() and using_ego_pose_xy():
         return 2
+    if using_ego_restrained_pose():
+        return 0
     if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
         return len(_EGO_DISTANCE_FLAG_THRESHOLDS_PX)
     if _EGO_DISTANCE_BINS:
@@ -577,11 +704,14 @@ def ego_obs_channels_per_frame() -> int:
             4 if _USE_EGO_SIZE_FEATURES else 0
         ) + los_channels + skill_ego_extra_channels_per_frame()
     # Target-aligned channel groups:
-    #   always: distance + angle (sin/cos(ψ) or N θ bins)
+    #   always: distance + angle (sin/cos(ψ) or N θ bins), or restrained L/C/R × near/far
     #   velocity (optional): POV approach (1) or radial+tangential (2)
     #   size (optional): target_w, target_h           -> +2
     #   line-of-sight (optional): blocked             -> +1
-    pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
+    if using_ego_restrained_pose():
+        pose = restrained_pose_channels_per_frame()
+    else:
+        pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
     return pose + _ego_velocity_channels_per_frame() + (
         2 if _USE_EGO_SIZE_FEATURES else 0
     ) + los_channels + skill_ego_extra_channels_per_frame()
@@ -604,6 +734,8 @@ def ego_pose_channels_per_frame() -> int:
         return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
             4 if _USE_EGO_SIZE_FEATURES else 0
         )
+    if using_ego_restrained_pose():
+        return restrained_pose_channels_per_frame()
     return ego_distance_channels_per_frame() + ego_angle_channels_per_frame() + (
         _ego_velocity_channels_per_frame()
     ) + (2 if _USE_EGO_SIZE_FEATURES else 0)
@@ -1395,6 +1527,15 @@ def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
 
     if using_ego_pose_xy():
         channels = _xy_features_from_pixels(fwds, lats)
+    elif using_ego_restrained_pose():
+        pose_stack = jax.vmap(
+            lambda lat, phi, dist: jnp.stack(
+                _restrained_pose_feature_channels(lat, phi, dist), axis=-1
+            )
+        )(lats, phis, distances)
+        channels = [
+            pose_stack[..., i] for i in range(int(pose_stack.shape[-1]))
+        ]
     else:
         channels = distance_features_from_pixels(distances)
         channels.extend(_psi_angle_feature_channels(phis))

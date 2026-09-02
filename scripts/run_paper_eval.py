@@ -953,6 +953,15 @@ COLLECT_SPARSE_ARMS_STEMS = (
     "pong_transfer_ego_pov_clip50_facing_psibins8_v2_collect_sparse_destroy_sparse",
 )
 
+# Arm3: restrained L/C/R × near/far pose on facing v2 spine + legal ego mask.
+# Materialize: python scripts/materialize_restrained_ego_suite.py
+RESTRAINED_EGO_SUITE = "restrained_ego"
+RESTRAINED_EGO_STEMS = (
+    "seaquest_skills_ego_pov_facing_lcr_nearfar_v2",
+    "seaquest_skills_ego_pov_facing_lcr_nearfar_v2_eval_full",
+    "pong_transfer_ego_pov_facing_lcr_nearfar_v2",
+)
+
 # Eval-only ablation: reuse seaquest_skills_pixel ckpt with target outline OFF
 # (SKILL_PIXEL_PAINT_TARGET_OUTLINE: false) on Seaquest mods + RQ2 zero-shot.
 PIXEL_NOOUTLINE_SUITE = "pixel_nooutline"
@@ -1039,6 +1048,7 @@ SUITE_STEMS = {
     POV_FACING_ABLATION_GPU2_SUITE: POV_FACING_ABLATION_GPU2_STEMS,
     POV_FACING_ABLATION_PHIDEG_SUITE: POV_FACING_ABLATION_PHIDEG_STEMS,
     COLLECT_SPARSE_ARMS_SUITE: COLLECT_SPARSE_ARMS_STEMS,
+    RESTRAINED_EGO_SUITE: RESTRAINED_EGO_STEMS,
 }
 
 # Short nvidia-smi / RTPT labels (1–2 tokens; project-generic, not run-specific).
@@ -1104,6 +1114,7 @@ SUITE_RTPT: dict[str, str] = {
     POV_FACING_ABLATION_GPU2_SUITE: "facing_abl",
     POV_FACING_ABLATION_PHIDEG_SUITE: "facing_abl",
     COLLECT_SPARSE_ARMS_SUITE: "sparse",
+    RESTRAINED_EGO_SUITE: "restrain",
 }
 
 
@@ -2016,6 +2027,9 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_DISTANCE_BIN_CENTERS_PX",
     "EGO_DISTANCE_BIN_MAX_PX",
     "EGO_DISTANCE_FLAG_THRESHOLDS_PX",
+    "EGO_RESTRAINED_POSE",
+    "EGO_RESTRAINED_LATERAL_BAND_PX",
+    "EGO_RESTRAINED_NEAR_FAR_PX",
     "EGO_LEGAL_ACTION_MASK",
     # Pixel ablation: keep outline on/off from the eval YAML when architecture
     # is pinned to a train config that still paints by default.
