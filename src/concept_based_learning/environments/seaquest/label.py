@@ -8,6 +8,7 @@ from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
     LABEL_COLLECT,
+    LABEL_NAVIGATE,
     LABEL_AVOID,
     SemanticState,
 )
@@ -46,7 +47,32 @@ SURFACE_WP_SLOT_CX = (28.0, 80.0, 132.0)
 SURFACE_WP_SUB_CLEAR_PX = 40.0
 # Surface sub is the last of the 25 enemy slots (12 sharks + 12 subs + 1).
 _SURFACE_SUB_ENEMY_SLOT = 24
+# Thesis collectsurface spine uses COLLECT; navigatesurface A/B restores NAVIGATE.
 SEAQUEST_SURFACE_LABEL = LABEL_COLLECT
+
+_SURFACE_LABEL_ALIASES = {
+    "collect": LABEL_COLLECT,
+    "label_collect": LABEL_COLLECT,
+    "navigate": LABEL_NAVIGATE,
+    "label_navigate": LABEL_NAVIGATE,
+    str(int(LABEL_COLLECT)): LABEL_COLLECT,
+    str(int(LABEL_NAVIGATE)): LABEL_NAVIGATE,
+}
+
+
+def set_seaquest_surface_label(label) -> None:
+    """Set surface WP semantic label (``collect`` or ``navigate``, or label int)."""
+    global SEAQUEST_SURFACE_LABEL
+    if isinstance(label, str):
+        key = label.strip().lower()
+        if key not in _SURFACE_LABEL_ALIASES:
+            raise ValueError(
+                f"SEAQUEST_SURFACE_LABEL={label!r}; expected collect|navigate "
+                f"(or label ints {int(LABEL_COLLECT)}/{int(LABEL_NAVIGATE)})"
+            )
+        SEAQUEST_SURFACE_LABEL = _SURFACE_LABEL_ALIASES[key]
+        return
+    SEAQUEST_SURFACE_LABEL = int(label)
 
 
 def select_surface_waypoint_x(

@@ -421,10 +421,23 @@ THESIS_TIER_C_FACING_STEMS = tuple(
     "seaquest_meta_oc_ego_pov_eval",
     "seaquest_tandem_oc_ego_pov",
     "seaquest_tandem_oc_ego_pov_eval",
+    "seaquest_tandem_pixel_ego_pov",
+    "seaquest_tandem_pixel_ego_pov_eval",
 ) + tuple(
     f"{env}_from_scratch_tandem_{meta}_ego_pov"
     for env in _TIER_C_TANDEM_SCRATCH_ENVS
     for meta in ("pixel", "oc")
+)
+
+# 2-GPU batch: NAVIGATE-surface spine A/B + missing pixel tandem (independent trains).
+# Even idx → GPU0 (navigate spine → SQ eval → Pong ZS); odd → GPU1 (pixel tandem → eval).
+NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE = "navigate_surface_tandem_pixel"
+NAVIGATE_SURFACE_TANDEM_PIXEL_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface",
+    "seaquest_tandem_pixel_ego_pov",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_eval_full",
+    "seaquest_tandem_pixel_ego_pov_eval",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface",
 )
 
 # Alias: full ground-up batch = tier A (most users start here).
@@ -1006,6 +1019,7 @@ SUITE_STEMS = {
     FACING_DISTANCE_ABLATION_SUITE: FACING_DISTANCE_ABLATION_STEMS,
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_TIER_C_FACING_SUITE: THESIS_TIER_C_FACING_STEMS,
+    NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: NAVIGATE_SURFACE_TANDEM_PIXEL_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
     KANGAROO_LIFETIME_SUITE: KANGAROO_LIFETIME_STEMS,
@@ -1070,6 +1084,7 @@ SUITE_RTPT: dict[str, str] = {
     THESIS_TIER_B_FACING_SUITE: "finetune",
     THESIS_TIER_C_SUITE: "extras",
     THESIS_TIER_C_FACING_SUITE: "extras",
+    NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: "nav_tandem",
     CLIP100_COLLECTSURFACE_PROBE_SUITE: "clip100",
     CLIP150_COLLECTSURFACE_PROBE_SUITE: "clip150",
     FACING_DISTANCE_ABLATION_SUITE: "dist_abl",
@@ -2031,6 +2046,7 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_RESTRAINED_LATERAL_BAND_PX",
     "EGO_RESTRAINED_NEAR_FAR_PX",
     "EGO_LEGAL_ACTION_MASK",
+    "EGO_LEGAL_ACTION_MASK_MODE",
     # Pixel ablation: keep outline on/off from the eval YAML when architecture
     # is pinned to a train config that still paints by default.
     "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
@@ -2401,6 +2417,9 @@ def main() -> None:
             f"{THESIS_TIER_C_FACING_SUITE}: facing POV spine — scratch ego/pixel, "
             "RQ3 meta/tandem from collectsurface, tandem-scratch BR/FR/AS "
             "(use --post-eval). "
+            f"{NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE}: 2-GPU — NAVIGATE-surface "
+            "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
+            "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "

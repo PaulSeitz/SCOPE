@@ -25,6 +25,7 @@ ENV_NAME: seaquest
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+SEAQUEST_SURFACE_LABEL: collect
 SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_collectsurface
 WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_clip50_facing_psibins8_v2
 WANDB_TAGS:
@@ -38,6 +39,7 @@ WANDB_TAGS:
 - ego:blocking
 - ego:weapon
 - ablation:collect_death
+- surface:collect
 - destroy:contact_fail
 - destroy:living_penalty
 SKILL_INPUT_MODE: ego

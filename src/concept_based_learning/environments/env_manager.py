@@ -36,6 +36,7 @@ from concept_based_learning.environments.seaquest.label import (
     extract_all_skills_rewards,
     set_seaquest_action_mapper,
     set_seaquest_ascent_block,
+    set_seaquest_surface_label,
     set_seaquest_surfacing_death_guard,
 )
 from concept_based_learning.environments.seaquest.heuristic_policy import (
@@ -725,6 +726,8 @@ class EnvManager:
             set_seaquest_surfacing_death_guard(
                 bool(config.get("USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD", False))
             )
+            # Always apply (default collect) so multi-job workers reset between stems.
+            set_seaquest_surface_label(config.get("SEAQUEST_SURFACE_LABEL", "collect"))
         if components.jax_game_id == "freeway":
             set_freeway_heuristic_params(
                 threat_dist_thresh=config.get("FREEWAY_THREAT_DIST_THRESH", None),

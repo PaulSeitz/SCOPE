@@ -156,7 +156,19 @@ def _make_objects(
 
 
 def test_surface_waypoint_uses_collect_skill():
-    assert SEAQUEST_SURFACE_LABEL == LABEL_COLLECT
+    import concept_based_learning.environments.seaquest.label as sq_label
+
+    assert sq_label.SEAQUEST_SURFACE_LABEL == LABEL_COLLECT
+
+
+def test_set_seaquest_surface_label_navigate_and_reset():
+    import concept_based_learning.environments.seaquest.label as sq_label
+    from concept_based_learning.environments.datatypes import LABEL_NAVIGATE
+
+    sq_label.set_seaquest_surface_label("navigate")
+    assert sq_label.SEAQUEST_SURFACE_LABEL == LABEL_NAVIGATE
+    sq_label.set_seaquest_surface_label("collect")
+    assert sq_label.SEAQUEST_SURFACE_LABEL == LABEL_COLLECT
 
 
 def test_surface_waypoint_picks_nearest_slot_without_sub():
