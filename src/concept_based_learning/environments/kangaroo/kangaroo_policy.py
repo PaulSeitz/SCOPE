@@ -80,7 +80,9 @@ _ON_LADDER_X_SLACK_PX = 14.0
 _N_LADDER_WAYPOINT_PAIRS = 20
 _LADDER_BOT_SLOT_OFFSET = 1
 _LADDER_TOP_SLOT_OFFSET = 21
-LADDER_ARRIVE = 6.0
+# Bottom: require AABB overlap with the narrow shaft WP (see kangaroo_label).
+# arrive_dist=6 on a 16px WP completed the stage ~10px short of the ladder.
+LADDER_ARRIVE = 0.0
 LADDER_TOP_ARRIVE = 10.0
 # Top completion: player centre dy = py - oy in this band (standing on upper floor).
 LADDER_TOP_PLATFORM_DY_MIN = 10.0

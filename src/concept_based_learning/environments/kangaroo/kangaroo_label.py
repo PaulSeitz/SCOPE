@@ -38,10 +38,10 @@ kangaroo_action_mapper, kangaroo_inverse_action_mapper = make_target_aligned_act
     move_fire_table=[11, 16, 13, 17, 12, 15, 10, 14],
 )
 
-# Each ladder produces two virtual 1px COLLECT waypoints snapped to the
-# standable platforms the ladder connects (not the ladder sprite edges), so
-# arrival fires when the player is actually standing on that floor:
-#   bottom: centre of player AABB when standing on the platform at the ladder foot
+# Each ladder produces two virtual COLLECT waypoints snapped to the
+# standable platforms the ladder connects (not the ladder sprite edges):
+#   bottom: player standing-centre at the ladder foot (narrow 2×1 so AABB
+#           overlap implies climbable ladder-column overlap)
 #   top:    standing-centre on the upper platform, raised by ``_TOP_WAYPOINT_LIFT_PX``
 #           so mid-ladder approach cannot complete the stage early
 # Observation pads ladders/platforms to 20 slots; inactive slots are ignored.
@@ -61,9 +61,10 @@ _COCO_PUNCH_SCORE = 200
 # Standing kangaroo height in jax_kangaroo (non-crouch); waypoint y = platform_y - half.
 _PLAYER_STAND_HEIGHT = 24
 _PLAYER_STAND_HALF = _PLAYER_STAND_HEIGHT // 2
-# Match Seaquest surface-WP width so transferred COLLECT stops with overlap at the
-# ladder column (centre-distance ~player_w), not ~8px short on 1×1 slots.
-_PLAYER_STAND_WIDTH = 16
+# jax_kangaroo PLAYER_WIDTH is 8. Bottom WP must be narrow enough that AABB
+# overlap with the WP implies ≥0.3 ladder-column overlap (climb start). A 16px
+# WP let arrive fire ~10px short of the shaft (ladder_climb_probe).
+_PLAYER_STAND_WIDTH = 2
 _PLAYER_STAND_HALF_W = _PLAYER_STAND_WIDTH // 2
 _LADDER_WAYPOINT_H = 1
 # If no platform matches, lift the top waypoint by this many px (L1 ladder→floor gap).
@@ -72,9 +73,9 @@ _TOP_FALLBACK_LIFT = 8
 # player is actually on the upper platform — not while still on the ladder a few
 # px below the floor (arrive_dist alone was firing early).
 _TOP_WAYPOINT_LIFT_PX = 17
-# POV probe (2026-09): nudge bottom waypoints up a few px so platform approach is not
-# exactly on degenerate pose bins (orthogonal / zeroed fwd-lat).
-_BOTTOM_WAYPOINT_Y_OFFSET_PX = -5
+# Bottom WP at standing-centre (offset 0): a downward bearing made greedy FORWARD
+# pick DOWNRIGHT near the foot and jump instead of entering the shaft.
+_BOTTOM_WAYPOINT_Y_OFFSET_PX = 0
 # Max |ladder_edge - platform.y| to count as the connected floor.
 _PLATFORM_MATCH_PX = 16
 # Falling coco x must lie within ladder width ± this margin to gate a ladder.
@@ -255,7 +256,7 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         ).astype(jnp.int32)
 
         bot_x = lad_cx - wp_half_w
-        bot_y = src_plat_y - wp_h + float(_BOTTOM_WAYPOINT_Y_OFFSET_PX)
+        bot_y = _standing_center_y(src_plat_y) + float(_BOTTOM_WAYPOINT_Y_OFFSET_PX)
         bot_active = ladder_climbable
 
         top_x = lad_cx - wp_half_w
