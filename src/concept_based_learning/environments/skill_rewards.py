@@ -2,13 +2,14 @@
 Global skill reward contract — env-independent.
 
 Reward magnitudes and trigger conditions:
-  AVOID    : +0.01 when centre-distance to an active AVOID target *increases*
-             (escape progress). No per-frame survival farm.
+  AVOID    : +0.01 when AABB surface-gap to an active AVOID target *increases*
+             (escape progress; same distance metric as ego obs). No per-frame
+             survival farm.
              -1  on rising edge of AABB overlap / was_killed (contact fail).
              No sparse “cleared” success terminal (escape shaping only).
   COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1.
-             Default dense term: +0.01 when centre-distance to the (still active)
-             collectible decreases (approach shaping).
+             Default dense term: +0.01 when AABB surface-gap to the (still active)
+             collectible decreases (approach shaping; matches ego distance).
              COLLECT_LIVING_PENALTY: replace approach with −0.01 every frame the
              collectible is still active and not collected this step (same clock
              as DESTROY living tax). NAVIGATE is unchanged.
@@ -17,7 +18,7 @@ Reward magnitudes and trigger conditions:
   DESTROY  : +1  when next_target.was_killed == 1 (set by env wrapper from raw state).
              Optional per-run extras (config flags, default off):
              DESTROY_Y_ALIGN: +0.01 when |Δy| to the target decreases.
-             DESTROY_STANDOFF: +0.01 backing out of melee (centre-dist < 20px and
+             DESTROY_STANDOFF: +0.01 backing out of melee (surface-gap < 20px and
                increasing); −0.01 closing further while already in melee.
              DESTROY_CONTACT_FAIL: −1 and skill-done on rising-edge AABB overlap
                (ram). Kill still wins if was_killed on the same step.
@@ -25,7 +26,7 @@ Reward magnitudes and trigger conditions:
                (both still active, no kill this step). Combined with contact-fail
                this is the “urgency” arm: ram loses, waiting/jiggling ticks down.
   NAVIGATE : +1  on rising-edge overlap / was_collected (arrive at waypoint);
-             signed dense shaping on centre-distance change while the waypoint
+             signed dense shaping on AABB surface-gap change while the waypoint
              stays active: +0.05 per 10px closer, −0.05 per 10px farther
              (``NAVIGATE_PROGRESS_REWARD`` / ``NAVIGATE_PROGRESS_UNIT_PX``).
              Idle (Δ=0) stays 0.
@@ -75,6 +76,10 @@ from concept_based_learning.environments.datatypes import (
     LABEL_DESTROY,
     LABEL_JUMP_OVER,
     LABEL_NAVIGATE,
+)
+from concept_based_learning.observations.egocentric import (
+    _uses_bottom_edge_y,
+    aabb_surface_gap_px,
 )
 
 # Unified reward magnitudes — single source of truth.
@@ -133,6 +138,7 @@ class RewardContext:
     destroy_standoff_px: float
     collect_living_penalty: bool
     collect_sparse_only: bool
+    y_is_bottom_edge: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,18 +285,31 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
 # ---------------------------------------------------------------------------
 
 
-def _centre_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Centre-to-centre distances at t and t+1."""
-    prev_px = ctx.prev_player.x + ctx.prev_player.width / 2.0
-    prev_py = ctx.prev_player.y + ctx.prev_player.height / 2.0
-    next_px = ctx.next_player.x + ctx.next_player.width / 2.0
-    next_py = ctx.next_player.y + ctx.next_player.height / 2.0
-    prev_tx = ctx.prev_target.x + ctx.prev_target.width / 2.0
-    prev_ty = ctx.prev_target.y + ctx.prev_target.height / 2.0
-    next_tx = ctx.next_target.x + ctx.next_target.width / 2.0
-    next_ty = ctx.next_target.y + ctx.next_target.height / 2.0
-    prev_dist = jnp.sqrt((prev_px - prev_tx) ** 2 + (prev_py - prev_ty) ** 2)
-    next_dist = jnp.sqrt((next_px - next_tx) ** 2 + (next_py - next_ty) ** 2)
+def _approach_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """AABB surface-gap distances at t and t+1 (same metric as ego obs)."""
+    y_bot = bool(ctx.y_is_bottom_edge)
+    prev_dist = aabb_surface_gap_px(
+        ctx.prev_player.x,
+        ctx.prev_player.y,
+        ctx.prev_player.width,
+        ctx.prev_player.height,
+        ctx.prev_target.x,
+        ctx.prev_target.y,
+        ctx.prev_target.width,
+        ctx.prev_target.height,
+        y_is_bottom_edge=y_bot,
+    )
+    next_dist = aabb_surface_gap_px(
+        ctx.next_player.x,
+        ctx.next_player.y,
+        ctx.next_player.width,
+        ctx.next_player.height,
+        ctx.next_target.x,
+        ctx.next_target.y,
+        ctx.next_target.width,
+        ctx.next_target.height,
+        y_is_bottom_edge=y_bot,
+    )
     return prev_dist, next_dist
 
 
@@ -301,7 +320,7 @@ def _destroy_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Life-loss penalty is applied uniformly in extract_skill_rewards.
     success = ctx.next_target.was_killed == 1
     contact = jnp.logical_and(ctx.destroy_contact_fail, ctx.overlap_rising_edge)
-    prev_dist, next_dist = _centre_distances(ctx)
+    prev_dist, next_dist = _approach_distances(ctx)
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
@@ -359,7 +378,7 @@ def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
-    prev_dist, next_dist = _centre_distances(ctx)
+    prev_dist, next_dist = _approach_distances(ctx)
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
@@ -394,7 +413,7 @@ def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     failure = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
     )
-    prev_dist, next_dist = _centre_distances(ctx)
+    prev_dist, next_dist = _approach_distances(ctx)
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
@@ -422,14 +441,14 @@ def _navigate_progress_shaped(prev_dist: jnp.ndarray, next_dist: jnp.ndarray) ->
 
 def _navigate_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Arrive: same sparse contract as COLLECT (overlap / was_collected).
-    # Progress: signed dense shaping proportional to centre-distance change —
+    # Progress: signed dense shaping proportional to AABB surface-gap change —
     # needed for far static targets (Kangaroo ladders). Retreat is penalized so
     # jump-spam away from the WP cannot be reward-neutral.
     # Life-loss penalty is applied uniformly in extract_skill_rewards.
     success = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
     )
-    prev_dist, next_dist = _centre_distances(ctx)
+    prev_dist, next_dist = _approach_distances(ctx)
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
     )
@@ -594,6 +613,7 @@ def extract_skill_rewards(
         destroy_standoff_px=flags["destroy_standoff_px"],
         collect_living_penalty=collect_clock,
         collect_sparse_only=collect_sparse,
+        y_is_bottom_edge=bool(_uses_bottom_edge_y(prev_raw_obs)),
     )
 
     died = ctx.life_lost > 0

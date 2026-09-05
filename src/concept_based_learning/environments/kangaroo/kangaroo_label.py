@@ -61,18 +61,20 @@ _COCO_PUNCH_SCORE = 200
 # Standing kangaroo height in jax_kangaroo (non-crouch); waypoint y = platform_y - half.
 _PLAYER_STAND_HEIGHT = 24
 _PLAYER_STAND_HALF = _PLAYER_STAND_HEIGHT // 2
+# Match Seaquest surface-WP width so transferred COLLECT stops with overlap at the
+# ladder column (centre-distance ~player_w), not ~8px short on 1×1 slots.
+_PLAYER_STAND_WIDTH = 16
+_PLAYER_STAND_HALF_W = _PLAYER_STAND_WIDTH // 2
+_LADDER_WAYPOINT_H = 1
 # If no platform matches, lift the top waypoint by this many px (L1 ladder→floor gap).
 _TOP_FALLBACK_LIFT = 8
 # Pull top waypoints above standing-centre so arrive / overlap only fire once the
 # player is actually on the upper platform — not while still on the ladder a few
 # px below the floor (arrive_dist alone was firing early).
 _TOP_WAYPOINT_LIFT_PX = 17
-# Shift ladder waypoints toward the nearest screen wall (±x from ladder centre).
-_WAYPOINT_WALL_OFFSET_PX = 4
-# Plan waypoints 3 & 4 (ladder index 1): extra nudge left from wall offset.
-_L1_LADDER_INDEX = 1
-_L1_WAYPOINT_EXTRA_X_PX = -1
-_KANGAROO_SCREEN_MID_X = 80.0
+# POV probe (2026-09): nudge bottom waypoints up a few px so platform approach is not
+# exactly on degenerate pose bins (orthogonal / zeroed fwd-lat).
+_BOTTOM_WAYPOINT_Y_OFFSET_PX = -5
 # Max |ladder_edge - platform.y| to count as the connected floor.
 _PLATFORM_MATCH_PX = 16
 # Falling coco x must lie within ladder width ± this margin to gate a ladder.
@@ -227,18 +229,9 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         # --- Ladder waypoints (COLLECT), snapped to standable floors ---
         lad_half_w = ladders.width // 2
         lad_cx = ladders.x + lad_half_w
-        wall_offset = jnp.where(
-            lad_cx >= _KANGAROO_SCREEN_MID_X,
-            float(_WAYPOINT_WALL_OFFSET_PX),
-            -float(_WAYPOINT_WALL_OFFSET_PX),
-        )
-        ladder_idx = jnp.arange(ladders.x.shape[0], dtype=jnp.float32)
-        l1_x_nudge = jnp.where(
-            ladder_idx == float(_L1_LADDER_INDEX),
-            float(_L1_WAYPOINT_EXTRA_X_PX),
-            0.0,
-        )
-        wp_x_offset = wall_offset + l1_x_nudge
+        wp_half_w = jnp.full_like(lad_cx, float(_PLAYER_STAND_HALF_W))
+        wp_w = jnp.full_like(lad_cx, float(_PLAYER_STAND_WIDTH))
+        wp_h = jnp.full_like(lad_cx, float(_LADDER_WAYPOINT_H))
 
         lad_top_edge = ladders.y
         lad_bot_edge = ladders.y + ladders.height
@@ -261,16 +254,16 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
             jnp.logical_not(coco_on_ladder),
         ).astype(jnp.int32)
 
-        bot_x = lad_cx + wp_x_offset
-        bot_y = _standing_center_y(src_plat_y)
+        bot_x = lad_cx - wp_half_w
+        bot_y = src_plat_y - wp_h + float(_BOTTOM_WAYPOINT_Y_OFFSET_PX)
         bot_active = ladder_climbable
 
-        top_x = lad_cx + wp_x_offset
+        top_x = lad_cx - wp_half_w
         top_y = _top_waypoint_y(dest_plat_y)
         top_active = ladder_climbable
 
-        waypoint_w = jnp.ones_like(bot_x)
-        waypoint_h = jnp.ones_like(bot_y)
+        waypoint_w = wp_w
+        waypoint_h = wp_h
 
         bell_x, bell_y = _scalar_to_1d(bell.x), _scalar_to_1d(bell.y)
         bell_w, bell_h = _scalar_to_1d(bell.width), _scalar_to_1d(bell.height)

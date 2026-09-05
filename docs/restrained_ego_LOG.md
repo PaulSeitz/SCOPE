@@ -39,6 +39,22 @@ Stems (`restrained_ego` suite):
 | SeaQuest base | ~22.6k | ≥20k (don't collapse source) |
 | Pong base | +1 (mask off) | > baseline with mask on |
 
-## Results
+## Results (cluster1, synced 2026-09-05)
 
-_(fill after cluster run)_
+**Fail — do not iterate on this encoding.**
+
+| Metric | φ8 v2 | Arm3 LCR×near/far |
+|--------|-------|-------------------|
+| SeaQuest base | **22 600** | **2 643** (−88%) |
+| SeaQuest median retention | 0.936 | 0.953 (on a collapsed base) |
+| Pong base | **+1** (21–20) | **−21** (0–21 shutout) |
+
+Source competence collapsed: dynamics/semantic mods like `faster_enemies`,
+`lethal_divers`, `gravity` fall to ~140–230. Farming mods still inflate
+retention ratios — ignore those.
+
+Coarse pose + legal mask **did not** unlock Pong intercept; it destroyed the
+SeaQuest skill set first. Next transfer work should keep continuous φ8 (or
+navigatesurface) and attack action/legal-mask / reward–obs consistency instead.
+
+See `docs/transfer_ablation_ANALYSIS.md` for the full ablation board.

@@ -60,10 +60,14 @@ def _S(v, dtype=jnp.int32):
     return jnp.stack([a, a, a, a])
 
 
-def _centre_dist(px, py, tx, ty, *, pw=8, ph=11, tw=1, th=1) -> float:
-    pcx, pcy = px + pw / 2.0, py + ph / 2.0
-    tcx, tcy = tx + tw / 2.0, ty + th / 2.0
-    return float(((pcx - tcx) ** 2 + (pcy - tcy) ** 2) ** 0.5)
+def _surface_gap(
+    px, py, tx, ty, *, pw=8, ph=11, tw=1, th=1
+) -> float:
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    return float(
+        aabb_surface_gap_px(px, py, pw, ph, tx, ty, tw, th, y_is_bottom_edge=False)
+    )
 
 
 def _nav_shaped(prev_dist: float, next_dist: float) -> float:
@@ -92,8 +96,8 @@ def test_navigate_progress_when_distance_decreases():
     next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
     expected = _nav_shaped(
-        _centre_dist(50, 100, 50, 40),
-        _centre_dist(50, 80, 50, 40),
+        _surface_gap(50, 100, 50, 40),
+        _surface_gap(50, 80, 50, 40),
     )
     assert float(r[3]) == pytest.approx(expected)
     assert expected > 0.0
@@ -109,8 +113,8 @@ def test_navigate_no_progress_when_idle_or_farther():
     away_r, away_t = _mk(50, 120, 50, 40, LABEL_NAVIGATE)
     r1, _ = extract_skill_rewards(prev_r, away_r, prev_t, away_t, jnp.int32(0))
     expected = _nav_shaped(
-        _centre_dist(50, 100, 50, 40),
-        _centre_dist(50, 120, 50, 40),
+        _surface_gap(50, 100, 50, 40),
+        _surface_gap(50, 120, 50, 40),
     )
     assert float(r1[3]) == pytest.approx(expected)
     assert expected < 0.0
@@ -181,8 +185,8 @@ def test_death_does_not_penalize_navigate_or_collect():
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(1))
     # Progress still applies; death does not override NAVIGATE.
     expected = _nav_shaped(
-        _centre_dist(50, 100, 50, 40),
-        _centre_dist(50, 80, 50, 40),
+        _surface_gap(50, 100, 50, 40),
+        _surface_gap(50, 80, 50, 40),
     )
     assert float(r[3]) == pytest.approx(expected)
     assert not bool(d[3])
@@ -221,7 +225,7 @@ def test_death_penalizes_collect_when_opted_in():
         penalize_collect_death=True,
     )
     assert float(r[3]) == pytest.approx(
-        _nav_shaped(_centre_dist(50, 100, 50, 40), _centre_dist(50, 80, 50, 40))
+        _nav_shaped(_surface_gap(50, 100, 50, 40), _surface_gap(50, 80, 50, 40))
     )
     assert not bool(d[3])
 
@@ -400,7 +404,7 @@ def test_navigate_keeps_approach_when_collect_living_on():
         prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_living_penalty=True
     )
     assert float(r[3]) == pytest.approx(
-        _nav_shaped(_centre_dist(50, 100, 50, 40), _centre_dist(50, 80, 50, 40))
+        _nav_shaped(_surface_gap(50, 100, 50, 40), _surface_gap(50, 80, 50, 40))
     )
     assert not bool(d[3])
 

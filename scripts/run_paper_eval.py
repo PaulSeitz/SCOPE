@@ -91,6 +91,13 @@ Usage:
   # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
   CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
 
+  # Surface-gap reward retrains (AABB approach shaping; obs–reward aligned):
+  #   2 GPUs — Kangaroo (clip50+θ8) + Seaquest navigatesurface → SQ eval → Pong:
+  python scripts/run_paper_eval.py --suite surfacegap_dual --gpus 0,1 --wait-deps --lean
+  #   Kangaroo only / Seaquest nav-surfacegap only:
+  python scripts/run_paper_eval.py --suite kangaroo_surfacegap --gpus 0 --wait-deps --lean
+  python scripts/run_paper_eval.py --suite navigate_surface_surfacegap --gpus 0 --wait-deps --lean
+
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
     && CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite clip50_lifetime_pipeline --wait-deps --lean
@@ -438,6 +445,31 @@ NAVIGATE_SURFACE_TANDEM_PIXEL_STEMS = (
     "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_eval_full",
     "seaquest_tandem_pixel_ego_pov_eval",
     "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface",
+)
+
+# NAVIGATE-surface retrain with AABB surface-gap approach shaping (obs–reward aligned).
+# Requires skill_rewards._approach_distances (post-2026-09-05). Sequential 1 GPU.
+NAVIGATE_SURFACE_SURFACEGAP_SUITE = "navigate_surface_surfacegap"
+NAVIGATE_SURFACE_SURFACEGAP_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap",
+)
+
+# Kangaroo retrain: Seaquest-proven clip50+θ8 angbins + surface-gap rewards.
+KANGAROO_SURFACEGAP_SUITE = "kangaroo_surfacegap"
+KANGAROO_SURFACEGAP_STEMS = (
+    "kangaroo_skills_ego_clip50_angbins_surfacegap",
+)
+
+# 2-GPU dual: shard-critical — trains first (GPU0 kangaroo, GPU1 Seaquest nav-surfacegap).
+#   python scripts/run_paper_eval.py --suite surfacegap_dual --gpus 0,1 --wait-deps --lean
+SURFACEGAP_DUAL_SUITE = "surfacegap_dual"
+SURFACEGAP_DUAL_STEMS = (
+    "kangaroo_skills_ego_clip50_angbins_surfacegap",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap",
 )
 
 # Alias: full ground-up batch = tier A (most users start here).
@@ -1020,6 +1052,9 @@ SUITE_STEMS = {
     THESIS_TIER_C_SUITE: THESIS_TIER_C_STEMS,
     THESIS_TIER_C_FACING_SUITE: THESIS_TIER_C_FACING_STEMS,
     NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: NAVIGATE_SURFACE_TANDEM_PIXEL_STEMS,
+    NAVIGATE_SURFACE_SURFACEGAP_SUITE: NAVIGATE_SURFACE_SURFACEGAP_STEMS,
+    KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
+    SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
     KANGAROO_LIFETIME_SUITE: KANGAROO_LIFETIME_STEMS,
@@ -1085,6 +1120,9 @@ SUITE_RTPT: dict[str, str] = {
     THESIS_TIER_C_SUITE: "extras",
     THESIS_TIER_C_FACING_SUITE: "extras",
     NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: "nav_tandem",
+    NAVIGATE_SURFACE_SURFACEGAP_SUITE: "nav_sgap",
+    KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
+    SURFACEGAP_DUAL_SUITE: "sgap_dual",
     CLIP100_COLLECTSURFACE_PROBE_SUITE: "clip100",
     CLIP150_COLLECTSURFACE_PROBE_SUITE: "clip150",
     FACING_DISTANCE_ABLATION_SUITE: "dist_abl",
@@ -2418,6 +2456,14 @@ def main() -> None:
             "RQ3 meta/tandem from collectsurface, tandem-scratch BR/FR/AS "
             "(use --post-eval). "
             f"{NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE}: 2-GPU — NAVIGATE-surface "
+            "φ8 spine (+ pixel tandem). "
+            f"{NAVIGATE_SURFACE_SURFACEGAP_SUITE}: 1-GPU — NAVIGATE-surface retrain "
+            "with AABB surface-gap COLLECT/NAVIGATE/AVOID shaping (obs–reward aligned) "
+            "→ SQ full eval → Pong ZS. "
+            f"{KANGAROO_SURFACEGAP_SUITE}: Kangaroo train only (clip50+θ8 angbins + "
+            "surface-gap rewards; Seaquest-proven spine). "
+            f"{SURFACEGAP_DUAL_SUITE}: 2-GPU — kangaroo_surfacegap on GPU0 + "
+            "navigate_surface_surfacegap train/eval/Pong on GPU1 (--wait-deps). "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
