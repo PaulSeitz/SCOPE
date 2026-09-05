@@ -10,17 +10,26 @@ Future experiment ideas and known obs–reward mismatches.
 distance (`_centre_distances`). Ego observations use AABB surface gap
 (`aabb_surface_gap_px`).
 
-**Now:** `_approach_distances` in `skill_rewards.py` uses the same
-`aabb_surface_gap_px` as ego (including Freeway bottom-edge y). DESTROY standoff
-melee range also uses surface gap; DESTROY y-align still uses centre `|Δy|`.
+**Now:** `_approach_distances` uses `aabb_geom_distance_px` (same `EGO_AABB_GEOM`
+as ego). Default `centre_ray` = `aabb_surface_gap_px`. Optional `closest_points`
+= true edge–edge separation. DESTROY y-align still uses centre `|Δy|` and stays off
+on transfer spines.
 
-**Retrain suites:**
+**Pose ablations (obs–reward aligned, navigatesurface_surfacegap spine):**
 
 ```bash
-# 2 GPUs — Kangaroo (clip50+θ8) + Seaquest navigatesurface_surfacegap → eval → Pong
-python scripts/run_paper_eval.py --suite surfacegap_dual --gpus 0,1 --wait-deps --lean
+# 2 GPUs — hit-corridor vs closest-points φ in parallel → eval → Pong
+python scripts/run_paper_eval.py --suite surfacegap_geom_dual --gpus 0,1 --wait-deps --lean
+```
 
-# Pieces alone
+- `USE_EGO_HIT_CORRIDOR`: +`lat_rel`, +`in_corridor` (body-relative lateral slab)
+- `EGO_AABB_GEOM: closest_points`: distance + φ from true AABB closest-points vector
+  (centre-ray surface points share centre bearing — φ only changes with closest-points)
+
+**Older surfacegap suites:**
+
+```bash
+python scripts/run_paper_eval.py --suite surfacegap_dual --gpus 0,1 --wait-deps --lean
 python scripts/run_paper_eval.py --suite kangaroo_surfacegap --gpus 0 --wait-deps --lean
 python scripts/run_paper_eval.py --suite navigate_surface_surfacegap --gpus 0 --wait-deps --lean
 ```

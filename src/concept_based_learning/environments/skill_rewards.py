@@ -79,7 +79,7 @@ from concept_based_learning.environments.datatypes import (
 )
 from concept_based_learning.observations.egocentric import (
     _uses_bottom_edge_y,
-    aabb_surface_gap_px,
+    aabb_geom_distance_px,
 )
 
 # Unified reward magnitudes — single source of truth.
@@ -286,9 +286,9 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
 
 
 def _approach_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """AABB surface-gap distances at t and t+1 (same metric as ego obs)."""
+    """Contact distances at t and t+1 (same ``EGO_AABB_GEOM`` metric as ego obs)."""
     y_bot = bool(ctx.y_is_bottom_edge)
-    prev_dist = aabb_surface_gap_px(
+    prev_dist = aabb_geom_distance_px(
         ctx.prev_player.x,
         ctx.prev_player.y,
         ctx.prev_player.width,
@@ -299,7 +299,7 @@ def _approach_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
         ctx.prev_target.height,
         y_is_bottom_edge=y_bot,
     )
-    next_dist = aabb_surface_gap_px(
+    next_dist = aabb_geom_distance_px(
         ctx.next_player.x,
         ctx.next_player.y,
         ctx.next_player.width,

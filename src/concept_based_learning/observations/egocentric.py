@@ -69,8 +69,16 @@ _EGO_PSI_ANGLE_SCALAR: bool = False
 _EGO_RESTRAINED_POSE: str | None = None
 _EGO_RESTRAINED_LATERAL_BAND_PX: float = 8.0
 _EGO_RESTRAINED_NEAR_FAR_PX: float = 50.0
+# Hit-corridor pose extras: lat / (p⊥+t⊥) + soft in-corridor bit (facing frame).
+_USE_EGO_HIT_CORRIDOR: bool = False
+_EGO_HIT_CORRIDOR_SAT: float = 4.0
+# AABB contact geometry for ego distance (+ bearing when facing/polar):
+#   centre_ray — current default (gap along centre→centre ray)
+#   closest_points — true edge–edge separation vector (dist + φ from that vector)
+_EGO_AABB_GEOM: str = "centre_ray"
 
 RESTRAINED_POSE_CHOICES = ("lcr_nearfar", "quadrant_nearfar")
+AABB_GEOM_CHOICES = ("centre_ray", "closest_points")
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -92,6 +100,42 @@ def set_ego_size_features(enabled: bool) -> None:
     """Enable/disable size channels while keeping ego feature dimensions unchanged."""
     global _USE_EGO_SIZE_FEATURES
     _USE_EGO_SIZE_FEATURES = bool(enabled)
+
+
+def set_ego_hit_corridor(enabled: bool, *, sat: float = 4.0) -> None:
+    """Enable relative hit-corridor channels (lat_rel + soft in_corridor)."""
+    global _USE_EGO_HIT_CORRIDOR, _EGO_HIT_CORRIDOR_SAT
+    _USE_EGO_HIT_CORRIDOR = bool(enabled)
+    sat_f = float(sat)
+    if sat_f <= 0.0:
+        raise ValueError(f"EGO_HIT_CORRIDOR_SAT must be > 0, got {sat}")
+    _EGO_HIT_CORRIDOR_SAT = sat_f
+
+
+def using_ego_hit_corridor() -> bool:
+    return _USE_EGO_HIT_CORRIDOR
+
+
+def set_ego_aabb_geom(mode: str | None) -> None:
+    """Select AABB distance/bearing geometry (``centre_ray`` or ``closest_points``)."""
+    global _EGO_AABB_GEOM
+    if mode in (None, "", False):
+        _EGO_AABB_GEOM = "centre_ray"
+        return
+    key = str(mode).lower().strip()
+    if key not in AABB_GEOM_CHOICES:
+        raise ValueError(
+            f"EGO_AABB_GEOM must be one of {AABB_GEOM_CHOICES}, got {mode!r}"
+        )
+    _EGO_AABB_GEOM = key
+
+
+def ego_aabb_geom() -> str:
+    return _EGO_AABB_GEOM
+
+
+def using_ego_closest_points_geom() -> bool:
+    return _EGO_AABB_GEOM == "closest_points"
 
 
 def set_ego_velocity_features(enabled: bool) -> None:
@@ -570,7 +614,17 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_bins(None)
     else:
         set_ego_restrained_pose(None)
+    set_ego_hit_corridor(
+        bool(config.get("USE_EGO_HIT_CORRIDOR", False)),
+        sat=float(config.get("EGO_HIT_CORRIDOR_SAT", 4.0)),
+    )
+    set_ego_aabb_geom(config.get("EGO_AABB_GEOM", "centre_ray"))
+    if using_ego_hit_corridor() and bool(config.get("EGO_POSE_XY", False)):
+        raise ValueError(
+            "USE_EGO_HIT_CORRIDOR requires polar facing pose (EGO_POSE_XY: false)."
+        )
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
+
     # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
     weapon = config.get(
         "USE_EGO_WEAPON_FEATURES",
@@ -712,6 +766,8 @@ def ego_obs_channels_per_frame() -> int:
         pose = restrained_pose_channels_per_frame()
     else:
         pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
+        if _USE_EGO_HIT_CORRIDOR:
+            pose += 2
     return pose + _ego_velocity_channels_per_frame() + (
         2 if _USE_EGO_SIZE_FEATURES else 0
     ) + los_channels + skill_ego_extra_channels_per_frame()
@@ -736,7 +792,10 @@ def ego_pose_channels_per_frame() -> int:
         )
     if using_ego_restrained_pose():
         return restrained_pose_channels_per_frame()
-    return ego_distance_channels_per_frame() + ego_angle_channels_per_frame() + (
+    pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
+    if _USE_EGO_HIT_CORRIDOR:
+        pose += 2
+    return pose + (
         _ego_velocity_channels_per_frame()
     ) + (2 if _USE_EGO_SIZE_FEATURES else 0)
 
@@ -909,7 +968,7 @@ def aabb_surface_gap_px(
     y_is_bottom_edge: bool = False,
 ):
     """
-    Nearest-surface gap between two AABBs (same geometry as skill ego distance).
+    Nearest-surface gap between two AABBs along the centre→centre ray.
 
     Centre→centre ray, minus each box's surface extent along that ray; clamped
     at 0 when boxes overlap/touch. All args broadcast (scalars vs per-object).
@@ -928,6 +987,129 @@ def aabb_surface_gap_px(
     p_extent = _box_surface_extent(p_w / 2.0, p_h / 2.0, cos_t, sin_t)
     t_extent = _box_surface_extent(t_w / 2.0, t_h / 2.0, cos_t, sin_t)
     return jnp.maximum(center_dist - p_extent - t_extent, 0.0)
+
+
+def _aabb_minmax(
+    x,
+    y,
+    w,
+    h,
+    *,
+    y_is_bottom_edge: bool,
+):
+    """Axis-aligned ``(x0, x1, y0, y1)`` with ``y`` increasing downward on screen."""
+    x0 = x
+    x1 = x + w
+    if y_is_bottom_edge:
+        y0 = y - h
+        y1 = y
+    else:
+        y0 = y
+        y1 = y + h
+    return x0, x1, y0, y1
+
+
+def aabb_closest_delta_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Shortest separation vector from player AABB to target AABB (true edge–edge).
+
+    Returns ``(dx, dy, dist)``. Overlap / touch → ``(0, 0, 0)``. When separated on
+    both axes the vector joins the nearest corners; when only one axis separates,
+    it is axis-aligned (pure strafe or pure forward close).
+    """
+    px0, px1, py0, py1 = _aabb_minmax(
+        p_x, p_y, p_w, p_h, y_is_bottom_edge=y_is_bottom_edge
+    )
+    tx0, tx1, ty0, ty1 = _aabb_minmax(
+        t_x, t_y, t_w, t_h, y_is_bottom_edge=y_is_bottom_edge
+    )
+    dx = jnp.where(
+        px1 < tx0,
+        tx0 - px1,
+        jnp.where(tx1 < px0, tx1 - px0, jnp.float32(0.0)),
+    )
+    dy = jnp.where(
+        py1 < ty0,
+        ty0 - py1,
+        jnp.where(ty1 < py0, ty1 - py0, jnp.float32(0.0)),
+    )
+    dist = jnp.sqrt(dx * dx + dy * dy)
+    return dx, dy, dist
+
+
+def aabb_geom_distance_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """Active ego/reward contact distance (``EGO_AABB_GEOM``)."""
+    if _EGO_AABB_GEOM == "closest_points":
+        _dx, _dy, dist = aabb_closest_delta_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        return dist
+    return aabb_surface_gap_px(
+        p_x,
+        p_y,
+        p_w,
+        p_h,
+        t_x,
+        t_y,
+        t_w,
+        t_h,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
+
+
+def hit_corridor_features(
+    lat_px,
+    facing_deg,
+    p_w,
+    p_h,
+    t_w,
+    t_h,
+    *,
+    sat: float | None = None,
+):
+    """Relative lateral miss + soft in-corridor bit (body-sized, not absolute px)."""
+    sat_f = jnp.float32(_EGO_HIT_CORRIDOR_SAT if sat is None else sat)
+    rad = jnp.asarray(facing_deg, dtype=jnp.float32) * (jnp.pi / jnp.float32(180.0))
+    # Lateral-right unit in screen coords (matches world_delta_to_facing_frame).
+    lat_ux = -jnp.sin(rad)
+    lat_uy = jnp.cos(rad)
+    p_half = _box_surface_extent(p_w / 2.0, p_h / 2.0, lat_ux, lat_uy)
+    t_half = _box_surface_extent(t_w / 2.0, t_h / 2.0, lat_ux, lat_uy)
+    half_sum = jnp.maximum(p_half + t_half, jnp.float32(1e-3))
+    lat_rel_raw = lat_px / half_sum
+    lat_rel = jnp.clip(lat_rel_raw, -sat_f, sat_f) / sat_f
+    inside = jnp.clip(jnp.float32(1.0) - jnp.abs(lat_rel_raw), 0.0, 1.0)
+    return lat_rel, inside
 
 
 def player_object_aabb_gaps(raw_observation, objects, *, y_is_bottom_edge=None):
@@ -988,23 +1170,41 @@ def _frame_geometry_target_aligned(
     """
     # IMPORTANT: centre computation must match the environment's y convention.
     # If this drifts from action mapping/reward geometry, transfer can silently fail.
-    distance = aabb_surface_gap_px(
-        p_x,
-        p_y,
-        p_w,
-        p_h,
-        t_x,
-        t_y,
-        t_w,
-        t_h,
-        y_is_bottom_edge=y_is_bottom_edge,
-    )
     p_cx = p_x + p_w / 2.0
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-    dx = t_cx - p_cx
-    dy = t_cy - p_cy
+    if _EGO_AABB_GEOM == "closest_points":
+        dx, dy, distance = aabb_closest_delta_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        cdx = t_cx - p_cx
+        cdy = t_cy - p_cy
+        use_c = distance <= jnp.float32(1e-6)
+        dx = jnp.where(use_c, cdx, dx)
+        dy = jnp.where(use_c, cdy, dy)
+    else:
+        distance = aabb_surface_gap_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
     theta_target = jnp.arctan2(dy, dx)
 
     # ψ: player physical facing relative to θ_target.
@@ -1451,26 +1651,45 @@ def _frame_geometry_facing(
         world_delta_to_facing_frame,
     )
 
-    distance = aabb_surface_gap_px(
-        p_x,
-        p_y,
-        p_w,
-        p_h,
-        t_x,
-        t_y,
-        t_w,
-        t_h,
-        y_is_bottom_edge=y_is_bottom_edge,
-    )
     p_cx = p_x + p_w / 2.0
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-    dx = t_cx - p_cx
-    dy = t_cy - p_cy
+    if _EGO_AABB_GEOM == "closest_points":
+        dx, dy, distance = aabb_closest_delta_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        # Overlap: fall back to centre bearing so φ is defined.
+        cdx = t_cx - p_cx
+        cdy = t_cy - p_cy
+        use_c = distance <= jnp.float32(1e-6)
+        dx = jnp.where(use_c, cdx, dx)
+        dy = jnp.where(use_c, cdy, dy)
+    else:
+        distance = aabb_surface_gap_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
     fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
     phi = facing_frame_phi_rad(fwd, lat)
-    return distance, fwd, lat, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+    return distance, fwd, lat, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h, p_w, p_h
 
 
 def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
@@ -1493,7 +1712,20 @@ def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
         jnp.asarray(facing_scalar, dtype=jnp.float32), player.x.shape
     )
 
-    distances, fwds, lats, phis, t_cxs, t_cys, p_cxs, p_cys, t_ws, t_hs = jax.vmap(
+    (
+        distances,
+        fwds,
+        lats,
+        phis,
+        t_cxs,
+        t_cys,
+        p_cxs,
+        p_cys,
+        t_ws,
+        t_hs,
+        p_ws,
+        p_hs,
+    ) = jax.vmap(
         lambda px, py, pw, ph, face, tx, ty, tw, th: _frame_geometry_facing(
             px,
             py,
@@ -1538,6 +1770,22 @@ def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
         ]
     else:
         channels = distance_features_from_pixels(distances)
+        if _USE_EGO_HIT_CORRIDOR:
+            # Corridor uses centre-frame lateral (body overlap slab), even when
+            # distance/φ use closest-points geometry.
+            from concept_based_learning.observations.pov_facing_frame import (
+                world_delta_to_facing_frame,
+            )
+
+            _cf, centre_lats = world_delta_to_facing_frame(
+                t_cxs - p_cxs, t_cys - p_cys, facing_hist
+            )
+            lat_rel, in_cor = jax.vmap(
+                lambda lat, face, pw, ph, tw, th: hit_corridor_features(
+                    lat, face, pw, ph, tw, th
+                )
+            )(centre_lats, facing_hist, p_ws, p_hs, t_ws, t_hs)
+            channels.extend([lat_rel, in_cor])
         channels.extend(_psi_angle_feature_channels(phis))
 
     if _USE_EGO_SIZE_FEATURES:

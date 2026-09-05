@@ -472,6 +472,19 @@ SURFACEGAP_DUAL_STEMS = (
     "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap",
 )
 
+# 2-GPU: hit-corridor vs closest-points φ (both on navigatesurface_surfacegap spine).
+#   python scripts/run_paper_eval.py --suite surfacegap_geom_dual --gpus 0,1 --wait-deps --lean
+SURFACEGAP_GEOM_DUAL_SUITE = "surfacegap_geom_dual"
+SURFACEGAP_GEOM_DUAL_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor_eval_full",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi",
+)
+
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1053,6 +1066,7 @@ SUITE_STEMS = {
     THESIS_TIER_C_FACING_SUITE: THESIS_TIER_C_FACING_STEMS,
     NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: NAVIGATE_SURFACE_TANDEM_PIXEL_STEMS,
     NAVIGATE_SURFACE_SURFACEGAP_SUITE: NAVIGATE_SURFACE_SURFACEGAP_STEMS,
+    SURFACEGAP_GEOM_DUAL_SUITE: SURFACEGAP_GEOM_DUAL_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
@@ -2083,6 +2097,9 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_RESTRAINED_POSE",
     "EGO_RESTRAINED_LATERAL_BAND_PX",
     "EGO_RESTRAINED_NEAR_FAR_PX",
+    "USE_EGO_HIT_CORRIDOR",
+    "EGO_HIT_CORRIDOR_SAT",
+    "EGO_AABB_GEOM",
     "EGO_LEGAL_ACTION_MASK",
     "EGO_LEGAL_ACTION_MASK_MODE",
     # Pixel ablation: keep outline on/off from the eval YAML when architecture
