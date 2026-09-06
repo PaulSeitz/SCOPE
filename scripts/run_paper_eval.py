@@ -474,8 +474,15 @@ SURFACEGAP_DUAL_STEMS = (
 
 # 2-GPU: hit-corridor vs closest-points φ (both on navigatesurface_surfacegap spine).
 #   python scripts/run_paper_eval.py --suite surfacegap_geom_dual --gpus 0,1 --wait-deps --lean
-  python scripts/run_paper_eval.py --suite navigate_surface_centres --gpus 0 --wait-deps --lean
 SURFACEGAP_GEOM_DUAL_SUITE = "surfacegap_geom_dual"
+SURFACEGAP_GEOM_DUAL_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor_eval_full",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi",
+)
 
 # Fully centre-consistent navigatesurface (obs+reward+φ). 1 GPU sequential.
 #   python scripts/run_paper_eval.py --suite navigate_surface_centres --gpus 0 --wait-deps --lean
@@ -484,15 +491,6 @@ NAVIGATE_SURFACE_CENTRES_STEMS = (
     "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_centres",
     "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_centres_eval_full",
     "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_centres",
-)
-
-SURFACEGAP_GEOM_DUAL_STEMS = (
-    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor",
-    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi",
-    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor_eval_full",
-    "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi_eval_full",
-    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_hitcorridor",
-    "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_surfacegap_closestphi",
 )
 
 
