@@ -100,3 +100,15 @@ def test_hit_corridor_adds_two_channels():
     assert ego_obs_channels_per_frame() == n0 + 2
     set_ego_hit_corridor(False)
     set_ego_aabb_geom("centre_ray")
+
+
+def test_centres_geom_is_euclidean():
+    set_ego_aabb_geom("centres")
+    from concept_based_learning.observations.egocentric import aabb_geom_distance_px
+
+    # centres  (5,5) and (15,5) → 10; surface gap would be smaller
+    d = float(
+        aabb_geom_distance_px(0, 0, 10, 10, 10, 0, 10, 10, y_is_bottom_edge=False)
+    )
+    assert d == pytest.approx(10.0)
+    set_ego_aabb_geom("centre_ray")

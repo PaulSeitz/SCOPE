@@ -73,12 +73,13 @@ _EGO_RESTRAINED_NEAR_FAR_PX: float = 50.0
 _USE_EGO_HIT_CORRIDOR: bool = False
 _EGO_HIT_CORRIDOR_SAT: float = 4.0
 # AABB contact geometry for ego distance (+ bearing when facing/polar):
-#   centre_ray — current default (gap along centre→centre ray)
+#   centre_ray — gap along centre→centre ray (surface-aware, same bearing as centres)
 #   closest_points — true edge–edge separation vector (dist + φ from that vector)
+#   centres — pure centre→centre Euclidean (obs + rewards; no surface subtraction)
 _EGO_AABB_GEOM: str = "centre_ray"
 
 RESTRAINED_POSE_CHOICES = ("lcr_nearfar", "quadrant_nearfar")
-AABB_GEOM_CHOICES = ("centre_ray", "closest_points")
+AABB_GEOM_CHOICES = ("centre_ray", "closest_points", "centres")
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -1061,6 +1062,12 @@ def aabb_geom_distance_px(
     y_is_bottom_edge: bool = False,
 ):
     """Active ego/reward contact distance (``EGO_AABB_GEOM``)."""
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    if _EGO_AABB_GEOM == "centres":
+        return jnp.sqrt((t_cx - p_cx) ** 2 + (t_cy - p_cy) ** 2)
     if _EGO_AABB_GEOM == "closest_points":
         _dx, _dy, dist = aabb_closest_delta_px(
             p_x,
@@ -1174,7 +1181,11 @@ def _frame_geometry_target_aligned(
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-    if _EGO_AABB_GEOM == "closest_points":
+    if _EGO_AABB_GEOM == "centres":
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+        distance = jnp.sqrt(dx * dx + dy * dy)
+    elif _EGO_AABB_GEOM == "closest_points":
         dx, dy, distance = aabb_closest_delta_px(
             p_x,
             p_y,
@@ -1655,7 +1666,11 @@ def _frame_geometry_facing(
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-    if _EGO_AABB_GEOM == "closest_points":
+    if _EGO_AABB_GEOM == "centres":
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+        distance = jnp.sqrt(dx * dx + dy * dy)
+    elif _EGO_AABB_GEOM == "closest_points":
         dx, dy, distance = aabb_closest_delta_px(
             p_x,
             p_y,

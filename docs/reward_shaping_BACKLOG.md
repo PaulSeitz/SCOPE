@@ -26,6 +26,16 @@ python scripts/run_paper_eval.py --suite surfacegap_geom_dual --gpus 0,1 --wait-
 - `EGO_AABB_GEOM: closest_points`: distance + φ from true AABB closest-points vector
   (centre-ray surface points share centre bearing — φ only changes with closest-points)
 
+**Fully centre-consistent (obs + rewards + φ):**
+
+```bash
+python scripts/run_paper_eval.py --suite navigate_surface_centres --gpus 0 --wait-deps --lean
+```
+
+`EGO_AABB_GEOM: centres` — pure centre→centre Euclidean. Contrasts with default
+`centre_ray` (surface gap along centre bearing) and the old *mixture* that
+transferred (surface-gap obs + centre rewards).
+
 **Older surfacegap suites:**
 
 ```bash
