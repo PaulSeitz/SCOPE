@@ -76,10 +76,11 @@ _EGO_HIT_CORRIDOR_SAT: float = 4.0
 #   centre_ray — gap along centre→centre ray (surface-aware, same bearing as centres)
 #   closest_points — true edge–edge separation vector (dist + φ from that vector)
 #   centres — pure centre→centre Euclidean (obs + rewards; no surface subtraction)
+#   body_gaps — facing-frame signed 1D surface gaps → contact dist + φ (size in halves)
 _EGO_AABB_GEOM: str = "centre_ray"
 
 RESTRAINED_POSE_CHOICES = ("lcr_nearfar", "quadrant_nearfar")
-AABB_GEOM_CHOICES = ("centre_ray", "closest_points", "centres")
+AABB_GEOM_CHOICES = ("centre_ray", "closest_points", "centres", "body_gaps")
 
 
 def set_ego_obs_format(use_legacy: bool) -> None:
@@ -118,7 +119,7 @@ def using_ego_hit_corridor() -> bool:
 
 
 def set_ego_aabb_geom(mode: str | None) -> None:
-    """Select AABB distance/bearing geometry (``centre_ray`` or ``closest_points``)."""
+    """Select AABB distance/bearing geometry (see ``AABB_GEOM_CHOICES``)."""
     global _EGO_AABB_GEOM
     if mode in (None, "", False):
         _EGO_AABB_GEOM = "centre_ray"
@@ -1049,6 +1050,74 @@ def aabb_closest_delta_px(
     return dx, dy, dist
 
 
+def aabb_body_frame_gaps_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    facing_deg,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Facing-frame signed 1D surface gaps and contact distance.
+
+    Centres projected into body (fwd, lat); half-extents from ``_box_surface_extent``.
+    Per axis: ``gap = |sep| - p_half - t_half`` (negative ⇒ overlap on that axis).
+
+    Returns ``(d_fwd, d_lat, dist, phi)`` where:
+      d_fwd/d_lat — signed gaps ``sign(sep) * gap``
+      dist — ``hypot(relu(gap_fwd), relu(gap_lat))``
+      phi — ``atan2`` of the positive gap corner (fallback: centre body bearing)
+    """
+    from concept_based_learning.observations.pov_facing_frame import (
+        facing_frame_phi_rad,
+        world_delta_to_facing_frame,
+    )
+
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    sep_fwd, sep_lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+
+    rad = jnp.asarray(facing_deg, dtype=jnp.float32) * (jnp.pi / jnp.float32(180.0))
+    fwd_ux = jnp.cos(rad)
+    fwd_uy = jnp.sin(rad)
+    lat_ux = -jnp.sin(rad)
+    lat_uy = jnp.cos(rad)
+    p_hf = _box_surface_extent(p_w / 2.0, p_h / 2.0, fwd_ux, fwd_uy)
+    t_hf = _box_surface_extent(t_w / 2.0, t_h / 2.0, fwd_ux, fwd_uy)
+    p_hl = _box_surface_extent(p_w / 2.0, p_h / 2.0, lat_ux, lat_uy)
+    t_hl = _box_surface_extent(t_w / 2.0, t_h / 2.0, lat_ux, lat_uy)
+    half_fwd = p_hf + t_hf
+    half_lat = p_hl + t_hl
+
+    gap_fwd = jnp.abs(sep_fwd) - half_fwd
+    gap_lat = jnp.abs(sep_lat) - half_lat
+    eps = jnp.float32(1e-6)
+    d_fwd = jnp.sign(sep_fwd + eps) * gap_fwd
+    d_lat = jnp.sign(sep_lat + eps) * gap_lat
+
+    pos_fwd = jnp.maximum(gap_fwd, jnp.float32(0.0))
+    pos_lat = jnp.maximum(gap_lat, jnp.float32(0.0))
+    dist = jnp.sqrt(pos_fwd * pos_fwd + pos_lat * pos_lat)
+
+    corner_fwd = jnp.sign(sep_fwd + eps) * pos_fwd
+    corner_lat = jnp.sign(sep_lat + eps) * pos_lat
+    use_centre = dist <= eps
+    cf = jnp.where(use_centre, sep_fwd, corner_fwd)
+    cl = jnp.where(use_centre, sep_lat, corner_lat)
+    phi = facing_frame_phi_rad(cf, cl)
+    return d_fwd, d_lat, dist, phi
+
+
 def aabb_geom_distance_px(
     p_x,
     p_y,
@@ -1060,6 +1129,7 @@ def aabb_geom_distance_px(
     t_h,
     *,
     y_is_bottom_edge: bool = False,
+    facing_deg=None,
 ):
     """Active ego/reward contact distance (``EGO_AABB_GEOM``)."""
     p_cx = p_x + p_w / 2.0
@@ -1068,6 +1138,21 @@ def aabb_geom_distance_px(
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
     if _EGO_AABB_GEOM == "centres":
         return jnp.sqrt((t_cx - p_cx) ** 2 + (t_cy - p_cy) ** 2)
+    if _EGO_AABB_GEOM == "body_gaps":
+        face = jnp.float32(0.0) if facing_deg is None else facing_deg
+        _df, _dl, dist, _phi = aabb_body_frame_gaps_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            face,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        return dist
     if _EGO_AABB_GEOM == "closest_points":
         _dx, _dy, dist = aabb_closest_delta_px(
             p_x,
@@ -1181,7 +1266,22 @@ def _frame_geometry_target_aligned(
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-    if _EGO_AABB_GEOM == "centres":
+    if _EGO_AABB_GEOM == "body_gaps":
+        _df, _dl, distance, _phi = aabb_body_frame_gaps_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            p_ori_deg,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+    elif _EGO_AABB_GEOM == "centres":
         dx = t_cx - p_cx
         dy = t_cy - p_cy
         distance = jnp.sqrt(dx * dx + dy * dy)
@@ -1666,10 +1766,27 @@ def _frame_geometry_facing(
     p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
     t_cx = t_x + t_w / 2.0
     t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
-    if _EGO_AABB_GEOM == "centres":
+    if _EGO_AABB_GEOM == "body_gaps":
+        _df, _dl, distance, phi = aabb_body_frame_gaps_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            facing_deg,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        # fwd/lat for corridor extras: centre body-frame offsets
+        fwd, lat = world_delta_to_facing_frame(t_cx - p_cx, t_cy - p_cy, facing_deg)
+    elif _EGO_AABB_GEOM == "centres":
         dx = t_cx - p_cx
         dy = t_cy - p_cy
         distance = jnp.sqrt(dx * dx + dy * dy)
+        fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+        phi = facing_frame_phi_rad(fwd, lat)
     elif _EGO_AABB_GEOM == "closest_points":
         dx, dy, distance = aabb_closest_delta_px(
             p_x,
@@ -1688,6 +1805,8 @@ def _frame_geometry_facing(
         use_c = distance <= jnp.float32(1e-6)
         dx = jnp.where(use_c, cdx, dx)
         dy = jnp.where(use_c, cdy, dy)
+        fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+        phi = facing_frame_phi_rad(fwd, lat)
     else:
         distance = aabb_surface_gap_px(
             p_x,
@@ -1702,8 +1821,8 @@ def _frame_geometry_facing(
         )
         dx = t_cx - p_cx
         dy = t_cy - p_cy
-    fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
-    phi = facing_frame_phi_rad(fwd, lat)
+        fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+        phi = facing_frame_phi_rad(fwd, lat)
     return distance, fwd, lat, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h, p_w, p_h
 
 

@@ -139,6 +139,7 @@ class RewardContext:
     collect_living_penalty: bool
     collect_sparse_only: bool
     y_is_bottom_edge: bool = False
+    facing_deg: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,7 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
 def _approach_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Contact distances at t and t+1 (same ``EGO_AABB_GEOM`` metric as ego obs)."""
     y_bot = bool(ctx.y_is_bottom_edge)
+    face = jnp.asarray(ctx.facing_deg, dtype=jnp.float32)
     prev_dist = aabb_geom_distance_px(
         ctx.prev_player.x,
         ctx.prev_player.y,
@@ -298,6 +300,7 @@ def _approach_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
         ctx.prev_target.width,
         ctx.prev_target.height,
         y_is_bottom_edge=y_bot,
+        facing_deg=face,
     )
     next_dist = aabb_geom_distance_px(
         ctx.next_player.x,
@@ -309,6 +312,7 @@ def _approach_distances(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
         ctx.next_target.width,
         ctx.next_target.height,
         y_is_bottom_edge=y_bot,
+        facing_deg=face,
     )
     return prev_dist, next_dist
 
@@ -593,6 +597,22 @@ def extract_skill_rewards(
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
 
+    # Body-gap rewards need the same facing as ego (facing-frame) when enabled.
+    facing_deg = 0.0
+    try:
+        from concept_based_learning.observations.pov_facing_frame import (
+            resolve_facing_deg,
+            using_pov_facing_frame,
+        )
+
+        if using_pov_facing_frame():
+            facing_deg = resolve_facing_deg(prev_raw_obs)
+        elif hasattr(prev_player, "orientation"):
+            facing_deg = prev_player.orientation
+    except Exception:
+        if hasattr(prev_player, "orientation"):
+            facing_deg = prev_player.orientation
+
     ctx = RewardContext(
         prev_player=prev_player,
         next_player=next_player,
@@ -614,6 +634,7 @@ def extract_skill_rewards(
         collect_living_penalty=collect_clock,
         collect_sparse_only=collect_sparse,
         y_is_bottom_edge=bool(_uses_bottom_edge_y(prev_raw_obs)),
+        facing_deg=facing_deg,
     )
 
     died = ctx.life_lost > 0

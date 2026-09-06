@@ -112,3 +112,63 @@ def test_centres_geom_is_euclidean():
     )
     assert d == pytest.approx(10.0)
     set_ego_aabb_geom("centre_ray")
+
+def test_body_gaps_forward_and_lateral():
+    import math
+    from concept_based_learning.observations.egocentric import aabb_body_frame_gaps_px
+
+    set_ego_aabb_geom("body_gaps")
+    # Facing +x. Player 16×16 centre (8,8). Target 8×10 centre (58,36) → sep (50,28).
+    d_fwd, d_lat, dist, phi = aabb_body_frame_gaps_px(
+        0, 0, 16, 16,
+        54, 31, 8, 10,
+        facing_deg=0.0,
+        y_is_bottom_edge=False,
+    )
+    assert float(d_fwd) == pytest.approx(38.0, abs=0.05)
+    assert float(d_lat) == pytest.approx(15.0, abs=0.05)
+    assert float(dist) == pytest.approx(math.hypot(38.0, 15.0), abs=0.1)
+    assert float(phi) == pytest.approx(math.atan2(15.0, 38.0), abs=0.05)
+
+    # Same centres, larger boxes → smaller contact dist
+    _a, _b, dist2, _c = aabb_body_frame_gaps_px(
+        -4, -4, 24, 24,
+        50, 29, 16, 14,
+        facing_deg=0.0,
+        y_is_bottom_edge=False,
+    )
+    assert float(dist2) < float(dist)
+    set_ego_aabb_geom("centre_ray")
+
+
+def test_body_gaps_in_corridor_phi_near_zero():
+    from concept_based_learning.observations.egocentric import aabb_body_frame_gaps_px
+
+    # sep_fwd=40, sep_lat=4; halves_fwd=12, halves_lat=13 → gap_lat=-9 (overlap)
+    _df, _dl, dist, phi = aabb_body_frame_gaps_px(
+        0, 0, 16, 16,
+        44, 7, 8, 10,
+        facing_deg=0.0,
+        y_is_bottom_edge=False,
+    )
+    assert float(dist) == pytest.approx(28.0, abs=0.2)
+    assert abs(float(phi)) < 0.15
+
+
+def test_body_gaps_geom_distance_matches():
+    from concept_based_learning.observations.egocentric import (
+        aabb_body_frame_gaps_px,
+        aabb_geom_distance_px,
+    )
+
+    set_ego_aabb_geom("body_gaps")
+    _df, _dl, dist, _phi = aabb_body_frame_gaps_px(
+        0, 0, 16, 16, 54, 31, 8, 10, 0.0, y_is_bottom_edge=False
+    )
+    d2 = float(
+        aabb_geom_distance_px(
+            0, 0, 16, 16, 54, 31, 8, 10, y_is_bottom_edge=False, facing_deg=0.0
+        )
+    )
+    assert d2 == pytest.approx(float(dist), abs=1e-5)
+    set_ego_aabb_geom("centre_ray")

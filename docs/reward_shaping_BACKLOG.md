@@ -26,6 +26,17 @@ python scripts/run_paper_eval.py --suite surfacegap_geom_dual --gpus 0,1 --wait-
 - `EGO_AABB_GEOM: closest_points`: distance + φ from true AABB closest-points vector
   (centre-ray surface points share centre bearing — φ only changes with closest-points)
 
+**Body-frame signed surface gaps (recommended next):**
+
+```bash
+# 2 GPUs — kangaroo bodygaps ‖ Seaquest navigatesurface_bodygaps → eval → Pong
+python scripts/run_paper_eval.py --suite navigate_surface_bodygaps --gpus 0,1 --wait-deps --lean
+```
+
+`EGO_AABB_GEOM: body_gaps` — `d_fwd`/`d_lat` = 1D surface gaps in facing frame;
+`dist = hypot(relu gaps)`; `φ = atan2` of gap corner. Sizes only via half-extents.
+See `docs/paper_eval/ego_geom_bodygaps_example.png`.
+
 **Fully centre-consistent (obs + rewards + φ):**
 
 ```bash
