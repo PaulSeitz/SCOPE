@@ -1,29 +1,38 @@
-"""Kangaroo manual policy: fixed-order ladder waypoints (COLLECT) + reactive threats.
+"""Kangaroo manual policy: L1 ladder climb + fruit COLLECT + reactive threats.
 
-Plan (waypoints only — fruits/bell/child stay labeled COLLECT but are ignored):
-  1. Ladder 0 bottom → top
-  2. Ladder 1 bottom → top
-  3. Ladder 2 bottom → top
+Plan (zig-zag):
+  1. Ladder 0 bottom → top → fruit 0
+  2. Ladder 1 bottom → top → fruit 1
+  3. Ladder 2 bottom → top → fruit 2
+
+Bell / child stay labeled COLLECT for skill rewards but are not in the plan.
 
 Interrupt priority (lowest first, later overrides earlier):
-  1. Falling coconut AVOID — suppressed while ``player.state`` is climbing.
-  2. Thrown coconut AVOID — same climbing gate as falling coco.
-  3. DESTROY — path / melee / emergency; ladder-shaft blockers stay selectable while climbing.
+  1. DESTROY — path / melee / emergency; ladder-shaft blockers stay selectable while climbing.
+  2. Thrown coconut AVOID — beats nearby monkeys (ground-flush throws share the
+     monkey's floor, so DESTROY would otherwise always steal the target).
+  3. Falling coconut AVOID — only while actively dropping onto the player
+     (``objects.state[falling]=1``); highest reactive priority; climbing-suppressed.
 
 Level-1 slots after meta-NOOP:
-  ladder waypoints      = 1..40  (COLLECT; plan uses these only)
-  fruits / bell / child = 41..45 (COLLECT; not in plan)
+  ladder waypoints      = 1..40  (COLLECT; plan uses L0–L2 pairs)
+  fruits / bell / child = 41..45 (COLLECT; plan uses fruits 41..43)
   monkeys               = 46..49 (DESTROY)
   falling coconut       = 50     (AVOID)
   thrown cocos          = 51..54 (AVOID)
 
 ``EnvComponents.reset_policy_on_life_lost=True`` — visualizer / training must
 clear ``PolicyState`` on life loss (Kangaroo ``done`` is only true at game over).
+The policy also freezes ``plan_idx`` at 0 while ``player.is_crashing`` so the
+falling corpse cannot advance ladder waypoints before respawn.
 """
 
 from concept_based_learning.environments.kangaroo.kangaroo_label import (
+    FALLING_COCO_STATE_DROPPING,
     PLAYER_STATE_CLIMBING,
+    PLAYER_STATE_CRASHING,
 )
+import jax
 import jax.numpy as jnp
 
 from concept_based_learning.environments.datatypes import LABEL_AVOID, LABEL_DESTROY
@@ -34,12 +43,16 @@ from concept_based_learning.environments.manual_policy import (
     Sequence,
     compile_policy,
 )
-from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
+from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX, PolicyState
 
 # Ladder bottoms / tops (paired i → 20+i).
 _L0_BOT, _L0_TOP = 1, 21
 _L1_BOT, _L1_TOP = 2, 22
 _L2_BOT, _L2_TOP = 3, 23
+
+# Fruits (COLLECT) between climbs; bell/child stay labeled but off-plan.
+_FRUIT0, _FRUIT1, _FRUIT2 = 41, 42, 43
+_BELL, _CHILD = 44, 45
 
 # collect(45) | destroy(4) | avoid(5)
 _MONKEY_SLOT0 = 46
@@ -66,13 +79,25 @@ FALLING_COCO_DODGE_RANGE = FALLING_COCO_AVOID_RANGE_Y
 FALLING_COCO_DODGE_RELEASE = FALLING_COCO_AVOID_RELEASE_Y
 # Horizontal: coco centre over player footprint ± slack.
 FALLING_COCO_X_MARGIN = 4.0
-# Thrown cocos: slower — symmetric 50 px disc + run corridor.
-THROWN_COCO_AVOID_RANGE = 50.0
-THROWN_COCO_AVOID_RELEASE = 65.0
+# Thrown cocos: slower horizontal reach; taller vertical so ground-flush throws
+# (centre near feet, ~12 px below player centre) stay inside the ellipse.
+THROWN_COCO_AVOID_RANGE_X = 50.0
+THROWN_COCO_AVOID_RANGE_Y = 72.0
+THROWN_COCO_AVOID_RELEASE_X = 65.0
+THROWN_COCO_AVOID_RELEASE_Y = 90.0
+# Legacy isotropic aliases (tests / dashboards).
+THROWN_COCO_AVOID_RANGE = THROWN_COCO_AVOID_RANGE_X
+THROWN_COCO_AVOID_RELEASE = THROWN_COCO_AVOID_RELEASE_X
 THROWN_COCO_CORRIDOR_MARGIN_PX = 24.0
 # Flattened-circle clip: detection disc cannot extend far below the player.
 # Reference = player feet (bbox bottom); margin catches same-floor / overlap threats.
 _BELOW_FEET_MARGIN_PX = 32.0
+# Thrown coco: vertical band from torso down through feet (+ small under-feet slack
+# so ground-flush throws whose centre sits just below the feet line still count).
+_THROWN_COCO_BODY_ABOVE_FEET_PX = 40.0
+_THROWN_COCO_BELOW_FEET_PX = 8.0
+# Nearby thrown coco: skip run-corridor gate (still clipped by the avoid ellipse).
+THROWN_COCO_MELEE_RANGE = 28.0
 # Player centre must lie in the climb shaft ± slack to count as climbing.
 _ON_LADDER_Y_SLACK_PX = 6.0
 _ON_LADDER_X_SLACK_PX = 14.0
@@ -112,6 +137,22 @@ def _wp_top(slot: int) -> NavigateTo:
     )
 
 
+# Fruit collect: skip once feet are clearly on a higher storey than the fruit
+# centre (L1 fruit0 hangs between P2/P3 — do not dive back down from P3+).
+# Same-floor collect still works: P3 feet≈76 vs fruit1 centre≈90 → not above.
+_FRUIT_SKIP_IF_ABOVE_PX = 20.0
+
+
+def _collect(slot: int) -> NavigateTo:
+    """Planned fruit: stay locked until collected, unless we have climbed past it."""
+    return NavigateTo(
+        slot=slot,
+        arrive_dist=LADDER_ARRIVE,
+        complete_when="inactive",
+        skip_if_player_above_px=_FRUIT_SKIP_IF_ABOVE_PX,
+    )
+
+
 def _player_feet_y(raw) -> jnp.ndarray:
     """Player feet (bbox bottom, screen y grows downward)."""
     player = raw.player
@@ -122,6 +163,22 @@ def _not_below_player(raw, ctx) -> jnp.ndarray:
     """Per-slot: object centre is not far below the player's feet."""
     feet = _player_feet_y(raw)
     return ctx.oy <= feet + float(_BELOW_FEET_MARGIN_PX)
+
+
+def _thrown_coco_on_player_floor(raw, objects, ctx) -> jnp.ndarray:
+    """Per-slot: thrown coco overlaps the player's standing body / feet band.
+
+    Ground-flush throws sit with their bbox top on the platform (= feet) and
+    centre a couple of pixels below the feet line. A centre-vs-feet clip alone
+    is fine with a large margin, but requiring ``oy < py`` (torso-above) would
+    drop them. Use the top-left bbox so flush throws clearly overlap the band.
+    """
+    feet = _player_feet_y(raw)
+    o_top = objects.y[-1]
+    o_bot = o_top + objects.height[-1]
+    band_top = feet - float(_THROWN_COCO_BODY_ABOVE_FEET_PX)
+    band_bot = feet + float(_THROWN_COCO_BELOW_FEET_PX)
+    return jnp.logical_and(o_top <= band_bot, o_bot >= band_top)
 
 
 def _coco_centre_x(objects) -> jnp.ndarray:
@@ -209,6 +266,15 @@ def _player_is_climbing(raw, objects, ctx) -> jnp.ndarray:
     return _player_on_any_ladder(raw, objects, ctx)
 
 
+def _player_is_crashing(raw, objects=None, ctx=None) -> jnp.ndarray:
+    """True during the death / fall animation (stamped on ``player.state``)."""
+    del objects, ctx
+    player = getattr(raw, "player", None)
+    if player is not None and hasattr(player, "state"):
+        return _player_last_scalar(player.state) == jnp.int32(PLAYER_STATE_CRASHING)
+    return jnp.bool_(False)
+
+
 def _suppress_falling_coco_while_climbing(raw, objects, ctx) -> jnp.ndarray:
     """Disable falling-coco AVOID while the player is in climb state."""
     return _player_is_climbing(raw, objects, ctx)
@@ -276,45 +342,72 @@ def _kangaroo_destroy_threat_mask(raw, objects, ctx, plan_target):
 
 
 def _kangaroo_falling_coco_threat_mask(raw, objects, ctx, plan_target):
-    """Falling coco: x-aligned, above the player, not below feet."""
+    """Falling coco: only while actively dropping, x-aligned, above the player."""
     del plan_target
     idxs = jnp.arange(ctx.n, dtype=jnp.int32)
     is_falling = idxs == _FALLING_COCO_SLOT
+    # Dropping flag stamped onto objects.state[falling] by KangarooSemanticWrapper.
+    dropping = objects.state[-1] == jnp.int32(FALLING_COCO_STATE_DROPPING)
     x_ok = _falling_coco_x_aligned(raw, objects, ctx)
     above = ctx.oy < ctx.py + 8.0
     return jnp.logical_and(
         is_falling,
-        jnp.logical_and(x_ok, jnp.logical_and(above, _not_below_player(raw, ctx))),
+        jnp.logical_and(
+            dropping,
+            jnp.logical_and(x_ok, jnp.logical_and(above, _not_below_player(raw, ctx))),
+        ),
     )
 
 
 def _kangaroo_thrown_coco_threat_mask(raw, objects, ctx, plan_target):
-    """Thrown cocos only in the run corridor to the plan target."""
+    """Thrown cocos in the run corridor (or melee-close) on the player's floor."""
     idxs = jnp.arange(ctx.n, dtype=jnp.int32)
     is_thrown = jnp.logical_and(
         idxs >= _THROWN_COCO_SLOT0, idxs <= _THROWN_COCO_SLOT1
     )
     in_corridor = _thrown_coco_in_run_corridor(ctx, plan_target, objects)
-    return jnp.logical_and(
-        is_thrown,
-        jnp.logical_and(in_corridor, _not_below_player(raw, ctx)),
-    )
+    melee = ctx.distances <= float(THROWN_COCO_MELEE_RANGE)
+    path_ok = jnp.logical_or(in_corridor, melee)
+    floor_ok = _thrown_coco_on_player_floor(raw, objects, ctx)
+    return jnp.logical_and(is_thrown, jnp.logical_and(path_ok, floor_ok))
 
 
 KANGAROO_L1_STAGES = (
     _wp(_L0_BOT),
     _wp_top(_L0_TOP),
+    _collect(_FRUIT0),
     _wp(_L1_BOT),
     _wp_top(_L1_TOP),
+    _collect(_FRUIT1),
     _wp(_L2_BOT),
     _wp_top(_L2_TOP),
+    _collect(_FRUIT2),
 )
 
-KANGAROO_POLICY = compile_policy(
+_KANGAROO_POLICY_CORE = compile_policy(
     ManualPolicySpec(
         plan=Sequence(stages=KANGAROO_L1_STAGES),
         interrupts=(
-            # Lowest priority: falling coco only when x-aligned and close.
+            Interrupt(
+                labels=(LABEL_DESTROY,),
+                within_x=DESTROY_PATH_RANGE,
+                within_y=DESTROY_PATH_RANGE,
+                release_x=DESTROY_RELEASE,
+                release_y=DESTROY_RELEASE,
+                threat_mask=_kangaroo_destroy_threat_mask,
+            ),
+            # After DESTROY: ground-level throws share the monkey's floor, so
+            # monkeys would otherwise always win and the coco is never punched.
+            Interrupt(
+                labels=(LABEL_AVOID,),
+                within_x=THROWN_COCO_AVOID_RANGE_X,
+                within_y=THROWN_COCO_AVOID_RANGE_Y,
+                release_x=THROWN_COCO_AVOID_RELEASE_X,
+                release_y=THROWN_COCO_AVOID_RELEASE_Y,
+                threat_mask=_kangaroo_thrown_coco_threat_mask,
+                suppress=_suppress_thrown_coco_while_climbing,
+            ),
+            # Highest reactive priority: actively dropping coco beats monkeys/thrown.
             Interrupt(
                 labels=(LABEL_AVOID,),
                 within_x=FALLING_COCO_AVOID_RANGE_X,
@@ -324,28 +417,50 @@ KANGAROO_POLICY = compile_policy(
                 threat_mask=_kangaroo_falling_coco_threat_mask,
                 suppress=_suppress_falling_coco_while_climbing,
             ),
-            Interrupt(
-                labels=(LABEL_AVOID,),
-                within_x=THROWN_COCO_AVOID_RANGE,
-                within_y=THROWN_COCO_AVOID_RANGE,
-                release_x=THROWN_COCO_AVOID_RELEASE,
-                release_y=THROWN_COCO_AVOID_RELEASE,
-                threat_mask=_kangaroo_thrown_coco_threat_mask,
-                suppress=_suppress_thrown_coco_while_climbing,
-            ),
-            # Highest priority among reactive threats: path-blocking monkeys only.
-            Interrupt(
-                labels=(LABEL_DESTROY,),
-                within_x=DESTROY_PATH_RANGE,
-                within_y=DESTROY_PATH_RANGE,
-                release_x=DESTROY_RELEASE,
-                release_y=DESTROY_RELEASE,
-                threat_mask=_kangaroo_destroy_threat_mask,
-            ),
         ),
         no_target_idx=NO_TARGET_IDX,
     )
 )
+
+
+class _CrashFrozenKangarooPolicy:
+    """Hold the climb Sequence at stage 0 for the whole death animation.
+
+    Outer callers already reset ``PolicyState`` on life-lost, but the falling
+    corpse still overlaps ladder bottom waypoints and advances ``plan_idx``.
+    After respawn the plan then starts mid-route (killing every life after the
+    first). Freezing here makes episode / life boundaries self-healing.
+    """
+
+    def __init__(self, core):
+        self._core = core
+        self.spec = core.spec
+        self.needs_state = True
+
+    def initial_state(self) -> PolicyState:
+        return self._core.initial_state()
+
+    def step(self, raw_observation, objects, state, rng):
+        crashing = _player_is_crashing(raw_observation)
+        zero = self._core.initial_state()
+        state_in = jax.lax.cond(crashing, lambda _: zero, lambda s: s, state)
+        target, new_state = self._core.step(raw_observation, objects, state_in, rng)
+        new_state = jax.lax.cond(crashing, lambda _: zero, lambda s: s, new_state)
+        target = jnp.where(crashing, jnp.int32(NO_TARGET_IDX), target)
+        return target.astype(jnp.int32), new_state
+
+    def as_legacy_heuristic(self):
+        return self._core.as_legacy_heuristic()
+
+    def as_stateful_heuristic(self):
+        def _fn(raw_observation, objects, prev_target_idx, state, rng):
+            del prev_target_idx
+            return self.step(raw_observation, objects, state, rng)
+
+        return _fn
+
+
+KANGAROO_POLICY = _CrashFrozenKangarooPolicy(_KANGAROO_POLICY_CORE)
 
 get_heuristic_target = KANGAROO_POLICY.as_legacy_heuristic()
 get_heuristic_target_with_state = KANGAROO_POLICY.as_stateful_heuristic()

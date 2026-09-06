@@ -97,6 +97,8 @@ Usage:
   #   Kangaroo only / Seaquest nav-surfacegap only:
   python scripts/run_paper_eval.py --suite kangaroo_surfacegap --gpus 0 --wait-deps --lean
   python scripts/run_paper_eval.py --suite navigate_surface_surfacegap --gpus 0 --wait-deps --lean
+  #   Kangaroo heuristic-fix retrain (POV facing ψ8 surfacegap; mirrors SQ nav-sgap):
+  python scripts/run_paper_eval.py --suite kangaroo_facing_surfacegap --gpus 0 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -460,6 +462,14 @@ NAVIGATE_SURFACE_SURFACEGAP_STEMS = (
 KANGAROO_SURFACEGAP_SUITE = "kangaroo_surfacegap"
 KANGAROO_SURFACEGAP_STEMS = (
     "kangaroo_skills_ego_clip50_angbins_surfacegap",
+)
+
+# Kangaroo retrain after heuristic coco/fruit fixes — mirrors Seaquest
+# navigatesurface_surfacegap (POV facing, ψ8, clip50; not centres geom).
+#   python scripts/run_paper_eval.py --suite kangaroo_facing_surfacegap --gpus 0 --wait-deps --lean
+KANGAROO_FACING_SURFACEGAP_SUITE = "kangaroo_facing_surfacegap"
+KANGAROO_FACING_SURFACEGAP_STEMS = (
+    "kangaroo_skills_ego_pov_clip50_facing_psibins8_surfacegap",
 )
 
 # 2-GPU dual: shard-critical — trains first (GPU0 kangaroo, GPU1 Seaquest nav-surfacegap).
@@ -1078,6 +1088,7 @@ SUITE_STEMS = {
     SURFACEGAP_GEOM_DUAL_SUITE: SURFACEGAP_GEOM_DUAL_STEMS,
     NAVIGATE_SURFACE_CENTRES_SUITE: NAVIGATE_SURFACE_CENTRES_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
+    KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
     THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
@@ -1146,6 +1157,7 @@ SUITE_RTPT: dict[str, str] = {
     NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: "nav_tandem",
     NAVIGATE_SURFACE_SURFACEGAP_SUITE: "nav_sgap",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
+    KANGAROO_FACING_SURFACEGAP_SUITE: "kg_fsgap",
     SURFACEGAP_DUAL_SUITE: "sgap_dual",
     CLIP100_COLLECTSURFACE_PROBE_SUITE: "clip100",
     CLIP150_COLLECTSURFACE_PROBE_SUITE: "clip150",
@@ -2489,6 +2501,9 @@ def main() -> None:
             "→ SQ full eval → Pong ZS. "
             f"{KANGAROO_SURFACEGAP_SUITE}: Kangaroo train only (clip50+θ8 angbins + "
             "surface-gap rewards; Seaquest-proven spine). "
+            f"{KANGAROO_FACING_SURFACEGAP_SUITE}: Kangaroo train only — POV facing "
+            "ψ8 clip50 surfacegap (mirrors navigate_surface_surfacegap; "
+            "post-heuristic-fix retrain). "
             f"{SURFACEGAP_DUAL_SUITE}: 2-GPU — kangaroo_surfacegap on GPU0 + "
             "navigate_surface_surfacegap train/eval/Pong on GPU1 (--wait-deps). "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "

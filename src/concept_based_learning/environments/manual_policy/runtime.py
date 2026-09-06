@@ -158,6 +158,18 @@ def _eval_navigate_to(
     # Keep mission on the slot even while inactive-wait isn't needed; if inactive
     # and complete_when=inactive, target is no_target but done is True so Sequence
     # advances immediately.
+
+    # Hanging fruit / under-floor collectibles: once the player has climbed to a
+    # higher storey, skip instead of pathing back downward.
+    above_margin = getattr(node, "skip_if_player_above_px", None)
+    if above_margin is not None:
+        oy = jnp.where(
+            jnp.logical_and(slot >= 0, slot < ctx.n), ctx.oy[slot], ctx.py
+        )
+        player_above = ctx.feet_y < oy - float(above_margin)
+        done = jnp.logical_or(done, player_above)
+        target = jnp.where(player_above, jnp.int32(no_target_idx), target)
+
     new_state = state.replace(mission_target=jnp.where(active, slot, state.mission_target))
     return target, done, new_state
 

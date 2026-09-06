@@ -86,6 +86,12 @@ class NavigateTo:
     near the slot even if centre-distance arrive never fires.  Prefer
     ``platform_reach_dy_min`` / ``platform_reach_dy_max`` (player centre below
     waypoint by dy = py - oy) over loose ``platform_reach_y_slack``.
+
+    ``skip_if_player_above_px``: when set, the stage completes (and stops
+    targeting the slot) if the player's feet are higher on screen than the
+    object centre by more than this many pixels.  Used for hanging fruits that
+    must be grabbed from the floor below — once the agent has climbed past,
+    do not dive back down.
     """
 
     slot: int
@@ -96,6 +102,7 @@ class NavigateTo:
     platform_reach_x_slack: Optional[float] = None
     platform_reach_dy_min: Optional[float] = None
     platform_reach_dy_max: Optional[float] = None
+    skip_if_player_above_px: Optional[float] = None
     kind: str = field(default="navigate_to", init=False)
 
 

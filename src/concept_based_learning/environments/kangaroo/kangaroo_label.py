@@ -84,16 +84,27 @@ _FALLING_COCO_LADDER_X_MARGIN = 10
 # hanging cocos above the shaft, not only cocos already inside it.
 _FALLING_COCO_PASSED_FOOT_MARGIN_PX = 8
 # Stamped on ``raw_observation.player.state[-1]`` by ``KangarooSemanticWrapper``.
+# Crashing takes priority over climbing (death animation must freeze the plan).
 PLAYER_STATE_CLIMBING = 1
+PLAYER_STATE_CRASHING = 2
 
 
-def stamp_player_climbing_on_raw(raw_obs, is_climbing):
-    """Expose ``env_state.player.is_climbing`` on the stacked player ``state`` channel."""
+def stamp_player_status_on_raw(raw_obs, is_climbing, is_crashing):
+    """Expose climb / crash flags on the stacked player ``state`` channel."""
     player = raw_obs.player
-    flag = jnp.where(is_climbing, jnp.int32(PLAYER_STATE_CLIMBING), jnp.int32(0))
+    flag = jnp.where(
+        is_crashing,
+        jnp.int32(PLAYER_STATE_CRASHING),
+        jnp.where(is_climbing, jnp.int32(PLAYER_STATE_CLIMBING), jnp.int32(0)),
+    )
     st = player.state
     new_state = st.at[-1].set(flag) if jnp.ndim(st) > 0 else flag
     return raw_obs.replace(player=player.replace(state=new_state))
+
+
+def stamp_player_climbing_on_raw(raw_obs, is_climbing):
+    """Backward-compatible climb-only stamp (no crash bit)."""
+    return stamp_player_status_on_raw(raw_obs, is_climbing, False)
 
 
 def _scalar_to_1d(x):
@@ -112,6 +123,14 @@ def _standing_center_y(platform_y):
 def _top_waypoint_y(platform_y):
     """Standing-centre on ``platform_y``, then raised by ``_TOP_WAYPOINT_LIFT_PX``."""
     return _standing_center_y(platform_y) - _TOP_WAYPOINT_LIFT_PX
+
+
+# Player must be this close to a ladder column (centre vs shaft) to count as
+# "already on it" for coco-gate bypass (keep climbing when coco hangs above).
+_PLAYER_ON_LADDER_X_SLACK_PX = 14.0
+_PLAYER_ON_LADDER_Y_SLACK_PX = 6.0
+# Stamped on labeled falling-coco ``state`` when JAX-Atari reports dropping.
+FALLING_COCO_STATE_DROPPING = 1
 
 
 def _falling_coco_covers_ladders(falling_coconut, ladders):
@@ -142,6 +161,22 @@ def _falling_coco_covers_ladders(falling_coconut, ladders):
     )
 
 
+def _player_on_ladders(player, ladders):
+    """Per-ladder bool: player centre lies in the climb shaft (full column)."""
+    px = player.x + player.width * 0.5
+    py = player.y + player.height * 0.5
+    lad_cx = ladders.x + ladders.width * 0.5
+    lad_top = ladders.y
+    lad_bot = ladders.y + ladders.height
+    active = ladders.active > 0.5
+    in_y = jnp.logical_and(
+        py >= lad_top - float(_PLAYER_ON_LADDER_Y_SLACK_PX),
+        py <= lad_bot + float(_PLAYER_ON_LADDER_Y_SLACK_PX),
+    )
+    near_x = jnp.abs(px - lad_cx) <= (ladders.width * 0.5 + float(_PLAYER_ON_LADDER_X_SLACK_PX))
+    return jnp.logical_and(active, jnp.logical_and(in_y, near_x))
+
+
 def _match_platform_y(edge_y, plat_y, plat_active, *, above: bool):
     """Nearest active platform to a ladder edge."""
     edge = edge_y[:, None]
@@ -166,10 +201,27 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         super().__init__(env, max_objects=_KANGAROO_MAX_OBJECTS)
 
     def _patch_raw_observation(self, semantic_obs, env_state):
+        """Stamp climb/crash on player.state and falling-coco dropping on objects.state.
+
+        ``falling_coco_dropping`` lives on the Atari level state (not ObjectObservation),
+        so we copy it onto the labeled falling-coco slot after meta-NOOP prepend.
+        """
+        raw = stamp_player_status_on_raw(
+            semantic_obs.raw_observation,
+            env_state.player.is_climbing,
+            env_state.player.is_crashing,
+        )
+        # Layout after meta NOOP: collect(45) | destroy(4) | falling(1) | thrown(4)
+        fc_slot = 1 + _N_WAYPOINTS + _N_COLLECTIBLE + _N_DESTROY  # 50
+        dropping = jnp.asarray(env_state.level.falling_coco_dropping).astype(jnp.int32)
+        dropping = jnp.where(
+            dropping > 0, jnp.int32(FALLING_COCO_STATE_DROPPING), jnp.int32(0)
+        )
+        objects = semantic_obs.objects
+        new_state = objects.state.at[-1, fc_slot].set(dropping)
         return semantic_obs.replace(
-            raw_observation=stamp_player_climbing_on_raw(
-                semantic_obs.raw_observation, env_state.player.is_climbing
-            )
+            raw_observation=raw,
+            objects=objects.replace(state=new_state),
         )
 
     def reset(self, key=None):
@@ -250,9 +302,13 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         )
 
         coco_on_ladder = _falling_coco_covers_ladders(falling_coconut, ladders)
+        # Keep waypoints live if we are already in that shaft — otherwise the
+        # coco-above gate clears both WPs mid-climb and the plan gets stuck.
+        already_on = _player_on_ladders(obs.player, ladders)
+        coco_blocks = jnp.logical_and(coco_on_ladder, jnp.logical_not(already_on))
         ladder_climbable = jnp.logical_and(
             ladders.active > 0.5,
-            jnp.logical_not(coco_on_ladder),
+            jnp.logical_not(coco_blocks),
         ).astype(jnp.int32)
 
         bot_x = lad_cx - wp_half_w

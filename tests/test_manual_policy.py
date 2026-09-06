@@ -41,6 +41,7 @@ class _Player:
     y: jnp.ndarray
     width: jnp.ndarray
     height: jnp.ndarray
+    state: jnp.ndarray
 
 
 @struct.dataclass
@@ -62,14 +63,18 @@ class _Objects:
     height: jnp.ndarray
     active: jnp.ndarray
     semantic_label: jnp.ndarray
+    state: jnp.ndarray
 
 
 def _stack(val, t=4):
     return jnp.stack([val] * t)
 
 
-def _make_obs(player_xy, objects):
-    """objects: list of (x, y, w, h, active, label)."""
+def _make_obs(player_xy, objects, *, object_states=None):
+    """objects: list of (x, y, w, h, active, label).
+
+    ``object_states`` optional per-slot int state (e.g. falling-coco dropping).
+    """
     px, py = player_xy
     raw = _Raw(
         player=_Player(
@@ -77,6 +82,7 @@ def _make_obs(player_xy, objects):
             y=_stack(jnp.int32(py)),
             width=_stack(jnp.int32(4)),
             height=_stack(jnp.int32(4)),
+            state=_stack(jnp.int32(0)),
         )
     )
     n = len(objects)
@@ -86,6 +92,10 @@ def _make_obs(player_xy, objects):
     hs = jnp.array([o[3] for o in objects], dtype=jnp.int32)
     act = jnp.array([o[4] for o in objects], dtype=jnp.int32)
     labs = jnp.array([o[5] for o in objects], dtype=jnp.int32)
+    if object_states is None:
+        st = jnp.zeros((n,), dtype=jnp.int32)
+    else:
+        st = jnp.asarray(object_states, dtype=jnp.int32)
     objs = _Objects(
         x=_stack(xs),
         y=_stack(ys),
@@ -93,6 +103,7 @@ def _make_obs(player_xy, objects):
         height=_stack(hs),
         active=_stack(act),
         semantic_label=_stack(labs),
+        state=_stack(st),
     )
     return raw, objs
 
@@ -406,7 +417,7 @@ def test_destroy_targets_nearby_monkey_on_same_floor():
         collect_tail=tail,
     )
     raw, objs = _make_obs((30, 56), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _MONKEY_SLOT0
     assert int(target) != _L1_TOP
@@ -442,7 +453,7 @@ def test_destroy_emergency_close_monkey_ignores_floor_heuristic():
         collect_tail=tail,
     )
     raw, objs = _make_obs((30, 56), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _MONKEY_SLOT0
     assert int(target) != _L1_TOP
@@ -505,7 +516,7 @@ def test_destroy_suppressed_while_on_ladder():
             active=jnp.array([1, 1] + [0] * 18, dtype=jnp.int32),
         ),
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _MONKEY_SLOT0
@@ -567,7 +578,7 @@ def test_destroy_shaft_blocking_monkey_while_climbing():
             active=jnp.array([0, 1] + [0] * 18, dtype=jnp.int32),
         ),
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _MONKEY_SLOT0
     assert int(target) != _L1_TOP
@@ -586,9 +597,9 @@ def test_l1_top_does_not_complete_mid_climb():
         l2_bot=(136, 56, 2, 2),
     )
     raw, objs = _make_obs((18, 84), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
-    assert int(state2.plan_idx) == 3
+    assert int(state2.plan_idx) == 4
     assert int(target) == _L1_TOP
     assert int(target) != _L2_BOT
 
@@ -596,20 +607,49 @@ def test_l1_top_does_not_complete_mid_climb():
 def test_l1_top_stage_completes_on_platform():
     from concept_based_learning.environments.kangaroo.kangaroo_policy import (
         KANGAROO_POLICY,
-        _L2_BOT,
+        _FRUIT1,
         _L1_TOP,
     )
 
+    # Active fruit1 so the stage after L1_TOP has a real COLLECT target.
+    # Real L1 fruit1 is at (39, 84); use full fruit height so the above-skip
+    # margin matches in-game geometry (same-floor collect from P3).
+    tail = [
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (39, 84, 8, 12, 1, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+    ]
     slots = _kangaroo_policy_slots(
         l1_bot=(20, 112, 2, 2),
         l1_top=(20, 44, 2, 2),
         l2_bot=(136, 56, 2, 2),
+        collect_tail=tail,
     )
-    raw, objs = _make_obs((18, 56), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    # Standing on mid-high (P3 y=76): top-left y = 52, feet = 76.
+    raw, objs = _make_obs((18, 52), slots)
+    raw = raw.replace(
+        player=raw.player.replace(
+            y=_stack(jnp.int32(52)),
+            height=_stack(jnp.int32(24)),
+            width=_stack(jnp.int32(8)),
+        )
+    )
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
-    assert int(state2.plan_idx) == 4
-    assert int(target) == _L2_BOT
+    assert int(state2.plan_idx) == 5
+    assert int(target) == _FRUIT1
+    assert int(target) != _L1_TOP
 
 
 def test_destroy_ignores_monkey_on_lower_floor():
@@ -734,7 +774,43 @@ def test_falling_coco_ignored_when_not_x_aligned():
     assert int(target) != _FALLING_COCO_SLOT
 
 
+def test_falling_coco_ignored_when_hovering_not_dropping():
+    """Bobbing / x-tracking coco must not interrupt until it actually drops."""
+    from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+        KANGAROO_POLICY,
+        _L0_BOT,
+        _FALLING_COCO_SLOT,
+    )
+
+    tail = [
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (38, 72, 6, 6, 1, LABEL_AVOID),  # x-aligned and close, but not dropping
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+    ]
+    slots = _kangaroo_policy_slots(collect_tail=tail)
+    raw, objs = _make_obs((40, 100), slots)  # state defaults to 0 = not dropping
+    target, _ = KANGAROO_POLICY.step(
+        raw, objs, KANGAROO_POLICY.initial_state(), None
+    )
+    assert int(target) == _L0_BOT
+    assert int(target) != _FALLING_COCO_SLOT
+
+
 def test_falling_coco_selected_when_x_aligned_and_close():
+    from concept_based_learning.environments.kangaroo.kangaroo_label import (
+        FALLING_COCO_STATE_DROPPING,
+    )
     from concept_based_learning.environments.kangaroo.kangaroo_policy import (
         KANGAROO_POLICY,
         _L0_BOT,
@@ -758,7 +834,9 @@ def test_falling_coco_selected_when_x_aligned_and_close():
         (0, 0, 1, 1, 0, LABEL_AVOID),
     ]
     slots = _kangaroo_policy_slots(collect_tail=tail)
-    raw, objs = _make_obs((40, 100), slots)
+    states = [0] * len(slots)
+    states[_FALLING_COCO_SLOT] = FALLING_COCO_STATE_DROPPING
+    raw, objs = _make_obs((40, 100), slots, object_states=states)
     target, _ = KANGAROO_POLICY.step(
         raw, objs, KANGAROO_POLICY.initial_state(), None
     )
@@ -831,7 +909,94 @@ def test_thrown_coco_selected_when_in_corridor_and_close():
     assert int(target) != _L0_BOT
 
 
+def test_thrown_coco_selected_when_ground_flush():
+    """Low throws sit on the platform (top ≈ feet); must still be AVOID targets."""
+    from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+        KANGAROO_POLICY,
+        _L0_BOT,
+        _THROWN_COCO_SLOT0,
+    )
+
+    # Player standing on platform y=172 (top-left y=148, h=24). Real thrown coco
+    # is 2×3; low spawn puts top at monkey_feet - 3 = 169 (flush with the floor).
+    tail = [
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (55, 169, 2, 3, 1, LABEL_AVOID),  # ground-flush throw in corridor
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+    ]
+    slots = _kangaroo_policy_slots(collect_tail=tail)
+    raw, objs = _make_obs((40, 148), slots)
+    raw = raw.replace(
+        player=raw.player.replace(
+            y=_stack(jnp.int32(148)),
+            height=_stack(jnp.int32(24)),
+            width=_stack(jnp.int32(8)),
+        )
+    )
+    target, _ = KANGAROO_POLICY.step(
+        raw, objs, KANGAROO_POLICY.initial_state(), None
+    )
+    assert int(target) == _THROWN_COCO_SLOT0
+    assert int(target) != _L0_BOT
+
+
+def test_ground_thrown_coco_beats_nearby_monkey():
+    """Low throws share the monkey's floor — AVOID must win over DESTROY."""
+    from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+        KANGAROO_POLICY,
+        _MONKEY_SLOT0,
+        _THROWN_COCO_SLOT0,
+    )
+
+    # Monkey at (80,157) on ground floor; low coco at (55,169) in the run path.
+    tail = [
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (80, 157, 8, 15, 1, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (55, 169, 2, 3, 1, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+    ]
+    slots = _kangaroo_policy_slots(collect_tail=tail)
+    raw, objs = _make_obs((40, 148), slots)
+    raw = raw.replace(
+        player=raw.player.replace(
+            y=_stack(jnp.int32(148)),
+            height=_stack(jnp.int32(24)),
+            width=_stack(jnp.int32(8)),
+        )
+    )
+    target, _ = KANGAROO_POLICY.step(
+        raw, objs, KANGAROO_POLICY.initial_state(), None
+    )
+    assert int(target) == _THROWN_COCO_SLOT0
+    assert int(target) != _MONKEY_SLOT0
+
+
 def test_thrown_coco_avoid_suppressed_while_on_ladder():
+    """Thrown-coco AVOID must not fire while climbing (stamped climb state)."""
+    from concept_based_learning.environments.kangaroo.kangaroo_label import (
+        PLAYER_STATE_CLIMBING,
+    )
     from concept_based_learning.environments.kangaroo.kangaroo_policy import (
         KANGAROO_POLICY,
         _L1_TOP,
@@ -866,6 +1031,7 @@ def test_thrown_coco_avoid_suppressed_while_on_ladder():
             y=_stack(jnp.int32(84)),
             width=_stack(jnp.int32(4)),
             height=_stack(jnp.int32(24)),
+            state=_stack(jnp.int32(PLAYER_STATE_CLIMBING)),
         )
     )
 
@@ -888,7 +1054,7 @@ def test_thrown_coco_avoid_suppressed_while_on_ladder():
         ),
     )
 
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _THROWN_COCO_SLOT0
@@ -896,6 +1062,9 @@ def test_thrown_coco_avoid_suppressed_while_on_ladder():
 
 def test_falling_coco_suppressed_in_upper_ladder_shaft():
     """Shaft extends to top waypoint — sprite top alone misses upper climb."""
+    from concept_based_learning.environments.kangaroo.kangaroo_label import (
+        PLAYER_STATE_CLIMBING,
+    )
     from concept_based_learning.environments.kangaroo.kangaroo_policy import (
         KANGAROO_POLICY,
         _FALLING_COCO_SLOT,
@@ -930,6 +1099,7 @@ def test_falling_coco_suppressed_in_upper_ladder_shaft():
             y=_stack(jnp.int32(110)),
             width=_stack(jnp.int32(4)),
             height=_stack(jnp.int32(24)),
+            state=_stack(jnp.int32(PLAYER_STATE_CLIMBING)),
         )
     )
 
@@ -952,13 +1122,16 @@ def test_falling_coco_suppressed_in_upper_ladder_shaft():
             active=jnp.array([0, 1] + [0] * 18, dtype=jnp.int32),
         ),
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _FALLING_COCO_SLOT
 
 
 def test_falling_coco_avoid_suppressed_while_on_ladder():
+    from concept_based_learning.environments.kangaroo.kangaroo_label import (
+        PLAYER_STATE_CLIMBING,
+    )
     from concept_based_learning.environments.kangaroo.kangaroo_policy import (
         KANGAROO_POLICY,
         _FALLING_COCO_SLOT,
@@ -993,6 +1166,7 @@ def test_falling_coco_avoid_suppressed_while_on_ladder():
             y=_stack(jnp.int32(84)),
             width=_stack(jnp.int32(4)),
             height=_stack(jnp.int32(24)),
+            state=_stack(jnp.int32(PLAYER_STATE_CLIMBING)),
         )
     )
 
@@ -1016,15 +1190,18 @@ def test_falling_coco_avoid_suppressed_while_on_ladder():
         ),
     )
 
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _FALLING_COCO_SLOT
 
 
-def test_kangaroo_plan_is_waypoints_only():
+def test_kangaroo_plan_includes_fruits_between_climbs():
     from concept_based_learning.environments.kangaroo.kangaroo_policy import (
         KANGAROO_L1_STAGES,
+        _FRUIT0,
+        _FRUIT1,
+        _FRUIT2,
         _L0_BOT,
         _L0_TOP,
         _L2_TOP,
@@ -1033,15 +1210,126 @@ def test_kangaroo_plan_is_waypoints_only():
     slots = [s.slot for s in KANGAROO_L1_STAGES]
     assert slots[0] == _L0_BOT
     assert slots[1] == _L0_TOP
-    assert slots[-1] == _L2_TOP
-    assert 41 not in slots  # no fruits
+    assert slots[2] == _FRUIT0
+    assert slots[5] == _FRUIT1
+    assert slots[-2] == _L2_TOP
+    assert slots[-1] == _FRUIT2
     assert 44 not in slots  # no bell
     assert 45 not in slots  # no child
+
+
+def test_fruit0_skipped_when_player_on_floor_above():
+    """L1 fruit0 hangs under mid-high; once on P3 do not path back down to it."""
+    from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+        KANGAROO_POLICY,
+        _FRUIT0,
+        _L1_BOT,
+    )
+
+    # Fruit0 at L1 pos (119, 108), h=12 → centre ≈ 114. P3 feet at 76 is above.
+    tail = [
+        (119, 108, 8, 12, 1, LABEL_COLLECT),  # fruit0
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+    ]
+    slots = _kangaroo_policy_slots(
+        l1_bot=(20, 112, 2, 2),
+        collect_tail=tail,
+    )
+    # Standing on mid-high platform (P3 y=76): top-left y = 76 - 24 = 52.
+    raw, objs = _make_obs((40, 52), slots)
+    raw = raw.replace(
+        player=raw.player.replace(
+            y=_stack(jnp.int32(52)),
+            height=_stack(jnp.int32(24)),
+            width=_stack(jnp.int32(8)),
+        )
+    )
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(2))  # fruit0
+    target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
+    assert int(target) != _FRUIT0
+    assert int(state2.plan_idx) >= 3  # advanced past fruit0 (L1 bot stage)
+    assert int(target) == _L1_BOT
+
+
+def test_fruit0_selected_when_player_on_floor_below():
+    """From mid-low (P2) the hanging fruit0 remains a valid COLLECT target."""
+    from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+        KANGAROO_POLICY,
+        _FRUIT0,
+    )
+
+    tail = [
+        (119, 108, 8, 12, 1, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_COLLECT),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_DESTROY),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+        (0, 0, 1, 1, 0, LABEL_AVOID),
+    ]
+    slots = _kangaroo_policy_slots(collect_tail=tail)
+    # P2 y=124 → standing top-left y = 100.
+    raw, objs = _make_obs((100, 100), slots)
+    raw = raw.replace(
+        player=raw.player.replace(
+            y=_stack(jnp.int32(100)),
+            height=_stack(jnp.int32(24)),
+            width=_stack(jnp.int32(8)),
+        )
+    )
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(2))
+    target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
+    assert int(target) == _FRUIT0
+    assert int(state2.plan_idx) == 2
+
+
+def test_kangaroo_crash_freezes_plan_at_stage_zero():
+    """Falling corpse must not advance ladder stages before respawn."""
+    from concept_based_learning.environments.kangaroo.kangaroo_label import (
+        PLAYER_STATE_CRASHING,
+    )
+    from concept_based_learning.environments.kangaroo.kangaroo_policy import (
+        KANGAROO_POLICY,
+    )
+
+    # Player overlaps L0 bottom while "crashing" — without the freeze, arrive
+    # would advance plan_idx past stage 0.
+    slots = _kangaroo_policy_slots(l0_bot=(136, 160, 2, 2))
+    raw, objs = _make_obs((136, 160), slots)
+    raw = raw.replace(
+        player=raw.player.replace(
+            state=_stack(jnp.int32(PLAYER_STATE_CRASHING)),
+        )
+    )
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(2))
+    target, new_state = KANGAROO_POLICY.step(raw, objs, state, None)
+    assert int(new_state.plan_idx) == 0
+    assert int(target) == int(NO_TARGET_IDX)
 
 
 def test_falling_coco_covers_ladder_helper():
     from concept_based_learning.environments.kangaroo.kangaroo_label import (
         _falling_coco_covers_ladders,
+        _player_on_ladders,
     )
 
     @struct.dataclass
@@ -1080,6 +1368,20 @@ def test_falling_coco_covers_ladder_helper():
         active=jnp.int32(1),
     )
     assert not bool(_falling_coco_covers_ladders(passed, ladders)[0])
+
+    # Player mid-shaft on ladder 0 — coco still "covers", but climb bypass applies.
+    player = _Ent(
+        x=jnp.float32(130),
+        y=jnp.float32(140),
+        width=jnp.float32(8),
+        height=jnp.float32(24),
+        active=jnp.int32(1),
+    )
+    on = _player_on_ladders(player, ladders)
+    assert bool(on[0])
+    assert not bool(on[1])
+    blocks = jnp.logical_and(cover, jnp.logical_not(on))
+    assert not bool(blocks[0])
 
 
 def test_force_when_beats_interrupt():

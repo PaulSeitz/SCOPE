@@ -15,6 +15,7 @@ class FrameContext(NamedTuple):
     ``distances`` are AABB surface gaps (same metric as skill ego distance).
     ``px``/``py``/``ox``/``oy`` are centres; ``dx``/``dy`` are absolute centre
     offsets used by elliptical interrupt ranges.
+    ``feet_y`` is the player bbox bottom (screen-y down).
     """
 
     px: jnp.ndarray
@@ -26,6 +27,7 @@ class FrameContext(NamedTuple):
     distances: jnp.ndarray
     dx: jnp.ndarray
     dy: jnp.ndarray
+    feet_y: jnp.ndarray
     n: int
 
 
@@ -35,6 +37,8 @@ def build_frame_context(raw_observation: Any, objects: Any) -> FrameContext:
     labels = objects.semantic_label[-1]
     dx = jnp.abs(px - ox)
     dy = jnp.abs(py - oy)
+    player = raw_observation.player
+    feet_y = player.y[-1] + player.height[-1]
     return FrameContext(
         px=px,
         py=py,
@@ -45,5 +49,6 @@ def build_frame_context(raw_observation: Any, objects: Any) -> FrameContext:
         distances=distances,
         dx=dx,
         dy=dy,
+        feet_y=feet_y,
         n=int(active.shape[0]),
     )
