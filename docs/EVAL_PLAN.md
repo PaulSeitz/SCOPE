@@ -35,7 +35,8 @@ geometry stay off.
 python scripts/run_paper_eval.py --suite ego_min_channels --gpus 0,1 --wait-deps --lean
 ```
 
-Five 25M arms (trains first: GPU0×3, GPU1×2 → SQ full eval → Pong ZS):
+Five 25M arms (trains first: GPU0×3, GPU1×2 → SQ full eval → Pong /
+Beamrider / Phoenix ZS):
 
 1. Drop blocking (`USE_EGO_BLOCKING_FEATURES: false`)
 2. Drop blocking + `facing_enemy` (`USE_EGO_FACING_ENEMY_FEATURES: false`)
@@ -44,8 +45,8 @@ Five 25M arms (trains first: GPU0×3, GPU1×2 → SQ full eval → Pong ZS):
 5. Drop all weapon extras only (blocking on)
 
 Gate: Seaquest base still in the ~20k band; Beamrider / Phoenix ZS not
-collapsed (BR/PH can be queued after these five). Pong moving is a bonus,
-not the gate. Then **lock the ego stack** for the matrix below.
+collapsed vs v2 reference. Pong is a secondary readout, not the lock
+criterion. Then **lock the ego stack** for the matrix below.
 
 Optional follow-up: `EGO_LEGAL_ACTION_MASK: true` **at train** on the
 winning minimal ego.

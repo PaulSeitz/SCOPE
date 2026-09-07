@@ -101,7 +101,7 @@ Usage:
   python scripts/run_paper_eval.py --suite kangaroo_facing_surfacegap --gpus 0 --wait-deps --lean
   #   Body-frame gaps: Kangaroo ‖ Seaquest navigatesurface → SQ eval → Pong:
   python scripts/run_paper_eval.py --suite navigate_surface_bodygaps --gpus 0,1 --wait-deps --lean
-  #   Ego channel deletion (v2 spine; 5 arms, trains first → SQ eval → Pong):
+  #   Ego channel deletion (v2 spine; 5 arms → SQ eval → Pong/BR/PH):
   python scripts/run_paper_eval.py --suite ego_min_channels --gpus 0,1 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
@@ -520,7 +520,7 @@ NAVIGATE_SURFACE_BODYGAPS_STEMS = (
 
 # EVAL_PLAN §0 — channel-deletion ablations on v2 φ8 clip50 facing (25M).
 # 2-GPU shard-critical: all 5 trains first (GPU0: 3 arms, GPU1: 2), then
-# Seaquest full eval + Pong ZS per arm.
+# Seaquest full eval + Pong / Beamrider / Phoenix ZS per arm.
 #   python scripts/run_paper_eval.py --suite ego_min_channels --gpus 0,1 --wait-deps --lean
 EGO_MIN_CHANNELS_SUITE = "ego_min_channels"
 _EGO_MIN_CHANNEL_ARMS = (
@@ -541,6 +541,14 @@ EGO_MIN_CHANNELS_STEMS = (
     )
     + tuple(
         f"pong_transfer_ego_pov_clip50_facing_psibins8_v2_{a}"
+        for a in _EGO_MIN_CHANNEL_ARMS
+    )
+    + tuple(
+        f"beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_{a}"
+        for a in _EGO_MIN_CHANNEL_ARMS
+    )
+    + tuple(
+        f"phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_{a}"
         for a in _EGO_MIN_CHANNEL_ARMS
     )
 )
@@ -2561,7 +2569,7 @@ def main() -> None:
             "(EGO_AABB_GEOM=body_gaps; --wait-deps). "
             f"{EGO_MIN_CHANNELS_SUITE}: 2-GPU — five v2 channel-deletion arms "
             "(noblocking / ±facing_enemy / ±weapon); trains first (3+2) then "
-            "SQ full eval + Pong ZS (--wait-deps). "
+            "SQ full eval + Pong/Beamrider/Phoenix ZS (--wait-deps). "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
