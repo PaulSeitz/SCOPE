@@ -182,6 +182,7 @@ def _overlay_ego_flags_from_skill_config(
             "USE_EGO_VELOCITY_FEATURES",
             "USE_EGO_BLOCKING_FEATURES",
             "USE_EGO_WEAPON_FEATURES",
+            "USE_EGO_FACING_ENEMY_FEATURES",
             "USE_EGO_SHOT_FEATURES",
             "USE_EGO_SHOT_BETWEEN",
             "USE_DESTROY_ONLY_EGO_EXTRAS",

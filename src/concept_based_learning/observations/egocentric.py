@@ -637,6 +637,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         env_name=str(config.get("ENV_NAME", "")),
         shot_features=bool(config.get("USE_EGO_SHOT_FEATURES", False)),
         shot_between=bool(config.get("USE_EGO_SHOT_BETWEEN", False)),
+        facing_enemy=bool(config.get("USE_EGO_FACING_ENEMY_FEATURES", True)),
     )
 
 

@@ -101,6 +101,8 @@ Usage:
   python scripts/run_paper_eval.py --suite kangaroo_facing_surfacegap --gpus 0 --wait-deps --lean
   #   Body-frame gaps: Kangaroo ‖ Seaquest navigatesurface → SQ eval → Pong:
   python scripts/run_paper_eval.py --suite navigate_surface_bodygaps --gpus 0,1 --wait-deps --lean
+  #   Ego channel deletion (v2 spine; 5 arms, trains first → SQ eval → Pong):
+  python scripts/run_paper_eval.py --suite ego_min_channels --gpus 0,1 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -514,6 +516,33 @@ NAVIGATE_SURFACE_BODYGAPS_STEMS = (
     "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_bodygaps",
     "seaquest_skills_ego_pov_clip50_facing_psibins8_navigatesurface_bodygaps_eval_full",
     "pong_transfer_ego_pov_clip50_facing_psibins8_navigatesurface_bodygaps",
+)
+
+# EVAL_PLAN §0 — channel-deletion ablations on v2 φ8 clip50 facing (25M).
+# 2-GPU shard-critical: all 5 trains first (GPU0: 3 arms, GPU1: 2), then
+# Seaquest full eval + Pong ZS per arm.
+#   python scripts/run_paper_eval.py --suite ego_min_channels --gpus 0,1 --wait-deps --lean
+EGO_MIN_CHANNELS_SUITE = "ego_min_channels"
+_EGO_MIN_CHANNEL_ARMS = (
+    "noblocking",
+    "noblocking_nofacing",
+    "noblocking_noweapon",
+    "nofacing",
+    "noweapon",
+)
+EGO_MIN_CHANNELS_STEMS = (
+    tuple(
+        f"seaquest_skills_ego_pov_clip50_facing_psibins8_v2_{a}"
+        for a in _EGO_MIN_CHANNEL_ARMS
+    )
+    + tuple(
+        f"seaquest_skills_ego_pov_clip50_facing_psibins8_v2_{a}_eval_full"
+        for a in _EGO_MIN_CHANNEL_ARMS
+    )
+    + tuple(
+        f"pong_transfer_ego_pov_clip50_facing_psibins8_v2_{a}"
+        for a in _EGO_MIN_CHANNEL_ARMS
+    )
 )
 
 
@@ -1102,6 +1131,7 @@ SUITE_STEMS = {
     SURFACEGAP_GEOM_DUAL_SUITE: SURFACEGAP_GEOM_DUAL_STEMS,
     NAVIGATE_SURFACE_CENTRES_SUITE: NAVIGATE_SURFACE_CENTRES_STEMS,
     NAVIGATE_SURFACE_BODYGAPS_SUITE: NAVIGATE_SURFACE_BODYGAPS_STEMS,
+    EGO_MIN_CHANNELS_SUITE: EGO_MIN_CHANNELS_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1172,6 +1202,7 @@ SUITE_RTPT: dict[str, str] = {
     NAVIGATE_SURFACE_TANDEM_PIXEL_SUITE: "nav_tandem",
     NAVIGATE_SURFACE_SURFACEGAP_SUITE: "nav_sgap",
     NAVIGATE_SURFACE_BODYGAPS_SUITE: "nav_bgaps",
+    EGO_MIN_CHANNELS_SUITE: "ego_min",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2121,6 +2152,7 @@ _EVAL_OVERRIDE_KEYS = (
     "USE_EGO_VELOCITY_FEATURES",
     "USE_EGO_BLOCKING_FEATURES",
     "USE_EGO_WEAPON_FEATURES",
+    "USE_EGO_FACING_ENEMY_FEATURES",
     "USE_EGO_SHOT_FEATURES",
     "USE_EGO_SHOT_BETWEEN",
     "EGO_DISTANCE_CLIP_MAX_PX",
@@ -2527,6 +2559,9 @@ def main() -> None:
             f"{NAVIGATE_SURFACE_BODYGAPS_SUITE}: 2-GPU — kangaroo facing bodygaps "
             "on GPU0 + Seaquest navigatesurface_bodygaps → eval → Pong on GPU1 "
             "(EGO_AABB_GEOM=body_gaps; --wait-deps). "
+            f"{EGO_MIN_CHANNELS_SUITE}: 2-GPU — five v2 channel-deletion arms "
+            "(noblocking / ±facing_enemy / ±weapon); trains first (3+2) then "
+            "SQ full eval + Pong ZS (--wait-deps). "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "

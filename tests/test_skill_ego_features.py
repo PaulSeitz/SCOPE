@@ -207,6 +207,29 @@ def test_seaquest_can_fire_and_facing_enemy_when_aimed():
     assert float(extras[2, 1]) == FACING_ENEMY_YES
 
 
+def test_seaquest_can_fire_only_when_facing_enemy_disabled():
+    configure_skill_ego_features(
+        enabled=True, env_name="seaquest", facing_enemy=False
+    )
+    raw = _FakeRawObs(
+        jnp.array([0.0, 1.0, 1.0]),
+        orientation=270.0,
+        x=10.0,
+    )
+    objects = _FakeObjects(3, target_x=40.0)
+    extras = build_skill_ego_extras_stacked(raw, objects=objects, target_idx=0)
+    assert extras.shape == (3, 1)
+    assert float(extras[0, 0]) == CAN_FIRE_READY
+    assert float(extras[1, 0]) == CAN_FIRE_IN_FLIGHT
+    from concept_based_learning.observations.skill_ego_features import (
+        discrete_skill_ego_flags,
+        skill_ego_extra_channels_per_frame,
+    )
+
+    assert skill_ego_extra_channels_per_frame() == 1
+    assert [f.name for f in discrete_skill_ego_flags()] == ["can_fire"]
+
+
 def test_seaquest_facing_enemy_no_when_facing_away():
     configure_skill_ego_features(enabled=True, env_name="seaquest")
     # 270 = facing left; target is to the right.
@@ -322,6 +345,30 @@ def test_beamrider_can_fire():
     extras = build_skill_ego_extras_stacked(raw)
     assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
     assert float(extras[1, 0]) == CAN_FIRE_READY
+
+
+def test_ego_obs_channels_can_fire_without_facing_enemy():
+    configure_ego_obs_from_config(
+        {
+            "USE_LEGACY_EGO_OBS": False,
+            "USE_EGO_SIZE_FEATURES": False,
+            "USE_EGO_VELOCITY_FEATURES": False,
+            "USE_EGO_BLOCKING_FEATURES": False,
+            "USE_EGO_WEAPON_FEATURES": True,
+            "USE_EGO_FACING_ENEMY_FEATURES": False,
+            "ENV_NAME": "seaquest",
+            "EGO_DISTANCE_CLIP_MAX_PX": 50,
+            "EGO_PSI_ANGLE_BINS": 8,
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_FACING_FRAME": True,
+        }
+    )
+    # pose (clip + φ bins) + can_fire only
+    from concept_based_learning.observations.skill_ego_features import (
+        skill_ego_extra_channels_per_frame,
+    )
+
+    assert skill_ego_extra_channels_per_frame() == 1
 
 
 def test_ego_obs_channels_include_velocity_and_weapon():

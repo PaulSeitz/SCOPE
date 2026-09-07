@@ -1,6 +1,6 @@
 """Optional weapon ego channels appended to skill observations.
 
-When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains two channels:
+When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains:
 
   can_fire       +1 weapon ready / -1 shot in flight
                  (Phoenix: +1 shield active / -1 shield off — visible ability
@@ -8,6 +8,8 @@ When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains two channels:
   facing_enemy   +1 weapon can plausibly hit (L/R facing matches *and*
                  centres share a vertical band) / -1 not
                  (always +1 on envs whose shot direction is not L/R-gated)
+                 Optional: set ``USE_EGO_FACING_ENEMY_FEATURES: false`` to
+                 keep ``can_fire`` alone (channel-deletion ablation).
 
 ``facing_enemy`` is pure geometry (player ori + player/target centres). It is
 always visible — not latched on fire — so skills can turn before shooting.
@@ -47,6 +49,7 @@ from concept_based_learning.environments.datatypes import LABEL_DESTROY
 from concept_based_learning.observations.line_of_sight import missile_on_open_segment
 
 _USE_EGO_WEAPON_FEATURES = False
+_USE_EGO_FACING_ENEMY_FEATURES = True  # only applies when weapon extras are on
 _USE_EGO_SHOT_FEATURES = False
 _USE_EGO_SHOT_BETWEEN = False
 _ENV_NAME = ""
@@ -62,8 +65,11 @@ WEAPON_READY = CAN_FIRE_READY
 WEAPON_IN_FLIGHT_AIMED = 0.0  # legacy ternary mid value
 WEAPON_IN_FLIGHT_WASTED = CAN_FIRE_IN_FLIGHT
 
-# Base weapon extras (can_fire, facing_enemy). Shot geometry is optional.
-WEAPON_BASE_CHANNELS_PER_FRAME = 2
+# Base weapon extras: can_fire always; facing_enemy optional (see flag).
+# Shot geometry is optional on top.
+WEAPON_CAN_FIRE_CHANNELS_PER_FRAME = 1
+WEAPON_FACING_ENEMY_CHANNELS_PER_FRAME = 1
+WEAPON_BASE_CHANNELS_PER_FRAME = 2  # can_fire + facing_enemy (legacy full set)
 SHOT_BETWEEN_CHANNELS_PER_FRAME = 1
 SHOT_CHANNELS_PER_FRAME = 2
 # Backward-compat alias: base extras only (shot flag off).
@@ -89,25 +95,47 @@ class DiscreteSkillEgoFlag(NamedTuple):
     level_offset: float = 0.0
 
 
+def _weapon_base_channel_count() -> int:
+    """Active base weapon channels (can_fire ± optional facing_enemy)."""
+    if not _USE_EGO_WEAPON_FEATURES:
+        return 0
+    n = WEAPON_CAN_FIRE_CHANNELS_PER_FRAME
+    if _USE_EGO_FACING_ENEMY_FEATURES:
+        n += WEAPON_FACING_ENEMY_CHANNELS_PER_FRAME
+    return n
+
+
 def discrete_skill_ego_flags() -> tuple[DiscreteSkillEgoFlag, ...]:
     """Active discrete weapon extras (can_fire / shield_active, facing, optional shot_between)."""
+    if not _USE_EGO_WEAPON_FEATURES:
+        return ()
     can_fire_name = "shield_active" if _ENV_NAME == "phoenix" else "can_fire"
-    flags = (
+    flags: tuple[DiscreteSkillEgoFlag, ...] = (
         DiscreteSkillEgoFlag(
             offset=0,
             name=can_fire_name,
             n_levels=2,
             level_offset=1.0,  # {-1,+1} → {0,1} after clamp
         ),
-        DiscreteSkillEgoFlag(
-            offset=1,
-            name="facing_enemy",
-            n_levels=2,
-            level_offset=1.0,
-        ),
     )
+    if _USE_EGO_FACING_ENEMY_FEATURES:
+        flags = flags + (
+            DiscreteSkillEgoFlag(
+                offset=1,
+                name="facing_enemy",
+                n_levels=2,
+                level_offset=1.0,
+            ),
+        )
     if _USE_EGO_SHOT_BETWEEN:
-        return flags + (_SHOT_BETWEEN_FLAG,)
+        flags = flags + (
+            DiscreteSkillEgoFlag(
+                offset=_weapon_base_channel_count(),
+                name="shot_between",
+                n_levels=2,
+                level_offset=0.0,  # {0,1}
+            ),
+        )
     return flags
 
 
@@ -145,8 +173,13 @@ def configure_ego_weapon_features(
     extra_dim_per_skill: int | None = None,
     shot_features: bool = False,
     shot_between: bool = False,
+    facing_enemy: bool = True,
 ) -> None:
-    """Enable/disable the shared can_fire + facing_enemy ego channels.
+    """Enable/disable shared weapon ego channels.
+
+    When ``enabled``, always emits ``can_fire`` (or Phoenix ``shield_active``).
+    ``facing_enemy`` (default True) appends the L/R aim geometry bit; set False
+    to keep ``can_fire`` alone (channel-deletion ablation).
 
     ``shot_features`` adds shot-to-target Δx/Δy (zeros when no bullet).
     ``shot_between`` adds a DESTROY-only 0/1 occupancy bit (missile on the
@@ -157,8 +190,13 @@ def configure_ego_weapon_features(
     COLLECT/AVOID/NAVIGATE; extras concatenated only on DESTROY).
     """
     del num_skills, extra_dim_per_skill
-    global _USE_EGO_WEAPON_FEATURES, _USE_EGO_SHOT_FEATURES, _USE_EGO_SHOT_BETWEEN, _ENV_NAME
+    global _USE_EGO_WEAPON_FEATURES
+    global _USE_EGO_FACING_ENEMY_FEATURES
+    global _USE_EGO_SHOT_FEATURES
+    global _USE_EGO_SHOT_BETWEEN
+    global _ENV_NAME
     _USE_EGO_WEAPON_FEATURES = bool(enabled)
+    _USE_EGO_FACING_ENEMY_FEATURES = bool(enabled) and bool(facing_enemy)
     _USE_EGO_SHOT_FEATURES = bool(enabled) and bool(shot_features)
     _USE_EGO_SHOT_BETWEEN = bool(enabled) and bool(shot_between)
     _ENV_NAME = str(env_name).lower()
@@ -172,6 +210,7 @@ def configure_skill_ego_features(
     env_name: str = "",
     shot_features: bool = False,
     shot_between: bool = False,
+    facing_enemy: bool = True,
 ) -> None:
     """Backward-compatible alias for ``configure_ego_weapon_features``."""
     configure_ego_weapon_features(
@@ -181,11 +220,16 @@ def configure_skill_ego_features(
         extra_dim_per_skill=extra_dim_per_skill,
         shot_features=shot_features,
         shot_between=shot_between,
+        facing_enemy=facing_enemy,
     )
 
 
 def using_ego_weapon_features() -> bool:
     return _USE_EGO_WEAPON_FEATURES
+
+
+def using_ego_facing_enemy_features() -> bool:
+    return _USE_EGO_FACING_ENEMY_FEATURES
 
 
 def using_ego_shot_features() -> bool:
@@ -202,10 +246,10 @@ def using_skill_ego_features() -> bool:
 
 
 def skill_ego_extra_channels_per_frame() -> int:
-    """Extra ego channels/frame from weapon features (0, 2, 3, 4, or 6)."""
+    """Extra ego channels/frame from weapon features (0–6)."""
     if not _USE_EGO_WEAPON_FEATURES:
         return 0
-    extra = WEAPON_BASE_CHANNELS_PER_FRAME
+    extra = _weapon_base_channel_count()
     if _USE_EGO_SHOT_BETWEEN:
         extra += SHOT_BETWEEN_CHANNELS_PER_FRAME
     if _USE_EGO_SHOT_FEATURES:
@@ -467,7 +511,7 @@ def _weapon_channels_stacked(
     projectile_slot: int | None = None,
     can_fire_from_player_state: bool = False,
 ) -> jnp.ndarray:
-    """Per-frame weapon extras: [can_fire, facing_enemy] (+ shot_between) (+ shot_dx, shot_dy).
+    """Per-frame weapon extras: [can_fire] (+ facing_enemy) (+ shot_between) (+ shot_dx, shot_dy).
 
     When ``can_fire_from_player_state`` is True (Phoenix), the first channel is
     shield-active from ``player.state`` (+1 on / -1 off) instead of projectile ready.
@@ -510,7 +554,9 @@ def _weapon_channels_stacked(
     facing = _facing_enemy_per_frame(
         raw_observation, objects, target_idx, stack_len
     )
-    channels = [can_fire, facing]
+    channels = [can_fire]
+    if _USE_EGO_FACING_ENEMY_FEATURES:
+        channels.append(facing)
     if _USE_EGO_SHOT_BETWEEN:
         channels.append(
             _shot_between_per_frame(
@@ -543,9 +589,9 @@ def build_skill_ego_extras_stacked(
     target_idx: jnp.ndarray | int | None = None,
 ) -> jnp.ndarray:
     """
-    Per-frame weapon extras. Shape ``[stack_len, 2]`` when enabled, plus
-    ``shot_between`` and/or ``shot_dx/dy`` when those flags are on, else
-    ``[stack_len, 0]``.
+    Per-frame weapon extras. Shape ``[stack_len, 1|2]`` when enabled
+    (``can_fire`` ± ``facing_enemy``), plus ``shot_between`` and/or
+    ``shot_dx/dy`` when those flags are on, else ``[stack_len, 0]``.
 
     ``objects`` / ``target_idx`` drive ``facing_enemy`` on L/R-aim envs
     (Seaquest, Chopper Command, Kangaroo) and shot-to-target Δx/Δy when
@@ -596,10 +642,12 @@ def build_skill_ego_extras_stacked(
     # Default: always-ready weapon (no projectile attr) + geometry facing_enemy
     # for L/R-aim envs (e.g. Kangaroo punch). Non-L/R envs still get +1.
     ready = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
-    facing = _facing_enemy_per_frame(
-        raw_observation, objects, target_idx, stack_len
-    )
-    channels = [ready, facing]
+    channels = [ready]
+    if _USE_EGO_FACING_ENEMY_FEATURES:
+        facing = _facing_enemy_per_frame(
+            raw_observation, objects, target_idx, stack_len
+        )
+        channels.append(facing)
     if _USE_EGO_SHOT_BETWEEN:
         channels.append(jnp.zeros((stack_len,), dtype=jnp.float32))
     if _USE_EGO_SHOT_FEATURES:
