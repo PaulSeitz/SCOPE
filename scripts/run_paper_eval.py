@@ -115,6 +115,8 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_noweapon_heu_ablation --gpus 0,1 --wait-deps --lean
   #   Plan B: can_fire on (noblocking_nofacing) + same oval heuristic:
   python scripts/run_paper_eval.py --suite ego_min_nofacing_ovalavoid --gpus 0 --wait-deps --lean
+  #   Clip sweep on noweapon+ovalavoid (10/20/30/50/80/100/noclip; --resume skips clip50):
+  python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid_clipsweep --gpus 0,1,2,3 --wait-deps --lean --resume
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -662,6 +664,34 @@ EGO_MIN_NOFACING_OVALAVOID_STEMS = (
     "pong_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
     "beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
     "phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
+)
+
+# Distance-clip sweep on noweapon+ovalavoid spine (φ8 facing locked).
+# Arms: 10/20/30/50/80/100/noclip → SQ full + Pong/BR/PH. clip50 reuses existing ckpt.
+#   python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid_clipsweep --gpus 0,1,2,3 --wait-deps --lean --resume
+EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_SUITE = "ego_min_noweapon_ovalavoid_clipsweep"
+_EGO_OVA_CLIP_TOKS = ("clip10", "clip20", "clip30", "clip50", "clip80", "clip100", "noclip")
+EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_STEMS = (
+    tuple(
+        f"seaquest_skills_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_ovalavoid"
+        for tok in _EGO_OVA_CLIP_TOKS
+    )
+    + tuple(
+        f"seaquest_skills_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_ovalavoid_eval_full"
+        for tok in _EGO_OVA_CLIP_TOKS
+    )
+    + tuple(
+        f"pong_transfer_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_ovalavoid"
+        for tok in _EGO_OVA_CLIP_TOKS
+    )
+    + tuple(
+        f"beamrider_transfer_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_ovalavoid"
+        for tok in _EGO_OVA_CLIP_TOKS
+    )
+    + tuple(
+        f"phoenix_transfer_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_ovalavoid"
+        for tok in _EGO_OVA_CLIP_TOKS
+    )
 )
 
 # Alias: full ground-up batch = tier A (most users start here).
@@ -1255,6 +1285,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_SUITE: EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_STEMS,
     EGO_MIN_NOWEAPON_HEU_ABLATION_SUITE: EGO_MIN_NOWEAPON_HEU_ABLATION_STEMS,
     EGO_MIN_NOFACING_OVALAVOID_SUITE: EGO_MIN_NOFACING_OVALAVOID_STEMS,
+    EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_SUITE: EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1332,6 +1363,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_SUITE: "ego_ovas",
     EGO_MIN_NOWEAPON_HEU_ABLATION_SUITE: "ego_heu",
     EGO_MIN_NOFACING_OVALAVOID_SUITE: "ego_nfova",
+    EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_SUITE: "ego_clip",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2708,6 +2740,9 @@ def main() -> None:
             "surfacesub5 heuristic factors → SQ eval + Pong/BR/PH. "
             f"{EGO_MIN_NOFACING_OVALAVOID_SUITE}: Plan B — can_fire on "
             "(noblocking_nofacing) + oval/surface-sub heuristic. "
+            f"{EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_SUITE}: noweapon+ovalavoid "
+            "distance clip sweep 10/20/30/50/80/100/noclip → SQ + Pong/BR/PH "
+            "(clip50 reuses existing; --resume). "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
