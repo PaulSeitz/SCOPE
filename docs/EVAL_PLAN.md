@@ -48,8 +48,27 @@ Gate: Seaquest base still in the ~20k band; Beamrider / Phoenix ZS not
 collapsed vs v2 reference. Pong is a secondary readout, not the lock
 criterion. Then **lock the ego stack** for the matrix below.
 
+### Results (synced 2026-09-08) — `tmp/ego_min_channels/`
+
+| Arm | SQ base | BR ZS | PH ZS | Pong | Gate |
+|-----|---------|-------|-------|------|------|
+| **v2 (ref)** | 22 600 | 788 | 3 460 | **+1** (21–20) | — |
+| noblocking | 22 550 | 543 | **453** | −21 | fail (BR/PH) |
+| **noblocking_nofacing** | **34 203** | **814** | **4 557** | −11 | **PASS (lock)** |
+| noblocking_noweapon | **13 167** | 884 | 13 483 | +20 | fail (SQ) |
+| nofacing | 28 697 | 603 | 6 463 | −10 | PASS |
+| noweapon | 23 643 | 543 | 3 090 | **+4** | fail (BR) |
+
+**Lock for the matrix:** `noblocking_nofacing` —
+`USE_EGO_BLOCKING_FEATURES: false`, `USE_EGO_WEAPON_FEATURES: true`,
+`USE_EGO_FACING_ENEMY_FEATURES: false` (keep `can_fire` only). Best
+homologous DESTROY retention with SQ above v2. Pong regresses vs v2; do
+not chase with more channels. Skip legal-mask train unless a later Pong
+probe needs it. Ckpt:
+`outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing/`.
+
 Optional follow-up: `EGO_LEGAL_ACTION_MASK: true` **at train** on the
-winning minimal ego.
+locked minimal ego (deferred).
 
 Quirk (not a planned arm): Pong labeled DESTROY instead of COLLECT
 (“align with this object”). At most a discussion aside.
@@ -155,7 +174,15 @@ spine is locked; do not spawn 3× pixel/oc copies of every strip.
 
 ---
 
-## 4. Mods (sketch only — own session later)
+## 4. Mods
+
+**Superseded by `docs/MODS_PLAN.md` (2026-09-08).** That doc locks seven parent
+categories derived from the ego pipeline's own assumptions, a 17-mod Seaquest
+grid, 4–6 mod strips elsewhere, and the metric fixes the current table needs
+(score caps, oracle normalisation, solvability gate). The sketch below is kept
+for provenance.
+
+### Original sketch
 
 Reuse Seaquest’s existing split (`control` / `semantic` / `dynamics` /
 `visual` in `configs/experiment/paper_eval/mods/seaquest.yaml`) but **report

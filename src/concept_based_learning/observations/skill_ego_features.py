@@ -52,6 +52,7 @@ _USE_EGO_WEAPON_FEATURES = False
 _USE_EGO_FACING_ENEMY_FEATURES = True  # only applies when weapon extras are on
 _USE_EGO_SHOT_FEATURES = False
 _USE_EGO_SHOT_BETWEEN = False
+_FORCE_CAN_FIRE: float | None = None  # diagnostic override (±1); None = live
 _ENV_NAME = ""
 
 # Channel values (±1 binaries).
@@ -174,12 +175,17 @@ def configure_ego_weapon_features(
     shot_features: bool = False,
     shot_between: bool = False,
     facing_enemy: bool = True,
+    force_can_fire: float | None = None,
 ) -> None:
     """Enable/disable shared weapon ego channels.
 
     When ``enabled``, always emits ``can_fire`` (or Phoenix ``shield_active``).
     ``facing_enemy`` (default True) appends the L/R aim geometry bit; set False
     to keep ``can_fire`` alone (channel-deletion ablation).
+
+    ``force_can_fire`` (diagnostic): if set to ±1, overrides the live can_fire /
+    shield channel every frame (used to probe transfer sensitivity to the
+    constant +1 Pong sees). ``None`` keeps the live signal.
 
     ``shot_features`` adds shot-to-target Δx/Δy (zeros when no bullet).
     ``shot_between`` adds a DESTROY-only 0/1 occupancy bit (missile on the
@@ -194,11 +200,21 @@ def configure_ego_weapon_features(
     global _USE_EGO_FACING_ENEMY_FEATURES
     global _USE_EGO_SHOT_FEATURES
     global _USE_EGO_SHOT_BETWEEN
+    global _FORCE_CAN_FIRE
     global _ENV_NAME
     _USE_EGO_WEAPON_FEATURES = bool(enabled)
     _USE_EGO_FACING_ENEMY_FEATURES = bool(enabled) and bool(facing_enemy)
     _USE_EGO_SHOT_FEATURES = bool(enabled) and bool(shot_features)
     _USE_EGO_SHOT_BETWEEN = bool(enabled) and bool(shot_between)
+    if force_can_fire is None or force_can_fire is False or force_can_fire == "":
+        _FORCE_CAN_FIRE = None
+    else:
+        v = float(force_can_fire)
+        if abs(abs(v) - 1.0) > 1e-5:
+            raise ValueError(
+                f"EGO_FORCE_CAN_FIRE must be ±1 or null, got {force_can_fire!r}"
+            )
+        _FORCE_CAN_FIRE = 1.0 if v > 0 else -1.0
     _ENV_NAME = str(env_name).lower()
 
 
@@ -211,6 +227,7 @@ def configure_skill_ego_features(
     shot_features: bool = False,
     shot_between: bool = False,
     facing_enemy: bool = True,
+    force_can_fire: float | None = None,
 ) -> None:
     """Backward-compatible alias for ``configure_ego_weapon_features``."""
     configure_ego_weapon_features(
@@ -221,6 +238,7 @@ def configure_skill_ego_features(
         shot_features=shot_features,
         shot_between=shot_between,
         facing_enemy=facing_enemy,
+        force_can_fire=force_can_fire,
     )
 
 
@@ -551,6 +569,9 @@ def _weapon_channels_stacked(
             CAN_FIRE_READY,
         ).astype(jnp.float32)
 
+    if _FORCE_CAN_FIRE is not None:
+        can_fire = jnp.full((stack_len,), jnp.float32(_FORCE_CAN_FIRE))
+
     facing = _facing_enemy_per_frame(
         raw_observation, objects, target_idx, stack_len
     )
@@ -642,6 +663,8 @@ def build_skill_ego_extras_stacked(
     # Default: always-ready weapon (no projectile attr) + geometry facing_enemy
     # for L/R-aim envs (e.g. Kangaroo punch). Non-L/R envs still get +1.
     ready = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
+    if _FORCE_CAN_FIRE is not None:
+        ready = jnp.full((stack_len,), jnp.float32(_FORCE_CAN_FIRE))
     channels = [ready]
     if _USE_EGO_FACING_ENEMY_FEATURES:
         facing = _facing_enemy_per_frame(

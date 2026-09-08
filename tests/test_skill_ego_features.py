@@ -533,13 +533,32 @@ def test_slice_skill_ego_drops_weapon_for_collect():
     assert jnp.allclose(destroy, full)
 
 
+def test_force_can_fire_overrides_default_ready_channel():
+    """Diagnostic: EGO_FORCE_CAN_FIRE=-1 clamps Pong's constant +1 magazine bit."""
+    _paper_eval_ego_cfg(
+        USE_EGO_BLOCKING_FEATURES=False,
+        USE_EGO_WEAPON_FEATURES=True,
+        USE_EGO_FACING_ENEMY_FEATURES=False,
+        ENV_NAME="pong",
+        EGO_FORCE_CAN_FIRE=-1,
+    )
+
+    class _PongObs:
+        def __init__(self):
+            self.player = _FakePlayer(2)
+
+    extras = build_skill_ego_extras_stacked(_PongObs())
+    assert extras.shape == (2, 1)  # can_fire only
+    assert float(extras[0, 0]) == -1.0
+    assert float(extras[1, 0]) == -1.0
+
+
 def test_pong_collect_pose_has_no_can_fire_channel():
     """Pong COLLECT intercept should not see Seaquest leftover magazine bits."""
     _paper_eval_ego_cfg(USE_DESTROY_ONLY_EGO_EXTRAS=True, ENV_NAME="pong")
     assert skill_ego_flat_dim(1, stack_size=4) == 12
     # Shared (non-sliced) layout still builds the extras for DESTROY / occupancy.
     assert ego_obs_channels_per_frame() == 6
-
 
 def test_flatten_packed_skill_params_roundtrip():
     from flax.traverse_util import unflatten_dict
