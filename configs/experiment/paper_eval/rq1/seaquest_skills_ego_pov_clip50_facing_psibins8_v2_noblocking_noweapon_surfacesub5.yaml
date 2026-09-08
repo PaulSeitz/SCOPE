@@ -31,6 +31,7 @@ USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
 SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_TAGS:
+- suite:ego_min_noweapon_surfacesub5_clipsweep
 - suite:ego_min_noweapon_heu_ablation
 - rq:1
 - env:seaquest
@@ -44,6 +45,7 @@ WANDB_TAGS:
 - ablation:ego_min_channels
 - ego:noblocking
 - ego:noweapon
+- ego:clip50
 SKILL_INPUT_MODE: ego
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false

@@ -15,7 +15,7 @@ USE_EGO_VELOCITY_FEATURES: false
 USE_EGO_BLOCKING_FEATURES: false
 USE_EGO_WEAPON_FEATURES: false
 AVOID_INTERRUPT_RANGE: 55
-AVOID_INTERRUPT_RANGE_Y: 18
+AVOID_INTERRUPT_RANGE_Y: 55
 SURFACE_SUB_AVOID_RANGE_X: 5
 SURFACE_SUB_AVOID_RANGE_Y: 5
 USE_EGO_SHOT_FEATURES: false
@@ -28,10 +28,10 @@ ENV_NAME: seaquest
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
-SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip80_facing_psibins8_v2_noblocking_noweapon_ovalavoid
-WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_clip80_facing_psibins8_v2_noblocking_noweapon_ovalavoid
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip80_facing_psibins8_v2_noblocking_noweapon_surfacesub5
+WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_clip80_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_TAGS:
-- suite:ego_min_noweapon_ovalavoid_clipsweep
+- suite:ego_min_noweapon_surfacesub5_clipsweep
 - rq:1
 - env:seaquest
 - train_mode:skills_only
@@ -100,5 +100,5 @@ alg:
   DESTROY_CONTACT_FAIL: true
   DESTROY_LIVING_PENALTY: true
   USE_EGO_SHOT_FEATURES: false
-SURFACE_SUB_NEAR_RANGE: 5
 SEED: 44
+SURFACE_SUB_NEAR_RANGE: 5

@@ -19,6 +19,7 @@ EGO_POSE_XY: false
 SAVE_PATH: ./outputs/models/paper_eval/rq2/beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_RUN_NAME: br_paper_rq2_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_TAGS:
+- suite:ego_min_noweapon_surfacesub5_clipsweep
 - suite:ego_min_noweapon_heu_ablation
 - rq:2
 - env:beamrider
@@ -29,6 +30,7 @@ WANDB_TAGS:
 - ablation:ego_min_channels
 - ego:noblocking
 - ego:noweapon
+- ego:clip50
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
 USE_EGO_VELOCITY_FEATURES: false
