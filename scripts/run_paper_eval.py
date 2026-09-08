@@ -105,6 +105,8 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_channels --gpus 0,1 --wait-deps --lean
   #   Locked spine + DESTROY-only extras retrain:
   python scripts/run_paper_eval.py --suite ego_min_destroyextras --gpus 0 --wait-deps --lean
+  #   Locked channels, unclipped distance (one-off):
+  python scripts/run_paper_eval.py --suite ego_min_noclip --gpus 0 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -565,6 +567,17 @@ EGO_MIN_DESTROYEXTRAS_STEMS = (
     "pong_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_destroyextras",
     "beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_destroyextras",
     "phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_destroyextras",
+)
+
+# One-off: locked noblocking_nofacing channels, but EGO_DISTANCE_CLIP_MAX_PX=null.
+#   python scripts/run_paper_eval.py --suite ego_min_noclip --gpus 0 --wait-deps --lean
+EGO_MIN_NOCLIP_SUITE = "ego_min_noclip"
+EGO_MIN_NOCLIP_STEMS = (
+    "seaquest_skills_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
+    "seaquest_skills_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing_eval_full",
+    "pong_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
+    "beamrider_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
+    "phoenix_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
 )
 
 
@@ -1155,6 +1168,7 @@ SUITE_STEMS = {
     NAVIGATE_SURFACE_BODYGAPS_SUITE: NAVIGATE_SURFACE_BODYGAPS_STEMS,
     EGO_MIN_CHANNELS_SUITE: EGO_MIN_CHANNELS_STEMS,
     EGO_MIN_DESTROYEXTRAS_SUITE: EGO_MIN_DESTROYEXTRAS_STEMS,
+    EGO_MIN_NOCLIP_SUITE: EGO_MIN_NOCLIP_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1227,6 +1241,7 @@ SUITE_RTPT: dict[str, str] = {
     NAVIGATE_SURFACE_BODYGAPS_SUITE: "nav_bgaps",
     EGO_MIN_CHANNELS_SUITE: "ego_min",
     EGO_MIN_DESTROYEXTRAS_SUITE: "ego_dx",
+    EGO_MIN_NOCLIP_SUITE: "ego_nc",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2589,6 +2604,8 @@ def main() -> None:
             "SQ full eval + Pong/Beamrider/Phoenix ZS (--wait-deps). "
             f"{EGO_MIN_DESTROYEXTRAS_SUITE}: locked noblocking_nofacing spine "
             "retrained with USE_DESTROY_ONLY_EGO_EXTRAS → SQ eval + Pong/BR/PH. "
+            f"{EGO_MIN_NOCLIP_SUITE}: locked channels with EGO_DISTANCE_CLIP_MAX_PX=null "
+            "(one-off Pong timing probe). "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
