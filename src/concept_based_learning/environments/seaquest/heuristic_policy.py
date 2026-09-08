@@ -294,6 +294,7 @@ def _select_target(
     avoid_interrupt_range_y=None,
     surface_sub_avoid_range_x=None,
     surface_sub_avoid_range_y=None,
+    surface_sub_near_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
@@ -312,6 +313,8 @@ def _select_target(
         surface_sub_avoid_range_x = SURFACE_SUB_AVOID_RANGE_X
     if surface_sub_avoid_range_y is None:
         surface_sub_avoid_range_y = SURFACE_SUB_AVOID_RANGE_Y
+    if surface_sub_near_range is None:
+        surface_sub_near_range = SURFACE_SUB_NEAR_RANGE
     if diver_lane_y_px is None:
         diver_lane_y_px = DIVER_LANE_Y_PX
     if collect_edge_margin_px is None:
@@ -327,6 +330,7 @@ def _select_target(
     surface_sub_avoid_range_y = jnp.asarray(
         surface_sub_avoid_range_y, dtype=jnp.float32
     )
+    surface_sub_near_range = jnp.asarray(surface_sub_near_range, dtype=jnp.float32)
     diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
     collect_edge_margin_px = jnp.asarray(collect_edge_margin_px, dtype=jnp.float32)
     oxygen = _latest_leaf(raw_observation.oxygen_level)
@@ -376,7 +380,7 @@ def _select_target(
     near_surface = py <= SURFACE_Y_THRESHOLD
     surface_sub_eligible = jnp.logical_and(
         is_surface_sub,
-        jnp.logical_and(distances <= SURFACE_SUB_NEAR_RANGE, near_surface),
+        jnp.logical_and(distances <= surface_sub_near_range, near_surface),
     )
     selectable = jnp.logical_and(
         selectable,
@@ -549,6 +553,7 @@ def get_heuristic_target_with_state(
     avoid_interrupt_range_y=None,
     surface_sub_avoid_range_x=None,
     surface_sub_avoid_range_y=None,
+    surface_sub_near_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
@@ -564,6 +569,7 @@ def get_heuristic_target_with_state(
         avoid_interrupt_range_y=avoid_interrupt_range_y,
         surface_sub_avoid_range_x=surface_sub_avoid_range_x,
         surface_sub_avoid_range_y=surface_sub_avoid_range_y,
+        surface_sub_near_range=surface_sub_near_range,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
         collect_edge_margin_px=collect_edge_margin_px,
@@ -591,6 +597,7 @@ def get_heuristic_target(
     avoid_interrupt_range_y=None,
     surface_sub_avoid_range_x=None,
     surface_sub_avoid_range_y=None,
+    surface_sub_near_range=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
@@ -607,6 +614,7 @@ def get_heuristic_target(
         avoid_interrupt_range_y=avoid_interrupt_range_y,
         surface_sub_avoid_range_x=surface_sub_avoid_range_x,
         surface_sub_avoid_range_y=surface_sub_avoid_range_y,
+        surface_sub_near_range=surface_sub_near_range,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
         collect_edge_margin_px=collect_edge_margin_px,

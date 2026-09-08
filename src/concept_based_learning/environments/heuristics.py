@@ -12,6 +12,7 @@ from concept_based_learning.environments.seaquest.heuristic_policy import (
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
     SURFACE_SUB_AVOID_RANGE_X as SEAQUEST_SURFACE_SUB_AVOID_RANGE_X,
     SURFACE_SUB_AVOID_RANGE_Y as SEAQUEST_SURFACE_SUB_AVOID_RANGE_Y,
+    SURFACE_SUB_NEAR_RANGE as SEAQUEST_SURFACE_SUB_NEAR_RANGE,
 )
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
     get_heuristic_target as spaceinvaders_sweep_heuristic_target,
@@ -85,6 +86,11 @@ def _seaquest_surface_sub_avoid_range_y(config) -> float:
     )
 
 
+def _seaquest_surface_sub_near_range(config) -> float:
+    """Nearest-target surface-sub gate (surface band only); ``<=0`` disables."""
+    return float(config.get("SURFACE_SUB_NEAR_RANGE", SEAQUEST_SURFACE_SUB_NEAR_RANGE))
+
+
 def _seaquest_diver_lane_y_px(config) -> float:
     """Centre-Δy band that blocks COLLECT; ``<=0`` disables lane gating."""
     return float(config.get("DIVER_LANE_Y_PX", SEAQUEST_DIVER_LANE_Y_PX))
@@ -108,6 +114,7 @@ def _seaquest_heuristic_kwargs(config) -> dict:
         "avoid_interrupt_range_y": _seaquest_avoid_interrupt_range_y(config),
         "surface_sub_avoid_range_x": _seaquest_surface_sub_avoid_range_x(config),
         "surface_sub_avoid_range_y": _seaquest_surface_sub_avoid_range_y(config),
+        "surface_sub_near_range": _seaquest_surface_sub_near_range(config),
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
         "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
         "collect_edge_margin_px": _seaquest_collect_edge_margin_px(config),

@@ -109,6 +109,12 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_noclip --gpus 0 --wait-deps --lean
   #   Drop can_fire + oval AVOID / surface-sub dodge:
   python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid --gpus 0 --wait-deps --lean
+  #   Extra seeds 45/46 for noweapon ovalavoid (YAML SEED; do not pass --seed):
+  python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid_seeds --gpus 0,1 --wait-deps --lean
+  #   Heuristic factor ablation (oval-only vs isotropic+surface-sub5):
+  python scripts/run_paper_eval.py --suite ego_min_noweapon_heu_ablation --gpus 0,1 --wait-deps --lean
+  #   Plan B: can_fire on (noblocking_nofacing) + same oval heuristic:
+  python scripts/run_paper_eval.py --suite ego_min_nofacing_ovalavoid --gpus 0 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -593,7 +599,70 @@ EGO_MIN_NOWEAPON_OVALAVOID_STEMS = (
     "phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid",
 )
 
+# Extra seeds for noweapon ovalavoid (YAML SEED=45/46; do not pass --seed).
+#   python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid_seeds --gpus 0,1 --wait-deps --lean
+EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_SUITE = "ego_min_noweapon_ovalavoid_seeds"
+_EGO_OVA_SEEDS = (45, 46)
+EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_STEMS = (
+    tuple(
+        f"seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid_seed{seed}"
+        for seed in _EGO_OVA_SEEDS
+    )
+    + tuple(
+        f"seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid_seed{seed}_eval_full"
+        for seed in _EGO_OVA_SEEDS
+    )
+    + tuple(
+        f"pong_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid_seed{seed}"
+        for seed in _EGO_OVA_SEEDS
+    )
+    + tuple(
+        f"beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid_seed{seed}"
+        for seed in _EGO_OVA_SEEDS
+    )
+    + tuple(
+        f"phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid_seed{seed}"
+        for seed in _EGO_OVA_SEEDS
+    )
+)
 
+# Heuristic factor ablation (noweapon): oval-missile-only vs isotropic+surface-sub5.
+#   python scripts/run_paper_eval.py --suite ego_min_noweapon_heu_ablation --gpus 0,1 --wait-deps --lean
+EGO_MIN_NOWEAPON_HEU_ABLATION_SUITE = "ego_min_noweapon_heu_ablation"
+_EGO_HEU_ABLATION_ARMS = ("oval_only", "surfacesub5")
+EGO_MIN_NOWEAPON_HEU_ABLATION_STEMS = (
+    tuple(
+        f"seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_{a}"
+        for a in _EGO_HEU_ABLATION_ARMS
+    )
+    + tuple(
+        f"seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_{a}_eval_full"
+        for a in _EGO_HEU_ABLATION_ARMS
+    )
+    + tuple(
+        f"pong_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_{a}"
+        for a in _EGO_HEU_ABLATION_ARMS
+    )
+    + tuple(
+        f"beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_{a}"
+        for a in _EGO_HEU_ABLATION_ARMS
+    )
+    + tuple(
+        f"phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_{a}"
+        for a in _EGO_HEU_ABLATION_ARMS
+    )
+)
+
+# Plan B: locked noblocking_nofacing (can_fire on) + same oval/surface-sub heuristic.
+#   python scripts/run_paper_eval.py --suite ego_min_nofacing_ovalavoid --gpus 0 --wait-deps --lean
+EGO_MIN_NOFACING_OVALAVOID_SUITE = "ego_min_nofacing_ovalavoid"
+EGO_MIN_NOFACING_OVALAVOID_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
+    "phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_nofacing_ovalavoid",
+)
 
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
@@ -1183,6 +1252,9 @@ SUITE_STEMS = {
     EGO_MIN_DESTROYEXTRAS_SUITE: EGO_MIN_DESTROYEXTRAS_STEMS,
     EGO_MIN_NOCLIP_SUITE: EGO_MIN_NOCLIP_STEMS,
     EGO_MIN_NOWEAPON_OVALAVOID_SUITE: EGO_MIN_NOWEAPON_OVALAVOID_STEMS,
+    EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_SUITE: EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_STEMS,
+    EGO_MIN_NOWEAPON_HEU_ABLATION_SUITE: EGO_MIN_NOWEAPON_HEU_ABLATION_STEMS,
+    EGO_MIN_NOFACING_OVALAVOID_SUITE: EGO_MIN_NOFACING_OVALAVOID_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1257,6 +1329,9 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_DESTROYEXTRAS_SUITE: "ego_dx",
     EGO_MIN_NOCLIP_SUITE: "ego_nc",
     EGO_MIN_NOWEAPON_OVALAVOID_SUITE: "ego_ova",
+    EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_SUITE: "ego_ovas",
+    EGO_MIN_NOWEAPON_HEU_ABLATION_SUITE: "ego_heu",
+    EGO_MIN_NOFACING_OVALAVOID_SUITE: "ego_nfova",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2200,6 +2275,7 @@ _EVAL_OVERRIDE_KEYS = (
     "AVOID_INTERRUPT_RANGE_Y",
     "SURFACE_SUB_AVOID_RANGE_X",
     "SURFACE_SUB_AVOID_RANGE_Y",
+    "SURFACE_SUB_NEAR_RANGE",
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
     "COLLECT_EDGE_MARGIN_PX",
@@ -2626,6 +2702,12 @@ def main() -> None:
             "(one-off Pong timing probe). "
             f"{EGO_MIN_NOWEAPON_OVALAVOID_SUITE}: drop can_fire + oval AVOID "
             "interrupt + anytime surface-sub dodge → SQ eval + Pong/BR/PH. "
+            f"{EGO_MIN_NOWEAPON_OVALAVOID_SEEDS_SUITE}: same recipe seeds 45/46 "
+            "(YAML SEED; do not pass --seed). "
+            f"{EGO_MIN_NOWEAPON_HEU_ABLATION_SUITE}: noweapon oval_only vs "
+            "surfacesub5 heuristic factors → SQ eval + Pong/BR/PH. "
+            f"{EGO_MIN_NOFACING_OVALAVOID_SUITE}: Plan B — can_fire on "
+            "(noblocking_nofacing) + oval/surface-sub heuristic. "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
