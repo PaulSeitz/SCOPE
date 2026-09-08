@@ -5,10 +5,13 @@ import jax.numpy as jnp
 from concept_based_learning.environments.manual_policy.state import PolicyState
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     AVOID_INTERRUPT_RANGE as SEAQUEST_AVOID_INTERRUPT_RANGE,
+    AVOID_INTERRUPT_RANGE_Y as SEAQUEST_AVOID_INTERRUPT_RANGE_Y,
     COLLECT_EDGE_MARGIN_PX as SEAQUEST_COLLECT_EDGE_MARGIN_PX,
     DESTROY_INTERRUPT_RANGE as SEAQUEST_DESTROY_INTERRUPT_RANGE,
     DIVER_LANE_Y_PX as SEAQUEST_DIVER_LANE_Y_PX,
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
+    SURFACE_SUB_AVOID_RANGE_X as SEAQUEST_SURFACE_SUB_AVOID_RANGE_X,
+    SURFACE_SUB_AVOID_RANGE_Y as SEAQUEST_SURFACE_SUB_AVOID_RANGE_Y,
 )
 from concept_based_learning.environments.spaceinvaders.spaceinvaders_sweep_policy import (
     get_heuristic_target as spaceinvaders_sweep_heuristic_target,
@@ -57,8 +60,29 @@ def _seaquest_destroy_interrupt_range(config) -> float:
 
 
 def _seaquest_avoid_interrupt_range(config) -> float:
-    """AABB surface-gap px for AVOID (torpedo) interrupt; ``<=0`` disables."""
+    """Horizontal AABB edge-gap px for AVOID (torpedo) ellipse; ``<=0`` disables."""
     return float(config.get("AVOID_INTERRUPT_RANGE", SEAQUEST_AVOID_INTERRUPT_RANGE))
+
+
+def _seaquest_avoid_interrupt_range_y(config) -> float:
+    """Vertical AABB edge-gap px for AVOID (torpedo) ellipse; ``<=0`` disables."""
+    return float(
+        config.get("AVOID_INTERRUPT_RANGE_Y", SEAQUEST_AVOID_INTERRUPT_RANGE_Y)
+    )
+
+
+def _seaquest_surface_sub_avoid_range_x(config) -> float:
+    """Horizontal ellipse for anytime surface-sub AVOID; ``<=0`` disables."""
+    return float(
+        config.get("SURFACE_SUB_AVOID_RANGE_X", SEAQUEST_SURFACE_SUB_AVOID_RANGE_X)
+    )
+
+
+def _seaquest_surface_sub_avoid_range_y(config) -> float:
+    """Vertical ellipse for anytime surface-sub AVOID; ``<=0`` disables."""
+    return float(
+        config.get("SURFACE_SUB_AVOID_RANGE_Y", SEAQUEST_SURFACE_SUB_AVOID_RANGE_Y)
+    )
 
 
 def _seaquest_diver_lane_y_px(config) -> float:
@@ -81,6 +105,9 @@ def _seaquest_heuristic_kwargs(config) -> dict:
         "danger_close_range": _seaquest_danger_close_range(config),
         "destroy_interrupt_range": _seaquest_destroy_interrupt_range(config),
         "avoid_interrupt_range": _seaquest_avoid_interrupt_range(config),
+        "avoid_interrupt_range_y": _seaquest_avoid_interrupt_range_y(config),
+        "surface_sub_avoid_range_x": _seaquest_surface_sub_avoid_range_x(config),
+        "surface_sub_avoid_range_y": _seaquest_surface_sub_avoid_range_y(config),
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
         "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
         "collect_edge_margin_px": _seaquest_collect_edge_margin_px(config),

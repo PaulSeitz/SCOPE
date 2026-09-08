@@ -15,12 +15,15 @@ from concept_based_learning.environments.datatypes import (
 from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     AVOID_INTERRUPT_RANGE,
+    AVOID_INTERRUPT_RANGE_Y,
     DESTROY_INTERRUPT_RANGE,
     DIVER_LANE_Y_PX,
     O2_CRITICAL_ENEMY_INTERRUPT_RANGE,
     O2_LOW_ENEMY_INTERRUPT_RANGE,
     SURFACE_DANGER_CLOSE_RANGE,
     SURFACE_DUMMY_IDX,
+    SURFACE_SUB_AVOID_RANGE_X,
+    SURFACE_SUB_AVOID_RANGE_Y,
     SURFACE_SUB_IDX,
     SURFACE_SUB_NEAR_RANGE,
     apply_meta_mask_overrides,
@@ -210,10 +213,13 @@ def test_surface_danger_close_range():
     assert SURFACE_DANGER_CLOSE_RANGE == 25.0
     assert DESTROY_INTERRUPT_RANGE == 40.0
     assert AVOID_INTERRUPT_RANGE == 55.0
+    assert AVOID_INTERRUPT_RANGE_Y == 18.0
+    assert SURFACE_SUB_AVOID_RANGE_X == 5.0
+    assert SURFACE_SUB_AVOID_RANGE_Y == 5.0
     assert DIVER_LANE_Y_PX == 14.0
     assert O2_LOW_ENEMY_INTERRUPT_RANGE == 12.0
     assert O2_CRITICAL_ENEMY_INTERRUPT_RANGE == 0.0
-    assert SURFACE_SUB_NEAR_RANGE == 15.0
+    assert SURFACE_SUB_NEAR_RANGE == 5.0
 
 
 def test_always_nearest_object():
@@ -263,6 +269,23 @@ def test_far_avoid_does_not_steal_nearest_destroy():
         aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 170.0, 100.0, 4.0, 2.0)
     )
     assert gap_missile > AVOID_INTERRUPT_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
+
+
+def test_other_lane_missile_does_not_steal_destroy():
+    """Oval AVOID: a torpedo far in Y (other row) must not lock dodge."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(shark_xy=(95.0, 100.0), missile_xy=(90.0, 50.0))
+    from concept_based_learning.observations.egocentric import aabb_closest_delta_px
+
+    gap_dx, gap_dy, _ = aabb_closest_delta_px(
+        80.0, 100.0, 16.0, 11.0, 90.0, 50.0, 4.0, 2.0
+    )
+    radius = (float(gap_dx) / AVOID_INTERRUPT_RANGE) ** 2 + (
+        float(gap_dy) / AVOID_INTERRUPT_RANGE_Y
+    ) ** 2
+    assert radius > 1.0
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 5
 
@@ -376,6 +399,48 @@ def test_surface_sub_ignored_when_deep():
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 1
+
+
+def test_surface_sub_avoids_when_close_even_if_deep():
+    """Ram-prevention: only at contact range (~5px), even below the surface band."""
+    raw = _make_raw(px=80.0, py=60.0, pw=16.0, ph=11.0)
+    objs = _make_objects(
+        diver_xy=(120.0, 60.0),
+        surface_sub_xy=(85.0, 46.0),
+        surface_sub_active=True,
+    )
+    from concept_based_learning.observations.egocentric import aabb_closest_delta_px
+
+    gap_dx, gap_dy, _ = aabb_closest_delta_px(
+        80.0, 60.0, 16.0, 11.0, 85.0, 46.0, 8.0, 11.0
+    )
+    radius = (float(gap_dx) / SURFACE_SUB_AVOID_RANGE_X) ** 2 + (
+        float(gap_dy) / SURFACE_SUB_AVOID_RANGE_Y
+    ) ** 2
+    assert radius <= 1.0
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == SURFACE_SUB_IDX
+
+
+def test_surface_sub_does_not_steal_from_a_lane_away():
+    """A shark in the upper lane must win over a still-distant surface sub."""
+    raw = _make_raw(px=80.0, py=70.0, pw=16.0, ph=11.0)
+    objs = _make_objects(
+        shark_xy=(95.0, 70.0),
+        surface_sub_xy=(85.0, 46.0),
+        surface_sub_active=True,
+    )
+    from concept_based_learning.observations.egocentric import aabb_closest_delta_px
+
+    gap_dx, gap_dy, _ = aabb_closest_delta_px(
+        80.0, 70.0, 16.0, 11.0, 85.0, 46.0, 8.0, 11.0
+    )
+    radius = (float(gap_dx) / SURFACE_SUB_AVOID_RANGE_X) ** 2 + (
+        float(gap_dy) / SURFACE_SUB_AVOID_RANGE_Y
+    ) ** 2
+    assert radius > 1.0
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 5
 
 
 def test_surface_sub_selectable_near_surface_and_close():

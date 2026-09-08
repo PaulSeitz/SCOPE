@@ -3,8 +3,8 @@
 When ``USE_EGO_WEAPON_FEATURES`` is enabled, each frame gains:
 
   can_fire       +1 weapon ready / -1 shot in flight
-                 (Phoenix: +1 shield active / -1 shield off — visible ability
-                 sprite via ``player.state``, not the hidden cooldown timer)
+                 (same definition on every shooter, including Phoenix /
+                 Beamrider: player projectile inactive vs in air)
   facing_enemy   +1 weapon can plausibly hit (L/R facing matches *and*
                  centres share a vertical band) / -1 not
                  (always +1 on envs whose shot direction is not L/R-gated)
@@ -107,14 +107,13 @@ def _weapon_base_channel_count() -> int:
 
 
 def discrete_skill_ego_flags() -> tuple[DiscreteSkillEgoFlag, ...]:
-    """Active discrete weapon extras (can_fire / shield_active, facing, optional shot_between)."""
+    """Active discrete weapon extras (can_fire, facing, optional shot_between)."""
     if not _USE_EGO_WEAPON_FEATURES:
         return ()
-    can_fire_name = "shield_active" if _ENV_NAME == "phoenix" else "can_fire"
     flags: tuple[DiscreteSkillEgoFlag, ...] = (
         DiscreteSkillEgoFlag(
             offset=0,
-            name=can_fire_name,
+            name="can_fire",
             n_levels=2,
             level_offset=1.0,  # {-1,+1} → {0,1} after clamp
         ),
@@ -141,7 +140,7 @@ def discrete_skill_ego_flags() -> tuple[DiscreteSkillEgoFlag, ...]:
 
 
 # Keep the module-level registry for docs / older imports; runtime uses
-# ``discrete_skill_ego_flags()`` so Phoenix can rename the first channel.
+# ``discrete_skill_ego_flags()``.
 DISCRETE_SKILL_EGO_FLAGS: tuple[DiscreteSkillEgoFlag, ...] = (
     DiscreteSkillEgoFlag(
         offset=0,
@@ -179,12 +178,12 @@ def configure_ego_weapon_features(
 ) -> None:
     """Enable/disable shared weapon ego channels.
 
-    When ``enabled``, always emits ``can_fire`` (or Phoenix ``shield_active``).
+    When ``enabled``, always emits ``can_fire`` (magazine: ready vs in-flight).
     ``facing_enemy`` (default True) appends the L/R aim geometry bit; set False
     to keep ``can_fire`` alone (channel-deletion ablation).
 
-    ``force_can_fire`` (diagnostic): if set to ±1, overrides the live can_fire /
-    shield channel every frame (used to probe transfer sensitivity to the
+    ``force_can_fire`` (diagnostic): if set to -1, 0, or +1, overrides the live
+    can_fire channel every frame (used to probe transfer sensitivity to the
     constant +1 Pong sees). ``None`` keeps the live signal.
 
     ``shot_features`` adds shot-to-target Δx/Δy (zeros when no bullet).
@@ -210,11 +209,14 @@ def configure_ego_weapon_features(
         _FORCE_CAN_FIRE = None
     else:
         v = float(force_can_fire)
-        if abs(abs(v) - 1.0) > 1e-5:
+        if abs(v) > 1e-5 and abs(abs(v) - 1.0) > 1e-5:
             raise ValueError(
-                f"EGO_FORCE_CAN_FIRE must be ±1 or null, got {force_can_fire!r}"
+                f"EGO_FORCE_CAN_FIRE must be -1, 0, +1, or null, got {force_can_fire!r}"
             )
-        _FORCE_CAN_FIRE = 1.0 if v > 0 else -1.0
+        if abs(v) < 1e-5:
+            _FORCE_CAN_FIRE = 0.0
+        else:
+            _FORCE_CAN_FIRE = 1.0 if v > 0 else -1.0
     _ENV_NAME = str(env_name).lower()
 
 
@@ -527,34 +529,10 @@ def _weapon_channels_stacked(
     *,
     projectile_attr: str,
     projectile_slot: int | None = None,
-    can_fire_from_player_state: bool = False,
 ) -> jnp.ndarray:
-    """Per-frame weapon extras: [can_fire] (+ facing_enemy) (+ shot_between) (+ shot_dx, shot_dy).
-
-    When ``can_fire_from_player_state`` is True (Phoenix), the first channel is
-    shield-active from ``player.state`` (+1 on / -1 off) instead of projectile ready.
-    """
+    """Per-frame weapon extras: [can_fire] (+ facing_enemy) (+ shot_between) (+ shot_dx, shot_dy)."""
     stack_len = _stack_len(raw_observation)
-    if can_fire_from_player_state:
-        player = _get_player(raw_observation)
-        st = jnp.asarray(getattr(player, "state", 0), dtype=jnp.float32)
-        if st.ndim == 0:
-            st = jnp.full((stack_len,), st)
-        elif st.shape[0] != stack_len:
-            st = jnp.broadcast_to(st.reshape(-1)[0], (stack_len,))
-        can_fire = jnp.where(
-            st > 0.5,
-            jnp.float32(CAN_FIRE_READY),
-            jnp.float32(CAN_FIRE_IN_FLIGHT),
-        )
-        if hasattr(raw_observation, projectile_attr):
-            projectiles = getattr(raw_observation, projectile_attr)
-            in_flight = _player_projectile_active_per_frame(
-                projectiles.active, projectile_slot
-            )
-        else:
-            in_flight = jnp.zeros((stack_len,), dtype=jnp.float32)
-    elif not hasattr(raw_observation, projectile_attr):
+    if not hasattr(raw_observation, projectile_attr):
         can_fire = jnp.full((stack_len,), CAN_FIRE_READY, dtype=jnp.float32)
         in_flight = jnp.zeros((stack_len,), dtype=jnp.float32)
     else:
@@ -636,7 +614,6 @@ def build_skill_ego_extras_stacked(
         return _weapon_channels_stacked(
             raw_observation,
             projectile_attr="player_projectile",
-            can_fire_from_player_state=True,
             **common,
         )
     if _ENV_NAME == "spaceinvaders":
@@ -697,10 +674,7 @@ def seaquest_can_fire(raw_observation) -> jnp.ndarray:
 
 
 def phoenix_can_fire(raw_observation) -> jnp.ndarray:
-    """Latest-frame player-projectile ready helper (legal-fire masking).
-
-    Distinct from the Phoenix ego ``can_fire`` channel, which encodes shield-active.
-    """
+    """Latest-frame player-projectile ready helper (ego + legal-fire masking)."""
     return _latest_can_fire(raw_observation, "player_projectile")
 
 

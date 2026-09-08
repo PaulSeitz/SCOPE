@@ -14,8 +14,9 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   > 0 and any lane-clear diver has centre x in ``[margin, 160-margin]``,
   edge divers are skipped so COLLECT is not trained on edge-suicide rushes.
   If no midfield diver is available, edge divers remain selectable.
-- Surface sub (slot 29) is ignored unless the player is near the surface and
-  within ``SURFACE_SUB_NEAR_RANGE``.
+- Surface sub (slot 29) is ignored for *nearest* targeting unless the player
+  is near the surface and within ``SURFACE_SUB_NEAR_RANGE``. It still
+  interrupts as AVOID from any depth inside ``SURFACE_SUB_AVOID_RANGE_{X,Y}``.
 - Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
   at the surface with divers on board, or when divers ≥ 6 — but only if the
   surface sub is inactive / left of the player, or oxygen is low.
@@ -23,9 +24,12 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   overrides the waypoint (nearest AVOID, or DESTROY within the larger
   ``DESTROY_INTERRUPT_RANGE``). Anytime, a DESTROY within
   ``DESTROY_INTERRUPT_RANGE`` beats a nearer COLLECT so sharks interrupt
-  dives before frameskip closes the gap. AVOID (missiles) within the larger
-  ``AVOID_INTERRUPT_RANGE`` then steals DESTROY/COLLECT so a fired torpedo
-  is selected before it rams.
+  dives before frameskip closes the gap.   AVOID (missiles) inside a wide-X / tight-Y ellipse
+  (``AVOID_INTERRUPT_RANGE`` × ``AVOID_INTERRUPT_RANGE_Y``) then steals
+  DESTROY/COLLECT so a same-lane torpedo is selected before it rams, without
+  locking AVOID on a shot in another row. The surface sub also interrupts
+  anytime it is inside ``SURFACE_SUB_AVOID_RANGE_{X,Y}`` (not only while
+  already in the surface band).
   When oxygen is low, those enemy interrupt radii shrink (and go to 0 at
   critical O₂) so the surface waypoint stays selected and the player goes up.
 
@@ -49,7 +53,10 @@ from concept_based_learning.environments.manual_policy.state import (
     NO_TARGET_IDX,
     PolicyState,
 )
-from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+from concept_based_learning.observations.egocentric import (
+    aabb_closest_delta_px,
+    aabb_surface_gap_px,
+)
 
 # Last game-object slot (index 0 is reserved meta NOOP).
 SURFACE_DUMMY_IDX = 34
@@ -58,7 +65,7 @@ SURFACE_SUB_IDX = 29
 
 OXYGEN_LOW_THRESHOLD = 15.0
 CRITICAL_OXYGEN_THRESHOLD = 5.0
-SURFACE_SUB_NEAR_RANGE = 15.0
+SURFACE_SUB_NEAR_RANGE = 5.0
 # While forced to surface, AVOID within this surface-gap radius interrupt.
 # Overridable via config ``SURFACE_DANGER_CLOSE_RANGE`` (see resolve_heuristic_*).
 SURFACE_DANGER_CLOSE_RANGE = 25.0
@@ -66,10 +73,19 @@ SURFACE_DANGER_CLOSE_RANGE = 25.0
 # AABB gap so FRAME_SKIP=4 cannot close a shark before the heuristic retargets.
 # Overridable via ``DESTROY_INTERRUPT_RANGE``.
 DESTROY_INTERRUPT_RANGE = 40.0
-# AVOID (torpedoes) steal DESTROY/COLLECT inside this AABB gap. Larger than
-# DESTROY so a sub that just fired is dropped before the shot connects.
-# Overridable via ``AVOID_INTERRUPT_RANGE``. ``<=0`` disables.
+# AVOID (torpedoes) steal DESTROY/COLLECT inside a wide-X / tight-Y ellipse of
+# AABB edge-gaps. X matches the old 55px same-lane steal; Y is a corridor so a
+# missile in another row does not lock AVOID. Overridable via
+# ``AVOID_INTERRUPT_RANGE`` / ``AVOID_INTERRUPT_RANGE_Y``. ``<=0`` disables.
 AVOID_INTERRUPT_RANGE = 55.0
+AVOID_INTERRUPT_RANGE_Y = 18.0
+# Surface sub: AVOID interrupt from any depth when this close (edge-gap ellipse).
+# Distinct from ``SURFACE_SUB_NEAR_RANGE``, which still gates *nearest* targeting
+# to the surface band so we do not hunt the patrol from mid-water. 5px edge-gap:
+# the patrol is slow — only dodge at contact range so a shark in the upper lane
+# is not ignored.
+SURFACE_SUB_AVOID_RANGE_X = 5.0
+SURFACE_SUB_AVOID_RANGE_Y = 5.0
 # While oxygen is low the surface WP must win: shrink combat interrupts so a
 # shark in the usual 40px band cannot keep the player underwater. Critical O₂
 # disables interrupts entirely (must surface).
@@ -239,6 +255,17 @@ def get_forced_target_override(raw_obs, current_targets, config, rng=None, objec
     return current_targets
 
 
+def _ellipse_in_range(gap_dx, gap_dy, range_x, range_y):
+    """True when AABB edge-gaps lie inside the axis-aligned ellipse."""
+    rx = jnp.asarray(range_x, dtype=jnp.float32)
+    ry = jnp.asarray(range_y, dtype=jnp.float32)
+    enabled = jnp.logical_and(rx > 0.0, ry > 0.0)
+    rx = jnp.maximum(rx, jnp.float32(1e-6))
+    ry = jnp.maximum(ry, jnp.float32(1e-6))
+    radius = (gap_dx / rx) ** 2 + (gap_dy / ry) ** 2
+    return jnp.logical_and(enabled, radius <= 1.0)
+
+
 def _oxygen_scaled_interrupt_range(oxygen, full_range):
     """Shrink (or zero) an enemy interrupt radius when oxygen is low/critical."""
     oxygen = jnp.asarray(oxygen, dtype=jnp.float32)
@@ -264,6 +291,9 @@ def _select_target(
     danger_close_range=None,
     destroy_interrupt_range=None,
     avoid_interrupt_range=None,
+    avoid_interrupt_range_y=None,
+    surface_sub_avoid_range_x=None,
+    surface_sub_avoid_range_y=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
@@ -276,6 +306,12 @@ def _select_target(
         destroy_interrupt_range = DESTROY_INTERRUPT_RANGE
     if avoid_interrupt_range is None:
         avoid_interrupt_range = AVOID_INTERRUPT_RANGE
+    if avoid_interrupt_range_y is None:
+        avoid_interrupt_range_y = AVOID_INTERRUPT_RANGE_Y
+    if surface_sub_avoid_range_x is None:
+        surface_sub_avoid_range_x = SURFACE_SUB_AVOID_RANGE_X
+    if surface_sub_avoid_range_y is None:
+        surface_sub_avoid_range_y = SURFACE_SUB_AVOID_RANGE_Y
     if diver_lane_y_px is None:
         diver_lane_y_px = DIVER_LANE_Y_PX
     if collect_edge_margin_px is None:
@@ -284,6 +320,13 @@ def _select_target(
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
     destroy_interrupt_range = jnp.asarray(destroy_interrupt_range, dtype=jnp.float32)
     avoid_interrupt_range = jnp.asarray(avoid_interrupt_range, dtype=jnp.float32)
+    avoid_interrupt_range_y = jnp.asarray(avoid_interrupt_range_y, dtype=jnp.float32)
+    surface_sub_avoid_range_x = jnp.asarray(
+        surface_sub_avoid_range_x, dtype=jnp.float32
+    )
+    surface_sub_avoid_range_y = jnp.asarray(
+        surface_sub_avoid_range_y, dtype=jnp.float32
+    )
     diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
     collect_edge_margin_px = jnp.asarray(collect_edge_margin_px, dtype=jnp.float32)
     oxygen = _latest_leaf(raw_observation.oxygen_level)
@@ -293,6 +336,15 @@ def _select_target(
     )
     avoid_interrupt_range = _oxygen_scaled_interrupt_range(
         oxygen, avoid_interrupt_range
+    )
+    avoid_interrupt_range_y = _oxygen_scaled_interrupt_range(
+        oxygen, avoid_interrupt_range_y
+    )
+    surface_sub_avoid_range_x = _oxygen_scaled_interrupt_range(
+        oxygen, surface_sub_avoid_range_x
+    )
+    surface_sub_avoid_range_y = _oxygen_scaled_interrupt_range(
+        oxygen, surface_sub_avoid_range_y
     )
 
     px = raw_observation.player.x[-1]
@@ -310,6 +362,9 @@ def _select_target(
 
     # Same edge/surface-gap metric as skill ego distance features.
     distances = aabb_surface_gap_px(
+        px, py, pw, ph, ox, oy, ow, oh, y_is_bottom_edge=False
+    )
+    gap_dx, gap_dy, _ = aabb_closest_delta_px(
         px, py, pw, ph, ox, oy, ow, oh, y_is_bottom_edge=False
     )
 
@@ -387,18 +442,32 @@ def _select_target(
     best_destroy_idx = jnp.argmin(destroy_dist).astype(jnp.int32)
     any_destroy_close = jnp.any(destroy_close)
 
-    # Torpedoes (and a near-surface patrol sub) steal DESTROY/COLLECT inside a
-    # wider band than sharks. Far AVOID still loses to nearest combat/collect.
-    avoid_interrupt = jnp.logical_and(
+    # Torpedoes: same-lane corridor (wide X, tight Y). Surface sub: close
+    # ellipse at any depth so an ascent does not ram it. Far AVOID still
+    # loses to nearest combat/collect.
+    is_missile_avoid = jnp.logical_and(is_avoid, jnp.logical_not(is_surface_sub))
+    missile_interrupt = jnp.logical_and(
         selectable,
         jnp.logical_and(
-            is_avoid,
-            jnp.logical_and(
-                avoid_interrupt_range > 0.0,
-                distances <= avoid_interrupt_range,
+            is_missile_avoid,
+            _ellipse_in_range(
+                gap_dx, gap_dy, avoid_interrupt_range, avoid_interrupt_range_y
             ),
         ),
     )
+    surface_sub_interrupt = jnp.logical_and(
+        active_mask,
+        jnp.logical_and(
+            is_surface_sub,
+            _ellipse_in_range(
+                gap_dx,
+                gap_dy,
+                surface_sub_avoid_range_x,
+                surface_sub_avoid_range_y,
+            ),
+        ),
+    )
+    avoid_interrupt = jnp.logical_or(missile_interrupt, surface_sub_interrupt)
     avoid_interrupt_dist = jnp.where(avoid_interrupt, distances, jnp.inf)
     best_avoid_idx = jnp.argmin(avoid_interrupt_dist).astype(jnp.int32)
     any_avoid_interrupt = jnp.any(avoid_interrupt)
@@ -477,6 +546,9 @@ def get_heuristic_target_with_state(
     danger_close_range=None,
     destroy_interrupt_range=None,
     avoid_interrupt_range=None,
+    avoid_interrupt_range_y=None,
+    surface_sub_avoid_range_x=None,
+    surface_sub_avoid_range_y=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
@@ -489,6 +561,9 @@ def get_heuristic_target_with_state(
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
         avoid_interrupt_range=avoid_interrupt_range,
+        avoid_interrupt_range_y=avoid_interrupt_range_y,
+        surface_sub_avoid_range_x=surface_sub_avoid_range_x,
+        surface_sub_avoid_range_y=surface_sub_avoid_range_y,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
         collect_edge_margin_px=collect_edge_margin_px,
@@ -513,6 +588,9 @@ def get_heuristic_target(
     danger_close_range=None,
     destroy_interrupt_range=None,
     avoid_interrupt_range=None,
+    avoid_interrupt_range_y=None,
+    surface_sub_avoid_range_x=None,
+    surface_sub_avoid_range_y=None,
     diver_lane_y_px=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
@@ -526,6 +604,9 @@ def get_heuristic_target(
         danger_close_range=danger_close_range,
         destroy_interrupt_range=destroy_interrupt_range,
         avoid_interrupt_range=avoid_interrupt_range,
+        avoid_interrupt_range_y=avoid_interrupt_range_y,
+        surface_sub_avoid_range_x=surface_sub_avoid_range_x,
+        surface_sub_avoid_range_y=surface_sub_avoid_range_y,
         diver_lane_y_px=diver_lane_y_px,
         collect_requires_no_destroy=collect_requires_no_destroy,
         collect_edge_margin_px=collect_edge_margin_px,

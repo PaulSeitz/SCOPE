@@ -261,8 +261,8 @@ def test_seaquest_facing_enemy_updates_when_target_crosses():
     assert float(extras[2, 1]) == FACING_ENEMY_NO
 
 
-def test_phoenix_can_fire_is_shield_active_not_projectile():
-    """Phoenix reuses the can_fire slot for visible shield-on (player.state)."""
+def test_phoenix_can_fire_follows_projectile_not_shield():
+    """Phoenix ego can_fire is magazine (shot in air), not shield-on."""
     from concept_based_learning.observations.skill_ego_features import (
         discrete_skill_ego_flags,
         phoenix_can_fire,
@@ -270,29 +270,28 @@ def test_phoenix_can_fire_is_shield_active_not_projectile():
     )
 
     configure_skill_ego_features(enabled=True, env_name="phoenix")
-    # Projectile in flight on frame 0, ready on frame 1 — must NOT drive the channel.
+    # Projectile in flight on frame 0, ready on frame 1. Shield stamp is the
+    # opposite (off then on) and must not drive the ego channel.
     raw = _FakeSingleProjectileObs(
         jnp.array([1.0, 0.0]),
         player_state=jnp.array([0.0, 1.0]),
     )
     extras = build_skill_ego_extras_stacked(raw)
     assert extras.shape == (2, 2)
-    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT  # shield off
-    assert float(extras[1, 0]) == CAN_FIRE_READY  # shield on
-    assert float(extras[0, 1]) == FACING_ENEMY_YES
-    assert float(extras[1, 1]) == FACING_ENEMY_YES
-    assert discrete_skill_ego_flags()[0].name == "shield_active"
-    # Legal-fire helper still tracks the projectile.
+    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[1, 0]) == CAN_FIRE_READY
+    assert discrete_skill_ego_flags()[0].name == "can_fire"
     assert float(phoenix_can_fire(raw)) == CAN_FIRE_READY
+    # Shield stamp is still available for debug / ability UI, not ego extras.
     assert float(phoenix_shield_active(raw)) == CAN_FIRE_READY
 
 
-def test_phoenix_shield_off_even_when_projectile_ready():
+def test_phoenix_can_fire_ready_when_no_projectile():
     configure_skill_ego_features(enabled=True, env_name="phoenix")
     raw = _FakeSingleProjectileObs(jnp.array([0.0, 0.0]), player_state=0.0)
     extras = build_skill_ego_extras_stacked(raw)
-    assert float(extras[0, 0]) == CAN_FIRE_IN_FLIGHT
-    assert float(extras[1, 0]) == CAN_FIRE_IN_FLIGHT
+    assert float(extras[0, 0]) == CAN_FIRE_READY
+    assert float(extras[1, 0]) == CAN_FIRE_READY
 
 def test_spaceinvaders_can_fire():
     configure_skill_ego_features(enabled=True, env_name="spaceinvaders")
@@ -551,6 +550,26 @@ def test_force_can_fire_overrides_default_ready_channel():
     assert extras.shape == (2, 1)  # can_fire only
     assert float(extras[0, 0]) == -1.0
     assert float(extras[1, 0]) == -1.0
+
+
+def test_force_can_fire_zero_on_pong_default_path():
+    """Diagnostic: EGO_FORCE_CAN_FIRE=0 is a no-weapon fill, not fake ready."""
+    _paper_eval_ego_cfg(
+        USE_EGO_BLOCKING_FEATURES=False,
+        USE_EGO_WEAPON_FEATURES=True,
+        USE_EGO_FACING_ENEMY_FEATURES=False,
+        ENV_NAME="pong",
+        EGO_FORCE_CAN_FIRE=0,
+    )
+
+    class _PongObs:
+        def __init__(self):
+            self.player = _FakePlayer(2)
+
+    extras = build_skill_ego_extras_stacked(_PongObs())
+    assert extras.shape == (2, 1)
+    assert float(extras[0, 0]) == 0.0
+    assert float(extras[1, 0]) == 0.0
 
 
 def test_pong_collect_pose_has_no_can_fire_channel():

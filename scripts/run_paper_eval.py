@@ -107,6 +107,8 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_destroyextras --gpus 0 --wait-deps --lean
   #   Locked channels, unclipped distance (one-off):
   python scripts/run_paper_eval.py --suite ego_min_noclip --gpus 0 --wait-deps --lean
+  #   Drop can_fire + oval AVOID / surface-sub dodge:
+  python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid --gpus 0 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -578,6 +580,17 @@ EGO_MIN_NOCLIP_STEMS = (
     "pong_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
     "beamrider_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
     "phoenix_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_nofacing",
+)
+
+# Drop can_fire (noblocking_noweapon) + oval AVOID interrupt + anytime surface-sub dodge.
+#   python scripts/run_paper_eval.py --suite ego_min_noweapon_ovalavoid --gpus 0 --wait-deps --lean
+EGO_MIN_NOWEAPON_OVALAVOID_SUITE = "ego_min_noweapon_ovalavoid"
+EGO_MIN_NOWEAPON_OVALAVOID_STEMS = (
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid_eval_full",
+    "pong_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid",
+    "beamrider_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid",
+    "phoenix_transfer_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_ovalavoid",
 )
 
 
@@ -1169,6 +1182,7 @@ SUITE_STEMS = {
     EGO_MIN_CHANNELS_SUITE: EGO_MIN_CHANNELS_STEMS,
     EGO_MIN_DESTROYEXTRAS_SUITE: EGO_MIN_DESTROYEXTRAS_STEMS,
     EGO_MIN_NOCLIP_SUITE: EGO_MIN_NOCLIP_STEMS,
+    EGO_MIN_NOWEAPON_OVALAVOID_SUITE: EGO_MIN_NOWEAPON_OVALAVOID_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1242,6 +1256,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_CHANNELS_SUITE: "ego_min",
     EGO_MIN_DESTROYEXTRAS_SUITE: "ego_dx",
     EGO_MIN_NOCLIP_SUITE: "ego_nc",
+    EGO_MIN_NOWEAPON_OVALAVOID_SUITE: "ego_ova",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2182,6 +2197,9 @@ _EVAL_OVERRIDE_KEYS = (
     "SURFACE_DANGER_CLOSE_RANGE",
     "DESTROY_INTERRUPT_RANGE",
     "AVOID_INTERRUPT_RANGE",
+    "AVOID_INTERRUPT_RANGE_Y",
+    "SURFACE_SUB_AVOID_RANGE_X",
+    "SURFACE_SUB_AVOID_RANGE_Y",
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
     "COLLECT_EDGE_MARGIN_PX",
@@ -2606,6 +2624,8 @@ def main() -> None:
             "retrained with USE_DESTROY_ONLY_EGO_EXTRAS → SQ eval + Pong/BR/PH. "
             f"{EGO_MIN_NOCLIP_SUITE}: locked channels with EGO_DISTANCE_CLIP_MAX_PX=null "
             "(one-off Pong timing probe). "
+            f"{EGO_MIN_NOWEAPON_OVALAVOID_SUITE}: drop can_fire + oval AVOID "
+            "interrupt + anytime surface-sub dodge → SQ eval + Pong/BR/PH. "
             "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
             "(init collectsurface; --wait-deps --lean). "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
