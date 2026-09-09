@@ -31,8 +31,8 @@ ENV_NAME: seaquest
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
-SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sticky
-WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sticky
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5
+WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_TAGS:
 - suite:ego_min_noweapon_surfacesub5_distbands
 - rq:1
@@ -48,7 +48,6 @@ WANDB_TAGS:
 - ego:noblocking
 - ego:noweapon
 - ego:distbands3
-- ego:sticky
 SKILL_INPUT_MODE: ego
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false
@@ -76,7 +75,7 @@ alg:
   CLIP_REWARD: true
   RESTRICT_FIRE_FOR_NON_DESTROY: false
   FIRST_FIRE: true
-  STICKY_ACTIONS: true
+  STICKY_ACTIONS: false
   EPISODIC_LIFE: true
   FRAME_STACK_SIZE: 4
   FRAME_SKIP: 4

@@ -238,7 +238,9 @@ as-is.
 
    Exclusive near/mid/far distance (`EGO_DISTANCE_HARD_EDGES_PX: [12, 40]`)
    is the next encoding probe so the S4 "bounded range" claim is a few
-   symbols, not a magic clip. That does not replace the metric fix above.
+   symbols, not a magic clip. Sticky (Machado 0.25 at train) is a *separate*
+   clip50 arm — do not confound it with the encoding. That does not replace
+   the metric fix above.
 
 ---
 
