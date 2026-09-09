@@ -117,6 +117,9 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_nofacing_ovalavoid --gpus 0 --wait-deps --lean
   #   Clip sweep on noweapon+surfacesub5 (10/20/30/50/80/100/noclip; --resume skips clip50):
   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_clipsweep --gpus 0,1,2 --wait-deps --lean --resume
+  #   Distance encoding + sticky on surfacesub5 (clip0 / distbins8 / clip10+sticky):
+  python scripts/materialize_surfacesub5_distabl.py
+  python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distabl --gpus 0,1,2 --wait-deps --lean
 
   # SKILL_TARGET_CUT=lifetime ablations (sequential on one GPU):
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite kangaroo_lifetime --wait-deps --lean \\
@@ -696,6 +699,36 @@ EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_STEMS = (
     )
 )
 EGO_MIN_NOWEAPON_OVALAVOID_CLIPSWEEP_STEMS = EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_STEMS
+
+# clip0 (distance zeroed) / distbins8 (no hard clip) / clip10+sticky train.
+#   python scripts/materialize_surfacesub5_distabl.py
+#   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distabl --gpus 0,1,2 --wait-deps --lean
+EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE = "ego_min_noweapon_surfacesub5_distabl"
+_EGO_SS5_DISTABL_TOKS = ("clip0", "distbins8", "clip10")
+_EGO_SS5_DISTABL_SUFFIX = {
+    "clip0": "",
+    "distbins8": "",
+    "clip10": "_sticky",
+}
+
+
+def _ego_ss5_distabl_train_stem(tok: str) -> str:
+    return (
+        f"seaquest_skills_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+        f"{_EGO_SS5_DISTABL_SUFFIX[tok]}"
+    )
+
+
+EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_STEMS = (
+    tuple(_ego_ss5_distabl_train_stem(tok) for tok in _EGO_SS5_DISTABL_TOKS)
+    + tuple(f"{_ego_ss5_distabl_train_stem(tok)}_eval_full" for tok in _EGO_SS5_DISTABL_TOKS)
+    + tuple(
+        f"{env}_transfer_ego_pov_{tok}_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+        f"{_EGO_SS5_DISTABL_SUFFIX[tok]}"
+        for env in ("pong", "beamrider", "phoenix")
+        for tok in _EGO_SS5_DISTABL_TOKS
+    )
+)
 
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
@@ -1291,6 +1324,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_STEMS,
     # deprecated alias → same stems
     "ego_min_noweapon_ovalavoid_clipsweep": EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_STEMS,
+    EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1370,6 +1404,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOFACING_OVALAVOID_SUITE: "ego_nfova",
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_SUITE: "ego_clip",
     "ego_min_noweapon_ovalavoid_clipsweep": "ego_clip",
+    EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE: "ego_dist",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2749,8 +2784,9 @@ def main() -> None:
             f"{EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_SUITE}: noweapon+surfacesub5 "
             "distance clip sweep 10/20/30/50/80/100/noclip → SQ + Pong/BR/PH "
             "(clip50 reuses existing; --resume). "
-            "φ8/clip50 spine (SQ eval + Pong ZS) ‖ pixel meta + ego tandem "
-            "(init collectsurface; --wait-deps --lean). "
+            f"{EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE}: surfacesub5 clip0 "
+            "(distance zeroed) / distbins8 (no hard clip) / clip10+sticky "
+            "→ SQ + Pong/BR/PH. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
