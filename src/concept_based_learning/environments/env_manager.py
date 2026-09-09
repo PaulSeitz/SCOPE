@@ -734,7 +734,14 @@ class EnvManager:
             )
 
         game_mods = _normalize_game_mods(config.get("GAME_MODS", None))
-        sticky_actions = config.get("STICKY_ACTIONS", False)
+        # AtariWrapper expects a float probability in [0, 1], not a bool.
+        # ``True`` becomes ``float(True) == 1.0`` (always repeat last action) and
+        # collapses training to zero reward — match flat_pqn_train's 0.25 default.
+        sticky_raw = config.get("STICKY_ACTIONS", False)
+        if isinstance(sticky_raw, bool):
+            sticky_actions = 0.25 if sticky_raw else 0.0
+        else:
+            sticky_actions = float(sticky_raw)
         episodic_life = config.get("EPISODIC_LIFE", False)
         first_fire = bool(config.get("FIRST_FIRE", True))
         # Must match frozen skill checkpoints: ego MLP length = EGO_OBS_CHANNELS_PER_FRAME * frame_stack_size.
@@ -778,7 +785,7 @@ class EnvManager:
             env = AtariWrapper(env, **wrapper_kwargs)
         else:
             # Evaluation-time wrapper: clean rollouts without sticky actions or episodic life.
-            wrapper_kwargs["sticky_actions"] = False
+            wrapper_kwargs["sticky_actions"] = 0.0
             wrapper_kwargs["episodic_life"] = False
             env = AtariWrapper(env, **wrapper_kwargs)
 

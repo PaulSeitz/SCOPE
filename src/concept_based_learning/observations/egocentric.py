@@ -49,6 +49,9 @@ _EGO_DISTANCE_BIN_MAX_PX: float = MAX_DIST
 _EGO_DISTANCE_BINS_SCALAR: bool = False
 # When set, replace scalar/bins with one binary channel per threshold (d <= t).
 _EGO_DISTANCE_FLAG_THRESHOLDS_PX: tuple[float, ...] | None = None
+# Exclusive one-hot range bands. ``[12, 40]`` → 3 channels: d<12, 12≤d<40, d≥40.
+# Unlike nested flags, these do not reconstruct a stepwise metric.
+_EGO_DISTANCE_HARD_EDGES_PX: tuple[float, ...] | None = None
 # None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
 # channels with this many triangular, 50%-overlap bins of world θ_target.
 _EGO_ANGLE_BINS: int | None = None
@@ -259,6 +262,42 @@ def set_ego_distance_flag_thresholds_px(
 
 def ego_distance_flag_thresholds_px() -> tuple[float, ...] | None:
     return _EGO_DISTANCE_FLAG_THRESHOLDS_PX
+
+
+def set_ego_distance_hard_edges_px(
+    edges: list[float] | tuple[float, ...] | None,
+) -> None:
+    """Exclusive one-hot bands from increasing interior edges (pixels).
+
+    ``n`` edges produce ``n + 1`` channels. Example: ``[12, 40]`` → near / mid / far.
+    """
+    global _EGO_DISTANCE_HARD_EDGES_PX
+    if edges is None:
+        _EGO_DISTANCE_HARD_EDGES_PX = None
+        return
+    vals = tuple(float(t) for t in edges)
+    if len(vals) < 1:
+        raise ValueError("EGO_DISTANCE_HARD_EDGES_PX must have at least one edge")
+    if any(v <= 0.0 for v in vals):
+        raise ValueError("EGO_DISTANCE_HARD_EDGES_PX values must be > 0")
+    if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
+        raise ValueError("EGO_DISTANCE_HARD_EDGES_PX must be strictly increasing")
+    _EGO_DISTANCE_HARD_EDGES_PX = vals
+
+
+def ego_distance_hard_edges_px() -> tuple[float, ...] | None:
+    return _EGO_DISTANCE_HARD_EDGES_PX
+
+
+def exclusive_distance_band_onehots(
+    distances_px: jnp.ndarray, edges_px: jnp.ndarray
+) -> jnp.ndarray:
+    """Return one-hot bands ``(..., n_edges + 1)`` for exclusive range sections."""
+    d = jnp.asarray(distances_px, dtype=jnp.float32)[..., None]
+    edges = jnp.asarray(edges_px, dtype=jnp.float32)
+    n_bands = int(edges.shape[0]) + 1
+    idx = jnp.sum(d >= edges, axis=-1).astype(jnp.int32)
+    return jax.nn.one_hot(idx, n_bands, dtype=jnp.float32)
 
 
 def set_ego_distance_bin_centers_px(centers: list[float] | tuple[float, ...] | None) -> None:
@@ -564,14 +603,24 @@ def configure_ego_obs_from_config(config: dict) -> None:
         config.get("USE_EGO_LOS_FEATURES", False),
     )
     set_ego_blocking_features(bool(blocking))
+    hard_edges = config.get("EGO_DISTANCE_HARD_EDGES_PX", None)
     flag_thresh = config.get("EGO_DISTANCE_FLAG_THRESHOLDS_PX", None)
-    if flag_thresh not in (None, "", False):
+    if hard_edges not in (None, "", False):
+        set_ego_distance_hard_edges_px(hard_edges)
+        set_ego_distance_flag_thresholds_px(None)
+        set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_bins_scalar(False)
+        set_ego_distance_bin_centers_px(None)
+    elif flag_thresh not in (None, "", False):
+        set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(flag_thresh)
         set_ego_distance_clip_max_pixels(None)
         set_ego_distance_bins(None)
         set_ego_distance_bins_scalar(False)
         set_ego_distance_bin_centers_px(None)
     else:
+        set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(None)
         clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
         set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
@@ -611,6 +660,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         )
         set_ego_psi_angle_bins(None)
         set_ego_psi_angle_scalar(False)
+        set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(None)
         set_ego_distance_clip_max_pixels(None)
         set_ego_distance_bins(None)
@@ -667,6 +717,8 @@ def ego_distance_channels_per_frame() -> int:
         return 2
     if using_ego_restrained_pose():
         return 0
+    if _EGO_DISTANCE_HARD_EDGES_PX:
+        return len(_EGO_DISTANCE_HARD_EDGES_PX) + 1
     if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
         return len(_EGO_DISTANCE_FLAG_THRESHOLDS_PX)
     if _EGO_DISTANCE_BINS:
@@ -700,6 +752,10 @@ def triangular_distance_bins(distances_px: jnp.ndarray, centers_px: jnp.ndarray)
 
 def distance_features_from_pixels(distances_px: jnp.ndarray) -> list[jnp.ndarray]:
     """Distance feature block as list of per-channel vectors."""
+    if _EGO_DISTANCE_HARD_EDGES_PX:
+        edges = jnp.asarray(_EGO_DISTANCE_HARD_EDGES_PX, dtype=jnp.float32)
+        onehots = exclusive_distance_band_onehots(distances_px, edges)
+        return [onehots[..., i] for i in range(int(onehots.shape[-1]))]
     if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
         thresholds = jnp.asarray(_EGO_DISTANCE_FLAG_THRESHOLDS_PX, dtype=jnp.float32)
         d = jnp.asarray(distances_px, dtype=jnp.float32)[..., None]

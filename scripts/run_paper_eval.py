@@ -117,6 +117,9 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_nofacing_ovalavoid --gpus 0 --wait-deps --lean
   #   Clip sweep on noweapon+surfacesub5 (10/20/30/50/80/100/noclip; --resume skips clip50):
   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_clipsweep --gpus 0,1,2 --wait-deps --lean --resume
+  #   Exclusive near/mid/far (12/40) + train sticky 0.25 on surfacesub5:
+  python scripts/materialize_surfacesub5_distbands.py
+  python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distbands --gpus 0 --wait-deps --lean
   #   Distance encoding + sticky on surfacesub5 (clip0 / distbins8 / clip10+sticky):
   python scripts/materialize_surfacesub5_distabl.py
   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distabl --gpus 0,1,2 --wait-deps --lean
@@ -730,6 +733,21 @@ EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_STEMS = (
     )
 )
 
+# Exclusive near/mid/far (12px / 40px) + Machado sticky 0.25 at train.
+#   python scripts/materialize_surfacesub5_distbands.py
+#   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distbands --gpus 0 --wait-deps --lean
+EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_SUITE = "ego_min_noweapon_surfacesub5_distbands"
+_EGO_SS5_DISTBANDS_TRAIN = (
+    "seaquest_skills_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sticky"
+)
+EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_STEMS = (
+    _EGO_SS5_DISTBANDS_TRAIN,
+    f"{_EGO_SS5_DISTBANDS_TRAIN}_eval_full",
+    "pong_transfer_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sticky",
+    "beamrider_transfer_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sticky",
+    "phoenix_transfer_ego_pov_distbands3_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sticky",
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1325,6 +1343,7 @@ SUITE_STEMS = {
     # deprecated alias → same stems
     "ego_min_noweapon_ovalavoid_clipsweep": EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_STEMS,
     EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_STEMS,
+    EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1405,6 +1424,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPSWEEP_SUITE: "ego_clip",
     "ego_min_noweapon_ovalavoid_clipsweep": "ego_clip",
     EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE: "ego_dist",
+    EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_SUITE: "ego_bands",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2373,6 +2393,7 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_DISTANCE_BIN_CENTERS_PX",
     "EGO_DISTANCE_BIN_MAX_PX",
     "EGO_DISTANCE_FLAG_THRESHOLDS_PX",
+    "EGO_DISTANCE_HARD_EDGES_PX",
     "EGO_RESTRAINED_POSE",
     "EGO_RESTRAINED_LATERAL_BAND_PX",
     "EGO_RESTRAINED_NEAR_FAR_PX",
@@ -2787,6 +2808,8 @@ def main() -> None:
             f"{EGO_MIN_NOWEAPON_SURFACESUB5_DISTABL_SUITE}: surfacesub5 clip0 "
             "(distance zeroed) / distbins8 (no hard clip) / clip10+sticky "
             "→ SQ + Pong/BR/PH. "
+            f"{EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_SUITE}: exclusive "
+            "near/mid/far (12/40px) + train sticky 0.25 → SQ + Pong/BR/PH. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "

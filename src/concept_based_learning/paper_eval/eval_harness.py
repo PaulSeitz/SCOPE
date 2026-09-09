@@ -192,6 +192,7 @@ def _overlay_ego_flags_from_skill_config(
             "EGO_DISTANCE_BIN_CENTERS_PX",
             "EGO_DISTANCE_BIN_MAX_PX",
             "EGO_DISTANCE_FLAG_THRESHOLDS_PX",
+            "EGO_DISTANCE_HARD_EDGES_PX",
             "EGO_ANGLE_BINS",
             "EGO_ANGLE_BINS_SCALAR",
             "EGO_ANGLE_SINCOS_SNAP",
