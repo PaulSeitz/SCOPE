@@ -794,7 +794,7 @@ EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS = (
     "phoenix_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
 )
 
-# Distance-block pose probes (Δxy / sign(Δxy) / absolute xy) + φ8, clip50 spine.
+# Distance-block pose probes (Δxy / sign(Δxy) / absolute xy) + φ8; clip null.
 # Trains first so --gpus 0,1,2 shards one train per GPU.
 #   python scripts/materialize_surfacesub5_distpose.py
 #   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_distpose --gpus 0,1,2 --wait-deps --lean
@@ -805,11 +805,10 @@ _EGO_SS5_DISTPOSE_TOKS = (
     "posxy_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
 )
 EGO_MIN_SURFACESUB5_DISTPOSE_STEMS = (
-    # trains
-    *(f"seaquest_skills_ego_pov_{tok}" for tok in _EGO_SS5_DISTPOSE_TOKS)
-    # evals
-    + tuple(f"seaquest_skills_ego_pov_{tok}_eval_full" for tok in _EGO_SS5_DISTPOSE_TOKS)
-    # transfers
+    tuple(f"seaquest_skills_ego_pov_{tok}" for tok in _EGO_SS5_DISTPOSE_TOKS)
+    + tuple(
+        f"seaquest_skills_ego_pov_{tok}_eval_full" for tok in _EGO_SS5_DISTPOSE_TOKS
+    )
     + tuple(
         f"{env}_transfer_ego_pov_{tok}"
         for tok in _EGO_SS5_DISTPOSE_TOKS
