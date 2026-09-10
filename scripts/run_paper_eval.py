@@ -816,6 +816,21 @@ EGO_MIN_SURFACESUB5_DISTPOSE_STEMS = (
     )
 )
 
+# clip10 continuous near + exclusive mid/far tiers (stitch near-field ↔ operational).
+#   python scripts/materialize_surfacesub5_neartiers.py
+#   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_neartiers --gpus 0 --wait-deps --lean
+EGO_MIN_SURFACESUB5_NEARTIERS_SUITE = "ego_min_surfacesub5_neartiers"
+_EGO_SS5_NEARTIERS_TRAIN = (
+    "seaquest_skills_ego_pov_neartiers_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+)
+EGO_MIN_SURFACESUB5_NEARTIERS_STEMS = (
+    _EGO_SS5_NEARTIERS_TRAIN,
+    f"{_EGO_SS5_NEARTIERS_TRAIN}_eval_full",
+    "pong_transfer_ego_pov_neartiers_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
+    "beamrider_transfer_ego_pov_neartiers_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
+    "phoenix_transfer_ego_pov_neartiers_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1416,6 +1431,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS,
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
+    EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1501,6 +1517,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: "ego_rand",
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
+    EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2899,6 +2916,8 @@ def main() -> None:
             f"{EGO_MIN_SURFACESUB5_DISTPOSE_SUITE}: clip50 surfacesub5 distance "
             "block → Δxy / sign(Δxy) / absolute xy (+ φ8); 3 trains → "
             "--gpus 0,1,2. "
+            f"{EGO_MIN_SURFACESUB5_NEARTIERS_SUITE}: clip10 continuous near + "
+            "exclusive tiers [10,20,50,80,150] beyond → SQ + Pong/BR/PH. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "

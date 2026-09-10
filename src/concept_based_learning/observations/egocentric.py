@@ -62,9 +62,17 @@ _EGO_DISTANCE_HARD_EDGES_PX: tuple[float, ...] | None = None
 #   xy             — body-frame (fwd, lat) absolute, clip-normalized
 #   delta_xy       — frame-to-frame Δfwd, Δlat / MAX_SPEED
 #   delta_xy_sign  — sign(Δfwd), sign(Δlat) ∈ {-1,0,1}
+#   near_tiers     — continuous clip near-field + exclusive one-hots beyond
+#                    the first hard edge (see ``near_tier_distance_features``)
 _EGO_DISTANCE_MODE: str = "scalar"
 _EGO_DISTANCE_DELTA_SIGN_EPS_PX: float = 0.5
-DISTANCE_MODE_CHOICES = ("scalar", "xy", "delta_xy", "delta_xy_sign")
+DISTANCE_MODE_CHOICES = (
+    "scalar",
+    "xy",
+    "delta_xy",
+    "delta_xy_sign",
+    "near_tiers",
+)
 # None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
 # channels with this many triangular, 50%-overlap bins of world θ_target.
 _EGO_ANGLE_BINS: int | None = None
@@ -674,7 +682,41 @@ def configure_ego_obs_from_config(config: dict) -> None:
     flag_thresh = config.get("EGO_DISTANCE_FLAG_THRESHOLDS_PX", None)
     clip_choices = config.get("EGO_DISTANCE_CLIP_CHOICES_PX", None)
     dist_mode = config.get("EGO_DISTANCE_MODE", None)
-    if hard_edges not in (None, "", False):
+    dist_mode_key = (
+        str(dist_mode).strip().lower() if dist_mode not in (None, "", False) else "scalar"
+    )
+    if dist_mode_key == "near_tiers":
+        # Continuous near-field (clip) + exclusive far bands (hard edges).
+        if hard_edges in (None, "", False):
+            raise ValueError(
+                "EGO_DISTANCE_MODE: near_tiers requires EGO_DISTANCE_HARD_EDGES_PX "
+                "(e.g. [10, 20, 50, 80, 150])."
+            )
+        clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+        if clip_px in (None, "", False):
+            raise ValueError(
+                "EGO_DISTANCE_MODE: near_tiers requires EGO_DISTANCE_CLIP_MAX_PX "
+                "(near-detail width, typically 10)."
+            )
+        set_ego_distance_hard_edges_px(hard_edges)
+        set_ego_distance_flag_thresholds_px(None)
+        set_ego_distance_clip_max_pixels(float(clip_px))
+        set_ego_distance_clip_choices_px(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_bins_scalar(False)
+        set_ego_distance_bin_centers_px(None)
+        set_ego_distance_mode(
+            "near_tiers",
+            sign_eps_px=float(config.get("EGO_DISTANCE_DELTA_SIGN_EPS_PX", 0.5)),
+        )
+        near_cap = float(clip_px)
+        first_edge = float(_EGO_DISTANCE_HARD_EDGES_PX[0])  # type: ignore[index]
+        if abs(first_edge - near_cap) > 1e-6:
+            raise ValueError(
+                "near_tiers expects the first hard edge to match "
+                f"EGO_DISTANCE_CLIP_MAX_PX ({near_cap}), got first edge {first_edge}."
+            )
+    elif hard_edges not in (None, "", False):
         set_ego_distance_hard_edges_px(hard_edges)
         set_ego_distance_flag_thresholds_px(None)
         set_ego_distance_clip_max_pixels(None)
@@ -824,6 +866,11 @@ def ego_distance_channels_per_frame() -> int:
         return 2
     if using_ego_restrained_pose():
         return 0
+    if _EGO_DISTANCE_MODE == "near_tiers":
+        if not _EGO_DISTANCE_HARD_EDGES_PX:
+            raise ValueError("near_tiers mode requires EGO_DISTANCE_HARD_EDGES_PX")
+        # Continuous near + one-hots for bands at/after the first edge (drop d<edge0).
+        return 1 + len(_EGO_DISTANCE_HARD_EDGES_PX)
     if _EGO_DISTANCE_HARD_EDGES_PX:
         return len(_EGO_DISTANCE_HARD_EDGES_PX) + 1
     if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
@@ -833,6 +880,27 @@ def ego_distance_channels_per_frame() -> int:
     if _EGO_DISTANCE_MODE in ("xy", "delta_xy", "delta_xy_sign"):
         return 2
     return 1
+
+
+def near_tier_distance_features(distances_px: jnp.ndarray) -> list[jnp.ndarray]:
+    """Clip-continuous near field + exclusive one-hots beyond the first edge.
+
+    Channel 0: ``min(d, near_cap) / near_cap`` (same as scalar clip).
+    Channels 1..: exclusive bands for ``d >= edge0`` only — the ``d < edge0``
+    one-hot is dropped so the near field is carried by the continuous channel.
+    """
+    if not _EGO_DISTANCE_HARD_EDGES_PX:
+        raise ValueError("near_tiers requires EGO_DISTANCE_HARD_EDGES_PX")
+    if _EGO_DISTANCE_CLIP_MAX_PX is None:
+        raise ValueError("near_tiers requires EGO_DISTANCE_CLIP_MAX_PX")
+    near_cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
+    d = jnp.asarray(distances_px, dtype=jnp.float32)
+    continuous = jnp.minimum(d, near_cap) / jnp.maximum(near_cap, jnp.float32(1e-6))
+    edges = jnp.asarray(_EGO_DISTANCE_HARD_EDGES_PX, dtype=jnp.float32)
+    onehots = exclusive_distance_band_onehots(d, edges)
+    # Drop band 0 (d < first edge); keep bands starting at edge0.
+    far = [onehots[..., i] for i in range(1, int(onehots.shape[-1]))]
+    return [continuous, *far]
 
 
 def body_frame_delta_xy_features(
@@ -898,6 +966,8 @@ def distance_features_from_pixels(
     clip_cap: jnp.ndarray | float | None = None,
 ) -> list[jnp.ndarray]:
     """Distance feature block as list of per-channel vectors."""
+    if _EGO_DISTANCE_MODE == "near_tiers":
+        return near_tier_distance_features(distances_px)
     if _EGO_DISTANCE_HARD_EDGES_PX:
         edges = jnp.asarray(_EGO_DISTANCE_HARD_EDGES_PX, dtype=jnp.float32)
         onehots = exclusive_distance_band_onehots(distances_px, edges)

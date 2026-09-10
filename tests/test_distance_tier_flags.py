@@ -29,7 +29,44 @@ def test_tier4_soft_bins_peak_near_center():
     assert int(jnp.argmax(feats[0])) == 1
 
 
-def test_hard_edges_exclusive_onehots():
+def test_near_tiers_continuous_plus_far_bands():
+    configure_ego_obs_from_config(
+        {
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_FACING_FRAME": True,
+            "EGO_POSE_XY": False,
+            "EGO_DISTANCE_MODE": "near_tiers",
+            "EGO_DISTANCE_CLIP_MAX_PX": 10,
+            "EGO_DISTANCE_HARD_EDGES_PX": [10, 20, 50, 80, 150],
+            "USE_EGO_SIZE_FEATURES": False,
+            "USE_EGO_VELOCITY_FEATURES": False,
+            "USE_EGO_WEAPON_FEATURES": False,
+        }
+    )
+    assert ego_distance_channels_per_frame() == 6
+    d = jnp.array([5.0, 10.0, 35.0, 200.0])
+    stacked = jnp.stack(distance_features_from_pixels(d), axis=-1)
+    # d=5: half-scale continuous, no far tier
+    assert float(stacked[0, 0]) == pytest.approx(0.5)
+    assert float(stacked[0, 1:].sum()) == pytest.approx(0.0)
+    # d=10: saturated continuous + first far band (10–20)
+    assert float(stacked[1, 0]) == pytest.approx(1.0)
+    assert float(stacked[1, 1]) == pytest.approx(1.0)
+    # d=35 → 20–50 band; d=200 → ≥150
+    assert float(stacked[2, 2]) == pytest.approx(1.0)
+    assert float(stacked[3, 5]) == pytest.approx(1.0)
+
+
+def test_near_tiers_requires_matching_first_edge():
+    with pytest.raises(ValueError, match="first hard edge"):
+        configure_ego_obs_from_config(
+            {
+                "EGO_DISTANCE_MODE": "near_tiers",
+                "EGO_DISTANCE_CLIP_MAX_PX": 10,
+                "EGO_DISTANCE_HARD_EDGES_PX": [12, 40],
+            }
+        )
+
     configure_ego_obs_from_config(
         {
             "USE_POV_RELATIVE_MAPPER": True,
