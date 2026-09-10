@@ -36,6 +36,10 @@ _USE_EGO_BLOCKING_FEATURES = False
 # None = normalize by MAX_DIST (full screen diagonal). Otherwise clip Euclidean
 # distance in pixels to this cap, then divide by the cap so feature ∈ [0, 1].
 _EGO_DISTANCE_CLIP_MAX_PX: float | None = None
+# Train-time domain randomization over scalar clip caps. When set, the training
+# loop samples one cap per env per episode and passes it into get_ego_obs; eval
+# / visualizer keep using ``_EGO_DISTANCE_CLIP_MAX_PX`` (no override).
+_EGO_DISTANCE_CLIP_CHOICES_PX: tuple[float, ...] | None = None
 # None / 0 = single normalized distance channel.
 # Otherwise replace it with this many triangular, overlapping distance bins.
 _EGO_DISTANCE_BINS: int | None = None
@@ -209,6 +213,30 @@ def set_ego_distance_clip_max_pixels(max_px: float | None) -> None:
 def ego_distance_clip_max_pixels() -> float | None:
     """Return the active distance clip cap in pixels, or None if disabled."""
     return _EGO_DISTANCE_CLIP_MAX_PX
+
+
+def set_ego_distance_clip_choices_px(
+    choices: list[float] | tuple[float, ...] | None,
+) -> None:
+    """Configure train-time per-episode clip sampling set (scalar distance only)."""
+    global _EGO_DISTANCE_CLIP_CHOICES_PX
+    if choices in (None, "", False):
+        _EGO_DISTANCE_CLIP_CHOICES_PX = None
+        return
+    caps = tuple(float(c) for c in choices)
+    if not caps:
+        _EGO_DISTANCE_CLIP_CHOICES_PX = None
+        return
+    if any(c < 0 for c in caps):
+        raise ValueError(
+            f"EGO_DISTANCE_CLIP_CHOICES_PX entries must be >= 0, got {choices}"
+        )
+    _EGO_DISTANCE_CLIP_CHOICES_PX = caps
+
+
+def ego_distance_clip_choices_px() -> tuple[float, ...] | None:
+    """Return train-time clip choices, or None when clip DR is off."""
+    return _EGO_DISTANCE_CLIP_CHOICES_PX
 
 
 def ego_distance_zeroed() -> bool:
@@ -605,10 +633,12 @@ def configure_ego_obs_from_config(config: dict) -> None:
     set_ego_blocking_features(bool(blocking))
     hard_edges = config.get("EGO_DISTANCE_HARD_EDGES_PX", None)
     flag_thresh = config.get("EGO_DISTANCE_FLAG_THRESHOLDS_PX", None)
+    clip_choices = config.get("EGO_DISTANCE_CLIP_CHOICES_PX", None)
     if hard_edges not in (None, "", False):
         set_ego_distance_hard_edges_px(hard_edges)
         set_ego_distance_flag_thresholds_px(None)
         set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_clip_choices_px(None)
         set_ego_distance_bins(None)
         set_ego_distance_bins_scalar(False)
         set_ego_distance_bin_centers_px(None)
@@ -616,6 +646,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(flag_thresh)
         set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_clip_choices_px(None)
         set_ego_distance_bins(None)
         set_ego_distance_bins_scalar(False)
         set_ego_distance_bin_centers_px(None)
@@ -624,6 +655,10 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_flag_thresholds_px(None)
         clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
         set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
+        # Choices are train-only DR; keep the fixed clip as eval/default fallback.
+        set_ego_distance_clip_choices_px(
+            None if clip_choices in (None, "", False) else clip_choices
+        )
         dist_bins = config.get("EGO_DISTANCE_BINS", None)
         set_ego_distance_bins(None if dist_bins in (None, "", False) else int(dist_bins))
         set_ego_distance_bins_scalar(bool(config.get("EGO_DISTANCE_BINS_SCALAR", False)))
@@ -663,6 +698,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(None)
         set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_clip_choices_px(None)
         set_ego_distance_bins(None)
     else:
         set_ego_restrained_pose(None)
@@ -692,8 +728,22 @@ def configure_ego_obs_from_config(config: dict) -> None:
     )
 
 
-def distance_feature_from_pixels(distances_px: jnp.ndarray) -> jnp.ndarray:
-    """Map raw pixel distances to the normalized distance channel fed to skills."""
+def distance_feature_from_pixels(
+    distances_px: jnp.ndarray,
+    clip_cap: jnp.ndarray | float | None = None,
+) -> jnp.ndarray:
+    """Map raw pixel distances to the normalized distance channel fed to skills.
+
+    ``clip_cap`` overrides the configured ``EGO_DISTANCE_CLIP_MAX_PX`` when given
+    (used for per-env train-time clip sampling). Pass a traced scalar per call.
+    """
+    if clip_cap is not None:
+        cap = jnp.asarray(clip_cap, dtype=jnp.float32)
+        return jnp.where(
+            cap == jnp.float32(0.0),
+            jnp.zeros_like(distances_px, dtype=jnp.float32),
+            jnp.minimum(distances_px, cap) / jnp.maximum(cap, jnp.float32(1e-6)),
+        )
     if _EGO_DISTANCE_CLIP_MAX_PX is not None:
         cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
         # Sentinel 0: drop distance information (keep channel width for arch parity).
@@ -750,7 +800,10 @@ def triangular_distance_bins(distances_px: jnp.ndarray, centers_px: jnp.ndarray)
     return tri
 
 
-def distance_features_from_pixels(distances_px: jnp.ndarray) -> list[jnp.ndarray]:
+def distance_features_from_pixels(
+    distances_px: jnp.ndarray,
+    clip_cap: jnp.ndarray | float | None = None,
+) -> list[jnp.ndarray]:
     """Distance feature block as list of per-channel vectors."""
     if _EGO_DISTANCE_HARD_EDGES_PX:
         edges = jnp.asarray(_EGO_DISTANCE_HARD_EDGES_PX, dtype=jnp.float32)
@@ -779,7 +832,7 @@ def distance_features_from_pixels(distances_px: jnp.ndarray) -> list[jnp.ndarray
             scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
             return [scalar]
         return [bin_feats[:, i] for i in range(int(bin_feats.shape[-1]))]
-    return [distance_feature_from_pixels(distances_px)]
+    return [distance_feature_from_pixels(distances_px, clip_cap=clip_cap)]
 
 
 def distance_pixels_from_feature(feature: jnp.ndarray | float) -> float:
@@ -1884,7 +1937,9 @@ def _frame_geometry_facing(
     return distance, fwd, lat, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h, p_w, p_h
 
 
-def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
+def _get_ego_obs_pov_facing_frame(
+    raw_observation, objects, target_idx, distance_clip_px=None
+):
     """Facing-locked FPS: polar (dist, φ) or Cartesian (fwd, lat); no velocity."""
     from concept_based_learning.observations.pov_facing_frame import (
         resolve_facing_deg,
@@ -1961,7 +2016,9 @@ def _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx):
             pose_stack[..., i] for i in range(int(pose_stack.shape[-1]))
         ]
     else:
-        channels = distance_features_from_pixels(distances)
+        channels = distance_features_from_pixels(
+            distances, clip_cap=distance_clip_px
+        )
         if _USE_EGO_HIT_CORRIDOR:
             # Corridor uses centre-frame lateral (body overlap slab), even when
             # distance/φ use closest-points geometry.
@@ -2189,7 +2246,9 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
     return stacked_ego.astype(jnp.float32).flatten()
 
 
-def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
+def get_ego_obs(
+    raw_observation, objects, target_idx, heading_deg=None, distance_clip_px=None
+):
     """
     Build egocentric observations using the currently selected format.
 
@@ -2199,6 +2258,9 @@ def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
     where ψ must be measured against the integrated heading rather than the
     sprite orientation. Omitting it there would silently feed the network a
     facing it never commanded, so that case raises instead.
+
+    ``distance_clip_px`` overrides ``EGO_DISTANCE_CLIP_MAX_PX`` for the scalar
+    distance channel (train-time clip sampling). Other encodings ignore it.
     """
     from concept_based_learning.observations.pov_relative import using_pov_relative
     from concept_based_learning.observations.pov_fixed_bilateral import (
@@ -2212,7 +2274,9 @@ def get_ego_obs(raw_observation, objects, target_idx, heading_deg=None):
     if using_pov_fixed_bilateral():
         return _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx)
     if using_pov_facing_frame():
-        return _get_ego_obs_pov_facing_frame(raw_observation, objects, target_idx)
+        return _get_ego_obs_pov_facing_frame(
+            raw_observation, objects, target_idx, distance_clip_px=distance_clip_px
+        )
     if using_pov_relative():
         if heading_deg is None and using_pov_turn_primitives():
             raise ValueError(

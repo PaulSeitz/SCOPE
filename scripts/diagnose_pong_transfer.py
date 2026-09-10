@@ -34,6 +34,8 @@ from concept_based_learning.environments.heuristics import (  # noqa: E402
 from concept_based_learning.observations.action_space import (  # noqa: E402
     fire_ego_action_indices,
     make_realized_ego_mask_fn,
+    make_legal_ego_mask_fn,
+    legal_ego_mask_mode_from_config,
     mask_q_with_legal_ego,
 )
 from concept_based_learning.observations.egocentric import (  # noqa: E402
@@ -48,6 +50,12 @@ from concept_based_learning.observations.pov_facing_frame import (  # noqa: E402
 from concept_based_learning.paper_eval.config_merge import (  # noqa: E402
     flatten_experiment_cfg,
     merge_paper_eval_yaml,
+)
+from concept_based_learning.paper_eval.bearing_conditioning import (  # noqa: E402
+    ABS_LAT_BUCKETS,
+    SIGNED_LAT_BUCKETS,
+    mean_pairwise_tv,
+    signed_lat_bucket,
 )
 from concept_based_learning.networks.skill_network import q_network_from_config  # noqa: E402
 from concept_based_learning.observations.pov_relative import (  # noqa: E402
@@ -139,10 +147,13 @@ def run_diag(
     num_episodes: int,
     max_frames: int,
     legal_mask: bool,
+    mask_mode: str = "realized",
     seed: int,
 ) -> dict:
     cfg = dict(cfg)
     cfg["EGO_LEGAL_ACTION_MASK"] = bool(legal_mask)
+    if legal_mask:
+        cfg["EGO_LEGAL_ACTION_MASK_MODE"] = mask_mode
     configure_ego_obs_from_config(cfg)
     configure_label_routing_from_config(cfg)
 
@@ -155,8 +166,9 @@ def run_diag(
     num_skills = int(cfg["NUM_SKILLS"])
     ego_dim = int(cfg["EGO_ACTION_DIM"])
     fire_indices = fire_ego_action_indices(ego_dim)
-    legal_fn = make_realized_ego_mask_fn(
+    legal_fn = make_legal_ego_mask_fn(
         action_mapper,
+        mode=mask_mode if legal_mask else "realized",
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=ego_dim,
@@ -172,7 +184,8 @@ def run_diag(
     wrong_strafe = 0
     idle_when_misaligned = 0
     move_when_aligned = 0
-    lat_bins = {"|lat|<8": Counter(), "|lat|8-20": Counter(), "|lat|>20": Counter()}
+    lat_bins = {b: Counter() for b in ABS_LAT_BUCKETS}
+    signed_lat_bins = {b: Counter() for b in SIGNED_LAT_BUCKETS}
     paddle_dy_vs_lat_sign = []  # +1 if paddle moved toward ball in y
     episode_scores = []
     miss_gaps = []  # |lat| when ball crosses near paddle x (intercept attempt)
@@ -265,6 +278,7 @@ def run_diag(
             else:
                 bucket = "|lat|>20"
             lat_bins[bucket][chosen] += 1
+            signed_lat_bins[signed_lat_bucket(lat)][chosen] += 1
 
             # Correct strafe: lat>0 (ball below) → RIGHT family; lat<0 → LEFT family
             if abs_lat >= 8:
@@ -320,8 +334,11 @@ def run_diag(
     toward_frac = (
         float(np.mean(paddle_dy_vs_lat_sign)) if paddle_dy_vs_lat_sign else float("nan")
     )
+    abs_tv = mean_pairwise_tv(lat_bins, n_actions=ego_dim, min_count=16)
+    signed_tv = mean_pairwise_tv(signed_lat_bins, n_actions=ego_dim, min_count=16)
     return {
         "legal_mask": legal_mask,
+        "mask_mode": mask_mode if legal_mask else None,
         "steps": steps_total,
         "episodes": num_episodes,
         "episode_scores": episode_scores,
@@ -344,9 +361,17 @@ def run_diag(
         "n_paddle_moves_logged": len(paddle_dy_vs_lat_sign),
         "mean_abs_lat_near_paddle": float(np.mean(miss_gaps)) if miss_gaps else float("nan"),
         "n_near_paddle_samples": len(miss_gaps),
+        "bearing_tv_abs_mean": abs_tv["bearing_tv_mean"],
+        "bearing_tv_abs_max": abs_tv["bearing_tv_max"],
+        "bearing_tv_signed_mean": signed_tv["bearing_tv_mean"],
+        "bearing_tv_signed_max": signed_tv["bearing_tv_max"],
         "ego_by_lat_bucket": {
             b: {EGO_NAMES.get(k, str(k)): int(v) for k, v in c.most_common(8)}
             for b, c in lat_bins.items()
+        },
+        "ego_by_signed_lat_bucket": {
+            b: {EGO_NAMES.get(k, str(k)): int(v) for k, v in c.most_common(8)}
+            for b, c in signed_lat_bins.items()
         },
     }
 
@@ -363,6 +388,12 @@ def main() -> None:
         default="both",
         choices=("off", "on", "both"),
         help="Legal-mask modes to run",
+    )
+    ap.add_argument(
+        "--mask-mode",
+        default="realized",
+        choices=("realized", "pure_cardinal", "strafe_only"),
+        help="When legal mask is on: realized vs pure_cardinal (no diagonals / move+FIRE)",
     )
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -392,6 +423,7 @@ def main() -> None:
             num_episodes=args.episodes,
             max_frames=args.max_frames,
             legal_mask=legal,
+            mask_mode=args.mask_mode,
             seed=args.seed,
         )
         results["runs"].append(stats)

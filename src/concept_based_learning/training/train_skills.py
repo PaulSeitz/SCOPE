@@ -15,6 +15,7 @@ from pathlib import Path
 
 from concept_based_learning.observations.egocentric import (
     destroy_only_extras_active,
+    ego_distance_clip_choices_px,
     get_ego_obs,
     set_destroy_only_ego_extras,
     skill_ego_flat_dim,
@@ -26,6 +27,8 @@ from concept_based_learning.observations.egocentric import _get_player as _get_p
 from concept_based_learning.observations.action_space import (
     fire_ego_action_indices,
     make_realized_ego_mask_fn,
+    make_legal_ego_mask_fn,
+    legal_ego_mask_mode_from_config,
     mask_q_with_legal_ego,
 )
 from concept_based_learning.observations.pov_turn import (
@@ -231,8 +234,10 @@ def make_train(
             fire_action=int(ego_mapper_fire_action),
         )
     elif legal_ego_mask_fn is None:
-        legal_ego_mask_fn = make_realized_ego_mask_fn(
+        _mask_mode = legal_ego_mask_mode_from_config(config) or "realized"
+        legal_ego_mask_fn = make_legal_ego_mask_fn(
             action_mapper,
+            mode=_mask_mode,
             noop_action=int(ego_mapper_noop_action),
             fire_action=int(ego_mapper_fire_action),
             ego_action_dim=EGO_ACTION_DIM,
@@ -251,6 +256,22 @@ def make_train(
     frame_stack_size = int(config.get("FRAME_STACK_SIZE", 4))
     destroy_skill_idx = skill_names.index("DESTROY") if "DESTROY" in skill_names else 0
     set_destroy_only_ego_extras(bool(config.get("USE_DESTROY_ONLY_EGO_EXTRAS", False)))
+    # Train-time distance-clip DR: sample one cap per env per episode.
+    _clip_choices = ego_distance_clip_choices_px()
+    use_clip_dr = (
+        _clip_choices is not None
+        and len(_clip_choices) > 0
+        and skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES)
+    )
+    clip_choices_arr = (
+        jnp.asarray(_clip_choices, dtype=jnp.float32) if use_clip_dr else None
+    )
+
+    def _sample_env_clip_caps(rng, n_envs):
+        idx = jax.random.randint(
+            rng, (n_envs,), 0, int(clip_choices_arr.shape[0])
+        )
+        return clip_choices_arr[idx]
     heterogeneous_skill_ego = (
         destroy_only_extras_active()
         and skill_input_mode in ("ego", "ego_embed")
@@ -339,11 +360,19 @@ def make_train(
         )
         return chosen_actions
 
-    def _skill_inputs(raw_obs, objects, target_idxs, headings=None):
+    def _skill_inputs(raw_obs, objects, target_idxs, headings=None, distance_clips=None):
         if skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
+            if distance_clips is None:
+                if headings is None:
+                    return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
+                return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs, headings)
             if headings is None:
-                return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
-            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs, headings)
+                return jax.vmap(
+                    lambda r, o, t, c: get_ego_obs(r, o, t, distance_clip_px=c)
+                )(raw_obs, objects, target_idxs, distance_clips)
+            return jax.vmap(
+                lambda r, o, t, h, c: get_ego_obs(r, o, t, h, distance_clip_px=c)
+            )(raw_obs, objects, target_idxs, headings, distance_clips)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
         raise ValueError(
@@ -512,6 +541,7 @@ def make_train(
                 (
                     last_obs,
                     env_state,
+                    env_clip_caps,
                     running_returns,
                     rng,
                     last_targets,
@@ -645,11 +675,13 @@ def make_train(
                 step_headings = (
                     policy_states.heading_deg if use_turn_primitives else None
                 )
+                step_clips = env_clip_caps if use_clip_dr else None
                 ego_obses = _skill_inputs(
                     last_obs.raw_observation,
                     last_obs.objects,
                     safe_target_idxs,
                     step_headings,
+                    step_clips,
                 )
                 pixel_obses = (
                     last_obs.pixel_observation
@@ -833,6 +865,11 @@ def make_train(
                     _zero_batched,
                 )
 
+                if use_clip_dr:
+                    rng, rng_clip = jax.random.split(rng)
+                    resampled = _sample_env_clip_caps(rng_clip, config["NUM_ENVS"])
+                    env_clip_caps = jnp.where(reset_mask, resampled, env_clip_caps)
+
                 car_hits_sum = car_hits_sum + jnp.sum(life_lost > 0)
 
                 # Track climb progress (Atari y grows downward → altitude = 210 - y).
@@ -889,6 +926,7 @@ def make_train(
                     new_obs.objects,
                     safe_target_idxs,
                     policy_states.heading_deg if use_turn_primitives else None,
+                    env_clip_caps if use_clip_dr else None,
                 )
 
                 if relabel_all_objects:
@@ -1104,6 +1142,7 @@ def make_train(
                 return (
                     new_obs,
                     new_env_state,
+                    env_clip_caps,
                     running_returns,
                     rng,
                     target_obj_idxs,
@@ -1171,6 +1210,7 @@ def make_train(
             (
                 last_obs,
                 env_state,
+                env_clip_caps,
                 running_returns,
                 rng,
                 _last_targets,
@@ -1187,7 +1227,7 @@ def make_train(
                 running_env_metrics,
                 returned_env_metrics,
             ) = carry_final
-            expl_state = (last_obs, env_state)
+            expl_state = (last_obs, env_state, env_clip_caps)
 
             def _update_skill(train_state, skill_idx, rng, pose_only=False):
                 train_state = train_state.replace(
@@ -1659,6 +1699,12 @@ def make_train(
         )(jnp.arange(config["NUM_ENVS"], dtype=jnp.uint32))
         expl_state = jax.vmap(env.reset)(init_reset_keys)
         rng, _rng = jax.random.split(rng)
+        if use_clip_dr:
+            rng, rng_clip0 = jax.random.split(rng)
+            init_clip_caps = _sample_env_clip_caps(rng_clip0, config["NUM_ENVS"])
+        else:
+            init_clip_caps = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.float32)
+        expl_state = (expl_state[0], expl_state[1], init_clip_caps)
         running_returns = jnp.zeros(config["NUM_ENVS"], dtype=jnp.float32)
         returned_episode_returns, returned_episode_lengths, episode_lengths = (
             init_per_env_episode_stats(config["NUM_ENVS"])

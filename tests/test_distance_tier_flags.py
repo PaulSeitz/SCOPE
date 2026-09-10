@@ -1,5 +1,6 @@
 """Fixed distance tiers and nested threshold flags."""
 
+import pytest
 import jax.numpy as jnp
 
 from concept_based_learning.observations.egocentric import (
@@ -92,3 +93,47 @@ def test_configure_flags_clears_bins():
     assert len(chans) == 2
     assert float(chans[0][0]) == 0.0
     assert float(chans[1][0]) == 1.0
+
+
+def test_clip_cap_override_ignores_global():
+    set_ego_distance_hard_edges_px(None)
+    set_ego_distance_flag_thresholds_px(None)
+    set_ego_distance_bins(None)
+    set_ego_distance_clip_max_pixels(50.0)
+    d = jnp.array([25.0, 100.0])
+    # Global clip50: 25→0.5, 100→1.0
+    base = distance_features_from_pixels(d)[0]
+    assert float(base[0]) == pytest.approx(0.5)
+    assert float(base[1]) == pytest.approx(1.0)
+    # Override clip10: 25→1.0, 100→1.0
+    ov = distance_features_from_pixels(d, clip_cap=10.0)[0]
+    assert float(ov[0]) == pytest.approx(1.0)
+    assert float(ov[1]) == pytest.approx(1.0)
+    # Override clip80: 25→0.3125, 100→1.0
+    ov80 = distance_features_from_pixels(d, clip_cap=80.0)[0]
+    assert float(ov80[0]) == pytest.approx(25.0 / 80.0)
+    assert float(ov80[1]) == pytest.approx(1.0)
+
+
+def test_configure_clip_choices_keeps_fallback_clip():
+    from concept_based_learning.observations.egocentric import (
+        ego_distance_clip_choices_px,
+        ego_distance_clip_max_pixels,
+    )
+
+    configure_ego_obs_from_config(
+        {
+            "EGO_DISTANCE_CLIP_MAX_PX": 50,
+            "EGO_DISTANCE_CLIP_CHOICES_PX": [10, 20, 30, 50, 80],
+        }
+    )
+    assert ego_distance_clip_max_pixels() == 50.0
+    assert ego_distance_clip_choices_px() == (10.0, 20.0, 30.0, 50.0, 80.0)
+    # Hard edges clear choices.
+    configure_ego_obs_from_config(
+        {
+            "EGO_DISTANCE_HARD_EDGES_PX": [12, 40],
+            "EGO_DISTANCE_CLIP_CHOICES_PX": [10, 50],
+        }
+    )
+    assert ego_distance_clip_choices_px() is None
