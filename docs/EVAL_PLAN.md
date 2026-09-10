@@ -1,11 +1,13 @@
 # Evaluation plan (locked decisions)
 
-Date: 2026-09-07. Thesis claim: **strict informational abstraction** on System 1
-(egocentric, bounded pose) yields in-domain competence, robustness, and
-*homologous* skill transfer. Geometry / pose rewrites after φ8+facing+clip50
-are frozen. Remaining work is (1) a few **channel-deletion** trains, (2) a
-wider but shallower ALE matrix, (3) Montezuma as planned-env showcase,
-(4) Freeway as a limitation, (5) a later dedicated mods workshop.
+Date: 2026-09-07 (distance-clip section amended 2026-09-10). Thesis claim:
+**strict informational abstraction** on System 1 (egocentric, bounded pose)
+yields in-domain competence, robustness, and *homologous* skill transfer.
+Facing-frame φ8 + surfacesub5 labeling are frozen. **Distance clip
+(`EGO_DISTANCE_CLIP_MAX_PX`) is the remaining open lock** (clip10 vs clip50
+— see §0.1). Remaining work after that lock: (1) wider but shallower ALE
+matrix, (2) Montezuma as planned-env showcase, (3) Freeway as a limitation,
+(4) dedicated mods workshop (`docs/MODS_PLAN.md`).
 
 ## Why this direction
 
@@ -25,9 +27,10 @@ wider but shallower ALE matrix, (3) Montezuma as planned-env showcase,
 
 ## 0. Spine freeze + last ego-minimization runs
 
-**Do not rework:** facing-locked POV mapper, facing-frame φ, clip50, φ8 bins,
-v2 / navigatesurface *labeling* (surface ≠ COLLECT). Size, velocity, shot
-geometry stay off.
+**Do not rework:** facing-locked POV mapper, facing-frame φ, φ8 bins,
+surfacesub5 / navigatesurface *labeling* (surface ≠ COLLECT). Size, velocity,
+shot geometry stay off. Distance clip: **open** (§0.1) — do not start a new
+encoding campaign; pick clip10 or clip50 and move on.
 
 **Do (few runs, v2 checkpoint recipe) — suite `ego_min_channels`:**
 
@@ -75,6 +78,92 @@ Quirk (not a planned arm): Pong labeled DESTROY instead of COLLECT
 
 ---
 
+## 0.1 Distance clip — surfacesub5 spine (open lock)
+
+After §0, the live recipe moved to **noweapon + surfacesub5** (isotropic
+AVOID 55×55, surface-sub dodge 5×5, φ8, no blocking/weapon extras) under
+suite `ego_min_noweapon_surfacesub5_clipsweep`. That is the spine the
+tables below use. Raw syncs:
+`tmp/ego_min_surfacesub5_clipsweep/`, `tmp/ego_min_surfacesub5_distabl/`,
+`tmp/ego_min_surfacesub5_distbands/`, `tmp/ego_min_surfacesub5_cliprand/`.
+
+**Open decision for direction meeting:** lock **clip10** or **clip50**.
+Lean (not locked): **clip10** — consistent Pong COLLECT, dynamics retention
+near 1.0 (easier robustness story), SQ ~PQN parity (~18.6k), BR/PH weak but
+not collapsed. Clip50 is the competence ceiling (SQ 35k, best homologous
+DESTROY) but Pong is noisy and own-base dynamics retention looks worse
+partly because the base is inflated (see caveat below).
+
+### Transfer + in-domain (clipsweep)
+
+| clip | SQ base | Pong ZS | BR ZS | PH ZS | Pong episodes | Pong pts (P/E) |
+|------|--------:|--------:|------:|------:|---------------|----------------|
+| **clip10** | 18 640 | **0.0** | 555 | 1 890 | `[0, 0, 0]` | **20.3 / 20.3** |
+| clip20 | 27 310 | −15.0 | 1 660 | **5 970** | `[−15×3]` | — |
+| clip30 | 22 037 | −0.3 | 525 | 427 | `[+21, −11, −11]` | fluke mean |
+| **clip50** | **35 333** | −3.7 | **1 939** | 5 093 | `[−20, +20, −11]` | 10.7 / 14.3 |
+| clip80 | 24 860 | −0.3 | 940 | 4 750 | `[+21, −11, −11]` | fluke mean |
+| clip100 | 27 473 | −11.0 | 1 099 | 3 390 | `[−11×3]` | — |
+| noclip | 26 190 | −13.7 | 485 | 2 023 | `[−13/−14]` | — |
+
+### Robustness — own-base category median retention
+
+Retention = `mod_mean / agent_base`. Visual is always 1.00 on
+`random_color_enemies` (geometry-only ego). **Caveat (MODS_PLAN §4.6):**
+when stress mods land in a similar *absolute* band across clips while bases
+differ (18k↔35k), own-base dynamics retention ranks ≈ `1/base`. Do **not**
+read clip50’s 0.46 as “less robust than clip10’s 0.97” without the absolute
+table below. Prefer abs stress cells (and vs PQN) for the thesis robustness
+story once the clip is locked.
+
+| clip | SQ base | dynamics med. | semantic med. | visual |
+|------|--------:|--------------:|--------------:|-------:|
+| **clip10** | 18 640 | **0.97** | 1.00 | 1.00 |
+| clip20 | 27 310 | 0.78 | 1.13 | 1.00 |
+| clip30 | 22 037 | 0.79 | 1.02 | 1.00 |
+| **clip50** | 35 333 | 0.46 | 1.00 | 1.00 |
+| clip80 | 24 860 | 0.56 | 0.91 | 1.00 |
+| clip100 | 27 473 | 0.60 | 0.48 | 1.00 |
+| noclip | 26 190 | 0.61 | 0.91 | 1.00 |
+
+### Stress mods — absolute returns (same cells)
+
+| mod | clip10 | clip50 | note |
+|-----|-------:|-------:|------|
+| gravity | **19 413** | 17 340 | clip10 slightly higher abs |
+| faster_enemies | 690 | **1 670** | clip50 better |
+| fast_oxygen_drain | 8 500 | **15 867** | clip50 better |
+| shift_lanes | **20 123** | 19 757 | ≈ tied |
+| surface_sub_always | 11 013 | **16 550** | clip50 better |
+| random_color_enemies | 18 640 (1.00) | 35 333 (1.00) | appearance OK both |
+
+### Encoding / DR probes on the same spine (rejected as lock)
+
+None beats the clip10↔clip50 tradeoff. Keep as negative evidence only.
+
+| arm | SQ | Pong | BR | PH | takeaway |
+|-----|---:|-----:|---:|---:|----------|
+| clip0 (dist zeroed) | 5 250 | −18.3 | 293 | 240 | collapses; direction-only fails |
+| distbins8 | 14 447 | −19.0 | 772 | 1 700 | middling; no unlock |
+| distbands3 (near/mid/far) | 17 180 | −13.7 | **2 771** | 2 293 | best BR; Pong still lost |
+| clip50_sticky (train p=0.25) | 15 360 | −1.3 | 1 341 | 4 740 | Pong near-ties; SQ halves |
+| cliprand `{10…80}`/ep | 3 960 | −13.7 | 293 | 4 947 | **clear negative** (SQ eps `[12k,0,0]`) |
+
+### Meeting read
+
+| Criterion | Prefer clip10 | Prefer clip50 |
+|-----------|---------------|---------------|
+| SQ competence | ~18.6k (PQN-parity band) | **35k ceiling** |
+| Pong / COLLECT story | **consistent 20–20 ties** | noisy; often wrong-way paddle |
+| Homologous DESTROY (BR/PH) | weak BR, OK PH | **best BR + strong PH** |
+| Robustness *narrative* | dynamics retention ≈1; abs already competitive on gravity/lanes | better abs on O₂ / surface-sub / faster enemies; retention looks bad via base inflation |
+| Thesis fit | tighter information bound | more in-domain capacity |
+
+**Stop after the lock:** no more clip sweeps, bins, hard bands, or train-time
+clip DR. Next is the ALE matrix (§3) on the chosen clip.
+
+---
+
 ## 1. Environment roles
 
 ### Bases (skill train from scratch + heuristic)
@@ -98,9 +187,11 @@ transfer *between* them is the interesting cell.
 | Time Pilot | omni DESTROY, 8-way facing, no Chopper turbo |
 | Asteroids | continuous facing; native POV test |
 | Pong + Breakout | intercept family (drop Tennis) |
-| Kaboom | cleaner 1D catch / lateral-null |
 | Freeway | limitation (single-target vs gap) |
 | Name This Game / Phoenix / Seaquest | cross-base (when not the source) |
+
+**Deferred:** Kaboom (cleaner 1D catch / lateral-null) — not in upstream
+jaxatari yet; label/policy code is parked unregistered.
 
 **Out:** Galaxian / Assault / Air Raid (redundant with SI+Phoenix). Tennis.
 Asterix (crowded COLLECT, expensive scratch, weak ZS). Chopper Command is
@@ -201,20 +292,21 @@ SQ’s full list everywhere.
 PQN pixel is the visual + shortcut foil. Ego should win visual and (we
 hope) simpler/farming; layout/new-rules are the stress columns.
 
-Phoenix/NTG/Pong/Kaboom/SI get the **same intent grid**, implemented with
+Phoenix/NTG/Pong/SI get the **same intent grid**, implemented with
 whatever jaxatari already has, then a short implement-list. Do not clone
 Seaquest mods that do not exist (`shift_lanes` on Pong is already
 `shift_player`). Full catalogue = later brainstorm; this table is the
-template.
+template. (Kaboom deferred until the env lands upstream.)
 
 ---
 
 ## 5. Order of work
 
-1. **Minimal ego** trains + SQ/Pong/BR/PH eval → lock spine.
+1. **Minimal ego** trains + SQ/Pong/BR/PH eval → lock spine channels (§0).
+1b. **Distance clip lock** (clip10 vs clip50 on surfacesub5) — §0.1; then freeze.
 2. **Labels + heuristics:** NTG (sticky COLLECT), Time Pilot, Asteroids;
-   Kaboom; Breakout already exists; SI exists.
-3. **Smoke** TP / Asteroids / Kaboom / Chopper with frozen SQ ego (current
+   Breakout already exists; SI exists. (Kaboom deferred — not upstream yet.)
+3. **Smoke** TP / Asteroids / Chopper with frozen SQ ego (current
    spine). Decide TP/Asteroids base vs transfer-only.
 4. **Mods workshop** (categories above × env). Implement missing jaxatari
    mods only for the locked ~8–12.
@@ -223,12 +315,14 @@ template.
 7. **Scratch + FT** on transfers (ego; SQ also pixel/oc FT).
 8. **RQ3 tandem** on bases + full mod eval; ZS the **skills** (not the meta).
 9. **Montezuma L1** plan video + heuristic/PQN controls.
-10. Write with Freeway as limitation, Pong/Breakout/Kaboom as intercept
+10. Write with Freeway as limitation, Pong/Breakout as intercept
     family, homologous DESTROY as the transfer win.
+    (Kaboom joins the intercept family once the env is upstream.)
 
 ## Explicit non-goals
 
-- More AABB / bin / clip / LCR pose arms.
+- More AABB / bin / LCR pose arms, and **no further clip sweeps** after §0.1
+  lock (clip0 / distbins / distbands / cliprand already negative).
 - Multi-object attention / dual-slot revival.
 - Kangaroo as flagship (timing). Keep as leftover if L1 ever clears.
 - RQ3 meta-only and transferring a learned meta.
