@@ -329,6 +329,66 @@ def make_realized_ego_mask_fn(
     return legal_mask
 
 
+LEGAL_EGO_MASK_MODES = ("realized", "pure_cardinal", "strafe_only")
+# Pure cardinals only: NOOP, FIRE, and the four body moves (no diagonals / move+FIRE).
+PURE_CARDINAL_EGO_ACTION_INDICES = jnp.array([0, 1, 2, 3, 4, 5], dtype=jnp.int32)
+# Restricted-axis transfer: NOOP + LEFT + RIGHT ego only (Pong paddle UP/DOWN).
+STRAFE_ONLY_EGO_ACTION_INDICES = jnp.array([0, 3, 4], dtype=jnp.int32)
+
+
+def make_legal_ego_mask_fn(
+    action_mapper,
+    *,
+    mode: str = "realized",
+    noop_action: int = 0,
+    fire_action: int = 1,
+    ego_action_dim: int = 18,
+):
+    """Legal ego mask factory.
+
+    ``realized`` — default; any ego action the mapper can realize (non-NOOP).
+    ``pure_cardinal`` — ``realized`` AND ego ∈ {NOOP, FIRE, FORWARD, RIGHT, LEFT,
+    BACKWARD}; blocks diagonals and all move+FIRE combos (e.g. FORWARD_LEFT_FIRE)
+    even when they map to a valid game button. Useful for restricted-axis transfer
+    (Pong: paddle UP/DOWN only).
+    ``strafe_only`` — ``realized`` AND ego ∈ {NOOP, LEFT, RIGHT} only; no FIRE,
+    FORWARD, BACKWARD, diagonals, or move+FIRE (strictest Pong-style strafe set).
+    """
+    key = str(mode).lower().strip()
+    if key not in LEGAL_EGO_MASK_MODES:
+        raise ValueError(
+            f"EGO_LEGAL_ACTION_MASK_MODE must be one of {LEGAL_EGO_MASK_MODES}, "
+            f"got {mode!r}"
+        )
+    realized_fn = make_realized_ego_mask_fn(
+        action_mapper,
+        noop_action=noop_action,
+        fire_action=fire_action,
+        ego_action_dim=ego_action_dim,
+    )
+    if key == "realized":
+        return realized_fn
+    _dim = int(ego_action_dim)
+    if key == "pure_cardinal":
+        allow = PURE_CARDINAL_EGO_ACTION_INDICES
+    else:
+        allow = STRAFE_ONLY_EGO_ACTION_INDICES
+    static = jnp.zeros((_dim,), dtype=jnp.bool_)
+    static = static.at[allow].set(True)
+
+    def legal_mask(raw_obs, target_idx, objects):
+        return jnp.logical_and(static, realized_fn(raw_obs, target_idx, objects))
+
+    return legal_mask
+
+
+def legal_ego_mask_mode_from_config(config: dict | None) -> str | None:
+    """Return mask mode when enabled, else ``None``."""
+    if not (config or {}).get("EGO_LEGAL_ACTION_MASK", False):
+        return None
+    return str((config or {}).get("EGO_LEGAL_ACTION_MASK_MODE", "realized")).lower().strip()
+
+
 def mask_q_with_legal_ego(q_vals, legal_mask):
     """Set illegal ego logits to -inf (broadcasts over leading batch dims)."""
     return jnp.where(legal_mask, q_vals, jnp.asarray(-jnp.inf, dtype=q_vals.dtype))
