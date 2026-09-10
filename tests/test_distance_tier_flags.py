@@ -13,6 +13,7 @@ from concept_based_learning.observations.egocentric import (
     set_ego_distance_clip_max_pixels,
     set_ego_distance_flag_thresholds_px,
     set_ego_distance_hard_edges_px,
+    set_ego_distance_mode,
     triangular_distance_bins,
 )
 
@@ -29,10 +30,18 @@ def test_tier4_soft_bins_peak_near_center():
 
 
 def test_hard_edges_exclusive_onehots():
-    set_ego_distance_bins(None)
-    set_ego_distance_clip_max_pixels(None)
-    set_ego_distance_flag_thresholds_px(None)
-    set_ego_distance_hard_edges_px([12.0, 40.0])
+    configure_ego_obs_from_config(
+        {
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_FACING_FRAME": True,
+            "EGO_POSE_XY": False,
+            "EGO_DISTANCE_MODE": "scalar",
+            "EGO_DISTANCE_HARD_EDGES_PX": [12.0, 40.0],
+            "USE_EGO_SIZE_FEATURES": False,
+            "USE_EGO_VELOCITY_FEATURES": False,
+            "USE_EGO_WEAPON_FEATURES": False,
+        }
+    )
     d = jnp.array([5.0, 12.0, 25.0, 40.0, 80.0])
     chans = distance_features_from_pixels(d)
     assert len(chans) == 3

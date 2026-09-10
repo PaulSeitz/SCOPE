@@ -188,6 +188,8 @@ def _overlay_ego_flags_from_skill_config(
             "USE_DESTROY_ONLY_EGO_EXTRAS",
             "EGO_DISTANCE_CLIP_MAX_PX",
             "EGO_DISTANCE_CLIP_CHOICES_PX",
+            "EGO_DISTANCE_MODE",
+            "EGO_DISTANCE_DELTA_SIGN_EPS_PX",
             "EGO_DISTANCE_BINS",
             "EGO_DISTANCE_BINS_SCALAR",
             "EGO_DISTANCE_BIN_CENTERS_PX",

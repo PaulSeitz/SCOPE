@@ -56,6 +56,15 @@ _EGO_DISTANCE_FLAG_THRESHOLDS_PX: tuple[float, ...] | None = None
 # Exclusive one-hot range bands. ``[12, 40]`` → 3 channels: d<12, 12≤d<40, d≥40.
 # Unlike nested flags, these do not reconstruct a stepwise metric.
 _EGO_DISTANCE_HARD_EDGES_PX: tuple[float, ...] | None = None
+# How the distance *block* is encoded (bearing φ bins stay separate unless
+# ``EGO_POSE_XY`` takes the legacy Cartesian-only branch):
+#   scalar         — clipped Euclidean (default)
+#   xy             — body-frame (fwd, lat) absolute, clip-normalized
+#   delta_xy       — frame-to-frame Δfwd, Δlat / MAX_SPEED
+#   delta_xy_sign  — sign(Δfwd), sign(Δlat) ∈ {-1,0,1}
+_EGO_DISTANCE_MODE: str = "scalar"
+_EGO_DISTANCE_DELTA_SIGN_EPS_PX: float = 0.5
+DISTANCE_MODE_CHOICES = ("scalar", "xy", "delta_xy", "delta_xy_sign")
 # None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
 # channels with this many triangular, 50%-overlap bins of world θ_target.
 _EGO_ANGLE_BINS: int | None = None
@@ -237,6 +246,36 @@ def set_ego_distance_clip_choices_px(
 def ego_distance_clip_choices_px() -> tuple[float, ...] | None:
     """Return train-time clip choices, or None when clip DR is off."""
     return _EGO_DISTANCE_CLIP_CHOICES_PX
+
+
+def set_ego_distance_mode(
+    mode: str | None,
+    *,
+    sign_eps_px: float = 0.5,
+) -> None:
+    """Select the distance-block encoding (see ``DISTANCE_MODE_CHOICES``)."""
+    global _EGO_DISTANCE_MODE, _EGO_DISTANCE_DELTA_SIGN_EPS_PX
+    if mode in (None, "", False):
+        _EGO_DISTANCE_MODE = "scalar"
+    else:
+        key = str(mode).lower().strip()
+        if key not in DISTANCE_MODE_CHOICES:
+            raise ValueError(
+                f"EGO_DISTANCE_MODE must be one of {DISTANCE_MODE_CHOICES}, got {mode!r}"
+            )
+        _EGO_DISTANCE_MODE = key
+    eps = float(sign_eps_px)
+    if eps < 0.0:
+        raise ValueError(f"EGO_DISTANCE_DELTA_SIGN_EPS_PX must be >= 0, got {sign_eps_px}")
+    _EGO_DISTANCE_DELTA_SIGN_EPS_PX = eps
+
+
+def ego_distance_mode() -> str:
+    return _EGO_DISTANCE_MODE
+
+
+def ego_distance_delta_sign_eps_px() -> float:
+    return _EGO_DISTANCE_DELTA_SIGN_EPS_PX
 
 
 def ego_distance_zeroed() -> bool:
@@ -634,6 +673,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
     hard_edges = config.get("EGO_DISTANCE_HARD_EDGES_PX", None)
     flag_thresh = config.get("EGO_DISTANCE_FLAG_THRESHOLDS_PX", None)
     clip_choices = config.get("EGO_DISTANCE_CLIP_CHOICES_PX", None)
+    dist_mode = config.get("EGO_DISTANCE_MODE", None)
     if hard_edges not in (None, "", False):
         set_ego_distance_hard_edges_px(hard_edges)
         set_ego_distance_flag_thresholds_px(None)
@@ -642,6 +682,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_bins(None)
         set_ego_distance_bins_scalar(False)
         set_ego_distance_bin_centers_px(None)
+        set_ego_distance_mode("scalar")
     elif flag_thresh not in (None, "", False):
         set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(flag_thresh)
@@ -650,6 +691,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_bins(None)
         set_ego_distance_bins_scalar(False)
         set_ego_distance_bin_centers_px(None)
+        set_ego_distance_mode("scalar")
     else:
         set_ego_distance_hard_edges_px(None)
         set_ego_distance_flag_thresholds_px(None)
@@ -665,6 +707,14 @@ def configure_ego_obs_from_config(config: dict) -> None:
         dist_centers = config.get("EGO_DISTANCE_BIN_CENTERS_PX", None)
         set_ego_distance_bin_centers_px(dist_centers)
         set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
+        set_ego_distance_mode(
+            dist_mode,
+            sign_eps_px=float(config.get("EGO_DISTANCE_DELTA_SIGN_EPS_PX", 0.5)),
+        )
+        if ego_distance_mode() != "scalar" and dist_bins not in (None, "", False):
+            raise ValueError(
+                "EGO_DISTANCE_MODE != scalar is mutually exclusive with EGO_DISTANCE_BINS."
+            )
     angle_bins = config.get("EGO_ANGLE_BINS", None)
     psi_bins = config.get("EGO_PSI_ANGLE_BINS", None)
     if using_pov_relative():
@@ -700,6 +750,7 @@ def configure_ego_obs_from_config(config: dict) -> None:
         set_ego_distance_clip_max_pixels(None)
         set_ego_distance_clip_choices_px(None)
         set_ego_distance_bins(None)
+        set_ego_distance_mode("scalar")
     else:
         set_ego_restrained_pose(None)
     set_ego_hit_corridor(
@@ -710,6 +761,12 @@ def configure_ego_obs_from_config(config: dict) -> None:
     if using_ego_hit_corridor() and bool(config.get("EGO_POSE_XY", False)):
         raise ValueError(
             "USE_EGO_HIT_CORRIDOR requires polar facing pose (EGO_POSE_XY: false)."
+        )
+    if bool(config.get("EGO_POSE_XY", False)) and ego_distance_mode() != "scalar":
+        raise ValueError(
+            "EGO_POSE_XY (Cartesian-only, no φ bins) is mutually exclusive with "
+            f"EGO_DISTANCE_MODE={ego_distance_mode()!r}. Use EGO_DISTANCE_MODE: xy "
+            "to keep φ bins with body-frame (fwd, lat)."
         )
     # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
 
@@ -756,7 +813,7 @@ def distance_feature_from_pixels(
 
 
 def ego_distance_channels_per_frame() -> int:
-    """Distance block width: flag indicators, ``n`` bins, or 1 scalar channel."""
+    """Distance block width: flag indicators, ``n`` bins, xy/delta pair, or 1 scalar."""
     from concept_based_learning.observations.pov_facing_frame import (
         using_ego_pose_xy,
         using_pov_facing_frame,
@@ -773,7 +830,43 @@ def ego_distance_channels_per_frame() -> int:
         return len(_EGO_DISTANCE_FLAG_THRESHOLDS_PX)
     if _EGO_DISTANCE_BINS:
         return 1 if _EGO_DISTANCE_BINS_SCALAR else int(_EGO_DISTANCE_BINS)
+    if _EGO_DISTANCE_MODE in ("xy", "delta_xy", "delta_xy_sign"):
+        return 2
     return 1
+
+
+def body_frame_delta_xy_features(
+    fwd_px: jnp.ndarray,
+    lat_px: jnp.ndarray,
+    *,
+    sign_only: bool = False,
+    sign_eps_px: float | None = None,
+) -> list[jnp.ndarray]:
+    """Frame-to-frame body-frame (Δfwd, Δlat). Stack axis is leading.
+
+    Oldest frame is zero-padded (no prior). Continuous mode divides by
+    ``MAX_SPEED``; sign mode emits ``{-1, 0, +1}`` with a small deadzone.
+    """
+    fwd = jnp.asarray(fwd_px, dtype=jnp.float32)
+    lat = jnp.asarray(lat_px, dtype=jnp.float32)
+    d_fwd = jnp.concatenate(
+        [jnp.zeros((1,), dtype=jnp.float32), jnp.diff(fwd, axis=0)], axis=0
+    )
+    d_lat = jnp.concatenate(
+        [jnp.zeros((1,), dtype=jnp.float32), jnp.diff(lat, axis=0)], axis=0
+    )
+    if sign_only:
+        eps = jnp.float32(
+            _EGO_DISTANCE_DELTA_SIGN_EPS_PX if sign_eps_px is None else sign_eps_px
+        )
+        s_fwd = jnp.where(
+            jnp.abs(d_fwd) <= eps, jnp.float32(0.0), jnp.sign(d_fwd)
+        )
+        s_lat = jnp.where(
+            jnp.abs(d_lat) <= eps, jnp.float32(0.0), jnp.sign(d_lat)
+        )
+        return [s_fwd, s_lat]
+    return [d_fwd / jnp.float32(MAX_SPEED), d_lat / jnp.float32(MAX_SPEED)]
 
 
 def triangular_distance_bins(distances_px: jnp.ndarray, centers_px: jnp.ndarray) -> jnp.ndarray:
@@ -2016,9 +2109,17 @@ def _get_ego_obs_pov_facing_frame(
             pose_stack[..., i] for i in range(int(pose_stack.shape[-1]))
         ]
     else:
-        channels = distance_features_from_pixels(
-            distances, clip_cap=distance_clip_px
-        )
+        mode = _EGO_DISTANCE_MODE
+        if mode == "xy":
+            channels = _xy_features_from_pixels(fwds, lats)
+        elif mode == "delta_xy":
+            channels = body_frame_delta_xy_features(fwds, lats, sign_only=False)
+        elif mode == "delta_xy_sign":
+            channels = body_frame_delta_xy_features(fwds, lats, sign_only=True)
+        else:
+            channels = distance_features_from_pixels(
+                distances, clip_cap=distance_clip_px
+            )
         if _USE_EGO_HIT_CORRIDOR:
             # Corridor uses centre-frame lateral (body overlap slab), even when
             # distance/φ use closest-points geometry.

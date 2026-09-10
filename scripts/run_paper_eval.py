@@ -794,6 +794,29 @@ EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS = (
     "phoenix_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
 )
 
+# Distance-block pose probes (Δxy / sign(Δxy) / absolute xy) + φ8, clip50 spine.
+# Trains first so --gpus 0,1,2 shards one train per GPU.
+#   python scripts/materialize_surfacesub5_distpose.py
+#   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_distpose --gpus 0,1,2 --wait-deps --lean
+EGO_MIN_SURFACESUB5_DISTPOSE_SUITE = "ego_min_surfacesub5_distpose"
+_EGO_SS5_DISTPOSE_TOKS = (
+    "deltaxy_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
+    "deltasign_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
+    "posxy_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
+)
+EGO_MIN_SURFACESUB5_DISTPOSE_STEMS = (
+    # trains
+    *(f"seaquest_skills_ego_pov_{tok}" for tok in _EGO_SS5_DISTPOSE_TOKS)
+    # evals
+    + tuple(f"seaquest_skills_ego_pov_{tok}_eval_full" for tok in _EGO_SS5_DISTPOSE_TOKS)
+    # transfers
+    + tuple(
+        f"{env}_transfer_ego_pov_{tok}"
+        for tok in _EGO_SS5_DISTPOSE_TOKS
+        for env in ("pong", "beamrider", "phoenix")
+    )
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1393,6 +1416,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_STEMS,
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS,
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
+    EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1477,6 +1501,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_SUITE: "ego_stick",
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: "ego_rand",
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
+    EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2436,6 +2461,8 @@ _EVAL_OVERRIDE_KEYS = (
     "USE_EGO_SHOT_BETWEEN",
     "EGO_DISTANCE_CLIP_MAX_PX",
     "EGO_DISTANCE_CLIP_CHOICES_PX",
+    "EGO_DISTANCE_MODE",
+    "EGO_DISTANCE_DELTA_SIGN_EPS_PX",
     "EGO_ANGLE_BINS",
     "EGO_PSI_ANGLE_BINS",
     "EGO_PSI_ANGLE_SCALAR",
@@ -2870,6 +2897,9 @@ def main() -> None:
             "→ SQ + Pong/BR/PH. "
             f"{EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE}: clip10 surfacesub5 + "
             "can_fire only (facing_enemy off) → SQ + Pong/BR/PH. "
+            f"{EGO_MIN_SURFACESUB5_DISTPOSE_SUITE}: clip50 surfacesub5 distance "
+            "block → Δxy / sign(Δxy) / absolute xy (+ φ8); 3 trains → "
+            "--gpus 0,1,2. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
