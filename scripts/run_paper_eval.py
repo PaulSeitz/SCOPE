@@ -779,6 +779,21 @@ EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS = (
     "phoenix_transfer_ego_pov_cliprand_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
 )
 
+# clip10 surfacesub5 + can_fire only (facing_enemy off). Fun probe: lift SQ/BR?
+#   python scripts/materialize_surfacesub5_clip10_canfire.py
+#   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_clip10_canfire --gpus 0 --wait-deps --lean
+EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE = "ego_min_surfacesub5_clip10_canfire"
+_EGO_SS5_CLIP10_CANFIRE_TRAIN = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5"
+)
+EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS = (
+    _EGO_SS5_CLIP10_CANFIRE_TRAIN,
+    f"{_EGO_SS5_CLIP10_CANFIRE_TRAIN}_eval_full",
+    "pong_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+    "beamrider_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+    "phoenix_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1377,6 +1392,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_STEMS,
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_STEMS,
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS,
+    EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1460,6 +1476,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_DISTBANDS_SUITE: "ego_bands",
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_SUITE: "ego_stick",
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: "ego_rand",
+    EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2851,6 +2868,8 @@ def main() -> None:
             f"{EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE}: train-time "
             "per-episode clip sample {{10,20,30,50,80}}; eval/ZS fixed clip50 "
             "→ SQ + Pong/BR/PH. "
+            f"{EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE}: clip10 surfacesub5 + "
+            "can_fire only (facing_enemy off) → SQ + Pong/BR/PH. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
