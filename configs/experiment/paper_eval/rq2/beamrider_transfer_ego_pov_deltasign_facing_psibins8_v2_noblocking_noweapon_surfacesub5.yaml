@@ -29,7 +29,7 @@ WANDB_TAGS:
 - ablation:ego_min_channels
 - ego:noblocking
 - ego:noweapon
-- ego:clip50
+- ego:noclip
 - ego:deltasign
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
@@ -41,7 +41,7 @@ AVOID_INTERRUPT_RANGE_Y: 55
 SURFACE_SUB_AVOID_RANGE_X: 5
 SURFACE_SUB_AVOID_RANGE_Y: 5
 USE_EGO_SHOT_FEATURES: false
-EGO_DISTANCE_CLIP_MAX_PX: 50
+EGO_DISTANCE_CLIP_MAX_PX: null
 EGO_DISTANCE_MODE: delta_xy_sign
 EGO_PSI_ANGLE_BINS: 8
 EGO_LEGAL_ACTION_MASK: true

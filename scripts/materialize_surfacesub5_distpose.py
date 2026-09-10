@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Three distance-block probes on clip50 surfacesub5 (φ8 kept).
+"""Three distance-block probes on surfacesub5 (φ8 kept, no distance clip).
 
 1. deltaxy — body-frame (Δfwd, Δlat) / MAX_SPEED instead of scalar distance
 2. deltasign — sign(Δfwd), sign(Δlat) ∈ {-1,0,1} (0.5px deadzone)
-3. posxy — absolute body-frame (fwd, lat) clip-normalized (still + φ8)
+3. posxy — absolute body-frame (fwd, lat) / screen W×H (clip null)
 
-Source spine: clip50 noweapon surfacesub5. Trains-first suite for 3-GPU shard.
+Source spine: clip50 noweapon surfacesub5 YAML family (clip cleared to null).
+Trains-first suite for 3-GPU shard.
 
     python scripts/materialize_surfacesub5_distpose.py
     python scripts/run_paper_eval.py --suite ego_min_surfacesub5_distpose \\
@@ -71,12 +72,12 @@ def _transform(text: str, arm: dict) -> str:
         "suite:ego_min_noweapon_surfacesub5_clipsweep", f"suite:{SUITE}"
     )
     out = out.replace("- suite:ego_min_noweapon_heu_ablation\n", "")
-    # Keep clip50 as xy normalizer / unused scalar fallback; inject mode after it.
+    # No distance clip: deltas ignore it; posxy uses screen W/H normalization.
     out = out.replace(
         "EGO_DISTANCE_CLIP_MAX_PX: 50\n",
-        f"EGO_DISTANCE_CLIP_MAX_PX: 50\nEGO_DISTANCE_MODE: {arm['mode']}\n",
+        f"EGO_DISTANCE_CLIP_MAX_PX: null\nEGO_DISTANCE_MODE: {arm['mode']}\n",
     )
-    out = out.replace("- ego:clip50", f"- ego:clip50\n{arm['tag']}")
+    out = out.replace("- ego:clip50", f"- ego:noclip\n{arm['tag']}")
     return out
 
 
