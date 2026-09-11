@@ -61,6 +61,14 @@ _MOVE_SPECS: dict[str, tuple[int, int, list[int], list[int]]] = {
     "spaceinvaders": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [4, 4, 1, 5, 5, 5, 1, 4]),
     "montezumarevenge": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "venture": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
+    # Asteroids ACTION_SET indices. DOWN/DOWNFIRE are hyperspace — map D→UP.
+    "asteroids": (0, 1, [3, 6, 2, 7, 4, 7, 2, 6], [9, 12, 8, 13, 10, 13, 8, 12]),
+    # Name This Game: same compact horizontal set as SpaceInvaders.
+    "namethisgame": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [4, 4, 1, 5, 5, 5, 1, 4]),
+    # Time Pilot: cardinal-only ACTION_SET; diagonals collapse.
+    "timepilot": (0, 1, [3, 3, 5, 4, 4, 4, 2, 3], [7, 7, 9, 8, 8, 8, 6, 7]),
+    # Kaboom deferred (not in upstream jaxatari yet).
+    # "kaboom": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [2, 2, 1, 3, 3, 3, 1, 2]),
 }
 
 # Per-env view axes: the body facings (screen degrees, y down) the player can
@@ -166,6 +174,38 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "facing_deg_bin1": 180.0,
         "bilateral_axis": "horizontal",
     },
+    "asteroids": {
+        # 16-way heading (22.5°). Screen degrees = sprite + (−90°). Honest motor
+        # is USE_POV_TURN_PRIMITIVES; these bins keep facing-frame obs/mapper
+        # aligned when turn primitives are off.
+        "facing_deg_bins": tuple(
+            ((-90.0 + i * 22.5 + 180.0) % 360.0) - 180.0 for i in range(16)
+        ),
+        "facing_deg_bin0": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "horizontal",
+    },
+    "namethisgame": {
+        "facing_deg_bin0": 0.0,
+        "facing_deg_bin1": 180.0,
+        "bilateral_axis": "horizontal",
+    },
+    "timepilot": {
+        # 8-way absolute-aim + stepwise rotate. Buttons request a compass heading;
+        # the game rotates one tick toward it (shortest path). 8 bins make ego
+        # FORWARD = current nose direction rather than a coarse L/R strafe.
+        "facing_deg_bins": (0.0, 45.0, 90.0, 135.0, 180.0, -135.0, -90.0, -45.0),
+        "facing_deg_bin0": -90.0,
+        "facing_deg_bin1": 90.0,
+        "bilateral_axis": "horizontal",
+    },
+    # Kaboom deferred (not in upstream jaxatari yet).
+    # "kaboom": {
+    #     "facing_deg_bin0": -90.0,
+    #     "facing_deg_bin1": -90.0,
+    #     "single_view_axis": True,
+    #     "bilateral_axis": "vertical",
+    # },
 }
 
 
@@ -191,12 +231,28 @@ def view_axes_deg(profile: dict[str, Any]) -> tuple[float, float]:
     )
 
 
+def facing_bins_deg(profile: dict[str, Any]) -> tuple[float, ...]:
+    """All declared body-facing snap angles (screen degrees).
+
+    Prefer ``facing_deg_bins`` (N-way) when present; otherwise the legacy
+    two-axis ``facing_deg_bin0/1`` pair.
+    """
+    bins = profile.get("facing_deg_bins")
+    if bins is not None:
+        return tuple(float(x) for x in bins)
+    return view_axes_deg(profile)
+
+
 def has_single_view_axis(profile: dict[str, Any]) -> bool:
     """True when the player body cannot turn, so only view axis 0 is reachable."""
     if bool(profile.get("single_view_axis", False)):
         return True
-    axis0, axis1 = view_axes_deg(profile)
-    return abs(axis0 - axis1) < 1e-6
+    bins = facing_bins_deg(profile)
+    if len(bins) <= 1:
+        return True
+    if len(bins) == 2:
+        return abs(bins[0] - bins[1]) < 1e-6
+    return False
 
 
 def _facing_bin_idx(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndarray:
@@ -209,16 +265,19 @@ def _facing_bin_idx(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndar
         mid = jnp.float32(profile.get("court_midline_y", 108.0))
         # Top court (smaller y) → bin 0 (face down); bottom → bin 1 (face up).
         return jnp.where(y < mid, jnp.int32(0), jnp.int32(1)).astype(jnp.int32)
-    axis0, axis1 = view_axes_deg(profile)
+    bins = jnp.asarray(facing_bins_deg(profile), dtype=jnp.float32)
     ori = jnp.asarray(player_getter(raw_obs).orientation[-1], dtype=jnp.float32)
     screen_deg = ori + jnp.float32(_SPRITE_ORIENTATION_OFFSET_DEG)
-    prefers_axis1 = jnp.abs(_wrap180_deg(screen_deg - jnp.float32(axis1))) < jnp.abs(
-        _wrap180_deg(screen_deg - jnp.float32(axis0))
-    )
-    unset = (
-        jnp.abs(ori - jnp.float32(_SPRITE_ORIENTATION_UNSET_DEG)) < jnp.float32(1e-3)
-    )
-    return jnp.where(unset, jnp.int32(0), prefers_axis1.astype(jnp.int32))
+    diffs = jnp.abs(_wrap180_deg(screen_deg - bins))
+    nearest = jnp.argmin(diffs).astype(jnp.int32)
+    # Legacy 2-bin hulls use orientation 0.0 as "unset". Multi-bin facers
+    # (Time Pilot 8-way, Asteroids 16-way) legitimately face up at 0° sprite.
+    if int(bins.shape[0]) <= 2:
+        unset = (
+            jnp.abs(ori - jnp.float32(_SPRITE_ORIENTATION_UNSET_DEG)) < jnp.float32(1e-3)
+        )
+        return jnp.where(unset, jnp.int32(0), nearest)
+    return nearest
 
 
 def _player_orientation_deg(raw_obs, profile: dict[str, Any], player_getter) -> jnp.ndarray:
@@ -228,9 +287,9 @@ def _player_orientation_deg(raw_obs, profile: dict[str, Any], player_getter) -> 
     the action mapper both resolve their facing through this function, so keying
     it on the same per-env axis table is what stops the two frames drifting apart.
     """
-    axis0, axis1 = view_axes_deg(profile)
+    bins = jnp.asarray(facing_bins_deg(profile), dtype=jnp.float32)
     bin_idx = _facing_bin_idx(raw_obs, profile, player_getter)
-    return jnp.where(bin_idx == 0, jnp.float32(axis0), jnp.float32(axis1))
+    return bins[bin_idx]
 
 
 def _target_delta_xy(raw_obs, objects, target_idx, player_getter):
@@ -318,35 +377,37 @@ def make_facing_relative_mappers(
 
     if using_pov_fixed_bilateral():
         facing0, facing1 = bilateral_facing_degrees(profile, axis=active_bilateral_axis())
+        facing_list = (facing0, facing1)
     else:
-        facing0 = float(profile["facing_deg_bin0"])
-        facing1 = float(profile["facing_deg_bin1"])
-    table0 = build_facing_action_table(
-        noop_action=noop,
-        fire_action=fire,
-        move_table=move,
-        move_fire_table=mfire,
-        facing_deg=facing0,
-    )
-    table1 = build_facing_action_table(
-        noop_action=noop,
-        fire_action=fire,
-        move_table=move,
-        move_fire_table=mfire,
-        facing_deg=facing1,
+        facing_list = facing_bins_deg(profile)
+
+    tables = jnp.stack(
+        [
+            build_facing_action_table(
+                noop_action=noop,
+                fire_action=fire,
+                move_table=move,
+                move_fire_table=mfire,
+                facing_deg=facing,
+            )
+            for facing in facing_list
+        ],
+        axis=0,
     )
     _getter = player_getter or profile.get("player_getter") or _default_get_player
     _noop_i = jnp.int32(noop)
     _fire_i = jnp.int32(fire)
+    _n_bins = jnp.int32(len(facing_list))
 
     def mapper(ego_action, raw_obs, target_idx, objects):
         bin_idx = _mapper_sector_idx(raw_obs, objects, target_idx, profile, _getter)
-        table = jnp.where(bin_idx == 0, table0, table1)
-        return table[ego_action]
+        bin_idx = jnp.clip(bin_idx, jnp.int32(0), _n_bins - jnp.int32(1))
+        return tables[bin_idx, ego_action]
 
     def inverse_mapper(game_action, raw_obs, target_idx, objects):
         bin_idx = _mapper_sector_idx(raw_obs, objects, target_idx, profile, _getter)
-        table = jnp.where(bin_idx == 0, table0, table1)
+        bin_idx = jnp.clip(bin_idx, jnp.int32(0), _n_bins - jnp.int32(1))
+        table = tables[bin_idx]
         game_action = jnp.asarray(game_action, dtype=jnp.int32)
         matches = table == game_action
         has_match = jnp.any(matches)
