@@ -831,6 +831,31 @@ EGO_MIN_SURFACESUB5_NEARTIERS_STEMS = (
     "phoenix_transfer_ego_pov_neartiers_facing_psibins8_v2_noblocking_noweapon_surfacesub5",
 )
 
+# can_fire re-intro overnight: clip10/50 + neartiers + deltaxy ± φ sincos.
+#   python scripts/materialize_surfacesub5_canfire_overnight.py
+#   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_canfire_overnight \\
+#       --gpus 0,1,2 --wait-deps --lean
+EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE = "ego_min_surfacesub5_canfire_overnight"
+_EGO_SS5_CANFIRE_OVERNIGHT_TOKS = (
+    "clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+    "clip50_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+    "neartiers_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+    "deltaxy_facing_psibins8_v2_noblocking_canfire_surfacesub5",
+    "deltaxy_facing_sincos_v2_noblocking_canfire_surfacesub5",
+)
+EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS = (
+    tuple(f"seaquest_skills_ego_pov_{tok}" for tok in _EGO_SS5_CANFIRE_OVERNIGHT_TOKS)
+    + tuple(
+        f"seaquest_skills_ego_pov_{tok}_eval_full"
+        for tok in _EGO_SS5_CANFIRE_OVERNIGHT_TOKS
+    )
+    + tuple(
+        f"{env}_transfer_ego_pov_{tok}"
+        for tok in _EGO_SS5_CANFIRE_OVERNIGHT_TOKS
+        for env in ("pong", "beamrider", "phoenix")
+    )
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1432,6 +1457,7 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
+    EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1518,6 +1544,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
+    EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: "ego_cfire",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2918,6 +2945,9 @@ def main() -> None:
             "--gpus 0,1,2. "
             f"{EGO_MIN_SURFACESUB5_NEARTIERS_SUITE}: clip10 continuous near + "
             "exclusive tiers [10,20,50,80,150] beyond → SQ + Pong/BR/PH. "
+            f"{EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE}: can_fire re-intro "
+            "on clip10/50 + neartiers + deltaxy(φ8) + deltaxy(φ sincos); "
+            "trains first → --gpus 0,1,2. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
