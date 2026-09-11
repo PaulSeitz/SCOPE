@@ -1,6 +1,7 @@
 """Persistent-heading turn primitives on top of the POV-relative mapper.
 
-Enabled with ``USE_POV_TURN_PRIMITIVES`` (requires ``USE_POV_RELATIVE_MAPPER``).
+Enabled with ``USE_POV_TURN_PRIMITIVES`` (requires ``USE_POV_RELATIVE_MAPPER``;
+incompatible with ``USE_POV_FACING_FRAME``).
 
 Instead of picking one of 18 instantaneous body-relative compass intentions per
 step, each environment carries an internal heading θ_h that integrates the chosen
@@ -8,13 +9,15 @@ turns over time.  The ego action space shrinks to 6 motion primitives::
 
     0 NOOP          θ_h unchanged, game NOOP
     1 FIRE          θ_h unchanged, stationary fire
-    2 FORWARD       move along θ_h
-    3 TURN_LEFT     θ_h -= step, then move along the new θ_h
-    4 TURN_RIGHT    θ_h += step, then move along the new θ_h
-    5 FORWARD_FIRE  move along θ_h while firing
+    2 FORWARD       advance along θ_h (thrust / aim-lock)
+    3 TURN_LEFT     θ_h -= step, then (usually) commit to the new heading
+    4 TURN_RIGHT    θ_h += step, then (usually) commit to the new heading
+    5 FORWARD_FIRE  advance along θ_h while firing
 
-Turns are not free frames: the agent commits to a rotation and keeps moving, so
-every primitive makes progress (the classic differential-drive formulation).
+Most envs use differential-drive mapping via ``_MOVE_SPECS``: TURN_* rotates and
+emits the world-dir for the new θ_h (Seaquest, Time Pilot, …).  Asteroids is
+special: LEFT/RIGHT are pure rotates and UP is thrust, so FORWARD→thrust and
+TURN_*→rotate-only (no strafe table).
 
 The mapper only ever sees ``(θ_h, ego_action)`` — no target geometry — so the
 action space stays as target-agnostic as the plain POV mapper, preserving its
@@ -65,6 +68,18 @@ TURN_EGO_ACTION_NAMES = (
 TURN_FIRE_EGO_ACTION_INDICES = jnp.array([TURN_FIRE, TURN_FORWARD_FIRE], dtype=jnp.int32)
 
 DEFAULT_TURN_STEP_DEG = 45.0
+# Asteroids is 16-way (22.5°/tick); Time Pilot / Seaquest-style are 8-way (45°).
+ASTEROIDS_TURN_STEP_DEG = 22.5
+TIMEPILOT_TURN_STEP_DEG = 45.0
+
+# Asteroids ACTION_SET indices (see asteroids_label.py). LEFT/RIGHT rotate;
+# UP thrusts along the ship's current orientation — not a world-strafe table.
+_ASTEROIDS_NOOP = 0
+_ASTEROIDS_FIRE = 1
+_ASTEROIDS_UP = 2
+_ASTEROIDS_RIGHT = 3
+_ASTEROIDS_LEFT = 4
+_ASTEROIDS_UPFIRE = 8
 
 _USE_POV_TURN: bool = False
 _TURN_STEP_DEG: float = DEFAULT_TURN_STEP_DEG
@@ -92,6 +107,16 @@ def default_initial_heading_deg(env_name: str | None) -> float:
     return float(profile.get("facing_deg_bin0", 0.0))
 
 
+def default_turn_step_deg(env_name: str | None) -> float:
+    """Env-native rotation tick when ``POV_TURN_STEP_DEG`` is unset."""
+    key = str(env_name or "").lower()
+    if key == "asteroids":
+        return ASTEROIDS_TURN_STEP_DEG
+    if key == "timepilot":
+        return TIMEPILOT_TURN_STEP_DEG
+    return DEFAULT_TURN_STEP_DEG
+
+
 def configure_pov_turn_from_config(config: dict | None) -> None:
     """Latch turn-primitive knobs from a run config (mirrors the other ego setters)."""
     global _USE_POV_TURN, _TURN_STEP_DEG, _INITIAL_HEADING_DEG
@@ -112,10 +137,17 @@ def configure_pov_turn_from_config(config: dict | None) -> None:
         raise ValueError(
             "USE_POV_TURN_PRIMITIVES is incompatible with USE_POV_FIXED_BILATERAL."
         )
+    if enabled and bool(cfg.get("USE_POV_FACING_FRAME", False)):
+        raise ValueError(
+            "USE_POV_TURN_PRIMITIVES is incompatible with USE_POV_FACING_FRAME: "
+            "facing frame uses sprite/synthetic orientation, not an integrated heading."
+        )
     _USE_POV_TURN = enabled
 
     step = cfg.get("POV_TURN_STEP_DEG")
-    _TURN_STEP_DEG = DEFAULT_TURN_STEP_DEG if step is None else float(step)
+    _TURN_STEP_DEG = (
+        default_turn_step_deg(cfg.get("ENV_NAME")) if step is None else float(step)
+    )
     if enabled and not (0.0 < _TURN_STEP_DEG <= 180.0):
         raise ValueError(f"POV_TURN_STEP_DEG must be in (0, 180], got {_TURN_STEP_DEG}")
 
@@ -159,7 +191,12 @@ def build_turn_action_fn(
     move_table,
     move_fire_table,
 ) -> Callable:
-    """Return ``(ego_action, heading_deg) -> game_action`` for one env's move spec."""
+    """Return ``(ego_action, heading_deg) -> game_action`` for one env's move spec.
+
+    Differential-drive style: FORWARD / TURN_* / FORWARD_FIRE all emit a world
+    move along ``heading_deg`` (after the caller integrated the turn). Used by
+    Seaquest, Time Pilot, and other envs where buttons select a compass direction.
+    """
     _noop = jnp.int32(noop_action)
     _fire = jnp.int32(fire_action)
     _move = jnp.asarray(move_table, dtype=jnp.int32)
@@ -173,6 +210,48 @@ def build_turn_action_fn(
         game_action = jnp.where(with_fire, _mfir[dir_idx], _move[dir_idx])
         stationary = jnp.where(ego == TURN_FIRE, _fire, _noop)
         return jnp.where(moving, game_action, stationary).astype(jnp.int32)
+
+    return turn_action
+
+
+def build_asteroids_turn_action_fn() -> Callable:
+    """Asteroids rotate/thrust mapper (not world-strafe via ``_MOVE_SPECS``).
+
+    FORWARD = thrust (UP), TURN_LEFT/RIGHT = rotate only, FORWARD_FIRE = thrust+fire.
+    ``heading_deg`` is ignored for button choice — the game ship orientation is
+    what thrust follows; θ_h stays in lockstep when ``POV_TURN_STEP_DEG`` matches
+    the 16-way tick (22.5°).
+    """
+    _noop = jnp.int32(_ASTEROIDS_NOOP)
+    _fire = jnp.int32(_ASTEROIDS_FIRE)
+    _thrust = jnp.int32(_ASTEROIDS_UP)
+    _left = jnp.int32(_ASTEROIDS_LEFT)
+    _right = jnp.int32(_ASTEROIDS_RIGHT)
+    _thrust_fire = jnp.int32(_ASTEROIDS_UPFIRE)
+
+    def turn_action(ego_action: jnp.ndarray, heading_deg: jnp.ndarray) -> jnp.ndarray:
+        del heading_deg
+        ego = jnp.asarray(ego_action, dtype=jnp.int32)
+        return (
+            jnp.where(
+                ego == TURN_FIRE,
+                _fire,
+                jnp.where(
+                    ego == TURN_FORWARD,
+                    _thrust,
+                    jnp.where(
+                        ego == TURN_LEFT,
+                        _left,
+                        jnp.where(
+                            ego == TURN_RIGHT,
+                            _right,
+                            jnp.where(ego == TURN_FORWARD_FIRE, _thrust_fire, _noop),
+                        ),
+                    ),
+                ),
+            )
+            .astype(jnp.int32)
+        )
 
     return turn_action
 
@@ -194,18 +273,21 @@ def make_turn_primitive_mappers(
     :func:`configure_pov_turn_from_config`.
     """
     game_key = str(jax_game_id).lower()
-    if game_key not in _MOVE_SPECS:
-        raise ValueError(
-            f"No POV move spec for jax_game_id={jax_game_id!r}. "
-            f"Known: {sorted(_MOVE_SPECS)}"
+    if game_key == "asteroids":
+        turn_action = build_asteroids_turn_action_fn()
+    else:
+        if game_key not in _MOVE_SPECS:
+            raise ValueError(
+                f"No POV move spec for jax_game_id={jax_game_id!r}. "
+                f"Known: {sorted(_MOVE_SPECS)}"
+            )
+        noop, fire, move, mfire = _MOVE_SPECS[game_key]
+        turn_action = build_turn_action_fn(
+            noop_action=noop,
+            fire_action=fire,
+            move_table=move,
+            move_fire_table=mfire,
         )
-    noop, fire, move, mfire = _MOVE_SPECS[game_key]
-    turn_action = build_turn_action_fn(
-        noop_action=noop,
-        fire_action=fire,
-        move_table=move,
-        move_fire_table=mfire,
-    )
     del player_getter
 
     def mapper(ego_action, heading_deg, raw_obs, target_idx, objects):

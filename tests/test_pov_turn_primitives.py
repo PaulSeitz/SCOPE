@@ -239,6 +239,80 @@ def test_turn_primitives_do_not_change_ego_channel_count():
     assert ego_obs_channels_per_frame() == without_turn
 
 
+def test_flag_rejects_facing_frame():
+    with pytest.raises(ValueError, match="incompatible with USE_POV_FACING_FRAME"):
+        configure_pov_turn_from_config(
+            {**SEAQUEST_TURN_CFG, "USE_POV_FACING_FRAME": True}
+        )
+
+
+def test_asteroids_default_step_is_22_5():
+    configure_pov_turn_from_config(
+        {
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_TURN_PRIMITIVES": True,
+            "ENV_NAME": "asteroids",
+        }
+    )
+    assert turn_step_deg() == pytest.approx(22.5)
+    assert initial_heading_deg() == pytest.approx(-90.0)
+
+
+def test_asteroids_mapper_is_rotate_and_thrust_not_strafe():
+    """Honest Asteroids motor: FORWARD=thrust, TURN_*=rotate-only (no world table)."""
+    configure_pov_turn_from_config(
+        {
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_TURN_PRIMITIVES": True,
+            "ENV_NAME": "asteroids",
+            "POV_TURN_STEP_DEG": 22.5,
+        }
+    )
+    mapper, _ = make_turn_primitive_mappers("asteroids")
+    heading = jnp.float32(-90.0)  # nose up
+    # ACTION_SET: 0=NOOP 1=FIRE 2=UP 3=RIGHT 4=LEFT 8=UPFIRE
+    assert int(mapper(jnp.int32(TURN_NOOP), heading, None, None, None)) == 0
+    assert int(mapper(jnp.int32(TURN_FIRE), heading, None, None, None)) == 1
+    assert int(mapper(jnp.int32(TURN_FORWARD), heading, None, None, None)) == 2
+    assert int(mapper(jnp.int32(TURN_LEFT), heading, None, None, None)) == 4
+    assert int(mapper(jnp.int32(TURN_RIGHT), heading, None, None, None)) == 3
+    assert int(mapper(jnp.int32(TURN_FORWARD_FIRE), heading, None, None, None)) == 8
+    # Heading must not change which button TURN/FORWARD emit.
+    other = jnp.float32(45.0)
+    assert int(mapper(jnp.int32(TURN_FORWARD), other, None, None, None)) == 2
+    assert int(mapper(jnp.int32(TURN_LEFT), other, None, None, None)) == 4
+
+
+def test_timepilot_mapper_aims_along_heading():
+    """Time Pilot: FORWARD locks absolute aim to θ_h (cardinal ACTION_SET)."""
+    configure_pov_turn_from_config(
+        {
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_TURN_PRIMITIVES": True,
+            "ENV_NAME": "timepilot",
+            "POV_TURN_STEP_DEG": 45.0,
+        }
+    )
+    assert turn_step_deg() == pytest.approx(45.0)
+    mapper, _ = make_turn_primitive_mappers("timepilot")
+    # ACTION_SET: 0=NOOP 1=FIRE 2=UP 3=RIGHT 4=LEFT 5=DOWN
+    cases = {
+        -90.0: 2,  # up
+        0.0: 3,  # right
+        90.0: 5,  # down
+        180.0: 4,  # left
+    }
+    for heading, expected in cases.items():
+        got = int(
+            mapper(jnp.int32(TURN_FORWARD), jnp.float32(heading), None, None, None)
+        )
+        assert got == expected, f"heading={heading} got={got}"
+    # TURN_RIGHT from up (-90) → -45 → nearest UR collapses to RIGHT (3).
+    new_h = heading_after(jnp.float32(-90.0), jnp.int32(TURN_RIGHT))
+    assert float(new_h) == pytest.approx(-45.0)
+    assert int(mapper(jnp.int32(TURN_RIGHT), new_h, None, None, None)) == 3
+
+
 def _seaquest_stub():
     stack = 4
 

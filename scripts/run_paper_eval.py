@@ -117,6 +117,9 @@ Usage:
   python scripts/run_paper_eval.py --suite ego_min_nofacing_ovalavoid --gpus 0 --wait-deps --lean
   #   Clip sweep on noweapon+surfacesub5 (10/20/30/50/80/100/noclip; --resume skips clip50):
   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_clipsweep --gpus 0,1,2 --wait-deps --lean --resume
+  #   Ungated skill-mechanics reward check (clip10+clip50 + clip10 all-objects):
+  python scripts/materialize_surfacesub5_skillmech_rw.py
+  python scripts/run_paper_eval.py --suite ego_min_surfacesub5_skillmech_rw --gpus 0,1,2 --wait-deps --lean
   #   Exclusive near/mid/far (12/40), no sticky:
   python scripts/materialize_surfacesub5_distbands.py
   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distbands --gpus 0 --wait-deps --lean
@@ -794,6 +797,26 @@ EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS = (
     "phoenix_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_canfire_surfacesub5",
 )
 
+# Ungated skill-mechanics reward regression (clip10+clip50 lock) + clip10 all-objects.
+# Fresh stems (…_skillmech / …_skillmech_relabel); compare to prior clipsweep numbers.
+#   python scripts/materialize_surfacesub5_skillmech_rw.py
+#   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_skillmech_rw --gpus 0,1,2 --wait-deps --lean
+EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE = "ego_min_surfacesub5_skillmech_rw"
+_EGO_SS5_SKILLMECH_TRAINS = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech",
+    "seaquest_skills_ego_pov_clip50_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech",
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech_relabel",
+)
+EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS = (
+    _EGO_SS5_SKILLMECH_TRAINS
+    + tuple(f"{t}_eval_full" for t in _EGO_SS5_SKILLMECH_TRAINS)
+    + tuple(
+        f"{env}_transfer_ego_pov_{t.removeprefix('seaquest_skills_ego_pov_')}"
+        for t in _EGO_SS5_SKILLMECH_TRAINS
+        for env in ("pong", "beamrider", "phoenix")
+    )
+)
+
 # Distance-block pose probes (Δxy / sign(Δxy) / absolute xy) + φ8; clip null.
 # Trains first so --gpus 0,1,2 shards one train per GPU.
 #   python scripts/materialize_surfacesub5_distpose.py
@@ -859,8 +882,11 @@ EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS = (
 # ALE clip10 heuristic smoke: native skills trains + SQ→target ZS (base mod only).
 #   python scripts/materialize_ale_clip10_heu_smoke.py
 #   python scripts/run_paper_eval.py --suite ale_clip10_heu_smoke --gpus 0,1,2 --wait-deps --lean
+# Asteroids/Time Pilot scratch use turn primitives (dim 6); ZS stays facing so SQ loads.
 ALE_CLIP10_HEU_SMOKE_SUITE = "ale_clip10_heu_smoke"
 _ALE_CLIP10_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+_ALE_CLIP10_TURN_SPINE = "clip10_turn_psibins8_v2_noblocking_noweapon_surfacesub5"
+_ALE_CLIP10_TURN_SCRATCH = frozenset({"asteroids", "timepilot"})
 _ALE_CLIP10_SCRATCH_ENVS = (
     "phoenix",
     "namethisgame",
@@ -884,7 +910,11 @@ _ALE_CLIP10_TRANSFER_ENVS = (
     "phoenix",
 )
 ALE_CLIP10_HEU_SMOKE_STEMS = (
-    tuple(f"{env}_from_scratch_ego_pov_{_ALE_CLIP10_SPINE}" for env in _ALE_CLIP10_SCRATCH_ENVS)
+    tuple(
+        f"{env}_from_scratch_ego_pov_"
+        f"{_ALE_CLIP10_TURN_SPINE if env in _ALE_CLIP10_TURN_SCRATCH else _ALE_CLIP10_SPINE}"
+        for env in _ALE_CLIP10_SCRATCH_ENVS
+    )
     + tuple(
         f"{env}_transfer_ego_pov_{_ALE_CLIP10_SPINE}" for env in _ALE_CLIP10_TRANSFER_ENVS
     )
@@ -1489,6 +1519,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_STEMS,
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS,
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
+    EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS,
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
@@ -1577,6 +1608,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIP50_STICKY_SUITE: "ego_stick",
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: "ego_rand",
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
+    EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: "ego_skm",
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: "ego_cfire",
@@ -2976,6 +3008,9 @@ def main() -> None:
             "→ SQ + Pong/BR/PH. "
             f"{EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE}: clip10 surfacesub5 + "
             "can_fire only (facing_enemy off) → SQ + Pong/BR/PH. "
+            f"{EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE}: ungated skill-mechanics "
+            "reward regression (clip10+clip50 lock + clip10 RELABEL_ALL) → "
+            "SQ eval + Pong/BR/PH; fresh …_skillmech stems. "
             f"{EGO_MIN_SURFACESUB5_DISTPOSE_SUITE}: clip50 surfacesub5 distance "
             "block → Δxy / sign(Δxy) / absolute xy (+ φ8); 3 trains → "
             "--gpus 0,1,2. "

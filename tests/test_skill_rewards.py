@@ -499,3 +499,51 @@ def test_collect_sparse_only_from_config_dict():
     )
     assert float(r[1]) == pytest.approx(COLLECT_LIVING_PENALTY)
     assert not bool(d[1])
+
+
+def test_collect_plus_one_on_destroy_labeled_contact():
+    """Off-policy: COLLECT mechanics apply even when the target is DESTROY."""
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), destroy_contact_fail=True
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_SUCCESS_REWARD)
+    assert bool(d[1])
+    # Same contact is a DESTROY ram-fail under contact_fail.
+    assert float(r[0]) == pytest.approx(DESTROY_FAILURE_REWARD)
+    assert bool(d[0])
+
+
+def test_collect_approach_on_destroy_labeled_target():
+    prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_DESTROY, tw=4, th=4)
+    next_r, next_t = _mk(20, 50, 40, 50, LABEL_DESTROY, tw=4, th=4)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[1]) == pytest.approx(COLLECT_PROGRESS_REWARD)
+    assert not bool(d[1])
+    # Sparse DESTROY stays 0 without extras.
+    assert float(r[0]) == 0.0
+
+
+def test_avoid_escape_on_destroy_labeled_target():
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_DESTROY, tw=8, th=1)
+    next_r, next_t = _mk(30, 100, 80, 100, LABEL_DESTROY, tw=8, th=1)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
+    assert float(r[2]) == pytest.approx(AVOID_ESCAPE_REWARD)
+    assert not bool(d[2])
+
+
+def test_death_applies_to_combat_skills_regardless_of_target_label():
+    # Dying while targeting a NAVIGATE waypoint still trains AVOID/DESTROY death.
+    prev_r, prev_t = _mk(50, 100, 50, 40, LABEL_NAVIGATE)
+    next_r, next_t = _mk(50, 80, 50, 40, LABEL_NAVIGATE)
+    r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(1))
+    assert float(r[0]) == SKILL_DEATH_PENALTY
+    assert bool(d[0])
+    assert float(r[2]) == SKILL_DEATH_PENALTY
+    assert bool(d[2])
+    # NAVIGATE itself stays death-exempt.
+    assert float(r[3]) == pytest.approx(
+        _nav_shaped(_surface_gap(50, 100, 50, 40), _surface_gap(50, 80, 50, 40))
+    )
+    assert not bool(d[3])

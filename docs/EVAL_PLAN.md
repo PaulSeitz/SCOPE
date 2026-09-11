@@ -224,15 +224,14 @@ So Seaquest is not “continuous facing that happens to look L/R.” It is
 **strafe-in-8-world-dirs + flip the hull**. Ego LEFT means translate
 perpendicular to facing, not rotate the ship.
 
-- **Time Pilot (8-way):** extend the snap to 8 headings and 8 mapper tables.
-  Still not continuous; still “pick a compass dir,” but more bins. LEFT will
-  still mean *strafe* unless we change the mapper.
+- **Time Pilot (8-way):** facing-frame 8-bin snap still exists for SQ→TP ZS
+  (strafe≠turn fail cell). Scratch / homologous AS↔TP trains use
+  `USE_POV_TURN_PRIMITIVES`: θ_h at 45° ticks, FORWARD = absolute-aim along
+  θ_h (cardinal ACTION_SET).
 - **Asteroids:** true continuous heading. Honest mapping is FORWARD=thrust,
-  LEFT/RIGHT=**turn** (no strafe). That is a different motor primitive than
-  Seaquest. Existing `USE_POV_TURN_PRIMITIVES` is exactly this (6 actions,
-  integrated θ_h) and is currently **incompatible** with the facing-frame
-  flag — wiring Asteroids means choosing turn-style mapping, not pretending
-  18-way strafe exists.
+  LEFT/RIGHT=**turn** (no strafe) via `USE_POV_TURN_PRIMITIVES` (6 actions,
+  22.5° ticks) — **incompatible** with facing-frame. Do not pretend 18-way
+  strafe exists for scratch training.
 
 **Story we want:** SQ → TP/Asteroids ZS is allowed to fail (strafe ≠ turn).
 Scratch-train one of them as a **base**, then transfer to the other. If that

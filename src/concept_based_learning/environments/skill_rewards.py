@@ -9,7 +9,8 @@ Reward magnitudes and trigger conditions:
              No sparse “cleared” success terminal (escape shaping only).
   COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1.
              Default dense term: +0.01 when AABB surface-gap to the (still active)
-             collectible decreases (approach shaping; matches ego distance).
+             target decreases (approach shaping; matches ego distance).
+             Label-agnostic: contact/approach on a DESTROY enemy still trains COLLECT.
              COLLECT_LIVING_PENALTY: replace approach with −0.01 every frame the
              collectible is still active and not collected this step (same clock
              as DESTROY living tax). NAVIGATE is unchanged.
@@ -46,6 +47,12 @@ Reward magnitudes and trigger conditions:
 All rewards fire on transition edges so sustained overlap cannot be farmed.
 DESTROY relies on was_killed rather than position-based disappearance detection
 because JAX-Atari zeros position for both torpedo kills and scroll-offs.
+
+**Off-policy multi-skill rewards:** each skill's mechanics run against the
+*current target* regardless of ``semantic_label``. Labels select which skill the
+heuristic executes; they do not gate reward. Touching a DESTROY enemy still
+gives COLLECT +1 (contact) and, with ``DESTROY_CONTACT_FAIL``, DESTROY −1 (ram).
+That is what lets Phoenix (no collectibles) teach a transferable COLLECT head.
 
 The reward/done vectors are ordered by skill index (label - 1); see
 SKILL_REGISTRY / SKILL_REWARD_ORDER.
@@ -281,8 +288,8 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
 # Per-skill reward functions.
 #
 # Each takes a RewardContext and returns (reward, done) for one transition.
-# Label gating (semantic_label == spec.label) is applied by the registry loop
-# in extract_skill_rewards, so these encode only the skill's mechanics.
+# Mechanics only — ``extract_skill_rewards`` applies every skill to the target
+# (no label gate) so off-policy heads learn from the same contact/approach.
 # ---------------------------------------------------------------------------
 
 
@@ -551,6 +558,11 @@ def extract_skill_rewards(
     This is the only place reward values are computed. Env-specific files call
     this after extracting object positions/dimensions — no reward logic elsewhere.
 
+    Every skill channel evaluates its own mechanics on ``prev_target`` /
+    ``next_target``; ``semantic_label`` does **not** zero other skills. The
+    heuristic still uses labels to pick an active skill; off-policy learning
+    consumes the full reward vector.
+
     Args:
         prev_raw_obs : raw game observation at t (player + target at t)
         next_raw_obs : raw game observation at t+1 (player at t+1)
@@ -642,9 +654,9 @@ def extract_skill_rewards(
     rewards_list = []
     done_list = []
     for spec in SKILL_REGISTRY:
-        is_label = prev_target.semantic_label == spec.label
         reward, done = spec.compute(ctx)
         # Death: AVOID/DESTROY always; COLLECT only if opted in.
+        # Applies per *skill channel*, independent of the target's label.
         is_combat = jnp.logical_or(
             spec.label == LABEL_AVOID,
             spec.label == LABEL_DESTROY,
@@ -659,8 +671,8 @@ def extract_skill_rewards(
         )
         reward = jnp.where(death_applies, SKILL_DEATH_PENALTY, reward)
         done = jnp.logical_or(done, death_applies)
-        rewards_list.append(jnp.where(is_label, reward, 0.0))
-        done_list.append(jnp.logical_and(is_label, done))
+        rewards_list.append(reward)
+        done_list.append(done)
 
     rewards = jnp.stack(rewards_list).astype(jnp.float32)
     skill_done = jnp.stack(done_list).astype(jnp.bool_)
