@@ -1,0 +1,11 @@
+# Minimal allowlist for namethisgame — base only until mods workshop.
+env: namethisgame
+status: draft
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+
+paper_core:
+  - base

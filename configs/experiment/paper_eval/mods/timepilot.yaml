@@ -1,0 +1,11 @@
+# Minimal allowlist for timepilot — base only until mods workshop.
+env: timepilot
+status: draft
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+
+paper_core:
+  - base

@@ -1,0 +1,11 @@
+# Minimal allowlist for spaceinvaders — base only until mods workshop.
+env: spaceinvaders
+status: draft
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+
+paper_core:
+  - base

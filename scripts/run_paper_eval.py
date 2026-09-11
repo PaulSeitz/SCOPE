@@ -856,6 +856,40 @@ EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS = (
     )
 )
 
+# ALE clip10 heuristic smoke: native skills trains + SQ→target ZS (base mod only).
+#   python scripts/materialize_ale_clip10_heu_smoke.py
+#   python scripts/run_paper_eval.py --suite ale_clip10_heu_smoke --gpus 0,1,2 --wait-deps --lean
+ALE_CLIP10_HEU_SMOKE_SUITE = "ale_clip10_heu_smoke"
+_ALE_CLIP10_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+_ALE_CLIP10_SCRATCH_ENVS = (
+    "phoenix",
+    "namethisgame",
+    "timepilot",
+    "asteroids",
+    "pong",
+    "breakout",
+    "beamrider",
+    "spaceinvaders",
+    "freeway",
+)
+_ALE_CLIP10_TRANSFER_ENVS = (
+    "spaceinvaders",
+    "beamrider",
+    "timepilot",
+    "asteroids",
+    "pong",
+    "breakout",
+    "freeway",
+    "namethisgame",
+    "phoenix",
+)
+ALE_CLIP10_HEU_SMOKE_STEMS = (
+    tuple(f"{env}_from_scratch_ego_pov_{_ALE_CLIP10_SPINE}" for env in _ALE_CLIP10_SCRATCH_ENVS)
+    + tuple(
+        f"{env}_transfer_ego_pov_{_ALE_CLIP10_SPINE}" for env in _ALE_CLIP10_TRANSFER_ENVS
+    )
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1458,6 +1492,7 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
+    ALE_CLIP10_HEU_SMOKE_SUITE: ALE_CLIP10_HEU_SMOKE_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1545,6 +1580,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: "ego_cfire",
+    ALE_CLIP10_HEU_SMOKE_SUITE: "ale_c10",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2948,6 +2984,9 @@ def main() -> None:
             f"{EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE}: can_fire re-intro "
             "on clip10/50 + neartiers + deltaxy(φ8) + deltaxy(φ sincos); "
             "trains first → --gpus 0,1,2. "
+            f"{ALE_CLIP10_HEU_SMOKE_SUITE}: clip10 spine native skills trains "
+            "(PH/NTG/TP/AS/Pong/Breakout/BR/SI/Freeway) + SQ→target ZS; "
+            "base-mod only; trains first → --gpus 0,1,2. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "

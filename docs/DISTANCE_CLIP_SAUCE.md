@@ -57,16 +57,12 @@ better with can_fire than with high-base noweapon/neartiers. Re-intro on the
 surfacesub5 spine is the overnight question — not a new combinatorial axis
 of encodings.
 
-## Overnight batch (2026-09-11)
+## Overnight batch (2026-09-11) — done
 
-Suite `ego_min_surfacesub5_canfire_overnight`:
+Suite `ego_min_surfacesub5_canfire_overnight` (cluster1): can_fire re-intro
+on clip10/50/neartiers/Δxy/Δxy+sincos was a **clear negative** on this spine
+(Pong stories died; clip50 SQ collapsed). Do not fold can_fire back into the
+surfacesub5 lock.
 
-1. clip10 + can_fire  
-2. clip50 + can_fire  
-3. neartiers + can_fire  
-4. deltaxy + can_fire (φ8)  
-5. deltaxy + can_fire + **φ sin/cos** (one angle variant — continuous bearing with continuous Δxy)
-
-Do **not** expand to more angle / distance hybrids until this batch is read.
-After: fold can_fire into the locked spine if it helps DESTROY/abs mods without
-killing the Pong story; then stop encoding spam and go ALE matrix.
+**Lock: clip10 + noweapon + surfacesub5 + φ8.** Next: ALE heuristic/skill
+smoke (`ale_clip10_heu_smoke`), then matrix.

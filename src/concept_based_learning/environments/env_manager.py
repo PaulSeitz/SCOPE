@@ -25,6 +25,11 @@ from jaxatari.games.jax_tennis import TennisRenderer
 from jaxatari.games.jax_asterix import AsterixRenderer
 from jaxatari.games.jax_montezumarevenge import MontezumaRevengeRenderer
 from jaxatari.games.jax_venture import VentureRenderer
+from jaxatari.games.jax_asteroids import AsteroidsRenderer
+from jaxatari.games.jax_namethisgame import Renderer_NameThisGame
+from jaxatari.games.jax_timepilot import TimePilotRenderer
+# Kaboom is not in upstream jaxatari yet — keep label/policy code, do not register.
+# from jaxatari.games.jax_kaboom import KaboomRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -170,6 +175,48 @@ from concept_based_learning.environments.venture.venture_policy import (
     get_heuristic_target as venture_get_heuristic_target,
     NO_TARGET_IDX as venture_NO_TARGET_IDX,
 )
+from concept_based_learning.environments.asteroids.asteroids_label import (
+    AsteroidsSemanticWrapper,
+    asteroids_action_mapper,
+    asteroids_inverse_action_mapper,
+    extract_all_skills_rewards as asteroids_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.asteroids.asteroids_policy import (
+    get_heuristic_target as asteroids_get_heuristic_target,
+    get_heuristic_target_with_state as asteroids_get_heuristic_with_state,
+    NO_TARGET_IDX as asteroids_NO_TARGET_IDX,
+)
+from concept_based_learning.environments.namethisgame.namethisgame_label import (
+    NameThisGameSemanticWrapper,
+    namethisgame_action_mapper,
+    namethisgame_inverse_action_mapper,
+    extract_all_skills_rewards as namethisgame_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.namethisgame.namethisgame_policy import (
+    get_heuristic_target as namethisgame_get_heuristic_target,
+    NO_TARGET_IDX as namethisgame_NO_TARGET_IDX,
+)
+from concept_based_learning.environments.timepilot.timepilot_label import (
+    TimePilotSemanticWrapper,
+    timepilot_action_mapper,
+    timepilot_inverse_action_mapper,
+    extract_all_skills_rewards as timepilot_extract_all_skills_rewards,
+)
+from concept_based_learning.environments.timepilot.timepilot_policy import (
+    get_heuristic_target as timepilot_get_heuristic_target,
+    get_heuristic_target_with_state as timepilot_get_heuristic_with_state,
+    NO_TARGET_IDX as timepilot_NO_TARGET_IDX,
+)
+# from concept_based_learning.environments.kaboom.kaboom_label import (
+#     KaboomSemanticWrapper,
+#     kaboom_action_mapper,
+#     kaboom_inverse_action_mapper,
+#     extract_all_skills_rewards as kaboom_extract_all_skills_rewards,
+# )
+# from concept_based_learning.environments.kaboom.kaboom_policy import (
+#     get_heuristic_target as kaboom_get_heuristic_target,
+#     NO_TARGET_IDX as kaboom_NO_TARGET_IDX,
+# )
 from concept_based_learning.environments.generic_heuristic import (
     get_heuristic_target as generic_get_heuristic_target,
     NO_TARGET_IDX as generic_NO_TARGET_IDX,
@@ -223,8 +270,10 @@ def _lives_from_env_state(env_state: Any) -> jnp.ndarray:
         return env_state.lives
     if hasattr(env_state, "player_lives"):
         return env_state.player_lives
+    if hasattr(env_state, "lives_remaining"):
+        return env_state.lives_remaining
     raise AttributeError(
-        "env_state has no `lives` or `player_lives` field; "
+        "env_state has no `lives`, `player_lives`, or `lives_remaining` field; "
         "register a custom extract_life_lost for this game."
     )
 
@@ -286,6 +335,15 @@ def _skiing_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.n
     next_es = _unwrap_atari_env_state(next_env_state)
     collision = jnp.logical_and(prev_es.collision_cooldown == 0, next_es.collision_cooldown > 0)
     return collision.astype(jnp.int32)
+
+
+# def _kaboom_extract_life_lost(prev_env_state: Any, next_env_state: Any) -> jnp.ndarray:
+#     """Kaboom has no lives counter; losing a bucket is the life-lost signal."""
+#     prev_es = _unwrap_atari_env_state(prev_env_state)
+#     next_es = _unwrap_atari_env_state(next_env_state)
+#     prev_n = jnp.sum(prev_es.buckets_pos[:, 2] > 0)
+#     next_n = jnp.sum(next_es.buckets_pos[:, 2] > 0)
+#     return jnp.maximum(prev_n - next_n, 0).astype(jnp.int32)
 
 
 def _wrap_reward_extractor_5arg(reward_extractor_5arg: Callable[..., Any]):
@@ -690,6 +748,88 @@ class EnvManager:
             meta_mask_hook=_default_meta_mask_hook,
             forced_target_hook=_default_forced_target_hook,
         )
+
+        self._registry["asteroids"] = EnvComponents(
+            name="Asteroids",
+            jax_game_id="asteroids",
+            semantic_wrapper_cls=AsteroidsSemanticWrapper,
+            renderer_cls=AsteroidsRenderer,
+            get_heuristic_target=asteroids_get_heuristic_target,
+            no_target_idx=asteroids_NO_TARGET_IDX,
+            action_mapper=asteroids_action_mapper,
+            inverse_action_mapper=asteroids_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(
+                asteroids_extract_all_skills_rewards
+            ),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+            get_heuristic_with_state=asteroids_get_heuristic_with_state,
+        )
+
+        self._registry["namethisgame"] = EnvComponents(
+            name="NameThisGame",
+            jax_game_id="namethisgame",
+            semantic_wrapper_cls=NameThisGameSemanticWrapper,
+            renderer_cls=Renderer_NameThisGame,
+            get_heuristic_target=namethisgame_get_heuristic_target,
+            no_target_idx=namethisgame_NO_TARGET_IDX,
+            action_mapper=namethisgame_action_mapper,
+            inverse_action_mapper=namethisgame_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(
+                namethisgame_extract_all_skills_rewards
+            ),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+        )
+        self._registry["name_this_game"] = self._registry["namethisgame"]
+
+        self._registry["timepilot"] = EnvComponents(
+            name="TimePilot",
+            jax_game_id="timepilot",
+            semantic_wrapper_cls=TimePilotSemanticWrapper,
+            renderer_cls=TimePilotRenderer,
+            get_heuristic_target=timepilot_get_heuristic_target,
+            no_target_idx=timepilot_NO_TARGET_IDX,
+            action_mapper=timepilot_action_mapper,
+            inverse_action_mapper=timepilot_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(
+                timepilot_extract_all_skills_rewards
+            ),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=_default_meta_mask_hook,
+            forced_target_hook=_default_forced_target_hook,
+            get_heuristic_with_state=timepilot_get_heuristic_with_state,
+        )
+        self._registry["time_pilot"] = self._registry["timepilot"]
+
+        # Kaboom: not in upstream jaxatari yet. Uncomment with the imports above
+        # once jax_kaboom lands.
+        # self._registry["kaboom"] = EnvComponents(
+        #     name="Kaboom",
+        #     jax_game_id="kaboom",
+        #     semantic_wrapper_cls=KaboomSemanticWrapper,
+        #     renderer_cls=KaboomRenderer,
+        #     get_heuristic_target=kaboom_get_heuristic_target,
+        #     no_target_idx=kaboom_NO_TARGET_IDX,
+        #     action_mapper=kaboom_action_mapper,
+        #     inverse_action_mapper=kaboom_inverse_action_mapper,
+        #     reward_extractor=_wrap_reward_extractor_5arg(
+        #         kaboom_extract_all_skills_rewards
+        #     ),
+        #     fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+        #     extract_life_lost=_kaboom_extract_life_lost,
+        #     resolve_curriculum_mods=_default_resolve_curriculum_mods,
+        #     meta_mask_hook=_default_meta_mask_hook,
+        #     forced_target_hook=_default_forced_target_hook,
+        # )
 
     def available_envs(self):
         return tuple(self._registry.keys())

@@ -1,0 +1,11 @@
+# Minimal allowlist for asteroids — base only until mods workshop.
+env: asteroids
+status: draft
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+
+paper_core:
+  - base

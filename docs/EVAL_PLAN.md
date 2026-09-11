@@ -3,11 +3,11 @@
 Date: 2026-09-07 (distance-clip section amended 2026-09-10). Thesis claim:
 **strict informational abstraction** on System 1 (egocentric, bounded pose)
 yields in-domain competence, robustness, and *homologous* skill transfer.
-Facing-frame φ8 + surfacesub5 labeling are frozen. **Distance clip
-(`EGO_DISTANCE_CLIP_MAX_PX`) is the remaining open lock** (clip10 vs clip50
-— see §0.1). Remaining work after that lock: (1) wider but shallower ALE
-matrix, (2) Montezuma as planned-env showcase, (3) Freeway as a limitation,
-(4) dedicated mods workshop (`docs/MODS_PLAN.md`).
+Facing-frame φ8 + surfacesub5 labeling are frozen. **Distance clip locked
+to clip10** (near-field information bound — see §0.1). Remaining work:
+(1) heuristic/skill smoke across ALE bases + transfer targets,
+(2) wider but shallower ALE matrix, (3) Montezuma showcase, (4) Freeway
+limitation, (5) mods workshop (`docs/MODS_PLAN.md`).
 
 ## Why this direction
 
@@ -87,12 +87,16 @@ tables below use. Raw syncs:
 `tmp/ego_min_surfacesub5_clipsweep/`, `tmp/ego_min_surfacesub5_distabl/`,
 `tmp/ego_min_surfacesub5_distbands/`, `tmp/ego_min_surfacesub5_cliprand/`.
 
-**Open decision for direction meeting:** lock **clip10** or **clip50**.
-Lean (not locked): **clip10** — consistent Pong COLLECT, dynamics retention
-near 1.0 (easier robustness story), SQ ~PQN parity (~18.6k), BR/PH weak but
-not collapsed. Clip50 is the competence ceiling (SQ 35k, best homologous
-DESTROY) but Pong is noisy and own-base dynamics retention looks worse
-partly because the base is inflated (see caveat below).
+**Locked:** **clip10** on noweapon + surfacesub5 + φ8. Near-field
+information bound: high-res distance only for close objects; mid-range
+saturation is intentional. Clip50 remains the competence-ceiling control
+(SQ ~35k, best BR/PH) — cite in appendix, do not re-sweep.
+
+**Stop:** no more clip sweeps, bins, hard bands, train-time clip DR, or
+distance-pose / can_fire encoding spam on this spine. Next is heuristic
+smoke across ALE envs (§5.2–3) then the matrix (§3).
+
+Lean (historical): clip10 vs clip50 meeting table kept below for provenance.
 
 ### Transfer + in-domain (clipsweep)
 
@@ -160,7 +164,8 @@ None beats the clip10↔clip50 tradeoff. Keep as negative evidence only.
 | Thesis fit | tighter information bound | more in-domain capacity |
 
 **Stop after the lock:** no more clip sweeps, bins, hard bands, or train-time
-clip DR. Next is the ALE matrix (§3) on the chosen clip.
+clip DR. Next is ALE heuristic smoke (`ale_clip10_heu_smoke`) then the
+matrix (§3) on clip10.
 
 ---
 
