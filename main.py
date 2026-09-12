@@ -303,6 +303,17 @@ def single_run(config):
             config=base_config,
             mode=base_config["WANDB_MODE"],
         )
+        # Persist run id early so a crashed train still leaves a resumable pointer.
+        save_path_early = resolve_config_path(base_config.get("SAVE_PATH", None))
+        if save_path_early is not None and wandb.run is not None:
+            from concept_based_learning.paper_eval.wandb_run_meta import (
+                persist_wandb_run_meta,
+            )
+
+            early_dir = os.path.join(save_path_early, env_name)
+            meta_path = persist_wandb_run_meta(early_dir)
+            if meta_path is not None:
+                print(f"Wandb run meta saved to {meta_path}")
 
     rng = jax.random.PRNGKey(base_config["SEED"])
     eval_seed = base_config.get("EVAL_SEED", base_config["SEED"] + 1)
@@ -797,6 +808,14 @@ def single_run(config):
                 os.path.join(save_dir, f'{alg_name}_{env_name}_seed{base_config["SEED"]}_config.yaml'),
             )
             print(f"Config saved to {save_dir}")
+
+            # Refresh wandb run id next to the final checkpoints (same dir).
+            if wandb.run is not None:
+                from concept_based_learning.paper_eval.wandb_run_meta import (
+                    persist_wandb_run_meta,
+                )
+
+                persist_wandb_run_meta(save_dir)
 
             if final_skill_params is not None:
                 flat_skill_params = flatten_skill_params(final_skill_params)

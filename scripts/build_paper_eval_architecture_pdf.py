@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a short PDF architecture overview of the current paper_eval suite.
 
-Focus: ego / pixel / OC skill observation modes and locked design decisions.
+Focus: ego / pixel / OC skill observation modes, POV facing spine, and suite protocol.
 Includes simple block diagrams (clarity over polish).
 """
 
@@ -15,6 +15,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = PROJECT_ROOT / "docs" / "paper_eval" / "architecture_overview.pdf"
+PIXEL_OUTLINE_IMG = PROJECT_ROOT / "docs" / "paper_eval" / "pixel_skill_target_outline.png"
 
 FIG = (8.5, 11.0)
 LM = 0.08
@@ -32,6 +33,8 @@ C_SHARED_FACE = "#f0f0f0"
 C_META = "#5c4a8a"
 C_META_FACE = "#f0ecf8"
 C_REMOVED = "#999999"
+C_THESIS = "#0b5a8a"
+C_THESIS_FACE = "#e6f3fa"
 
 
 # ---------------------------------------------------------------------------
@@ -139,15 +142,12 @@ def _hflow(ax, boxes, *, y=0.45, h=0.28, gap=0.035, start_x=0.02, total_w=0.96, 
     weights = [max(1.0, len(b[0].split("\n")[0]) / 12) for b in boxes]
     s = sum(weights)
     widths = [usable * w / s for w in weights]
-    xs = []
     x = start_x
     for i, ((text, face), w) in enumerate(zip(boxes, widths)):
         _node(ax, x, y, w, h, text, face=face, edge=edge, fs=7.0)
-        xs.append((x, w))
         if i < n - 1:
             _arrow(ax, x + w + 0.002, y + h / 2, x + w + gap - 0.002, y + h / 2, color=edge)
         x += w + gap
-    return xs
 
 
 # ---------------------------------------------------------------------------
@@ -157,47 +157,50 @@ def _hflow(ax, boxes, *, y=0.45, h=0.28, gap=0.035, start_x=0.02, total_w=0.96, 
 def page_title(pdf: PdfPages) -> None:
     fig = plt.figure(figsize=FIG)
     fig.patch.set_facecolor("white")
-    fig.text(0.5, 0.88, "Paper Eval Architecture", fontsize=20, weight="bold",
+    fig.text(0.5, 0.90, "Paper Eval Architecture", fontsize=20, weight="bold",
              ha="center", color="#1a1a1a")
-    fig.text(0.5, 0.84, "Concept-Based Learning — System-1 observation modes + suite protocol",
+    fig.text(0.5, 0.86, "Concept-Based Learning — System-1 observation modes + suite protocol",
              fontsize=9.5, ha="center", color="#555555")
+    fig.text(0.5, 0.825,
+             "Current thesis spine: POV facing-frame ego · φ8 bins · clip50  →  48-dim @ stack 4",
+             ha="center", fontsize=8.5, weight="bold", color=C_THESIS)
 
     # Three mode cards
-    ax = _axes(fig, [0.06, 0.52, 0.88, 0.28])
+    ax = _axes(fig, [0.06, 0.50, 0.88, 0.28])
     cards = [
         (0.02, "EGO", "SKILL_INPUT_MODE: ego",
-         "Relative geometry\n→ flat MLP\n24-dim @ stack 4", C_EGO, C_EGO_FACE),
+         "Relative geometry\n→ flat MLP\nthesis: 48-dim\n(classic: 24-dim)", C_EGO, C_EGO_FACE),
         (0.35, "PIXEL", "SKILL_INPUT_MODE: pixel_embed",
-         "84×84 gray + outline\n→ CNN → Dense → MLP", C_PIX, C_PIX_FACE),
+         "84×84 gray + outline\n→ CNN → Dense → MLP\n(+ POV mapper arms)", C_PIX, C_PIX_FACE),
         (0.68, "OC", "SKILL_INPUT_MODE: oc_embed",
-         "objects [M,F]\n→ Dense/row → gather\n→ MLP", C_OC, C_OC_FACE),
+         "objects [M,F]\n→ Dense/row → gather\n→ MLP (+ optional ψ)", C_OC, C_OC_FACE),
     ]
     for x, title, mode, body, edge, face in cards:
-        _node(ax, x, 0.15, 0.30, 0.70, "", face=face, edge=edge)
-        ax.text(x + 0.15, 0.72, title, ha="center", fontsize=12, weight="bold",
+        _node(ax, x, 0.12, 0.30, 0.78, "", face=face, edge=edge)
+        ax.text(x + 0.15, 0.78, title, ha="center", fontsize=12, weight="bold",
                 color=edge, transform=ax.transAxes)
-        ax.text(x + 0.15, 0.58, mode, ha="center", fontsize=6.5, color="#444",
+        ax.text(x + 0.15, 0.62, mode, ha="center", fontsize=6.5, color="#444",
                 family="DejaVu Sans Mono", transform=ax.transAxes)
         ax.text(x + 0.15, 0.35, body, ha="center", va="center", fontsize=7.5,
                 color="#222", transform=ax.transAxes)
 
-    fig.text(0.5, 0.48, "Shared rule: target_idx is a gather key — never a slot one-hot",
+    fig.text(0.5, 0.46, "Shared rule: target_idx is a gather key — never a slot one-hot",
              ha="center", fontsize=9, weight="bold", color="#333")
 
     # Mini RQ strip
-    ax2 = _axes(fig, [0.08, 0.18, 0.84, 0.22])
+    ax2 = _axes(fig, [0.08, 0.16, 0.84, 0.24])
     _node(ax2, 0.02, 0.25, 0.28, 0.55, "RQ1\nSeaquest skills\n+ mod retention",
           face=C_SHARED_FACE, edge=C_SHARED, fs=8)
     _arrow(ax2, 0.31, 0.52, 0.35, 0.52)
-    _node(ax2, 0.36, 0.25, 0.28, 0.55, "RQ2\nTransfer / finetune\n/ from-scratch",
-          face=C_SHARED_FACE, edge=C_SHARED, fs=8)
+    _node(ax2, 0.36, 0.25, 0.28, 0.55, "RQ2\nTransfer / finetune\n/ from-scratch\n(+ Phoenix)",
+          face=C_SHARED_FACE, edge=C_SHARED, fs=7.5)
     _arrow(ax2, 0.65, 0.52, 0.69, 0.52)
-    _node(ax2, 0.70, 0.25, 0.28, 0.55, "RQ3\nMeta/tandem on\nfrozen ego skills",
+    _node(ax2, 0.70, 0.25, 0.28, 0.55, "RQ3\nMeta/tandem on\nego skill backbone",
           face=C_META_FACE, edge=C_META, fs=8)
 
-    fig.text(0.5, 0.08, "docs/skill_input_modes.md  ·  configs/experiment/paper_eval/  ·  scripts/run_paper_eval.py",
+    fig.text(0.5, 0.09, "docs/skill_input_modes.md  ·  configs/experiment/paper_eval/  ·  scripts/run_paper_eval.py",
              ha="center", fontsize=7, color="#888")
-    fig.text(0.5, 0.045, "Regenerate: python scripts/build_paper_eval_architecture_pdf.py",
+    fig.text(0.5, 0.055, "Regenerate: python scripts/build_paper_eval_architecture_pdf.py",
              ha="center", fontsize=7, color="#888")
     pdf.savefig(fig)
     plt.close(fig)
@@ -212,7 +215,7 @@ def page_suite_diagram(pdf: PdfPages) -> None:
           face="#fff8e6", edge="#a67c00", fs=7.5)
     _arrow(ax, 0.5, 0.82, 0.5, 0.74)
     _node(ax, 0.20, 0.58, 0.60, 0.14,
-          "scripts/run_paper_eval.py\n(discover · shard · RQ gate · resume · lean)",
+          "scripts/run_paper_eval.py\n(discover · --suite · shard · RQ gate · resume · lean)",
           face="#eef2f8", edge="#2c4a7c", fs=8, weight="bold")
 
     # Branch
@@ -239,10 +242,11 @@ def page_suite_diagram(pdf: PdfPages) -> None:
         "## Matched outer loop (RQ1 skill arms)",
         "TOTAL_TIMESTEPS ≈ 24.98M · NUM_ENVS=128 · NUM_STEPS=128 · FRAME_SKIP=4 · stack=4",
         "Skills: DESTROY / COLLECT / AVOID / NAVIGATE · MAX_OBJECTS=35 · RELABEL_ALL_OBJECTS=false",
-        "Ego flags copied onto pixel/OC YAMLs for sidecar consistency (even if unused by those nets).",
+        "Ego encoding flags copied onto pixel/OC YAMLs for sidecar consistency (even if unused by those nets).",
         "",
-        "## RQ dependencies",
+        "## RQ dependencies + named suites",
         "RQ2/RQ3 wait on RQ1 Seaquest skill ckpts (PAPER_EVAL_REQUIRES_RQ1 / --wait-deps).",
+        "Named suites (thesis_facing, pov_facing_v2, clip50_angbins_full, …) select stems; not only --rq.",
         "RQ3 skills are always ego; meta input is pixel_embed or oc_embed.",
     ]
     _body(fig, 0.38, lines)
@@ -267,7 +271,7 @@ def page_three_way(pdf: PdfPages) -> None:
     columns = [
         ("EGO", C_EGO, C_EGO_FACE, [
             ("objects[target]\ngeometry only", C_EGO_FACE),
-            ("get_ego_obs\ndist, sinψ, cosψ\n+LOS +weapon\n× stack 4 → 24-d", C_EGO_FACE),
+            ("get_ego_obs\ndist + φ/ψ encode\n+LOS +weapon\n× stack 4", C_EGO_FACE),
             ("MLP\n(HIDDEN 128 × 3)", C_EGO_FACE),
             ("Q(ego actions)\ndim 18", C_EGO_FACE),
         ], "cue built into\nrelative features"),
@@ -280,7 +284,7 @@ def page_three_way(pdf: PdfPages) -> None:
         ("OC", C_OC, C_OC_FACE, [
             ("build matrix\n[M, F] all leaves", C_OC_FACE),
             ("Dense(F→256)\nshared per row", C_OC_FACE),
-            ("gather row\ntarget_idx → [256]", C_OC_FACE),
+            ("gather row\ntarget_idx → [256]\n(+ optional sin/cos ψ)", C_OC_FACE),
             ("MLP → Q\n(ego actions)", C_OC_FACE),
         ], "cue = gather\nembedded row"),
     ]
@@ -321,58 +325,104 @@ def page_ego_diagram(pdf: PdfPages) -> None:
     fig, y = _new_page(
         pdf,
         "3. Ego architecture (detail)",
-        "SKILL_INPUT_MODE: ego — locked 24-dim transfer substrate",
+        "Thesis spine vs classic baseline — layout must match the Seaquest ckpt sidecar on transfer",
     )
-    ax = _axes(fig, [0.06, 0.58, 0.88, 0.32])
+    ax = _axes(fig, [0.06, 0.62, 0.88, 0.28])
     _hflow(
         ax,
         [
             ("target_idx", "#fff3cd"),
             ("gather object\ngeometry", C_EGO_FACE),
-            ("relative feats\nper frame", C_EGO_FACE),
-            ("stack ×4\n→ 24-d vector", C_EGO_FACE),
+            ("facing-frame\npose (dist, φ)", C_THESIS_FACE),
+            ("φ → 8 bins\n+LOS +weapon\n×4 → 48-d", C_THESIS_FACE),
             ("MLP → Q\n18 ego acts", C_EGO_FACE),
         ],
-        y=0.35,
-        h=0.40,
+        y=0.30,
+        h=0.45,
         edge=C_EGO,
     )
-    _label(ax, 0.5, 0.12, "Q-net never sees the integer slot id", fs=8, color=C_EGO, weight="bold")
+    _label(ax, 0.5, 0.10, "Thesis spine: USE_POV_FACING_FRAME + EGO_PSI_ANGLE_BINS=8 + clip50",
+           fs=7.5, color=C_THESIS, weight="bold")
 
-    # Channel breakdown bars
-    ax2 = _axes(fig, [0.08, 0.28, 0.84, 0.26])
-    _label(ax2, 0.5, 0.95, "Per-frame channels (paper lock) → ×4 stack = 24", fs=8, weight="bold")
+    # Channel breakdown for thesis spine
+    ax2 = _axes(fig, [0.06, 0.36, 0.88, 0.24])
+    _label(ax2, 0.5, 0.95, "Thesis spine channels / frame (×4 stack = 48)", fs=8, weight="bold", color=C_THESIS)
     channels = [
-        ("distance", 1, True, C_EGO),
-        ("sin(ψ)", 1, True, C_EGO),
-        ("cos(ψ)", 1, True, C_EGO),
-        ("LOS blocked", 1, True, C_EGO),
+        ("distance\n(clip50)", 1, True, C_THESIS),
+        ("φ bins ×8", 8, True, C_THESIS),
+        ("LOS", 1, True, C_EGO),
         ("can_fire", 1, True, C_EGO),
         ("facing_enemy", 1, True, C_EGO),
-        ("size w,h", 2, False, C_REMOVED),
-        ("rad/tan vel", 2, False, C_REMOVED),
+        ("size / vel", 2, False, C_REMOVED),
     ]
     x = 0.02
     for name, n, on, col in channels:
-        w = 0.10 * n
-        face = C_EGO_FACE if on else "#f0f0f0"
-        _node(ax2, x, 0.35, w - 0.01, 0.40, f"{name}\n({'ON' if on else 'OFF'})",
+        w = 0.085 * max(n, 1) if n <= 2 else 0.28
+        if n == 8:
+            w = 0.36
+        face = C_THESIS_FACE if on and col == C_THESIS else (C_EGO_FACE if on else "#f0f0f0")
+        _node(ax2, x, 0.28, w - 0.01, 0.48, f"{name}\n({'ON' if on else 'OFF'})",
               face=face, edge=col, fs=5.8)
         x += w
-    _label(ax2, 0.5, 0.12, "ON = paper RQ1/transfer lock   |   OFF = disabled (matched to flat PQN / no velocity)",
+    _label(ax2, 0.5, 0.10, "φ = bearing of target in player-facing body frame  |  SIZE/VELOCITY always off for paper arms",
            fs=6.5, color="#666")
 
     lines = [
-        "## Locked flags (vs template)",
-        "USE_LEGACY_EGO_OBS=false · SIZE=false · VELOCITY=false · BLOCKING=true · WEAPON=true",
-        "EGO_DISTANCE_CLIP_MAX_PX=30 · USE_LEGACY_SEAQUEST_* action/ascent/death guards = false",
+        "## Encoding families (transfer locks to the trained layout)",
+        "Thesis / facing spine: POV facing frame · EGO_PSI_ANGLE_BINS=8 · clip=50 → 12 ch/frame → 48-dim",
+        "Classic baseline: target-aligned sin/cos(ψ) · blocking+weapon · clip null/50 → 6 ch/frame → 24-dim",
+        "World-θ bins (non-POV): EGO_ANGLE_BINS=8 · clip50 → also 48-dim (different angle semantics)",
+        "Ablations: clip0 / clip100 / distflags / facing_xy / restrained pose / shot extras — see YAML stems",
         "",
-        "## Why",
-        "Relative geometry is env-agnostic; slot IDs are not. Transfer/finetune must keep this",
-        "exact layout so MLP width matches Seaquest RQ1 weights. Eval overlays flags from ckpt sidecar.",
-        "RQ3 always uses ego skills (meta may be pixel or OC).",
+        "## Shared flags",
+        "SIZE=false · VELOCITY=false · BLOCKING=true · WEAPON=true · USE_LEGACY_EGO_OBS=false",
+        "USE_LEGACY_SEAQUEST_* action/ascent/death guards = false · EGO_ACTION_DIM=18",
+        "Pre-2026-08-30 facing-frame ckpts invalid (obs/mapper fix) — use *_v2 / thesis_facing stems.",
     ]
-    _body(fig, 0.26, lines, size=7.8, leading=0.016)
+    _body(fig, 0.34, lines, size=7.5, leading=0.015)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def page_pov_mapper(pdf: PdfPages) -> None:
+    fig, y = _new_page(
+        pdf,
+        "4. POV action mapper + ego frame",
+        "Body-relative control must match observation semantics",
+    )
+    ax = _axes(fig, [0.06, 0.55, 0.88, 0.35])
+
+    _node(ax, 0.02, 0.55, 0.28, 0.35, "Player facing\n(resolve_facing_deg)",
+          face=C_THESIS_FACE, edge=C_THESIS, fs=7.5)
+    _arrow(ax, 0.31, 0.72, 0.38, 0.72, color=C_THESIS)
+    _node(ax, 0.38, 0.55, 0.28, 0.35, "USE_POV_FACING_FRAME\nview = facing\ntarget pose in body frame",
+          face=C_THESIS_FACE, edge=C_THESIS, fs=7)
+    _arrow(ax, 0.67, 0.72, 0.74, 0.72, color=C_THESIS)
+    _node(ax, 0.74, 0.55, 0.24, 0.35, "ego FORWARD =\nstrafe along facing\n(+ FIRE primitives)",
+          face=C_EGO_FACE, edge=C_EGO, fs=7)
+
+    _node(ax, 0.02, 0.08, 0.28, 0.35, "Legacy / classic\n(no POV mapper)",
+          face=C_SHARED_FACE, edge=C_SHARED, fs=7)
+    _arrow(ax, 0.31, 0.25, 0.38, 0.25, color=C_SHARED)
+    _node(ax, 0.38, 0.08, 0.28, 0.35, "Target-aligned ψ\nview toward target\nsin/cos or θ-bins",
+          face=C_SHARED_FACE, edge=C_SHARED, fs=7)
+    _arrow(ax, 0.67, 0.25, 0.74, 0.25, color=C_SHARED)
+    _node(ax, 0.74, 0.08, 0.24, 0.35, "Orientation-relative\nor env ALE tables",
+          face=C_SHARED_FACE, edge=C_SHARED, fs=7)
+
+    lines = [
+        "## Flags",
+        "USE_POV_RELATIVE_MAPPER — body-facing ego action table (required for facing / fixed2 / turn).",
+        "USE_POV_FACING_FRAME — FPS obs: φ from player facing (thesis spine).",
+        "EGO_POSE_XY — emit (fwd, lat) instead of (distance, φ) under facing frame.",
+        "USE_POV_FIXED_BILATERAL / USE_POV_TURN_PRIMITIVES — alternate POV ablations (not thesis default).",
+        "",
+        "## Pixel / OC under POV",
+        "thesis_facing pairs pixel_pov / oc_pov arms with the same facing-relative mapper so",
+        "System-1 action semantics match across observation modes (obs cue still outline / gather).",
+        "Skill OC may set SKILL_OC_PSI_FEATURES to concat sin/cos(ψ) after gather (facing − bearing).",
+    ]
+    _body(fig, 0.50, lines, size=7.6, leading=0.0155)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -380,10 +430,10 @@ def page_ego_diagram(pdf: PdfPages) -> None:
 def page_pixel_diagram(pdf: PdfPages) -> None:
     fig, y = _new_page(
         pdf,
-        "4. Pixel architecture (detail)",
+        "5. Pixel architecture (detail)",
         "SKILL_INPUT_MODE: pixel_embed — CNN + painted target outline",
     )
-    ax = _axes(fig, [0.05, 0.62, 0.90, 0.28])
+    ax = _axes(fig, [0.05, 0.72, 0.90, 0.18])
 
     # Two inputs merge
     _node(ax, 0.02, 0.55, 0.18, 0.35, "pixel stack\n[T,H,W,C]\n84×84 gray", face=C_PIX_FACE, edge=C_PIX, fs=6.5)
@@ -398,29 +448,52 @@ def page_pixel_diagram(pdf: PdfPages) -> None:
     _node(ax, 0.74, 0.08, 0.22, 0.35, "Dense 256\n+ MLP → Q", face=C_PIX_FACE, edge=C_PIX, fs=7)
     _arrow(ax, 0.85, 0.55, 0.85, 0.44, color=C_PIX)
 
-    # Fake "outline" sketch
-    ax2 = _axes(fig, [0.08, 0.38, 0.38, 0.20])
-    ax2.add_patch(Rectangle((0.15, 0.15), 0.70, 0.70, fill=True, facecolor="#ddd",
-                            edgecolor="#666", lw=1, transform=ax2.transAxes))
-    ax2.add_patch(Rectangle((0.35, 0.35), 0.30, 0.30, fill=False, edgecolor="#c00",
-                            lw=2.5, transform=ax2.transAxes))
-    _label(ax2, 0.5, -0.05, "schematic: bright/red outline on target bbox", fs=6.5, color="#666")
+    # Real Seaquest screenshot: raw → red outline → 84×84 CNN input
+    if PIXEL_OUTLINE_IMG.is_file():
+        ax_img = fig.add_axes([0.07, 0.36, 0.86, 0.34])
+        ax_img.imshow(plt.imread(PIXEL_OUTLINE_IMG))
+        ax_img.axis("off")
+        fig.text(
+            0.50,
+            0.345,
+            "Seaquest skill input: raw RGB → red target outline cue → 84×84 grayscale CNN frame",
+            ha="center",
+            fontsize=7,
+            color="#444",
+        )
+    else:
+        ax2 = _axes(fig, [0.08, 0.40, 0.38, 0.28])
+        ax2.add_patch(Rectangle((0.15, 0.15), 0.70, 0.70, fill=True, facecolor="#ddd",
+                                edgecolor="#666", lw=1, transform=ax2.transAxes))
+        ax2.add_patch(Rectangle((0.35, 0.35), 0.30, 0.30, fill=False, edgecolor="#c00",
+                                lw=2.5, transform=ax2.transAxes))
+        _label(ax2, 0.5, -0.05, f"missing screenshot: {PIXEL_OUTLINE_IMG.name}", fs=6.5, color="#a00")
 
-    ax3 = _axes(fig, [0.52, 0.38, 0.40, 0.20])
-    _node(ax3, 0.05, 0.15, 0.90, 0.70,
-          "Settings: META_PIXEL_DO_RESIZE=true\nRESIZE [84,84] · GRAYSCALE=true\nNATIVE_DOWNSCALING=true\nSKILL_PIXEL_CNN_CHANNELS=[16,32]",
-          face=C_PIX_FACE, edge=C_PIX, fs=6.5)
+    ax3 = _axes(fig, [0.08, 0.24, 0.84, 0.09])
+    _node(
+        ax3,
+        0.02,
+        0.10,
+        0.96,
+        0.80,
+        "Settings: META_PIXEL_DO_RESIZE=true · RESIZE [84,84] · GRAYSCALE=true · "
+        "NATIVE_DOWNSCALING=true · SKILL_PIXEL_CNN_CHANNELS=[16,32]",
+        face=C_PIX_FACE,
+        edge=C_PIX,
+        fs=6.5,
+    )
 
     lines = [
         "## Design notes",
         "• Outline replaces slot one-hot / tiled slot embed (those failed remapping ablations).",
         "• Same ~25M env-step budget as ego despite ~10× wall time (RTPT weight ≈ 10).",
-        "• Time-chunked Q bootstrap limits peak CNN batch; skill heads sequential (not vmapped).",
-        "• Training still calls get_ego_obs as placeholder x — pixel branch ignores it.",
+        "• Ablation: SKILL_PIXEL_PAINT_TARGET_OUTLINE=false (nooutline) — transfer should collapse.",
         "• Flat PQN (seaquest_pqn) is a separate non-hierarchical pixel baseline at same budget.",
         "• RQ2 from-scratch includes pixel; RQ3 uses pixel as META_INPUT_MODE over ego skills.",
+        "• thesis_facing uses *_pixel_pov stems (POV mapper; outline cue unchanged).",
+        f"• Screenshot asset: docs/paper_eval/{PIXEL_OUTLINE_IMG.name}",
     ]
-    _body(fig, 0.34, lines, size=7.8, leading=0.016)
+    _body(fig, 0.22, lines, size=7.5, leading=0.015)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -428,7 +501,7 @@ def page_pixel_diagram(pdf: PdfPages) -> None:
 def page_oc_diagram(pdf: PdfPages) -> None:
     fig, y = _new_page(
         pdf,
-        "5. OC architecture (detail)",
+        "6. OC architecture (detail)",
         "SKILL_INPUT_MODE: oc_embed — per-object Dense + gather (not flat M·F)",
     )
     ax = _axes(fig, [0.06, 0.55, 0.88, 0.35])
@@ -474,15 +547,16 @@ def page_oc_diagram(pdf: PdfPages) -> None:
         "bbox, active, visual_id, state, orientation, semantic_label, flags, …",
         "Skill OC does NOT concat a global raw RAM flatten.",
         "",
-        "## Meta vs skill OC",
+        "## Meta vs skill OC · POV ψ",
         "META_INPUT_MODE: oc_embed concatenates full object matrix onto a global flatten —",
         "no transferable per-object Dense there. That Dense lives on skill oc_embed only.",
+        "SKILL_OC_PSI_FEATURES: after gather, concat sin/cos(ψ) (facing − bearing) for POV arms.",
         "",
         "## Suite role",
         "RQ1 train · RQ2 zero-shot + finetune · NOT from-scratch (protocol: ego+pixel only).",
         "RQ3: oc_embed as meta input over ego skills. RTPT weight ≈ 2×.",
     ]
-    _body(fig, 0.28, lines, size=7.6, leading=0.0155)
+    _body(fig, 0.28, lines, size=7.5, leading=0.015)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -490,8 +564,8 @@ def page_oc_diagram(pdf: PdfPages) -> None:
 def page_rq_diagram(pdf: PdfPages) -> None:
     fig, _ = _new_page(
         pdf,
-        "6. RQ protocol map",
-        "Which observation mode is used where",
+        "7. RQ protocol map",
+        "Which observation mode is used where (thesis_facing + classic paper_eval)",
     )
     ax = _axes(fig, [0.05, 0.42, 0.90, 0.48])
 
@@ -507,8 +581,10 @@ def page_rq_diagram(pdf: PdfPages) -> None:
     _label(ax, 0.50, 0.64, "↓  ckpts feed RQ2 transfer / RQ3 ego backbone", fs=7, color="#666")
 
     # RQ2
-    _label(ax, 0.5, 0.56, "RQ2 — other games (pong, tennis, beamrider, freeway, asterix)", fs=9, weight="bold")
-    _node(ax, 0.02, 0.32, 0.30, 0.18, "zero-shot + finetune (~5M)\nEGO · PIXEL · OC\n(Seaquest ego layout locked)",
+    _label(ax, 0.5, 0.56,
+           "RQ2 — pong · tennis · beamrider · freeway · asterix · phoenix",
+           fs=8.5, weight="bold")
+    _node(ax, 0.02, 0.32, 0.30, 0.18, "zero-shot + finetune (~5M)\nEGO · PIXEL · OC\n(layout locked to RQ1 ckpt)",
           face="#fff8e6", edge="#a67c00", fs=7)
     _node(ax, 0.36, 0.32, 0.30, 0.18, "from-scratch (~25M)\nEGO · PIXEL only\n(OC excluded by protocol)",
           face=C_PIX_FACE, edge=C_PIX, fs=7)
@@ -525,15 +601,16 @@ def page_rq_diagram(pdf: PdfPages) -> None:
     lines = [
         "## Cross-cutting",
         "• Mod allowlists: configs/experiment/paper_eval/mods/ (control / semantic / dynamics / visual).",
-        "• Eval overlays Seaquest ego flags from ckpt sidecar (weapon/blocking/clip) for transfer.",
+        "• Eval overlays ego encoding flags from ckpt sidecar (clip / bins / POV / weapon / blocking).",
         "• RTPT weights: ego×1, oc×2, pixel×10 (wall-time calibration, not step budget).",
         "• Reporting: env_metrics beyond score; retention = return_mod / return_base.",
+        "• Active suite names: thesis_facing · pov_facing_v2 · clip50_angbins_full · … (run_paper_eval.py).",
         "",
         "## Authoritative sources",
-        "docs/skill_input_modes.md · paper_eval YAML headers · observations/target_conditioning.py",
-        "networks/skill_network.py · paper_eval/eval_harness.py · materialize_paper_eval_configs.py",
+        "docs/skill_input_modes.md · paper_eval YAML headers · observations/egocentric.py",
+        "observations/target_conditioning.py · networks/skill_network.py · paper_eval/eval_harness.py",
     ]
-    _body(fig, 0.38, lines, size=7.6, leading=0.0155)
+    _body(fig, 0.38, lines, size=7.5, leading=0.015)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -542,20 +619,23 @@ def page_text_summary(pdf: PdfPages) -> None:
     """Keep a compact text reference page at the end."""
     fig, y = _new_page(
         pdf,
-        "7. Text reference (flags & decisions)",
+        "8. Text reference (flags & decisions)",
         "Quick lookup — diagrams above are the primary overview",
     )
     lines = [
-        "## Ego (paper lock)",
-        "SKILL_INPUT_MODE=ego · SIZE/VELOCITY=false · BLOCKING/WEAPON=true · clip=30 → 24-d",
-        "Transferable System-1 claim; RQ3 skill backbone; eval overlay from ckpt sidecar.",
+        "## Ego — thesis spine (48-dim)",
+        "POV_FACING_FRAME · PSI_ANGLE_BINS=8 · clip=50 · SIZE/VEL=false · BLOCKING/WEAPON=true",
+        "Stem family: *_facing_psibins8_* / thesis_facing · transfer must match this layout.",
+        "",
+        "## Ego — classic baseline (24-dim)",
+        "sin/cos(ψ) · blocking+weapon · no POV facing · SIZE/VEL=false · clip often null or 50",
         "",
         "## Pixel",
-        "SKILL_INPUT_MODE=pixel_embed · 84×84 gray · CNN [16,32] · outline on target bbox",
+        "pixel_embed · 84×84 gray · CNN [16,32] · outline on target bbox · optional *_pov mapper",
         "Index-invariant visual cue; matched step budget; ~10× wall time.",
         "",
         "## OC",
-        "SKILL_INPUT_MODE=oc_embed · [M,F] → Dense(F→D)/row → gather(target) → MLP",
+        "oc_embed · [M,F] → Dense(F→D)/row → gather(target) → MLP · optional SKILL_OC_PSI_FEATURES",
         "No skill RAM flatten; no from-scratch in RQ2; meta OC ≠ skill OC Dense.",
         "",
         "## Removed",
@@ -565,17 +645,15 @@ def page_text_summary(pdf: PdfPages) -> None:
         "4 skills · 25M steps · 128×128 · skip 4 · stack 4 · MAX_OBJECTS 35 · relabel off",
         "SKILL_DEATH_PENALIZE_COLLECT=true · HEURISTIC_MODE=env_specific (Seaquest)",
     ]
-    _body(fig, y, lines, size=8.5, leading=0.019)
+    _body(fig, y, lines, size=8.2, leading=0.0175)
 
-    # bottom comparison boxes
-    _box = _axes  # alias silence
-    ax = _axes(fig, [0.06, 0.08, 0.88, 0.28])
+    ax = _axes(fig, [0.06, 0.06, 0.88, 0.26])
     for i, (t, e, f, body) in enumerate([
-        ("Ego", C_EGO, C_EGO_FACE, "relative feats\nRQ1/2/3 skills\nfrom-scratch ✓\nRTPT 1×"),
+        ("Ego", C_EGO, C_EGO_FACE, "relative feats\nRQ1/2/3 skills\n48-d thesis / 24-d classic\nRTPT 1×"),
         ("Pixel", C_PIX, C_PIX_FACE, "outline CNN\nRQ1/2 skills\nfrom-scratch ✓\nRTPT 10×"),
         ("OC", C_OC, C_OC_FACE, "Dense+gather\nRQ1/2 transfer\nfrom-scratch ✗\nRTPT 2×"),
     ]):
-        _node(ax, 0.03 + i * 0.33, 0.1, 0.30, 0.8, f"{t}\n\n{body}", face=f, edge=e, fs=7.5)
+        _node(ax, 0.03 + i * 0.33, 0.08, 0.30, 0.84, f"{t}\n\n{body}", face=f, edge=e, fs=7.2)
 
     pdf.savefig(fig)
     plt.close(fig)
@@ -588,6 +666,7 @@ def build(output: Path) -> Path:
         page_suite_diagram(pdf)
         page_three_way(pdf)
         page_ego_diagram(pdf)
+        page_pov_mapper(pdf)
         page_pixel_diagram(pdf)
         page_oc_diagram(pdf)
         page_rq_diagram(pdf)
@@ -595,7 +674,7 @@ def build(output: Path) -> Path:
         d = pdf.infodict()
         d["Title"] = "Paper Eval Architecture Overview"
         d["Author"] = "ConceptBasedLearning"
-        d["Subject"] = "Ego / pixel / OC observation modes for paper_eval"
+        d["Subject"] = "Ego / pixel / OC observation modes for paper_eval (POV facing spine)"
     return output
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,7 @@ def run_mod_eval(
     output_csv_stem: str | Path | None = None,
     master_csv_dir: str | Path | None = None,
     extra_meta: dict[str, Any] | None = None,
+    wandb_mode: str | None = None,
 ) -> dict[str, Any]:
     """
     Evaluate one agent across the env's mod allowlist.
@@ -242,11 +244,17 @@ def run_mod_eval(
     ``agent_kind``:
       - ``skills`` / ``hierarchical``: load skills (+ optional meta)
       - ``heuristic_random``: heuristic meta + randomly initialized skills
+      - ``fixed_skills`` / ``fixed_ego_rules`` / ``constant_ego``: same heuristic
+        scaffolding with hand-coded ego-action rules (no skill checkpoint)
       - ``flat_pqn``: flat PQN checkpoint
 
     Always writes CSV when ``output_csv_stem`` or ``output_json`` is set:
       ``{stem}_summary.csv`` and ``{stem}_episodes.csv``, plus appends into
       ``master_csv_dir/all_mod_eval_{summary,episodes}.csv`` when provided.
+
+    After eval, writes ``mod_eval_*_summary.txt`` next to the evaluated
+    checkpoint and best-effort resumes that train's wandb run (via
+    ``wandb_run.json``) to attach the same scores.
     """
     from concept_based_learning.paper_eval.csv_export import write_mod_eval_csvs
 
@@ -278,11 +286,34 @@ def run_mod_eval(
     if extra_meta:
         payload.update(extra_meta)
 
-    if kind in {"skills", "hierarchical", "transfer", "heuristic_random"}:
+    if kind in {
+        "skills",
+        "hierarchical",
+        "transfer",
+        "heuristic_random",
+        "fixed_skills",
+        "fixed_ego_rules",
+        "constant_ego",
+    }:
         cfg = copy.deepcopy(config)
         params_tree = None
         meta_params = None
-        if kind != "heuristic_random":
+        if kind == "constant_ego":
+            cfg["SKILL_POLICY_MODE"] = "constant_ego"
+        elif kind == "fixed_ego_rules":
+            cfg["SKILL_POLICY_MODE"] = "fixed_ego_rules"
+        elif kind == "fixed_skills":
+            # Kind is shared by both arms; honor YAML SKILL_POLICY_MODE.
+            mode = str(cfg.get("SKILL_POLICY_MODE", "fixed_ego_rules")).lower()
+            if mode not in {"fixed_ego_rules", "constant_ego"}:
+                mode = "fixed_ego_rules"
+            cfg["SKILL_POLICY_MODE"] = mode
+        if kind not in {
+            "heuristic_random",
+            "fixed_skills",
+            "fixed_ego_rules",
+            "constant_ego",
+        }:
             if skills_path is None:
                 raise ValueError(f"{kind} eval requires skills_path")
             params_tree = load_params_from_file(str(skills_path))
@@ -290,7 +321,7 @@ def run_mod_eval(
             cfg = align_config_with_skill_checkpoint(cfg, params_tree)
             if meta_path is not None and Path(str(meta_path)).is_file():
                 meta_params = load_params_from_file(str(meta_path))
-        # heuristic_random: params_tree=None → random init inside run_greedy_eval_episodes
+        # heuristic_random / fixed_*: params_tree=None → no learned skill heads
         results = run_hierarchical_mod_eval(
             cfg,
             params_tree=params_tree,
@@ -302,6 +333,7 @@ def run_mod_eval(
             max_frames=max_frames,
         )
         payload["results"] = results
+        payload["skill_policy_mode"] = str(cfg.get("SKILL_POLICY_MODE", "learned"))
 
     elif kind == "flat_pqn":
         if flat_pqn_path is None:
@@ -357,4 +389,30 @@ def run_mod_eval(
         drop = stats.get("drop_from_base")
         drop_s = f"  drop={drop:+.1f}" if drop is not None else ""
         print(f"  {key:28s} mean={stats['mean']:.2f}±{stats['std']:.2f}{drop_s}")
+
+    # Text summary next to the evaluated checkpoint (+ optional train-run wandb sync).
+    try:
+        from concept_based_learning.paper_eval.mod_eval_report import (
+            publish_mod_eval_report,
+        )
+
+        meta = dict(extra_meta or {})
+        meta.setdefault("agent_kind", kind)
+        meta.setdefault("env_name", env_name)
+        publish_mod_eval_report(
+            payload,
+            skills_path=skills_path,
+            meta_path=meta_path,
+            flat_pqn_path=flat_pqn_path,
+            save_path=config.get("SAVE_PATH"),
+            env_name=env_name,
+            config_stem=str(meta.get("config_stem") or "unknown"),
+            extra_meta=meta,
+            wandb_mode=wandb_mode
+            or os.environ.get("PAPER_EVAL_WANDB_MODE")
+            or os.environ.get("WANDB_MODE"),
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail the eval on reporting
+        print(f"  WARN: mod_eval report publish failed: {exc}")
+
     return payload

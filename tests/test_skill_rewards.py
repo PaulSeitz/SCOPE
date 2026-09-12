@@ -12,6 +12,7 @@ from concept_based_learning.environments.datatypes import (
 )
 from concept_based_learning.environments.skill_rewards import (
     AVOID_ESCAPE_REWARD,
+    AVOID_FAILURE_REWARD,
     COLLECT_LIVING_PENALTY,
     COLLECT_PROGRESS_REWARD,
     COLLECT_SUCCESS_REWARD,
@@ -547,3 +548,47 @@ def test_death_applies_to_combat_skills_regardless_of_target_label():
         _nav_shaped(_surface_gap(50, 100, 50, 40), _surface_gap(50, 80, 50, 40))
     )
     assert not bool(d[3])
+
+
+def test_avoid_sparse_only_escape_is_plus_one_and_done():
+    from concept_based_learning.environments.skill_rewards import AVOID_SUCCESS_REWARD
+
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_r, next_t = _mk(30, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), avoid_sparse_only=True
+    )
+    assert float(r[2]) == pytest.approx(AVOID_SUCCESS_REWARD)
+    assert bool(d[2])
+
+
+def test_avoid_sparse_only_failure_still_minus_one():
+    prev_r, prev_t = _mk(70, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_r, next_t = _mk(80, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), avoid_sparse_only=True
+    )
+    assert float(r[2]) == AVOID_FAILURE_REWARD
+    assert bool(d[2])
+
+
+def test_avoid_sparse_only_from_config_dict():
+    from concept_based_learning.environments.skill_rewards import (
+        AVOID_SUCCESS_REWARD,
+        avoid_sparse_only_from_config,
+    )
+
+    assert avoid_sparse_only_from_config(None) is False
+    assert avoid_sparse_only_from_config({"AVOID_SPARSE_ONLY": True}) is True
+    prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    next_r, next_t = _mk(30, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        config={"AVOID_SPARSE_ONLY": True},
+    )
+    assert float(r[2]) == pytest.approx(AVOID_SUCCESS_REWARD)
+    assert bool(d[2])

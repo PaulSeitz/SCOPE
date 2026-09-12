@@ -116,6 +116,19 @@ def _eval_navigate_to(
     )
     dist = jnp.where(active, ctx.distances[slot], jnp.inf)
     arrived = jnp.logical_and(active, dist <= float(node.arrive_dist))
+    feet_oy_min = getattr(node, "arrive_feet_oy_min", None)
+    feet_oy_max = getattr(node, "arrive_feet_oy_max", None)
+    if feet_oy_min is not None or feet_oy_max is not None:
+        oy = jnp.where(
+            jnp.logical_and(slot >= 0, slot < ctx.n), ctx.oy[slot], ctx.py
+        )
+        feet_dy = ctx.feet_y - oy
+        feet_ok = jnp.bool_(True)
+        if feet_oy_min is not None:
+            feet_ok = jnp.logical_and(feet_ok, feet_dy >= float(feet_oy_min))
+        if feet_oy_max is not None:
+            feet_ok = jnp.logical_and(feet_ok, feet_dy <= float(feet_oy_max))
+        arrived = jnp.logical_and(arrived, feet_ok)
     inactive = jnp.logical_not(active)
 
     mode = str(node.complete_when)

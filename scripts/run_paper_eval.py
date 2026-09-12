@@ -120,6 +120,9 @@ Usage:
   #   Ungated skill-mechanics reward check (clip10+clip50 + clip10 all-objects):
   python scripts/materialize_surfacesub5_skillmech_rw.py
   python scripts/run_paper_eval.py --suite ego_min_surfacesub5_skillmech_rw --gpus 0,1,2 --wait-deps --lean
+  #   Same-scaffolding fixed ego-rule baseline (angle servo / constant actions):
+  python scripts/materialize_fixed_ego_skill_baseline.py
+  python scripts/run_paper_eval.py --suite fixed_ego_skill_baseline --gpus 0 --lean
   #   Exclusive near/mid/far (12/40), no sticky:
   python scripts/materialize_surfacesub5_distbands.py
   python scripts/run_paper_eval.py --suite ego_min_noweapon_surfacesub5_distbands --gpus 0 --wait-deps --lean
@@ -817,6 +820,27 @@ EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS = (
     )
 )
 
+# Same-scaffolding fixed ego-rule baselines vs clip10 skillmech transfer.
+#   python scripts/materialize_fixed_ego_skill_baseline.py
+#   python scripts/run_paper_eval.py --suite fixed_ego_skill_baseline --gpus 0 --lean
+FIXED_EGO_SKILL_BASELINE_SUITE = "fixed_ego_skill_baseline"
+_FIXED_EGO_ARCH = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_"
+    "noblocking_noweapon_surfacesub5_skillmech"
+)
+FIXED_EGO_SKILL_BASELINE_STEMS = tuple(
+    (
+        f"{_FIXED_EGO_ARCH}_{mode}_eval_full"
+        if env is None
+        else (
+            f"{env}_transfer_ego_pov_"
+            f"{_FIXED_EGO_ARCH.removeprefix('seaquest_skills_ego_pov_')}_{mode}"
+        )
+    )
+    for mode in ("fixed_ego_rules", "constant_ego")
+    for env in (None, "pong", "beamrider", "phoenix")
+)
+
 # Distance-block pose probes (Δxy / sign(Δxy) / absolute xy) + φ8; clip null.
 # Trains first so --gpus 0,1,2 shards one train per GPU.
 #   python scripts/materialize_surfacesub5_distpose.py
@@ -879,10 +903,14 @@ EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS = (
     )
 )
 
-# ALE clip10 heuristic smoke: native skills trains + SQ→target ZS (base mod only).
+# ALE clip10 heuristic smoke (+ tandem / SQ-10M / Δxy / Montezuma append).
 #   python scripts/materialize_ale_clip10_heu_smoke.py
 #   python scripts/run_paper_eval.py --suite ale_clip10_heu_smoke --gpus 0,1,2 --wait-deps --lean
 # Asteroids/Time Pilot scratch use turn primitives (dim 6); ZS stays facing so SQ loads.
+# SQ ZS source: …_surfacesub5_skillmech (ungated multi-skill rewards).
+# Appended: Montezuma scratch; SQ skills 10M (+ sparse C/D/A 10M); Δxy skillmech
+# negative control (+ Pong/BR/PH ZS); pixel+ego tandem on SQ+scratch except
+# Montezuma (home mod eval + ZS from SQ tandem skills only).
 ALE_CLIP10_HEU_SMOKE_SUITE = "ale_clip10_heu_smoke"
 _ALE_CLIP10_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
 _ALE_CLIP10_TURN_SPINE = "clip10_turn_psibins8_v2_noblocking_noweapon_surfacesub5"
@@ -897,6 +925,7 @@ _ALE_CLIP10_SCRATCH_ENVS = (
     "beamrider",
     "spaceinvaders",
     "freeway",
+    "montezumarevenge",
 )
 _ALE_CLIP10_TRANSFER_ENVS = (
     "spaceinvaders",
@@ -909,14 +938,70 @@ _ALE_CLIP10_TRANSFER_ENVS = (
     "namethisgame",
     "phoenix",
 )
+_ALE_CLIP10_NO_TANDEM = frozenset({"montezumarevenge"})
+_ALE_CLIP10_TANDEM_ENVS = ("seaquest",) + tuple(
+    e for e in _ALE_CLIP10_SCRATCH_ENVS if e not in _ALE_CLIP10_NO_TANDEM
+)
+_ALE_CLIP10_SQ_10M = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech_10m"
+)
+_ALE_CLIP10_SQ_SPARSE_10M = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech_sparse_cda_10m"
+)
+_ALE_CLIP10_DELTAXY = (
+    "seaquest_skills_ego_pov_deltaxy_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech"
+)
+_ALE_CLIP10_DELTAXY_ZS = ("pong", "beamrider", "phoenix")
+
+
+def _ale_clip10_scratch_spine(env: str) -> str:
+    return (
+        _ALE_CLIP10_TURN_SPINE
+        if env in _ALE_CLIP10_TURN_SCRATCH
+        else _ALE_CLIP10_SPINE
+    )
+
+
+def _ale_clip10_tandem_stem(env: str) -> str:
+    spine = _ale_clip10_scratch_spine(env) if env != "seaquest" else _ALE_CLIP10_SPINE
+    return f"{env}_from_scratch_tandem_pixel_ego_pov_{spine}"
+
+
 ALE_CLIP10_HEU_SMOKE_STEMS = (
+    # --- skills scratch (~25M) ---
     tuple(
-        f"{env}_from_scratch_ego_pov_"
-        f"{_ALE_CLIP10_TURN_SPINE if env in _ALE_CLIP10_TURN_SCRATCH else _ALE_CLIP10_SPINE}"
+        f"{env}_from_scratch_ego_pov_{_ale_clip10_scratch_spine(env)}"
         for env in _ALE_CLIP10_SCRATCH_ENVS
     )
+    # --- SQ 10M + sparse 10M + Δxy ---
+    + (_ALE_CLIP10_SQ_10M, _ALE_CLIP10_SQ_SPARSE_10M, _ALE_CLIP10_DELTAXY)
+    # --- tandem trains (pixel meta + ego) ---
+    + tuple(_ale_clip10_tandem_stem(env) for env in _ALE_CLIP10_TANDEM_ENVS)
+    # --- ZS from skillmech SQ ---
     + tuple(
         f"{env}_transfer_ego_pov_{_ALE_CLIP10_SPINE}" for env in _ALE_CLIP10_TRANSFER_ENVS
+    )
+    # --- SQ / sparse / Δxy full mod eval ---
+    + (
+        f"{_ALE_CLIP10_SQ_10M}_eval_full",
+        f"{_ALE_CLIP10_SQ_SPARSE_10M}_eval_full",
+        f"{_ALE_CLIP10_DELTAXY}_eval_full",
+    )
+    # --- Δxy ZS (Pong/BR/PH negative-control transfers) ---
+    + tuple(
+        f"{env}_transfer_ego_pov_deltaxy_facing_psibins8_v2_"
+        f"noblocking_noweapon_surfacesub5_skillmech"
+        for env in _ALE_CLIP10_DELTAXY_ZS
+    )
+    # --- tandem home mod evals ---
+    + tuple(f"{_ale_clip10_tandem_stem(env)}_eval" for env in _ALE_CLIP10_TANDEM_ENVS)
+    # --- ZS from SQ tandem skills ---
+    + tuple(
+        f"{env}_transfer_tandem_pixel_ego_pov_{_ALE_CLIP10_SPINE}"
+        for env in _ALE_CLIP10_TRANSFER_ENVS
     )
 )
 
@@ -1520,6 +1605,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS,
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS,
+    FIXED_EGO_SKILL_BASELINE_SUITE: FIXED_EGO_SKILL_BASELINE_STEMS,
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
@@ -1609,6 +1695,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: "ego_rand",
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: "ego_skm",
+    FIXED_EGO_SKILL_BASELINE_SUITE: "ego_fix",
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: "ego_cfire",
@@ -2002,13 +2089,26 @@ def experiment_done(path: Path, *, seed: int) -> tuple[bool, str]:
     if status in {"stub", "planned"}:
         return True, f"status={status} (skipped)"
 
-    if phase == "eval" or kind in {"heuristic_random", "transfer"}:
+    if phase == "eval" or kind in {
+        "heuristic_random",
+        "transfer",
+        "fixed_skills",
+        "fixed_ego_rules",
+        "constant_ego",
+    }:
         env_name = str(raw.get("ENV_NAME") or raw.get("PAPER_EVAL_MODS") or "seaquest")
         if isinstance(env_name, list):
             env_name = env_name[0] if env_name else "seaquest"
         env_name = str(env_name).lower()
         out = _eval_json_path(path.stem)
-        ok, detail = _eval_json_complete(out, env_name=env_name)
+        expected = (
+            list(raw["PAPER_EVAL_MOD_KEYS"])
+            if raw.get("PAPER_EVAL_MOD_KEYS")
+            else None
+        )
+        ok, detail = _eval_json_complete(
+            out, env_name=env_name, expected_mod_keys=expected
+        )
         if ok:
             return True, f"eval {detail}"
         return False, f"eval incomplete: {detail}"
@@ -2605,6 +2705,8 @@ _EVAL_OVERRIDE_KEYS = (
     "POV_TURN_STEP_DEG",
     "POV_TURN_INITIAL_HEADING_DEG",
     "EGO_ACTION_DIM",
+    "SKILL_POLICY_MODE",
+    "FIXED_EGO_ALIGN_DEG",
 )
 
 
@@ -2674,6 +2776,7 @@ def _run_mod_eval(
     seed: int | None,
     eval_episodes: int,
     eval_max_frames: int,
+    wandb_mode: str | None = None,
 ) -> None:
     from concept_based_learning.paper_eval.eval_harness import run_mod_eval
 
@@ -2692,7 +2795,8 @@ def _run_mod_eval(
     object_centric = bool(raw.get("PAPER_EVAL_OBJECT_CENTRIC", raw.get("OBJECT_CENTRIC", True)))
 
     # Resolve default skill ckpt from architecture SAVE_PATH when needed.
-    if kind in {"skills", "transfer", "hierarchical"} and not skills_path:
+    needs_skills = kind in {"skills", "transfer", "hierarchical"}
+    if needs_skills and not skills_path:
         skills_path = str(
             _skill_ckpt_from_save(
                 cfg.get("SAVE_PATH", raw.get("SAVE_PATH", ".")),
@@ -2712,7 +2816,19 @@ def _run_mod_eval(
         "hierarchical": "skills",
         "tandem": "skills",
         "meta": "skills",
+        "fixed_skills": "fixed_skills",
+        "fixed_ego_rules": "fixed_ego_rules",
+        "constant_ego": "constant_ego",
     }.get(kind, kind)
+
+    # Allow transfer / fixed_skills YAMLs to select the baseline arm via mode.
+    mode = str(cfg.get("SKILL_POLICY_MODE", raw.get("SKILL_POLICY_MODE", "learned"))).lower()
+    if kind == "transfer" and mode in {"fixed_ego_rules", "constant_ego", "fixed_skills"}:
+        agent_kind = "fixed_ego_rules" if mode != "constant_ego" else "constant_ego"
+        skills_path = None
+    elif kind == "fixed_skills":
+        agent_kind = "constant_ego" if mode == "constant_ego" else "fixed_ego_rules"
+        skills_path = None
 
     out_json = (
         PROJECT_ROOT
@@ -2725,7 +2841,12 @@ def _run_mod_eval(
     print(f"\n{'=' * 70}\n  EVAL mods: {path.relative_to(CONFIG_DIR)} kind={kind}\n{'=' * 70}")
     cfg_env = str(cfg.get("ENV_NAME", "")).lower().strip()
     raw_env = str(env_name).lower().strip()
-    if kind == "transfer" and cfg_env and raw_env and cfg_env != raw_env:
+    if kind in {
+        "transfer",
+        "fixed_skills",
+        "fixed_ego_rules",
+        "constant_ego",
+    } and cfg_env and raw_env and cfg_env != raw_env:
         raise SystemExit(
             f"Transfer eval ENV mismatch: YAML ENV_NAME={raw_env!r} but architecture "
             f"config has ENV_NAME={cfg_env!r}. Add ENV_NAME to _EVAL_OVERRIDE_KEYS "
@@ -2758,6 +2879,7 @@ def _run_mod_eval(
                 "heuristic_mode": cfg.get("HEURISTIC_MODE"),
                 "no_target_game_action": cfg.get("NO_TARGET_GAME_ACTION"),
             },
+            wandb_mode=wandb_mode,
         )
     finally:
         _release(label=f"eval:{path.stem}")
@@ -2804,13 +2926,19 @@ def _run_experiment(
         save_training_metrics_csv=save_training_metrics_csv,
     )
 
-    if phase == "eval" or kind == "heuristic_random":
+    if phase == "eval" or kind in {
+        "heuristic_random",
+        "fixed_skills",
+        "fixed_ego_rules",
+        "constant_ego",
+    }:
         _run_mod_eval(
             path,
             trial=trial,
             seed=seed,
             eval_episodes=eval_episodes,
             eval_max_frames=eval_max_frames,
+            wandb_mode=wandb_mode,
         )
         return
 
@@ -2874,6 +3002,7 @@ def _run_experiment(
                             "paper_eval_phase": f"{phase}+post_eval",
                             "paper_eval_kind": kind,
                         },
+                        wandb_mode=wandb_mode,
                     )
                 finally:
                     _release(label=f"post_eval:{path.stem}")
@@ -2889,6 +3018,7 @@ def _run_experiment(
             seed=seed,
             eval_episodes=eval_episodes,
             eval_max_frames=eval_max_frames,
+            wandb_mode=wandb_mode,
         )
         return
 
@@ -3011,6 +3141,9 @@ def main() -> None:
             f"{EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE}: ungated skill-mechanics "
             "reward regression (clip10+clip50 lock + clip10 RELABEL_ALL) → "
             "SQ eval + Pong/BR/PH; fresh …_skillmech stems. "
+            f"{FIXED_EGO_SKILL_BASELINE_SUITE}: same scaffolding as clip10 "
+            "skillmech transfer, but fixed ego-angle rules / constant ego "
+            "actions instead of learned Q-heads (SQ + Pong/BR/PH). "
             f"{EGO_MIN_SURFACESUB5_DISTPOSE_SUITE}: clip50 surfacesub5 distance "
             "block → Δxy / sign(Δxy) / absolute xy (+ φ8); 3 trains → "
             "--gpus 0,1,2. "
@@ -3019,9 +3152,11 @@ def main() -> None:
             f"{EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE}: can_fire re-intro "
             "on clip10/50 + neartiers + deltaxy(φ8) + deltaxy(φ sincos); "
             "trains first → --gpus 0,1,2. "
-            f"{ALE_CLIP10_HEU_SMOKE_SUITE}: clip10 spine native skills trains "
-            "(PH/NTG/TP/AS/Pong/Breakout/BR/SI/Freeway) + SQ→target ZS; "
-            "base-mod only; trains first → --gpus 0,1,2. "
+            f"{ALE_CLIP10_HEU_SMOKE_SUITE}: clip10 spine ~25M native skills "
+            "(PH/NTG/TP/AS/Pong/Breakout/BR/SI/Freeway/Montezuma) + SQ→target ZS; "
+            "SQ 10M (+ sparse C/D/A 10M); Δxy skillmech neg-control + Pong/BR/PH; "
+            "pixel+ego tandem on SQ+scratch except Montezuma "
+            "(home mod eval + ZS from SQ tandem skills); trains first → --gpus 0,1,2. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
@@ -3311,6 +3446,7 @@ def main() -> None:
             _check_rq_gate(gated, seed=seed)
 
     wandb_mode = _resolve_wandb_mode(trial=args.trial or args.smoke, wandb_mode=args.wandb_mode)
+    os.environ["PAPER_EVAL_WANDB_MODE"] = str(wandb_mode)
     trial_steps = args.trial_steps if (args.trial or args.smoke) else None
     trial = bool(args.trial or args.smoke)
     eval_episodes = args.eval_episodes if args.eval_episodes is not None else (1 if trial else 3)

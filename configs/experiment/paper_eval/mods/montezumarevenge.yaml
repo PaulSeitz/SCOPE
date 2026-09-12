@@ -1,0 +1,11 @@
+# Minimal allowlist for montezumarevenge — base only until mods workshop.
+env: montezumarevenge
+status: draft
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+
+paper_core:
+  - base

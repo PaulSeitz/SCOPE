@@ -37,6 +37,7 @@ from concept_based_learning.observations.pov_facing_frame import (
 )
 
 PANEL_WIDTH = 320
+DETAIL_PANEL_MIN_HEIGHT = 210
 
 
 @dataclass
@@ -86,30 +87,44 @@ def ego_channel_labels() -> list[str]:
         if _USE_EGO_BLOCKING_FEATURES:
             labels.append("blocked")
     else:
-        dist_n = ego_distance_channels_per_frame()
-        if using_pov_facing_frame() and using_ego_pose_xy() and dist_n == 2:
-            labels = ["fwd", "lat"]
-        elif dist_n == 1:
-            labels = ["dist"]
-        else:
-            labels = [f"dist{i}" for i in range(dist_n)]
+        from concept_based_learning.observations.egocentric import (
+            ego_restrained_pose_mode,
+            using_ego_restrained_pose,
+        )
 
-        ang_n = ego_angle_channels_per_frame()
-        if ang_n > 0:
-            if using_pov_facing_frame() and ego_psi_angle_bins():
-                labels.extend([f"phi{i}" for i in range(ang_n)])
-            elif using_pov_facing_frame():
-                labels.extend(["sin(phi)", "cos(phi)"])
-            elif using_pov_fixed_bilateral() and ego_psi_angle_bins():
-                labels.extend([f"phi{i}" for i in range(ang_n)])
-            elif using_pov_fixed_bilateral():
-                labels.extend(["sin(phi)", "cos(phi)"])
-            elif using_pov_relative() and ego_psi_angle_bins():
-                labels.extend([f"psi{i}" for i in range(ang_n)])
-            elif ang_n == 2:
-                labels.extend(["sin(psi)", "cos(psi)"])
+        if using_ego_restrained_pose():
+            mode = ego_restrained_pose_mode()
+            if mode == "lcr_nearfar":
+                labels = ["lat_L", "lat_C", "lat_R", "near", "far"]
+            elif mode == "quadrant_nearfar":
+                labels = ["ahead", "right", "behind", "left", "near", "far"]
             else:
-                labels.extend([f"theta{i}" for i in range(ang_n)])
+                labels = [f"pose{i}" for i in range(ego_pose_channels_per_frame())]
+        else:
+            dist_n = ego_distance_channels_per_frame()
+            if using_pov_facing_frame() and using_ego_pose_xy() and dist_n == 2:
+                labels = ["fwd", "lat"]
+            elif dist_n == 1:
+                labels = ["dist"]
+            else:
+                labels = [f"dist{i}" for i in range(dist_n)]
+
+            ang_n = ego_angle_channels_per_frame()
+            if ang_n > 0:
+                if using_pov_facing_frame() and ego_psi_angle_bins():
+                    labels.extend([f"phi{i}" for i in range(ang_n)])
+                elif using_pov_facing_frame():
+                    labels.extend(["sin(phi)", "cos(phi)"])
+                elif using_pov_fixed_bilateral() and ego_psi_angle_bins():
+                    labels.extend([f"phi{i}" for i in range(ang_n)])
+                elif using_pov_fixed_bilateral():
+                    labels.extend(["sin(phi)", "cos(phi)"])
+                elif using_pov_relative() and ego_psi_angle_bins():
+                    labels.extend([f"psi{i}" for i in range(ang_n)])
+                elif ang_n == 2:
+                    labels.extend(["sin(psi)", "cos(psi)"])
+                else:
+                    labels.extend([f"theta{i}" for i in range(ang_n)])
 
         from concept_based_learning.observations.egocentric import (
             _USE_EGO_SIZE_FEATURES,
@@ -430,6 +445,34 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
     return legend_y + 10
 
 
+def _ego_stack_shape(ego_obs: np.ndarray, stack_size: int) -> tuple[int, int]:
+    """Return (stack_size, channels_per) for a flattened ego vector."""
+    channels_per = ego_obs_channels_per_frame()
+    if channels_per <= 0 or ego_obs.size == 0:
+        return 0, 0
+    if ego_obs.size % channels_per == 0:
+        inferred = int(ego_obs.size // channels_per)
+        return max(1, inferred), channels_per
+    return max(1, int(stack_size)), channels_per
+
+
+def _wrap_text_lines(text: str, *, max_chars: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
 def _draw_ego_heatmap(
     canvas: np.ndarray,
     ego_obs: np.ndarray,
@@ -437,21 +480,20 @@ def _draw_ego_heatmap(
     x0: int,
     y0: int,
     width: int,
-    max_height: int,
+    *,
+    stack_size: int,
 ) -> int:
     """Stacked ego channels heatmap; returns y after block."""
     import cv2
 
-    channels_per = ego_obs_channels_per_frame()
-    if channels_per <= 0 or ego_obs.size == 0:
+    stack_size, channels_per = _ego_stack_shape(ego_obs, stack_size)
+    if channels_per <= 0:
         _draw_text(canvas, "ego obs: n/a", x0, y0 + 12)
         return y0 + 24
 
-    stack_size = max(1, int(ego_obs.size // channels_per))
     mat = ego_obs.reshape(stack_size, channels_per)
-    row_h = max(6, min(14, max_height // max(stack_size, 1)))
+    row_h = 10
     col_w = max(8, (width - 8) // max(channels_per, 1))
-    block_h = row_h * stack_size + 18
     _draw_text(canvas, f"ego stack ({stack_size}x{channels_per})", x0, y0 + 10, scale=0.36)
 
     flat = mat.reshape(-1)
@@ -474,6 +516,37 @@ def _draw_ego_heatmap(
     return label_y + 14
 
 
+def _draw_ego_stack_numeric(
+    canvas: np.ndarray,
+    ego_obs: np.ndarray,
+    labels: list[str],
+    x0: int,
+    y0: int,
+    width: int,
+    *,
+    stack_size: int,
+) -> int:
+    """Print exact stacked ego values (oldest frame first)."""
+    stack_size, channels_per = _ego_stack_shape(ego_obs, stack_size)
+    if channels_per <= 0:
+        return y0
+
+    mat = ego_obs.reshape(stack_size, channels_per)
+    y = y0 + 10
+    _draw_text(canvas, "ego values (oldest -> newest)", x0, y, scale=0.30, color=(180, 180, 180))
+    y += 12
+    max_chars = max(24, (width - 4) // 5)
+    for r in range(stack_size):
+        age = stack_size - 1 - r
+        parts = [f"{labels[c]}={float(mat[r, c]):+.4f}" for c in range(channels_per)]
+        prefix = f"t-{age}: "
+        for line in _wrap_text_lines(prefix + " ".join(parts), max_chars=max_chars):
+            _draw_text(canvas, line, x0, y, scale=0.26, color=(210, 210, 210))
+            y += 10
+        y += 2
+    return y + 4
+
+
 def _draw_q_bars(
     canvas: np.ndarray,
     q_vals: np.ndarray,
@@ -482,7 +555,6 @@ def _draw_q_bars(
     x0: int,
     y0: int,
     width: int,
-    max_height: int,
 ) -> int:
     import cv2
 
@@ -496,7 +568,7 @@ def _draw_q_bars(
     q_max = float(np.max(finite)) if finite.size else 1.0
     span = max(q_max - q_min, 1e-6)
 
-    bar_h = max(8, min(12, (max_height - 20) // max(n, 1)))
+    bar_h = 8 if n > 12 else 10
     label_w = 72
     bar_w = width - label_w - 12
     y = y0 + 18
@@ -518,6 +590,47 @@ def _draw_q_bars(
     return y + n * (bar_h + 2) + 6
 
 
+def estimate_detail_panel_height(
+    snapshot: LiveVizSnapshot,
+    *,
+    stack_size: int,
+    ego_action_names: dict[int, str],
+) -> int:
+    """Minimum panel height to render all detail blocks without clipping."""
+    del ego_action_names
+    y = 16 + 18 + 16 + 16
+    has_metrics = not np.isnan(snapshot.distance) or (
+        using_pov_facing_frame()
+        and using_ego_pose_xy()
+        and snapshot.fwd_px is not None
+    )
+    if has_metrics:
+        y += 18
+    y += 88 + 14 + 10 + 4  # compass block
+
+    if snapshot.ego_obs is not None:
+        stk, ch = _ego_stack_shape(np.asarray(snapshot.ego_obs), stack_size)
+        if ch > 0:
+            row_h = 10
+            y += 16 + stk * row_h + 4 + 14 + 6
+            labels = ego_channel_labels()
+            max_chars = max(24, (PANEL_WIDTH - 24) // 5)
+            for r in range(stk):
+                parts = [f"{labels[c]}={0.0:+.4f}" for c in range(ch)]
+                prefix = f"t-{stk - 1 - r}: "
+                for line in _wrap_text_lines(prefix + " ".join(parts), max_chars=max_chars):
+                    y += 10
+                y += 2
+            y += 4
+
+    if snapshot.q_vals_active is not None:
+        n = int(np.asarray(snapshot.q_vals_active).shape[0])
+        bar_h = 8 if n > 12 else 10
+        y += 18 + n * (bar_h + 2) + 6
+
+    return max(DETAIL_PANEL_MIN_HEIGHT, y + 12)
+
+
 def blank_detail_panel(height: int) -> np.ndarray:
     """Placeholder panel reserved in the layout before detail mode is toggled on."""
     import cv2
@@ -533,12 +646,19 @@ def blank_detail_panel(height: int) -> np.ndarray:
 def render_detail_panel(
     snapshot: LiveVizSnapshot,
     *,
-    height: int,
+    height: int | None = None,
     ego_action_names: dict[int, str],
     stack_size: int,
 ) -> np.ndarray:
     """Render the right-hand debug panel as HxWx3 RGB uint8."""
-    panel = np.zeros((height, PANEL_WIDTH, 3), dtype=np.uint8)
+    panel_h = int(
+        height
+        if height is not None
+        else estimate_detail_panel_height(
+            snapshot, stack_size=stack_size, ego_action_names=ego_action_names
+        )
+    )
+    panel = np.zeros((panel_h, PANEL_WIDTH, 3), dtype=np.uint8)
     panel[:] = (24, 24, 28)
 
     x = 8
@@ -653,14 +773,25 @@ def render_detail_panel(
 
     labels = ego_channel_labels()
     if snapshot.ego_obs is not None:
+        ego_arr = np.asarray(snapshot.ego_obs, dtype=np.float32)
         y = _draw_ego_heatmap(
             panel,
-            np.asarray(snapshot.ego_obs, dtype=np.float32),
+            ego_arr,
             labels,
             x,
             y,
             PANEL_WIDTH - 16,
-            max(60, height // 4),
+            stack_size=stack_size,
+        )
+        y += 4
+        y = _draw_ego_stack_numeric(
+            panel,
+            ego_arr,
+            labels,
+            x,
+            y,
+            PANEL_WIDTH - 16,
+            stack_size=stack_size,
         )
     y += 6
 
@@ -673,7 +804,6 @@ def render_detail_panel(
             x,
             y,
             PANEL_WIDTH - 16,
-            max(80, height - y - 8),
         )
 
     return panel
@@ -686,7 +816,7 @@ def compose_display(
     panel_rgb: np.ndarray,
     overlay: str | None,
 ) -> np.ndarray:
-    """Scale game frame and append the debug panel slot horizontally."""
+    """Scale game frame and append the debug panel without clipping panel content."""
     import cv2
 
     game_rgb = np.ascontiguousarray(game_rgb, dtype=np.uint8)
@@ -696,17 +826,22 @@ def compose_display(
         (w * scale, h * scale),
         interpolation=cv2.INTER_NEAREST,
     )
-    panel_scaled = cv2.resize(
-        np.ascontiguousarray(panel_rgb, dtype=np.uint8),
-        (PANEL_WIDTH, h * scale),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    canvas = np.concatenate([game_scaled, panel_scaled], axis=1)
+    panel = np.ascontiguousarray(panel_rgb, dtype=np.uint8)
+    out_h = max(game_scaled.shape[0], panel.shape[0])
+    if game_scaled.shape[0] < out_h:
+        pad = np.zeros((out_h - game_scaled.shape[0], game_scaled.shape[1], 3), dtype=np.uint8)
+        pad[:] = (20, 20, 20)
+        game_scaled = np.vstack([game_scaled, pad])
+    if panel.shape[0] < out_h:
+        pad = np.zeros((out_h - panel.shape[0], panel.shape[1], 3), dtype=np.uint8)
+        pad[:] = (24, 24, 28)
+        panel = np.vstack([panel, pad])
+    canvas = np.concatenate([game_scaled, panel], axis=1)
 
     if overlay:
         cv2.putText(
             canvas,
-            overlay[:120],
+            overlay[:160],
             (8, canvas.shape[0] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,

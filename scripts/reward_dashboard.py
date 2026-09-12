@@ -120,6 +120,78 @@ ACTION_DOWNRIGHTFIRE = 16
 ACTION_DOWNLEFTFIRE = 17
 
 
+def _unwrap_action_set(env):
+    """Return the game ``ACTION_SET`` (ALE ids) from a possibly wrapped env."""
+    cur = env
+    for _ in range(12):
+        action_set = getattr(cur, "ACTION_SET", None)
+        if action_set is not None:
+            return [int(x) for x in list(action_set)]
+        nxt = getattr(cur, "env", None)
+        if nxt is None:
+            nxt = getattr(cur, "_env", None)
+        if nxt is None:
+            break
+        cur = nxt
+    return list(range(18))
+
+
+def _ale_to_action_index_map(action_set):
+    """Map ALE action id → Discrete index into ``ACTION_SET``."""
+    return {int(ale): idx for idx, ale in enumerate(action_set)}
+
+
+# When an ALE id is absent from a compact ACTION_SET, try these substitutes
+# (first present wins). Keeps diagonals / fire combos playable on 4–10 action games.
+_ALE_FALLBACKS: dict[int, tuple[int, ...]] = {
+    ACTION_UPRIGHT: (ACTION_UP, ACTION_RIGHT),
+    ACTION_UPLEFT: (ACTION_UP, ACTION_LEFT),
+    ACTION_DOWNRIGHT: (ACTION_DOWN, ACTION_RIGHT),
+    ACTION_DOWNLEFT: (ACTION_DOWN, ACTION_LEFT),
+    ACTION_UPFIRE: (ACTION_FIRE, ACTION_UP),
+    ACTION_RIGHTFIRE: (ACTION_FIRE, ACTION_RIGHT),
+    ACTION_LEFTFIRE: (ACTION_FIRE, ACTION_LEFT),
+    ACTION_DOWNFIRE: (ACTION_FIRE, ACTION_DOWN),
+    ACTION_UPRIGHTFIRE: (
+        ACTION_UPFIRE,
+        ACTION_RIGHTFIRE,
+        ACTION_UPRIGHT,
+        ACTION_FIRE,
+        ACTION_UP,
+        ACTION_RIGHT,
+    ),
+    ACTION_UPLEFTFIRE: (
+        ACTION_UPFIRE,
+        ACTION_LEFTFIRE,
+        ACTION_UPLEFT,
+        ACTION_FIRE,
+        ACTION_UP,
+        ACTION_LEFT,
+    ),
+    ACTION_DOWNRIGHTFIRE: (
+        ACTION_DOWNFIRE,
+        ACTION_RIGHTFIRE,
+        ACTION_DOWNRIGHT,
+        ACTION_FIRE,
+        ACTION_DOWN,
+        ACTION_RIGHT,
+    ),
+    ACTION_DOWNLEFTFIRE: (
+        ACTION_DOWNFIRE,
+        ACTION_LEFTFIRE,
+        ACTION_DOWNLEFT,
+        ACTION_FIRE,
+        ACTION_DOWN,
+        ACTION_LEFT,
+    ),
+    ACTION_UP: (ACTION_NOOP,),
+    ACTION_DOWN: (ACTION_NOOP,),
+    ACTION_LEFT: (ACTION_NOOP,),
+    ACTION_RIGHT: (ACTION_NOOP,),
+    ACTION_FIRE: (ACTION_NOOP,),
+}
+
+
 class RewardDashboard:
     def __init__(
         self,
@@ -147,6 +219,11 @@ class RewardDashboard:
         self.no_target_idx = no_target_idx
         self.reward_extractor = reward_extractor
         self.extract_life_lost = extract_life_lost
+
+        # Keyboard emits Seaquest-style ALE ids; compact ACTION_SETs (Asteroids,
+        # Time Pilot, …) need remapping so RIGHTFIRE≠DOWNFIRE index collision.
+        self._action_set = _unwrap_action_set(env)
+        self._ale_to_idx = _ale_to_action_index_map(self._action_set)
 
         # Object name table
         if "seaquest" in self.env_name:
@@ -408,7 +485,7 @@ class RewardDashboard:
         return sx, sy, gw * self.game_scale, gh * self.game_scale
 
     def _draw_navigate_checkpoints(self):
-        """Draw enlarged markers for active NAVIGATE / ladder waypoints (often 1–2 px in obs)."""
+        """Draw enlarged markers for small NAVIGATE / ladder waypoints (often 1–2 px)."""
         if self.obs is None:
             return
         try:
@@ -425,14 +502,24 @@ class RewardDashboard:
             if act[i] <= 0:
                 continue
             lab = int(labels[i])
-            is_nav = lab == LABEL_NAVIGATE
-            # Kangaroo ladder waypoints are COLLECT slots 1..40 (no separate NAVIGATE label).
+            # Compact NAVIGATE markers only — tall doors/ropes keep native AABBs
+            # (drawing them as "checkpoints" was confusing in Montezuma).
+            is_small_nav = (
+                lab == LABEL_NAVIGATE and max(float(wa[i]), float(ha[i])) <= 12.0
+            )
+            # Kangaroo ladder waypoints are COLLECT slots 1..40.
             is_kangaroo_wp = (
                 "kangaroo" in self.env_name
                 and lab == LABEL_COLLECT
                 and 1 <= i <= 40
             )
-            if not (is_nav or is_kangaroo_wp):
+            # Montezuma ladder waypoints are COLLECT slots 4..11.
+            is_montezuma_wp = (
+                "montezuma" in self.env_name
+                and lab == LABEL_COLLECT
+                and 4 <= i <= 11
+            )
+            if not (is_small_nav or is_kangaroo_wp or is_montezuma_wp):
                 continue
             sx, sy, sw, sh = self._object_screen_rect(
                 xa[i], ya[i], wa[i], ha[i], min_game_px=NAVIGATE_MARKER_GAME_PX
@@ -489,9 +576,11 @@ class RewardDashboard:
             return
         lab = int(labels[idx])
         # Waypoint / coconut markers already highlight the selected checkpoint.
-        if lab == LABEL_NAVIGATE or (
-            "kangaroo" in self.env_name and lab == LABEL_COLLECT and 1 <= idx <= 40
-        ):
+        if lab == LABEL_NAVIGATE and max(float(wa[idx]), float(ha[idx])) <= 12.0:
+            return
+        if "kangaroo" in self.env_name and lab == LABEL_COLLECT and 1 <= idx <= 40:
+            return
+        if "montezuma" in self.env_name and lab == LABEL_COLLECT and 4 <= idx <= 11:
             return
         if lab == LABEL_AVOID:
             return
@@ -627,9 +716,35 @@ class RewardDashboard:
 
     # ── input ─────────────────────────────────────────────────────────────────
 
+    def _ale_to_env_action(self, ale_action: int) -> int:
+        """Convert a Seaquest-style ALE action id to an env Discrete index.
+
+        Applies to **all** envs: compact ``ACTION_SET`` tables (Asteroids,
+        NameThisGame, Phoenix, …) store ALE ids, so the Discrete index is not
+        the ALE id.  Missing combos fall back to the nearest available action.
+        """
+        ale = int(ale_action)
+        # Asteroids: DOWN/DOWNFIRE = hyperspace. Arrow-down must not teleport.
+        if "asteroids" in self.env_name:
+            if ale == ACTION_DOWN:
+                ale = ACTION_NOOP
+            elif ale == ACTION_DOWNFIRE:
+                ale = ACTION_FIRE
+            elif ale in (ACTION_DOWNRIGHT, ACTION_DOWNRIGHTFIRE):
+                ale = ACTION_RIGHTFIRE if ale == ACTION_DOWNRIGHTFIRE else ACTION_RIGHT
+            elif ale in (ACTION_DOWNLEFT, ACTION_DOWNLEFTFIRE):
+                ale = ACTION_LEFTFIRE if ale == ACTION_DOWNLEFTFIRE else ACTION_LEFT
+
+        if ale in self._ale_to_idx:
+            return int(self._ale_to_idx[ale])
+        for alt in _ALE_FALLBACKS.get(ale, ()):
+            if alt in self._ale_to_idx:
+                return int(self._ale_to_idx[alt])
+        return int(self._ale_to_idx.get(ACTION_NOOP, 0))
+
     def handle_input(self) -> Tuple[int, bool, bool, bool, bool]:
         keys = pygame.key.get_pressed()
-        action = ACTION_NOOP
+        ale_action = ACTION_NOOP
         quit_, reset_, freeze_, step_ = False, False, False, False
 
         for ev in pygame.event.get():
@@ -648,17 +763,17 @@ class RewardDashboard:
         u, d, l, r, sp = (keys[k] for k in (
             pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_SPACE
         ))
-        if u and r:   action = ACTION_UPRIGHTFIRE   if sp else ACTION_UPRIGHT
-        elif u and l: action = ACTION_UPLEFTFIRE    if sp else ACTION_UPLEFT
-        elif d and r: action = ACTION_DOWNRIGHTFIRE if sp else ACTION_DOWNRIGHT
-        elif d and l: action = ACTION_DOWNLEFTFIRE  if sp else ACTION_DOWNLEFT
-        elif u:       action = ACTION_UPFIRE        if sp else ACTION_UP
-        elif d:       action = ACTION_DOWNFIRE      if sp else ACTION_DOWN
-        elif r:       action = ACTION_RIGHTFIRE     if sp else ACTION_RIGHT
-        elif l:       action = ACTION_LEFTFIRE      if sp else ACTION_LEFT
-        elif sp:      action = ACTION_FIRE
+        if u and r:   ale_action = ACTION_UPRIGHTFIRE   if sp else ACTION_UPRIGHT
+        elif u and l: ale_action = ACTION_UPLEFTFIRE    if sp else ACTION_UPLEFT
+        elif d and r: ale_action = ACTION_DOWNRIGHTFIRE if sp else ACTION_DOWNRIGHT
+        elif d and l: ale_action = ACTION_DOWNLEFTFIRE  if sp else ACTION_DOWNLEFT
+        elif u:       ale_action = ACTION_UPFIRE        if sp else ACTION_UP
+        elif d:       ale_action = ACTION_DOWNFIRE      if sp else ACTION_DOWN
+        elif r:       ale_action = ACTION_RIGHTFIRE     if sp else ACTION_RIGHT
+        elif l:       ale_action = ACTION_LEFTFIRE      if sp else ACTION_LEFT
+        elif sp:      ale_action = ACTION_FIRE
 
-        return action, quit_, reset_, freeze_, step_
+        return self._ale_to_env_action(ale_action), quit_, reset_, freeze_, step_
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
@@ -717,6 +832,9 @@ def main():
     exp_cfg  = OmegaConf.to_container(OmegaConf.load(exp_path),  resolve=True)
     cfg      = {**base_cfg, **exp_cfg, **exp_cfg.get("alg", {})}
     env_name = str(args.env_name or cfg.get("ENV_NAME", "seaquest"))
+    # Manual play: no action-repeat flicker; show every frame with objects+player.
+    cfg["FRAME_SKIP"] = 1
+    cfg["STICKY_ACTIONS"] = False
 
     manager    = EnvManager()
     env, renderer = manager.make_env(env_name, cfg, train=False)

@@ -3,9 +3,9 @@ PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: transfer
 PAPER_EVAL_MODS: pong
 PAPER_EVAL_REQUIRES_RQ1:
-- seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5
-PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
-PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5
+- seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech
 NUM_SEEDS: 1
 ALG_NAME: hierarchical_pqn
 TRAIN_MODE: skills_only
@@ -17,14 +17,14 @@ EGO_POSE_XY: false
 SAVE_PATH: ./outputs/models/paper_eval/rq2/pong_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_RUN_NAME: po_paper_rq2_transfer_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5
 WANDB_TAGS:
-- suite:ego_min_noweapon_surfacesub5_clipsweep
+- suite:ale_clip10_heu_smoke
 - rq:2
 - env:pong
 - phase:zero_shot
 - skill_input:ego
 - mapper:pov_facing
 - ego:phi_bins8
-- ablation:ego_min_channels
+- ablation:ale_heu_smoke
 - ego:noblocking
 - ego:noweapon
 - ego:clip10

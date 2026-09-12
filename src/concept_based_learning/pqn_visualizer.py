@@ -18,9 +18,15 @@ from omegaconf import OmegaConf
 from safetensors.flax import load_file
 from flax.traverse_util import unflatten_dict
 
+from concept_based_learning.baselines.fixed_ego_skills import (
+    select_fixed_ego_action,
+    uses_fixed_skill_policy,
+)
 from concept_based_learning.observations.action_space import (
     fire_ego_action_indices,
     make_realized_ego_mask_fn,
+    make_legal_ego_mask_fn,
+    legal_ego_mask_mode_from_config,
     mask_q_with_legal_ego,
 )
 from concept_based_learning.observations.egocentric import (
@@ -484,6 +490,12 @@ def _infer_env_name_from_checkpoint_path(model_path: str) -> str | None:
         "montezuma_revenge",
         "venture",
         "asterix",
+        "asteroids",
+        "namethisgame",
+        "name_this_game",
+        "timepilot",
+        "time_pilot",
+        # "kaboom",  # deferred: not in upstream jaxatari yet
         "beamrider",
         "kangaroo",
         "freeway",
@@ -1072,8 +1084,9 @@ def _make_jitted_greedy_episode_runner(
     use_meta = meta_network is not None
     update_metrics, finalize_metrics = make_metric_fns(env_name, has_semantic_obs=True)
     use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
-    legal_ego_mask_fn = make_realized_ego_mask_fn(
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
         action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
@@ -1088,6 +1101,8 @@ def _make_jitted_greedy_episode_runner(
         else None
     )
 
+    fixed_skill_policy = uses_fixed_skill_policy(config)
+
     def _skill_game_action(obs, target, heading):
         is_noop = is_meta_noop_target(
             target, config, noop_idx=int(noop_idx), enabled=noop_enabled
@@ -1099,49 +1114,71 @@ def _make_jitted_greedy_episode_runner(
         safe_target = jnp.where(target == no_target, 0, target)
         raw_label = obs.objects.semantic_label[-1, safe_target]
         sk_idx = label_to_skill_idx(raw_label, num_skills)
-        ego_obs = _skill_input_from_obs(
-            config,
-            obs.raw_observation,
-            obs.objects,
-            safe_target,
-            heading if use_turn_primitives else None,
-        )
-        pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
-        q_all = apply_skill_q_all(
-            skill_network,
-            skill_params,
-            ego_obs,
-            target_idx=safe_target,
-            pixel_obs=pixel_obs,
-            objects=obs.objects,
-            raw_obs=obs.raw_observation,
-            oc_psi=_skill_oc_psi_from_obs(
+        if fixed_skill_policy:
+            ego_a = select_fixed_ego_action(
+                config,
+                sk_idx,
+                obs.raw_observation,
+                obs.objects,
+                safe_target,
+            )
+            if use_legal_ego_mask:
+                legal = (
+                    turn_legal_mask_fn(heading)
+                    if use_turn_primitives
+                    else legal_ego_mask_fn(
+                        obs.raw_observation, safe_target, obs.objects
+                    )
+                )
+                # Fall back to NOOP if the chosen intention cannot be realized.
+                ego_a = jnp.where(legal[ego_a], ego_a, jnp.int32(0))
+        else:
+            ego_obs = _skill_input_from_obs(
                 config,
                 obs.raw_observation,
                 obs.objects,
                 safe_target,
-                int(config.get("MAX_OBJECTS", 35)),
-            ),
-            stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
-            destroy_skill_idx=_destroy_skill_idx(config),
-        )
-        q_skill = q_all[sk_idx]
-        if restrict_fire_for_non_destroy:
-            q_skill = jax.lax.cond(
-                sk_idx == 0,
-                lambda q: q,
-                lambda q: q.at[fire_indices].set(-jnp.inf),
-                q_skill,
+                heading if use_turn_primitives else None,
             )
-        if use_legal_ego_mask:
-            legal = (
-                turn_legal_mask_fn(heading)
-                if use_turn_primitives
-                else legal_ego_mask_fn(obs.raw_observation, safe_target, obs.objects)
+            pixel_obs = _skill_pixel_obs_from_obs(config, obs)
+
+            q_all = apply_skill_q_all(
+                skill_network,
+                skill_params,
+                ego_obs,
+                target_idx=safe_target,
+                pixel_obs=pixel_obs,
+                objects=obs.objects,
+                raw_obs=obs.raw_observation,
+                oc_psi=_skill_oc_psi_from_obs(
+                    config,
+                    obs.raw_observation,
+                    obs.objects,
+                    safe_target,
+                    int(config.get("MAX_OBJECTS", 35)),
+                ),
+                stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+                destroy_skill_idx=_destroy_skill_idx(config),
             )
-            q_skill = mask_q_with_legal_ego(q_skill, legal)
-        ego_a = jnp.argmax(q_skill)
+            q_skill = q_all[sk_idx]
+            if restrict_fire_for_non_destroy:
+                q_skill = jax.lax.cond(
+                    sk_idx == 0,
+                    lambda q: q,
+                    lambda q: q.at[fire_indices].set(-jnp.inf),
+                    q_skill,
+                )
+            if use_legal_ego_mask:
+                legal = (
+                    turn_legal_mask_fn(heading)
+                    if use_turn_primitives
+                    else legal_ego_mask_fn(
+                        obs.raw_observation, safe_target, obs.objects
+                    )
+                )
+                q_skill = mask_q_with_legal_ego(q_skill, legal)
+            ego_a = jnp.argmax(q_skill)
         if use_turn_primitives:
             new_heading = heading_after(heading, ego_a)
             game_a = turn_action_mapper(
@@ -1394,7 +1431,12 @@ def run_greedy_eval_episodes(
     )
 
     if progress:
-        print(f"  Compiling greedy eval (max {max_frames} steps/episode)...", flush=True)
+        mode = str(config.get("SKILL_POLICY_MODE", "learned"))
+        print(
+            f"  Compiling greedy eval (max {max_frames} steps/episode, "
+            f"skill_policy={mode})...",
+            flush=True,
+        )
     _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
 
     total_runs = num_seeds * num_episodes
@@ -1495,8 +1537,9 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     )
     extract_life_lost = components.extract_life_lost
     use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
-    legal_ego_mask_fn = make_realized_ego_mask_fn(
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
         action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
@@ -1510,6 +1553,12 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         if use_turn_primitives
         else None
     )
+    fixed_skill_policy = uses_fixed_skill_policy(config)
+    if fixed_skill_policy:
+        print(
+            f"Skill policy mode: {config.get('SKILL_POLICY_MODE')} "
+            "(fixed ego rules; Q-heads unused for action)"
+        )
 
     meta_network = None
     if meta_params is not None:
@@ -1755,47 +1804,71 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 )
                 angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
-            # Evaluate all skills' Q-values on the current ego observation.
             target_idx_arr = jnp.asarray([target_obj_idx], dtype=jnp.int32)
-            pixel_batch = (
-                jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
-            )
-            q_vals = apply_all_skills(
-                params_tree,
-                ego_obs_batch,
-                target_idx_arr,
-                pixel_batch,
-                obs.objects,
-                obs.raw_observation,
-                _skill_oc_psi_from_obs(
-                    config,
-                    obs.raw_observation,
-                    obs.objects,
-                    target_idx_arr[0],
-                    int(config.get("MAX_OBJECTS", 35)),
-                ),
-            )  # [num_skills, 1, ego_action_dim]
-            q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, ego_action_dim]
-
-            combined_q = np.array(jnp.max(q_vals, axis=-1))
-
-            fire_indices = fire_ego_action_indices(ego_action_dim)
-            q_active = q_vals[active_skill_idx]
-            if restrict_fire_for_non_destroy and active_skill_idx != 0:
-                q_active = q_active.at[fire_indices].set(-jnp.inf)
-            if use_legal_ego_mask:
-                legal = (
-                    turn_legal_mask_fn(policy_state.heading_deg)
-                    if use_turn_primitives
-                    else legal_ego_mask_fn(
+            if fixed_skill_policy:
+                chosen_ego = int(
+                    select_fixed_ego_action(
+                        config,
+                        active_skill_idx,
                         obs.raw_observation,
-                        jnp.array(target_obj_idx, dtype=jnp.int32),
                         obs.objects,
+                        target_idx_arr[0],
                     )
                 )
-                q_active = mask_q_with_legal_ego(q_active, legal)
+                if use_legal_ego_mask:
+                    legal = (
+                        turn_legal_mask_fn(policy_state.heading_deg)
+                        if use_turn_primitives
+                        else legal_ego_mask_fn(
+                            obs.raw_observation,
+                            target_idx_arr[0],
+                            obs.objects,
+                        )
+                    )
+                    if not bool(legal[chosen_ego]):
+                        chosen_ego = 0
+                combined_q = np.zeros(num_skills, dtype=np.float32)
+            else:
+                # Evaluate all skills' Q-values on the current ego observation.
+                pixel_batch = (
+                    jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
+                )
+                q_vals = apply_all_skills(
+                    params_tree,
+                    ego_obs_batch,
+                    target_idx_arr,
+                    pixel_batch,
+                    obs.objects,
+                    obs.raw_observation,
+                    _skill_oc_psi_from_obs(
+                        config,
+                        obs.raw_observation,
+                        obs.objects,
+                        target_idx_arr[0],
+                        int(config.get("MAX_OBJECTS", 35)),
+                    ),
+                )  # [num_skills, 1, ego_action_dim]
+                q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, ego_action_dim]
 
-            chosen_ego = int(jnp.argmax(q_active))
+                combined_q = np.array(jnp.max(q_vals, axis=-1))
+
+                fire_indices = fire_ego_action_indices(ego_action_dim)
+                q_active = q_vals[active_skill_idx]
+                if restrict_fire_for_non_destroy and active_skill_idx != 0:
+                    q_active = q_active.at[fire_indices].set(-jnp.inf)
+                if use_legal_ego_mask:
+                    legal = (
+                        turn_legal_mask_fn(policy_state.heading_deg)
+                        if use_turn_primitives
+                        else legal_ego_mask_fn(
+                            obs.raw_observation,
+                            jnp.array(target_obj_idx, dtype=jnp.int32),
+                            obs.objects,
+                        )
+                    )
+                    q_active = mask_q_with_legal_ego(q_active, legal)
+
+                chosen_ego = int(jnp.argmax(q_active))
             if use_turn_primitives:
                 new_heading = heading_after(policy_state.heading_deg, chosen_ego)
                 policy_state = policy_state.replace(heading_deg=new_heading)
@@ -2024,24 +2097,31 @@ def run_live_visualization(
 
     def _show_canvas(canvas_rgb: np.ndarray) -> None:
         """Show a pre-composited HxWx3 RGB uint8 canvas."""
+        nonlocal window_size, screen
         if canvas_rgb.dtype != np.uint8:
             canvas_rgb = canvas_rgb.astype(np.uint8)
         if not canvas_rgb.flags["C_CONTIGUOUS"]:
             canvas_rgb = np.ascontiguousarray(canvas_rgb)
+        canvas_h, canvas_w = canvas_rgb.shape[:2]
+        target_size = (canvas_w, canvas_h)
         if display_backend == "pygame":
+            if target_size != window_size:
+                window_size = target_size
+                screen = pygame.display.set_mode(
+                    window_size, pygame.SHOWN | pygame.RESIZABLE
+                )
             surf = pygame.surfarray.make_surface(
                 np.ascontiguousarray(canvas_rgb.transpose(1, 0, 2))
             )
-            if surf.get_size() != window_size:
-                surf = pygame.transform.scale(surf, window_size)
             screen.fill((20, 20, 20))
             screen.blit(surf, (0, 0))
             pygame.display.flip()
             pygame.event.pump()
             return
+        if target_size != window_size:
+            window_size = target_size
+            cv2.resizeWindow(window_name, window_size[0], window_size[1])
         bgr = cv2.cvtColor(canvas_rgb, cv2.COLOR_RGB2BGR)
-        if (bgr.shape[1], bgr.shape[0]) != window_size:
-            bgr = cv2.resize(bgr, window_size, interpolation=cv2.INTER_NEAREST)
         cv2.imshow(window_name, bgr)
         cv2.waitKey(1)
 
@@ -2049,7 +2129,6 @@ def run_live_visualization(
         if detail_mode and last_snapshot is not None:
             panel = render_detail_panel(
                 last_snapshot,
-                height=H,
                 ego_action_names=_ego_action_names,
                 stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
             )
@@ -2146,8 +2225,9 @@ def run_live_visualization(
     )
     extract_life_lost = components.extract_life_lost
     use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
-    legal_ego_mask_fn = make_realized_ego_mask_fn(
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
         action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
@@ -2161,6 +2241,12 @@ def run_live_visualization(
         if use_turn_primitives
         else None
     )
+    fixed_skill_policy = uses_fixed_skill_policy(config)
+    if fixed_skill_policy:
+        _log(
+            f"Skill policy mode: {config.get('SKILL_POLICY_MODE')} "
+            "(fixed ego rules; Q-heads unused for action)"
+        )
 
     meta_network = None
     if meta_params is not None:
@@ -2407,40 +2493,64 @@ def run_live_visualization(
             angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
         pixel_batch = jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
-        q_vals = apply_all_skills(
-            params_tree,
-            ego_obs_batch,
-            jnp.asarray([target_obj_idx], dtype=jnp.int32),
-            pixel_batch,
-            obs.objects,
-            obs.raw_observation,
-            _skill_oc_psi_from_obs(
-                config,
-                obs.raw_observation,
-                obs.objects,
-                jnp.asarray(target_obj_idx, dtype=jnp.int32),
-                int(config.get("MAX_OBJECTS", 35)),
-            ),
-        )
-        q_vals = jnp.squeeze(q_vals, axis=1)
-
-        fire_indices = fire_ego_action_indices(ego_action_dim)
-        q_active = q_vals[active_skill_idx]
-        if restrict_fire_for_non_destroy and active_skill_idx != 0:
-            q_active = q_active.at[fire_indices].set(-jnp.inf)
-        if use_legal_ego_mask:
-            legal = (
-                turn_legal_mask_fn(policy_state.heading_deg)
-                if use_turn_primitives
-                else legal_ego_mask_fn(
+        if fixed_skill_policy:
+            chosen_ego = int(
+                select_fixed_ego_action(
+                    config,
+                    active_skill_idx,
                     obs.raw_observation,
-                    jnp.array(target_obj_idx, dtype=jnp.int32),
                     obs.objects,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
                 )
             )
-            q_active = mask_q_with_legal_ego(q_active, legal)
+            if use_legal_ego_mask:
+                legal = (
+                    turn_legal_mask_fn(policy_state.heading_deg)
+                    if use_turn_primitives
+                    else legal_ego_mask_fn(
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
+                    )
+                )
+                if not bool(legal[chosen_ego]):
+                    chosen_ego = 0
+            q_active = jnp.zeros((ego_action_dim,), dtype=jnp.float32)
+        else:
+            q_vals = apply_all_skills(
+                params_tree,
+                ego_obs_batch,
+                jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                pixel_batch,
+                obs.objects,
+                obs.raw_observation,
+                _skill_oc_psi_from_obs(
+                    config,
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.asarray(target_obj_idx, dtype=jnp.int32),
+                    int(config.get("MAX_OBJECTS", 35)),
+                ),
+            )
+            q_vals = jnp.squeeze(q_vals, axis=1)
 
-        chosen_ego = int(jnp.argmax(q_active))
+            fire_indices = fire_ego_action_indices(ego_action_dim)
+            q_active = q_vals[active_skill_idx]
+            if restrict_fire_for_non_destroy and active_skill_idx != 0:
+                q_active = q_active.at[fire_indices].set(-jnp.inf)
+            if use_legal_ego_mask:
+                legal = (
+                    turn_legal_mask_fn(policy_state.heading_deg)
+                    if use_turn_primitives
+                    else legal_ego_mask_fn(
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
+                    )
+                )
+                q_active = mask_q_with_legal_ego(q_active, legal)
+
+            chosen_ego = int(jnp.argmax(q_active))
         if use_turn_primitives:
             new_heading = heading_after(policy_state.heading_deg, chosen_ego)
             policy_state = policy_state.replace(heading_deg=new_heading)
@@ -2979,6 +3089,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--game-mods",
+        nargs="*",
+        default=None,
+        metavar="MOD",
+        help=(
+            "Override GAME_MODS for this run (e.g. --game-mods only_sharks). "
+            "Applied after --paper-config. Use with no values for an empty list."
+        ),
+    )
+    parser.add_argument(
         "--experiment",
         type=str,
         default=None,
@@ -3037,6 +3157,10 @@ def main():
             base_config, args.paper_config, project_root=_project_root()
         )
         print(f"Merged paper-eval config: {args.paper_config}")
+    if args.game_mods is not None:
+        base_config["GAME_MODS"] = list(args.game_mods)
+        base_config["EVAL_GAME_MODS"] = list(args.game_mods)
+        print(f"GAME_MODS override: {base_config['GAME_MODS']}")
     # Same as mod-eval harness: transfer YAMLs can disagree with the source
     # skill ego layout (e.g. weapon channels). Sidecar wins for obs dim.
     if skill_path is not None:

@@ -6,7 +6,10 @@ Reward magnitudes and trigger conditions:
              (escape progress; same distance metric as ego obs). No per-frame
              survival farm.
              -1  on rising edge of AABB overlap / was_killed (contact fail).
-             No sparse “cleared” success terminal (escape shaping only).
+             No sparse “cleared” success terminal by default (escape shaping only).
+             AVOID_SPARSE_ONLY: no per-step escape shaping; +1 and skill-done on
+             the first escape step (distance increased, no contact) — sparse
+             “switched away safely”; −1 on contact / death still applies.
   COLLECT  : +1  on rising edge of AABB overlap, or next_target.was_collected == 1.
              Default dense term: +0.01 when AABB surface-gap to the (still active)
              target decreases (approach shaping; matches ego distance).
@@ -92,6 +95,7 @@ from concept_based_learning.observations.egocentric import (
 # Unified reward magnitudes — single source of truth.
 AVOID_ESCAPE_REWARD = 0.01  # distance-to-threat increased this step
 AVOID_SURVIVAL_REWARD = AVOID_ESCAPE_REWARD  # back-compat alias (old survival farm removed)
+AVOID_SUCCESS_REWARD = 1.0  # sparse AVOID: one-shot escape success
 AVOID_FAILURE_REWARD = -1.0
 COLLECT_SUCCESS_REWARD = 1.0
 COLLECT_PROGRESS_REWARD = 0.01  # distance-to-collectible decreased this step
@@ -138,6 +142,7 @@ class RewardContext:
     overlap_rising_edge: jnp.ndarray
     life_lost: jnp.ndarray
     avoid_escape_reward: float
+    avoid_sparse_only: bool
     destroy_y_align: bool
     destroy_standoff: bool
     destroy_contact_fail: bool
@@ -420,6 +425,7 @@ def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
     # Escape shaping: reward *increasing* distance (mirror of NAVIGATE/COLLECT
     # approach). Idle near the threat earns 0 — no survival farm.
+    # AVOID_SPARSE_ONLY: +1 and done on first escape step (no dense 0.01).
     # Life-loss penalty is applied uniformly in extract_skill_rewards.
     failure = jnp.logical_or(
         ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
@@ -432,12 +438,21 @@ def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
         both_active,
         jnp.logical_and(jnp.logical_not(failure), next_dist > prev_dist),
     )
+    escape_r = jnp.where(
+        ctx.avoid_sparse_only,
+        jnp.float32(AVOID_SUCCESS_REWARD),
+        jnp.float32(ctx.avoid_escape_reward),
+    )
     reward = jnp.where(
         failure,
         AVOID_FAILURE_REWARD,
-        jnp.where(escaped, ctx.avoid_escape_reward, 0.0),
+        jnp.where(escaped, escape_r, 0.0),
     )
-    return reward, failure
+    done = jnp.logical_or(
+        failure,
+        jnp.logical_and(ctx.avoid_sparse_only, escaped),
+    )
+    return reward, done
 
 
 def _navigate_progress_shaped(prev_dist: jnp.ndarray, next_dist: jnp.ndarray) -> jnp.ndarray:
@@ -551,6 +566,7 @@ def extract_skill_rewards(
     destroy_living_penalty: bool | None = None,
     collect_living_penalty: bool | None = None,
     collect_sparse_only: bool | None = None,
+    avoid_sparse_only: bool | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all skills against a single target.
@@ -583,6 +599,9 @@ def extract_skill_rewards(
         collect_sparse_only:
             if True, COLLECT gets no dense term (no approach, no living tax).
             ``None`` → config ``COLLECT_SPARSE_ONLY``.
+        avoid_sparse_only:
+            if True, AVOID uses +1/done on escape instead of dense escape
+            shaping. ``None`` → config ``AVOID_SPARSE_ONLY``.
 
     Returns:
         rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
@@ -590,6 +609,8 @@ def extract_skill_rewards(
     """
     if avoid_survival_reward is not None:
         avoid_escape_reward = float(avoid_survival_reward)
+    elif config is not None:
+        avoid_escape_reward = avoid_escape_reward_from_config(config)
     flags = destroy_shaping_from_config(config)
     if destroy_y_align is not None:
         flags["destroy_y_align"] = bool(destroy_y_align)
@@ -605,6 +626,12 @@ def extract_skill_rewards(
     collect_sparse = collect_sparse_only_from_config(config)
     if collect_sparse_only is not None:
         collect_sparse = bool(collect_sparse_only)
+    avoid_sparse = avoid_sparse_only_from_config(config)
+    if avoid_sparse_only is not None:
+        avoid_sparse = bool(avoid_sparse_only)
+    if avoid_sparse:
+        # Dense escape bonus is unused when sparse success is on.
+        avoid_escape_reward = 0.0
 
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
@@ -638,6 +665,7 @@ def extract_skill_rewards(
         ),
         life_lost=life_lost,
         avoid_escape_reward=avoid_escape_reward,
+        avoid_sparse_only=avoid_sparse,
         destroy_y_align=flags["destroy_y_align"],
         destroy_standoff=flags["destroy_standoff"],
         destroy_contact_fail=flags["destroy_contact_fail"],
@@ -730,6 +758,13 @@ def collect_sparse_only_from_config(config) -> bool:
     if config is None:
         return False
     return bool(config.get("COLLECT_SPARSE_ONLY", False))
+
+
+def avoid_sparse_only_from_config(config) -> bool:
+    """If True, AVOID uses +1/done on escape (no dense escape shaping)."""
+    if config is None:
+        return False
+    return bool(config.get("AVOID_SPARSE_ONLY", False))
 
 
 def penalize_collect_death_from_config(config) -> bool:

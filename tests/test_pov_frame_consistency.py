@@ -29,6 +29,7 @@ from concept_based_learning.observations.pov_relative import (
     _POV_PROFILES,
     _SPRITE_ORIENTATION_OFFSET_DEG,
     build_facing_action_table,
+    facing_bins_deg,
     has_single_view_axis,
     view_axes_deg,
 )
@@ -87,10 +88,10 @@ def _body_pose(dx: float, dy: float, facing_deg: float) -> tuple[float, float, f
 @pytest.mark.parametrize("sprite_ori", [SPRITE_UNSET, SPRITE_RIGHT, SPRITE_LEFT])
 def test_obs_facing_matches_a_declared_view_axis(env, sprite_ori):
     facing = float(resolve_facing_deg(_raw_obs(env, sprite_ori), env_name=env))
-    axis0, axis1 = view_axes_deg(_POV_PROFILES[env])
+    bins = facing_bins_deg(_POV_PROFILES[env])
     assert any(
-        abs(_wrap180(facing - axis)) < 1e-3 for axis in (axis0, axis1)
-    ), f"{env}: obs facing {facing} is not one of the declared axes {(axis0, axis1)}"
+        abs(_wrap180(facing - axis)) < 1e-3 for axis in bins
+    ), f"{env}: obs facing {facing} is not one of the declared axes {bins}"
 
 
 @pytest.mark.parametrize("env", POV_ENVS)
@@ -105,7 +106,7 @@ def test_obs_facing_equals_mapper_facing(env, sprite_ori):
 
     obs_facing = float(resolve_facing_deg(raw, env_name=env))
     bin_idx = int(_facing_bin_idx(raw, profile, getter))
-    mapper_facing = view_axes_deg(profile)[bin_idx]
+    mapper_facing = facing_bins_deg(profile)[bin_idx]
 
     assert abs(_wrap180(obs_facing - mapper_facing)) < 1e-3, (
         f"{env}: observation built at {obs_facing} deg but mapper table keyed on "

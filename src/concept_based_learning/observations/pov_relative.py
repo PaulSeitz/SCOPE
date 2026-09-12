@@ -186,9 +186,11 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "horizontal",
     },
     "namethisgame": {
-        "facing_deg_bin0": 0.0,
-        "facing_deg_bin1": 180.0,
-        "bilateral_axis": "horizontal",
+        # Diver at the bottom; spears / threats are above (same as Space Invaders).
+        "facing_deg_bin0": -90.0,
+        "facing_deg_bin1": -90.0,
+        "single_view_axis": True,
+        "bilateral_axis": "vertical",
     },
     "timepilot": {
         # 8-way absolute-aim + stepwise rotate. Buttons request a compass heading;

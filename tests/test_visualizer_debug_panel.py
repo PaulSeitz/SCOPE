@@ -7,10 +7,12 @@ from concept_based_learning.observations.egocentric import (
     ego_obs_channels_per_frame,
 )
 from concept_based_learning.visualizer_debug_panel import (
+    DETAIL_PANEL_MIN_HEIGHT,
     PANEL_WIDTH,
     LiveVizSnapshot,
     compose_display,
     ego_channel_labels,
+    estimate_detail_panel_height,
     render_detail_panel,
 )
 
@@ -55,16 +57,22 @@ def test_render_detail_panel_shape():
         target_xy=(120.0, 90.0),
         frame_idx=3,
     )
-    panel = render_detail_panel(snap, height=210, ego_action_names={2: "FORWARD"}, stack_size=4)
-    assert panel.shape == (210, PANEL_WIDTH, 3)
+    panel = render_detail_panel(snap, ego_action_names={2: "FORWARD"}, stack_size=4)
+    needed = estimate_detail_panel_height(snap, stack_size=4, ego_action_names={2: "FORWARD"})
+    assert panel.shape == (needed, PANEL_WIDTH, 3)
+    assert needed >= DETAIL_PANEL_MIN_HEIGHT
     assert panel.dtype == np.uint8
 
 
 def test_compose_display_with_panel():
     game = np.full((210, 160, 3), 128, dtype=np.uint8)
-    panel = np.full((210, PANEL_WIDTH, 3), 64, dtype=np.uint8)
+    panel = np.full((260, PANEL_WIDTH, 3), 64, dtype=np.uint8)
     canvas = compose_display(game, scale=2, panel_rgb=panel, overlay="hello")
     assert canvas.shape == (420, 160 * 2 + PANEL_WIDTH, 3)
+
+    tall_panel = np.full((500, PANEL_WIDTH, 3), 64, dtype=np.uint8)
+    canvas_tall = compose_display(game, scale=2, panel_rgb=tall_panel, overlay=None)
+    assert canvas_tall.shape == (500, 160 * 2 + PANEL_WIDTH, 3)
 
 
 def test_apply_pov_overlay_non_contiguous_frame():

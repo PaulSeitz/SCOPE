@@ -87,6 +87,13 @@ class NavigateTo:
     ``platform_reach_dy_min`` / ``platform_reach_dy_max`` (player centre below
     waypoint by dy = py - oy) over loose ``platform_reach_y_slack``.
 
+    ``arrive_feet_oy_min`` / ``arrive_feet_oy_max`` (arrive mode): when set,
+    AABB ``arrive_dist`` alone is not enough — also require
+    ``arrive_feet_oy_min <= feet_y - oy <= arrive_feet_oy_max`` (omit a bound
+    to leave it open).  ``min`` stops ladder-bottom stages completing mid-climb
+    when the tall player box already overlaps a low waypoint; ``max`` stops
+    ladder-top stages completing while still low in the shaft.
+
     ``skip_if_player_above_px``: when set, the stage completes (and stops
     targeting the slot) if the player's feet are higher on screen than the
     object centre by more than this many pixels.  Used for hanging fruits that
@@ -102,6 +109,8 @@ class NavigateTo:
     platform_reach_x_slack: Optional[float] = None
     platform_reach_dy_min: Optional[float] = None
     platform_reach_dy_max: Optional[float] = None
+    arrive_feet_oy_min: Optional[float] = None
+    arrive_feet_oy_max: Optional[float] = None
     skip_if_player_above_px: Optional[float] = None
     kind: str = field(default="navigate_to", init=False)
 

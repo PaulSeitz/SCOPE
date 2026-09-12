@@ -4,21 +4,25 @@ Observation entities (jax_montezumarevenge):
   enemies, items, doors, ropes, conveyors, platforms.
 
 Ladders exist only in env state (not in the object observation).  This wrapper
-injects virtual 1px COLLECT waypoints from ``env_state.ladders_*`` (Kangaroo
+injects virtual COLLECT waypoints from ``env_state.ladders_*`` (Kangaroo
 pattern) and patches player leaves that jaxatari emits as length-1 vectors.
+
+jaxatari renders room sprites at ``state_y + 47`` (HUD band). This wrapper
+shifts player and object Y by the same offset so overlays and ego features
+align with the rendered frame.
 
 Lasers exist in env state but are not exposed in the object observation, so
 they are omitted here.
 
 Layout (game_max_objects=31, +1 meta NOOP → 32):
-  [0-2]   enemies           (AVOID)
-  [3-6]   ladder bottoms    (COLLECT waypoints)
-  [7-10]  ladder tops       (COLLECT waypoints)
+  [0-2]   enemies           (AVOID — skull)
+  [3-6]   ladder bottoms    (COLLECT waypoints; 0=center, 1=right, 2=left)
+  [7-10]  ladder tops       (COLLECT waypoints; spawn-adjacent tops start inactive)
   [11-13] items             (COLLECT)
   [14-15] doors             (NAVIGATE)
-  [16-17] ropes             (NAVIGATE)
+  [16-17] ropes             (COLLECT grab WPs near rope top — jump targets)
   [18]    conveyors         (BLOCKER)
-  [19-30] platforms         (BLOCKER)
+  [19-30] platforms         (BLOCKER; unused slots may host room-4 gap AVOID)
 
 With meta-NOOP prepended, planner slots are +1 (enemies start at 1).
 """
@@ -68,6 +72,10 @@ montezuma_action_mapper, montezuma_inverse_action_mapper = make_target_aligned_a
     move_fire_table=[11, 16, 13, 17, 12, 15, 10, 14],
 )
 
+# Stamped on ``raw_observation.player.state[-1]`` while ``death_timer > 0``.
+# The Sequence policy freezes plan_idx at 0 during this window (Kangaroo pattern).
+PLAYER_STATE_DYING = 1
+
 _N_ENEMIES = 3
 _N_LADDERS = 4  # MAX_LADDERS_PER_ROOM
 _N_WAYPOINTS = _N_LADDERS * 2  # bottom then top
@@ -94,12 +102,41 @@ _PLAYER_STAND_HALF = _PLAYER_STAND_HEIGHT // 2
 _LADDER_SHAFT_HALF = 8
 # Raise top waypoints so arrive does not fire mid-climb.
 _TOP_WAYPOINT_LIFT_PX = 12
+# Kangaroo-style readable waypoint footprint (was 1×1 — invisible in dashboard).
+_WAYPOINT_W = 8
+_WAYPOINT_H = 8
+_WAYPOINT_HALF_W = _WAYPOINT_W // 2
+# Top WPs within this centre distance of the player are treated as already
+# reached (spawn sits on the top floor next to the center ladder).
+_TOP_WP_ALREADY_THERE_PX = 16.0
+# jaxatari draws room content at state_y + 47 (HUD band). Observations use the
+# same offset so overlays / ego match the rendered frame.
+MONTEZUMA_RENDER_Y_OFFSET = 47
 
 # Game-layout indices (before meta-NOOP). Policy slots = these + 1.
 WP_BOT0 = _N_ENEMIES  # 3
 WP_TOP0 = _N_ENEMIES + _N_LADDERS  # 7
 ITEM0 = _N_ENEMIES + _N_WAYPOINTS  # 11
 DOOR0 = ITEM0 + _N_ITEMS  # 14
+ROPE0 = DOOR0 + _N_DOORS  # 16
+PLATFORM0 = DOOR0 + _N_DOORS + _N_ROPES + _N_CONVEYORS  # 19
+
+# High rope-grab COLLECT: top of shaft, above mid-floor stand height so the
+# skill must jump the chasm (walking under the rope does not arrive).
+_ROPE_GRAB_W = 8
+_ROPE_GRAB_H = 8
+_ROPE_GRAB_TOP_INSET = 2  # px below ropes_top
+
+# Room-4 mid-tier fall-through gaps (jump hazards). Injected into unused
+# platform slots as AVOID so skills learn to clear them rather than walk in.
+# Geometry measured against the classic starting room (room_id=4) in *state*
+# coordinates (render offset applied in ``_patch_raw_observation``).
+_ROOM4_GAP_AVOIDS = (
+    # (x, y, w, h) — left gap between key ledge and center shaft
+    (36, 58, 28, 28),
+    # right gap between center shaft and right mid platform
+    (96, 58, 28, 28),
+)
 
 
 def _squeeze_trailing_singleton(leaf):
@@ -119,8 +156,17 @@ def _orientation_from_player_dir(player_dir):
     )
 
 
-def _ladder_waypoints_from_state(env_state):
-    """Build bottom/top 1px COLLECT waypoints from ``env_state.ladders_*``."""
+def _ladder_waypoints_from_state(env_state, player=None):
+    """Build bottom/top COLLECT waypoints from ``env_state.ladders_*``.
+
+    Room-1 path uses center + both side ladders (right down, left up to key).
+    Coordinates are in *state* space; ``_patch_raw_observation`` adds the
+    render Y offset.
+
+    The center TOP waypoint is cleared while the player is already on that
+    landing (spawn), and parked off-screen so it cannot look like an
+    unfinished checkpoint the agent is standing inside.
+    """
     lad_cx = env_state.ladders_x.astype(jnp.float32) + float(_LADDER_SHAFT_HALF)
     active = env_state.ladders_active.astype(jnp.int32)
     bot_y = env_state.ladders_bottom.astype(jnp.float32) - float(_PLAYER_STAND_HALF)
@@ -129,15 +175,53 @@ def _ladder_waypoints_from_state(env_state):
         - float(_PLAYER_STAND_HALF)
         - float(_TOP_WAYPOINT_LIFT_PX)
     )
-    ones = jnp.ones_like(lad_cx)
+    bot_x = lad_cx - float(_WAYPOINT_HALF_W)
+    top_x = lad_cx - float(_WAYPOINT_HALF_W)
+    w = jnp.full_like(lad_cx, float(_WAYPOINT_W))
+    h = jnp.full_like(lad_cx, float(_WAYPOINT_H))
+
+    bot_active = active
+    top_active = active
+
+    if player is not None:
+        px = jnp.asarray(player.x, dtype=jnp.float32)
+        py = jnp.asarray(player.y, dtype=jnp.float32)
+        pw = jnp.asarray(player.width, dtype=jnp.float32)
+        ph = jnp.asarray(player.height, dtype=jnp.float32)
+        px = px[-1] if px.ndim > 0 else px
+        py = py[-1] if py.ndim > 0 else py
+        pw = pw[-1] if pw.ndim > 0 else pw
+        ph = ph[-1] if ph.ndim > 0 else ph
+        # Called before render-Y offset is applied — player and ladders share state-y.
+        p_cx = px + pw * 0.5
+        p_cy = py + ph * 0.5
+        top_cx = top_x + float(_WAYPOINT_HALF_W)
+        top_cy = top_y + float(_WAYPOINT_H) * 0.5
+        dist = jnp.hypot(p_cx - top_cx, p_cy - top_cy)
+        # Clear only while already on the upper landing — not while climbing up.
+        on_upper = p_cy <= (
+            env_state.ladders_top.astype(jnp.float32) + jnp.float32(6.0)
+        )
+        already_there = jnp.logical_and(
+            dist <= jnp.float32(_TOP_WP_ALREADY_THERE_PX), on_upper
+        )
+        top_active = jnp.where(
+            already_there, jnp.zeros_like(top_active), top_active
+        ).astype(jnp.int32)
+
+    # Hide inactive tops so spawn does not sit inside a visible dead waypoint.
+    top_x = jnp.where(top_active > 0, top_x, jnp.zeros_like(top_x))
+    top_y = jnp.where(top_active > 0, top_y, jnp.full_like(top_y, -40.0))
+
     return {
-        "bot_x": lad_cx,
+        "bot_x": bot_x,
         "bot_y": bot_y,
-        "top_x": lad_cx,
+        "top_x": top_x,
         "top_y": top_y,
-        "w": ones,
-        "h": ones,
-        "active": active,
+        "w": w,
+        "h": h,
+        "bot_active": bot_active,
+        "top_active": top_active,
     }
 
 
@@ -146,7 +230,7 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         super().__init__(env, max_objects=_MONTEZUMA_MAX_OBJECTS)
 
     def _patch_raw_observation(self, semantic_obs, env_state):
-        """Squeeze player (stack,1) leaves, stamp facing, inject ladder waypoints."""
+        """Squeeze player leaves, stamp facing/death, inject WPs, align Y to render."""
         unwrapped = self._unwrap_env_state(env_state.atari_state)
 
         player = semantic_obs.raw_observation.player
@@ -165,15 +249,42 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
             new_ori = ori.astype(jnp.float32)
         else:
             new_ori = jnp.asarray(cur_ori, dtype=jnp.float32).at[-1].set(ori)
-        new_player = new_player.replace(orientation=new_ori)
+        dying = jnp.asarray(unwrapped.death_timer > 0, dtype=jnp.bool_)
+        death_state = jnp.where(
+            dying, jnp.int32(PLAYER_STATE_DYING), jnp.int32(0)
+        )
+        cur_state = jnp.asarray(new_player.state, dtype=jnp.int32)
+        if cur_state.ndim == 0:
+            new_state = death_state
+        else:
+            new_state = cur_state.at[-1].set(death_state)
+        new_player = new_player.replace(orientation=new_ori, state=new_state)
         semantic_obs = semantic_obs.replace(
             raw_observation=semantic_obs.raw_observation.replace(player=new_player)
         )
-        return self._inject_ladder_waypoints(semantic_obs, unwrapped)
+        # Inject in state-y, then shift player + objects to match renderer (y+47).
+        semantic_obs = self._inject_ladder_waypoints(semantic_obs, unwrapped, new_player)
+        semantic_obs = self._inject_rope_grab_collects(semantic_obs, unwrapped)
+        semantic_obs = self._inject_room4_gap_avoids(semantic_obs, unwrapped)
+        return self._apply_render_y_offset(semantic_obs)
 
-    def _inject_ladder_waypoints(self, semantic_obs, env_state):
+    def _apply_render_y_offset(self, semantic_obs):
+        """Map state-y observations onto the rendered room (HUD band is 47px)."""
+        off = jnp.int32(MONTEZUMA_RENDER_Y_OFFSET)
+        player = semantic_obs.raw_observation.player
+        py = jnp.asarray(player.y)
+        new_player = player.replace(y=(py + off).astype(py.dtype))
+        objects = semantic_obs.objects
+        oy = jnp.asarray(objects.y)
+        new_objects = objects.replace(y=(oy + off).astype(oy.dtype))
+        return semantic_obs.replace(
+            raw_observation=semantic_obs.raw_observation.replace(player=new_player),
+            objects=new_objects,
+        )
+
+    def _inject_ladder_waypoints(self, semantic_obs, env_state, player):
         """Fill reserved COLLECT waypoint slots from current room ladders."""
-        wp = _ladder_waypoints_from_state(env_state)
+        wp = _ladder_waypoints_from_state(env_state, player=player)
         objects = semantic_obs.objects
         # Object arrays are [stack, max_objects] after meta prepend.
         # Game layout starts at meta_reserved_slots (usually 1).
@@ -198,8 +309,8 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         new_w = _set_block(new_w, top0, wp["w"])
         new_h = _set_block(objects.height, bot0, wp["h"])
         new_h = _set_block(new_h, top0, wp["h"])
-        new_act = _set_block(objects.active, bot0, wp["active"])
-        new_act = _set_block(new_act, top0, wp["active"])
+        new_act = _set_block(objects.active, bot0, wp["bot_active"])
+        new_act = _set_block(new_act, top0, wp["top_active"])
 
         labels = jnp.full(n, LABEL_COLLECT, dtype=objects.semantic_label.dtype)
         new_lab = objects.semantic_label.at[:, bot0 : bot0 + n].set(
@@ -217,6 +328,83 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
                 height=new_h,
                 active=new_act,
                 semantic_label=new_lab,
+            )
+        )
+
+    def _inject_rope_grab_collects(self, semantic_obs, env_state):
+        """Replace tall rope AABBs with a high COLLECT grab point.
+
+        The native rope box spans top→mid, so a standing player on the mid
+        floor already overlaps it. A small WP near ``ropes_top`` sits above
+        stand height — COLLECT must jump the chasm to arrive (room-1 right gap).
+        """
+        objects = semantic_obs.objects
+        meta = self.meta_reserved_slots
+        rope0 = meta + ROPE0
+        n = _N_ROPES
+        active = env_state.ropes_active.astype(jnp.int32)
+        # Centre the grab box on the rope shaft.
+        x = env_state.ropes_x.astype(jnp.float32) - float(_ROPE_GRAB_W) * 0.5
+        y = (
+            env_state.ropes_top.astype(jnp.float32)
+            + float(_ROPE_GRAB_TOP_INSET)
+        )
+        w = jnp.full((n,), float(_ROPE_GRAB_W))
+        h = jnp.full((n,), float(_ROPE_GRAB_H))
+        # Park inactive ropes off-screen.
+        x = jnp.where(active > 0, x, jnp.zeros_like(x))
+        y = jnp.where(active > 0, y, jnp.full_like(y, -40.0))
+        labs = jnp.full(n, LABEL_COLLECT, dtype=objects.semantic_label.dtype)
+
+        def _set(leaf, values):
+            vals = jnp.asarray(values).astype(leaf.dtype)
+            stacked = jnp.broadcast_to(vals, (leaf.shape[0], n))
+            return leaf.at[:, rope0 : rope0 + n].set(stacked)
+
+        return semantic_obs.replace(
+            objects=objects.replace(
+                x=_set(objects.x, x),
+                y=_set(objects.y, y),
+                width=_set(objects.width, w),
+                height=_set(objects.height, h),
+                active=_set(objects.active, active),
+                semantic_label=_set(objects.semantic_label, labs),
+            )
+        )
+
+    def _inject_room4_gap_avoids(self, semantic_obs, env_state):
+        """Stamp mid-tier fall-through gaps as AVOID (room 4 only)."""
+        objects = semantic_obs.objects
+        meta = self.meta_reserved_slots
+        # Reuse trailing unused platform slots (after the conveyor at PLATFORM0).
+        gap0 = meta + PLATFORM0 + 1  # skip conveyor slot
+        n_gaps = len(_ROOM4_GAP_AVOIDS)
+        in_room4 = jnp.asarray(env_state.room_id, dtype=jnp.int32) == jnp.int32(4)
+
+        xs = jnp.asarray([g[0] for g in _ROOM4_GAP_AVOIDS], dtype=objects.x.dtype)
+        ys = jnp.asarray([g[1] for g in _ROOM4_GAP_AVOIDS], dtype=objects.y.dtype)
+        ws = jnp.asarray([g[2] for g in _ROOM4_GAP_AVOIDS], dtype=objects.width.dtype)
+        hs = jnp.asarray([g[3] for g in _ROOM4_GAP_AVOIDS], dtype=objects.height.dtype)
+        act = jnp.where(
+            in_room4,
+            jnp.ones(n_gaps, dtype=objects.active.dtype),
+            jnp.zeros(n_gaps, dtype=objects.active.dtype),
+        )
+        labs = jnp.full(n_gaps, LABEL_AVOID, dtype=objects.semantic_label.dtype)
+
+        def _set(leaf, values):
+            vals = jnp.asarray(values).astype(leaf.dtype)
+            stacked = jnp.broadcast_to(vals, (leaf.shape[0], n_gaps))
+            return leaf.at[:, gap0 : gap0 + n_gaps].set(stacked)
+
+        return semantic_obs.replace(
+            objects=objects.replace(
+                x=_set(objects.x, xs),
+                y=_set(objects.y, ys),
+                width=_set(objects.width, ws),
+                height=_set(objects.height, hs),
+                active=_set(objects.active, act),
+                semantic_label=_set(objects.semantic_label, labs),
             )
         )
 
@@ -335,7 +523,7 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
                 jnp.full(_N_WAYPOINTS, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_ITEMS, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_DOORS, LABEL_NAVIGATE, dtype=jnp.int32),
-                jnp.full(_N_ROPES, LABEL_NAVIGATE, dtype=jnp.int32),
+                jnp.full(_N_ROPES, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_CONVEYORS, LABEL_BLOCKER, dtype=jnp.int32),
                 jnp.full(_N_PLATFORMS, LABEL_BLOCKER, dtype=jnp.int32),
             ]

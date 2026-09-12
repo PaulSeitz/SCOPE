@@ -9,6 +9,8 @@ import optax
 from concept_based_learning.observations.action_space import (
     fire_ego_action_indices,
     make_realized_ego_mask_fn,
+    make_legal_ego_mask_fn,
+    legal_ego_mask_mode_from_config,
     mask_q_with_legal_ego,
 )
 from concept_based_learning.observations.egocentric import get_ego_obs
@@ -124,8 +126,9 @@ def make_tandem_train(
     max_objects = config["MAX_OBJECTS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
-    legal_ego_mask_fn = make_realized_ego_mask_fn(
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
         action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
         noop_action=int(ego_mapper_noop_action),
         fire_action=int(ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),

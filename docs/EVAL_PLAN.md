@@ -87,16 +87,39 @@ tables below use. Raw syncs:
 `tmp/ego_min_surfacesub5_clipsweep/`, `tmp/ego_min_surfacesub5_distabl/`,
 `tmp/ego_min_surfacesub5_distbands/`, `tmp/ego_min_surfacesub5_cliprand/`.
 
-**Locked:** **clip10** on noweapon + surfacesub5 + φ8. Near-field
-information bound: high-res distance only for close objects; mid-range
-saturation is intentional. Clip50 remains the competence-ceiling control
-(SQ ~35k, best BR/PH) — cite in appendix, do not re-sweep.
+**Locked:** **clip10** on noweapon + surfacesub5 + φ8, with **ungated
+skill-mechanics rewards** (every skill’s mechanics on the current target;
+stem `…_surfacesub5_skillmech`). Near-field information bound: high-res
+distance only for close objects; mid-range saturation is intentional.
+Clip50 remains the competence-ceiling control — cite in appendix, do not
+re-sweep. Pre-ungate clipsweep numbers (`tmp/ego_min_surfacesub5_clipsweep/`)
+are provenance only; live cite
+`tmp/ego_min_surfacesub5_skillmech_rw/` (SQ ~27k, BR ~1.3k, PH ~3.9k).
+
+**Attribution baseline (same scaffolding):** suite
+`fixed_ego_skill_baseline` keeps heuristic / labels / facing-frame obs /
+POV mapper identical and replaces only skill Q-heads with
+`fixed_ego_rules` (φ-servo) or `constant_ego` (FORWARD/FIRE/BACKWARD).
+Evals are **base only** (`PAPER_EVAL_MOD_KEYS: [base]`). Materialize + run:
+
+```bash
+python scripts/materialize_fixed_ego_skill_baseline.py
+python scripts/run_paper_eval.py --suite fixed_ego_skill_baseline --gpus 0 --lean
+```
 
 **Stop:** no more clip sweeps, bins, hard bands, train-time clip DR, or
 distance-pose / can_fire encoding spam on this spine. Next is heuristic
 smoke across ALE envs (§5.2–3) then the matrix (§3).
 
 Lean (historical): clip10 vs clip50 meeting table kept below for provenance.
+Skillmech refresh of the locked clip10 cell:
+
+| cell | pre-ungate clip10 | **skillmech clip10** |
+|------|------------------:|---------------------:|
+| SQ base | 18 640 | **27 253** |
+| Pong ZS | 0.0 `[0×3]` | 5.0 `[+15, 0, 0]` |
+| BR ZS | 555 | **1 302** |
+| PH ZS | 1 890 | **3 920** |
 
 ### Transfer + in-domain (clipsweep)
 
