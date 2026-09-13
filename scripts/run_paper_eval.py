@@ -840,6 +840,31 @@ NEWSEAQUEST_SPAWNFIX_STEMS = (
     "surfacesub5_skillmech_eval_full_newseaquest",
 )
 
+# Paper-HP PQN on *old* Seaquest (pre-spawn-fix). Isolates env vs config.
+# Requires --jaxatari-root pointing at pre-spawnfix JAXAtari (NOT robustness).
+#   python scripts/run_paper_eval.py --suite pqn_paperhps_oldseaquest \
+#     --gpus 2 --wait-deps --lean --jaxatari-root /path/to/old/JAXAtari
+PQN_PAPERHPS_OLDSEAQUEST_SUITE = "pqn_paperhps_oldseaquest"
+PQN_PAPERHPS_OLDSEAQUEST_STEMS = (
+    "seaquest_pqn_paperhps_oldseaquest",
+    "seaquest_pqn_eval_paperhps_oldseaquest",
+)
+
+# clip10 skillmech on spawn-fixed Seaquest with OFF_POLICY=true (vs collapse at false).
+#   python scripts/run_paper_eval.py --suite newseaquest_clip10_offpolicy \
+#     --gpus 3 --wait-deps --lean \
+#     --jaxatari-root /path/to/JAXAtari-seaquest-robustness
+NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE = "newseaquest_clip10_offpolicy"
+_NEWSEAQUEST_CLIP10_OFFPOLICY_TRAIN = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech_newseaquest_offpolicy"
+)
+NEWSEAQUEST_CLIP10_OFFPOLICY_STEMS = (
+    _NEWSEAQUEST_CLIP10_OFFPOLICY_TRAIN,
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech_eval_full_newseaquest_offpolicy",
+)
+
 # Same-scaffolding fixed ego-rule baselines vs clip10 skillmech transfer.
 #   python scripts/materialize_fixed_ego_skill_baseline.py
 #   python scripts/run_paper_eval.py --suite fixed_ego_skill_baseline --gpus 0 --lean
@@ -1653,6 +1678,8 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS,
     NEWSEAQUEST_SPAWNFIX_SUITE: NEWSEAQUEST_SPAWNFIX_STEMS,
+    PQN_PAPERHPS_OLDSEAQUEST_SUITE: PQN_PAPERHPS_OLDSEAQUEST_STEMS,
+    NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE: NEWSEAQUEST_CLIP10_OFFPOLICY_STEMS,
     FIXED_EGO_SKILL_BASELINE_SUITE: FIXED_EGO_SKILL_BASELINE_STEMS,
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
@@ -1745,6 +1772,8 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: "ego_skm",
     NEWSEAQUEST_SPAWNFIX_SUITE: "sq_new",
+    PQN_PAPERHPS_OLDSEAQUEST_SUITE: "pqn_old",
+    NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE: "sq_c10op",
     FIXED_EGO_SKILL_BASELINE_SUITE: "ego_fix",
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
@@ -3197,6 +3226,10 @@ def main() -> None:
             f"{NEWSEAQUEST_SPAWNFIX_SUITE}: retrain PQN + clip10 skillmech "
             "(OFF_POLICY=false) on spawn-fixed Seaquest, then full SQ mods "
             "(fresh SAVE_PATHs; --wait-deps --gpus 2,3). "
+            f"{PQN_PAPERHPS_OLDSEAQUEST_SUITE}: paper-HP PQN on pre-spawn-fix "
+            "Seaquest (isolates env vs config; --jaxatari-root=old). "
+            f"{NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE}: clip10 skillmech on "
+            "spawn-fixed Seaquest with OFF_POLICY=true (collapse check). "
             f"{FIXED_EGO_SKILL_BASELINE_SUITE}: same scaffolding as clip10 "
             "skillmech transfer, but fixed ego-angle rules / constant ego "
             "actions instead of learned Q-heads (SQ + Pong/BR/PH). "
