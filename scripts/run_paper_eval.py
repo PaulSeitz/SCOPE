@@ -820,6 +820,26 @@ EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS = (
     )
 )
 
+# Retrain + full SQ mods on post-spawn-fix Seaquest (JAXAtari-seaquest-robustness).
+# Fresh SAVE_PATHs; clip10 skillmech uses OFF_POLICY=false. Trains first so
+# --gpus 2,3 --wait-deps shards one train per GPU, then each eval waits.
+#   python scripts/run_paper_eval.py --suite newseaquest_spawnfix \
+#     --gpus 2,3 --wait-deps --lean \
+#     --jaxatari-root /path/to/JAXAtari-seaquest-robustness
+NEWSEAQUEST_SPAWNFIX_SUITE = "newseaquest_spawnfix"
+_NEWSEAQUEST_PQN_TRAIN = "seaquest_pqn_newseaquest"
+_NEWSEAQUEST_CLIP10_TRAIN = (
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech_newseaquest"
+)
+NEWSEAQUEST_SPAWNFIX_STEMS = (
+    _NEWSEAQUEST_PQN_TRAIN,
+    _NEWSEAQUEST_CLIP10_TRAIN,
+    "seaquest_pqn_eval_newseaquest",
+    "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
+    "surfacesub5_skillmech_eval_full_newseaquest",
+)
+
 # Same-scaffolding fixed ego-rule baselines vs clip10 skillmech transfer.
 #   python scripts/materialize_fixed_ego_skill_baseline.py
 #   python scripts/run_paper_eval.py --suite fixed_ego_skill_baseline --gpus 0 --lean
@@ -1632,6 +1652,7 @@ SUITE_STEMS = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_STEMS,
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS,
+    NEWSEAQUEST_SPAWNFIX_SUITE: NEWSEAQUEST_SPAWNFIX_STEMS,
     FIXED_EGO_SKILL_BASELINE_SUITE: FIXED_EGO_SKILL_BASELINE_STEMS,
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: EGO_MIN_SURFACESUB5_DISTPOSE_STEMS,
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
@@ -1723,6 +1744,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_NOWEAPON_SURFACESUB5_CLIPRAND_SUITE: "ego_rand",
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: "ego_skm",
+    NEWSEAQUEST_SPAWNFIX_SUITE: "sq_new",
     FIXED_EGO_SKILL_BASELINE_SUITE: "ego_fix",
     EGO_MIN_SURFACESUB5_DISTPOSE_SUITE: "ego_dpose",
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
@@ -3172,6 +3194,9 @@ def main() -> None:
             f"{EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE}: ungated skill-mechanics "
             "reward regression (clip10+clip50 lock + clip10 RELABEL_ALL) → "
             "SQ eval + Pong/BR/PH; fresh …_skillmech stems. "
+            f"{NEWSEAQUEST_SPAWNFIX_SUITE}: retrain PQN + clip10 skillmech "
+            "(OFF_POLICY=false) on spawn-fixed Seaquest, then full SQ mods "
+            "(fresh SAVE_PATHs; --wait-deps --gpus 2,3). "
             f"{FIXED_EGO_SKILL_BASELINE_SUITE}: same scaffolding as clip10 "
             "skillmech transfer, but fixed ego-angle rules / constant ego "
             "actions instead of learned Q-heads (SQ + Pong/BR/PH). "

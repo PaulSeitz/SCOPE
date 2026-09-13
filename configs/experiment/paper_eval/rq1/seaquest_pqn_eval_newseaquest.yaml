@@ -1,23 +1,21 @@
-# Re-eval flat PQN pixel baseline on post-spawn-fix Seaquest
-# (JAXAtari-seaquest-robustness). Full mod allowlist from mods/seaquest.yaml.
-# Uses the existing matched-budget RQ1 checkpoint (not the paper-HP retrain).
+# Mod-eval for seaquest_pqn_newseaquest (post-spawn-fix Seaquest, full mods).
 
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: flat_pqn
 PAPER_EVAL_MODS: seaquest
 PAPER_EVAL_REQUIRES_RQ1:
-- seaquest_pqn
-PAPER_EVAL_FLAT_PQN_CKPT: ./outputs/models/paper_eval/rq1/seaquest_pqn/seaquest/flat_pqn_seaquest_pixel_seed44_vmap0.safetensors
+- seaquest_pqn_newseaquest
+PAPER_EVAL_FLAT_PQN_CKPT: ./outputs/models/paper_eval/rq1/seaquest_pqn_newseaquest/seaquest/flat_pqn_seaquest_pixel_seed44_vmap0.safetensors
 PAPER_EVAL_OBJECT_CENTRIC: false
 NUM_SEEDS: 1
 ALG_NAME: flat_pqn
 ENV_NAME: seaquest
 OBJECT_CENTRIC: false
-SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_pqn
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_pqn_newseaquest
 WANDB_RUN_NAME: sq_paper_rq1_pqn_eval_newseaquest
 WANDB_TAGS:
-- suite:paper_eval
+- suite:newseaquest_spawnfix
 - rq:1
 - env:seaquest
 - phase:mod_eval
