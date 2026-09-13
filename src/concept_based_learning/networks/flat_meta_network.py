@@ -47,6 +47,13 @@ class FlatMetaQNetwork(nn.Module):
             x = flatten_raw_observation(raw_obs)
             x = nn.Dense(self.meta_embed_dim, name="oc_embed")(x)
             x = nn.relu(x)
+        elif mode in ("oc_simple", "simple_oc", "oc_slim") or str(mode).startswith(
+            "oc_simple"
+        ):
+            raise ValueError(
+                f"META_INPUT_MODE={mode!r} requires META_ARCHITECTURE=per_object_mlp "
+                "(FlatMetaQNetwork ignores the object matrix)."
+            )
         elif mode in ("pixel_embed", "pixel_embedding", "cnn"):
             if pixel_obs is None:
                 raise ValueError(
@@ -69,7 +76,7 @@ class FlatMetaQNetwork(nn.Module):
         else:
             raise ValueError(
                 f"Unknown meta_input_mode={self.meta_input_mode!r}. "
-                "Expected one of: flat, oc_embed, pixel_embed."
+                "Expected one of: flat, oc_embed, oc_simple, pixel_embed."
             )
         x = append_target_locked_feature(
             x,

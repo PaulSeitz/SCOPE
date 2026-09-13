@@ -906,6 +906,11 @@ EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS = (
 # ALE clip10 heuristic smoke (+ tandem / SQ-10M / Δxy / Montezuma append).
 #   python scripts/materialize_ale_clip10_heu_smoke.py
 #   python scripts/run_paper_eval.py --suite ale_clip10_heu_smoke --gpus 0,1,2 --wait-deps --lean
+
+  # Seaquest tandem meta-OC input ablation (oc_simple* + oc_embed control):
+  #   python scripts/materialize_seaquest_meta_oc_ablation.py
+  #   python scripts/run_paper_eval.py --suite seaquest_meta_oc_ablation \\
+  #       --gpus 0,1,2 --wait-deps --lean
 # Asteroids/Time Pilot scratch use turn primitives (dim 6); ZS stays facing so SQ loads.
 # SQ ZS source: …_surfacesub5_skillmech (ungated multi-skill rewards).
 # Appended: Montezuma scratch; SQ skills 10M (+ sparse C/D/A 10M); Δxy skillmech
@@ -1003,6 +1008,28 @@ ALE_CLIP10_HEU_SMOKE_STEMS = (
         f"{env}_transfer_tandem_pixel_ego_pov_{_ALE_CLIP10_SPINE}"
         for env in _ALE_CLIP10_TRANSFER_ENVS
     )
+)
+
+# Seaquest tandem meta-OC input ablation (from-scratch ~25M + home mod eval).
+#   python scripts/materialize_seaquest_meta_oc_ablation.py
+#   python scripts/run_paper_eval.py --suite seaquest_meta_oc_ablation \\
+#       --gpus 0,1,2 --wait-deps --lean
+SEAQUEST_META_OC_ABLATION_SUITE = "seaquest_meta_oc_ablation"
+_SEAQUEST_META_OC_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+_SEAQUEST_META_OC_TOKENS = (
+    "oc_embed",
+    "oc_simple",
+    "oc_simple_rel",
+    "oc_simple_role",
+    "oc_simple_rel_role",
+    "oc_simple_inv",
+)
+SEAQUEST_META_OC_ABLATION_STEMS = tuple(
+    f"seaquest_from_scratch_tandem_{tok}_ego_pov_{_SEAQUEST_META_OC_SPINE}"
+    for tok in _SEAQUEST_META_OC_TOKENS
+) + tuple(
+    f"seaquest_from_scratch_tandem_{tok}_ego_pov_{_SEAQUEST_META_OC_SPINE}_eval"
+    for tok in _SEAQUEST_META_OC_TOKENS
 )
 
 # Alias: full ground-up batch = tier A (most users start here).
@@ -1610,6 +1637,7 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: EGO_MIN_SURFACESUB5_NEARTIERS_STEMS,
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
     ALE_CLIP10_HEU_SMOKE_SUITE: ALE_CLIP10_HEU_SMOKE_STEMS,
+    SEAQUEST_META_OC_ABLATION_SUITE: SEAQUEST_META_OC_ABLATION_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1700,6 +1728,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_SURFACESUB5_NEARTIERS_SUITE: "ego_ntier",
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: "ego_cfire",
     ALE_CLIP10_HEU_SMOKE_SUITE: "ale_c10",
+    SEAQUEST_META_OC_ABLATION_SUITE: "meta_oc",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",

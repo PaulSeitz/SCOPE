@@ -3,6 +3,11 @@ import jax.numpy as jnp
 import flax.linen as nn
 from typing import Any
 
+from concept_based_learning.observations.meta_oc_simple import (
+    build_meta_oc_simple_features,
+    normalize_meta_oc_simple_mode,
+)
+
 
 def append_target_locked_feature(
     global_features: jnp.ndarray,
@@ -29,6 +34,37 @@ def flatten_raw_observation(raw_obs):
     leaves, _ = jax.tree_util.tree_flatten(last_frame_obs)
     flat_arrays = [jnp.atleast_1d(leaf).flatten() for leaf in leaves]
     return jnp.concatenate(flat_arrays).astype(jnp.float32)
+
+
+def _full_object_feature_matrix(objects: Any, action_dim: int) -> jnp.ndarray:
+    """Legacy meta path: flatten every labeled-object leaf into per-slot rows."""
+    last_frame_objs = jax.tree_util.tree_map(
+        lambda x: x[-1] if jnp.ndim(x) > 0 else x, objects
+    )
+    leaves, _ = jax.tree_util.tree_flatten(last_frame_objs)
+
+    def _leaf_to_object_features(leaf):
+        arr = jnp.asarray(leaf, dtype=jnp.float32)
+        arr = jnp.squeeze(arr)
+
+        if arr.ndim == 0:
+            return jnp.broadcast_to(arr, (action_dim, 1))
+        if arr.ndim == 1:
+            if arr.shape[0] == action_dim:
+                return arr[:, None]
+            if arr.shape[0] == 1:
+                return jnp.broadcast_to(arr, (action_dim, 1))
+            return jnp.broadcast_to(arr[None, :], (action_dim, arr.shape[0]))
+        if arr.shape[0] == action_dim:
+            return arr.reshape(action_dim, -1)
+        if arr.shape[-1] == action_dim:
+            return jnp.moveaxis(arr, -1, 0).reshape(action_dim, -1)
+
+        flat = arr.reshape(-1)
+        return jnp.broadcast_to(flat[None, :], (action_dim, flat.shape[0]))
+
+    obj_features_list = [_leaf_to_object_features(leaf) for leaf in leaves]
+    return jnp.concatenate(obj_features_list, axis=-1).astype(jnp.float32)
 
 
 class MetaQNetwork(nn.Module):
@@ -58,12 +94,22 @@ class MetaQNetwork(nn.Module):
         pixel_obs=None,
     ):
         mode = str(self.meta_input_mode).lower().strip()
+        simple_mode = normalize_meta_oc_simple_mode(mode)
         if mode in ("flat", "flatten"):
             global_features = flatten_raw_observation(raw_obs)
+            obj_matrix = _full_object_feature_matrix(objects, self.action_dim)
         elif mode in ("oc_embed", "object_embed", "object_embedding"):
             # Same as flat for the global stream (no Dense). Full objects are still
             # concatenated below; skill OC is where the transfer embed lives.
             global_features = flatten_raw_observation(raw_obs)
+            obj_matrix = _full_object_feature_matrix(objects, self.action_dim)
+        elif simple_mode is not None:
+            global_features, obj_matrix = build_meta_oc_simple_features(
+                raw_obs,
+                objects,
+                max_objects=self.action_dim,
+                mode=simple_mode,
+            )
         elif mode in ("pixel_embed", "pixel_embedding", "cnn"):
             if pixel_obs is None:
                 raise ValueError(
@@ -85,44 +131,18 @@ class MetaQNetwork(nn.Module):
                 self.meta_embed_dim, name="pixel_embed_proj"
             )(global_features)
             global_features = nn.relu(global_features)
+            obj_matrix = _full_object_feature_matrix(objects, self.action_dim)
         else:
             raise ValueError(
                 f"Unknown meta_input_mode={self.meta_input_mode!r}. "
-                "Expected one of: flat, oc_embed, pixel_embed."
+                "Expected one of: flat, oc_embed, oc_simple, oc_simple_rel, "
+                "oc_simple_role, oc_simple_rel_role, oc_simple_inv, pixel_embed."
             )
         global_features = append_target_locked_feature(
             global_features,
             target_locked,
             enabled=self.use_target_locked_input,
         )
-
-        last_frame_objs = jax.tree_util.tree_map(
-            lambda x: x[-1] if jnp.ndim(x) > 0 else x, objects
-        )
-        leaves, _ = jax.tree_util.tree_flatten(last_frame_objs)
-
-        def _leaf_to_object_features(leaf):
-            arr = jnp.asarray(leaf, dtype=jnp.float32)
-            arr = jnp.squeeze(arr)
-
-            if arr.ndim == 0:
-                return jnp.broadcast_to(arr, (self.action_dim, 1))
-            if arr.ndim == 1:
-                if arr.shape[0] == self.action_dim:
-                    return arr[:, None]
-                if arr.shape[0] == 1:
-                    return jnp.broadcast_to(arr, (self.action_dim, 1))
-                return jnp.broadcast_to(arr[None, :], (self.action_dim, arr.shape[0]))
-            if arr.shape[0] == self.action_dim:
-                return arr.reshape(self.action_dim, -1)
-            if arr.shape[-1] == self.action_dim:
-                return jnp.moveaxis(arr, -1, 0).reshape(self.action_dim, -1)
-
-            flat = arr.reshape(-1)
-            return jnp.broadcast_to(flat[None, :], (self.action_dim, flat.shape[0]))
-
-        obj_features_list = [_leaf_to_object_features(leaf) for leaf in leaves]
-        obj_matrix = jnp.concatenate(obj_features_list, axis=-1).astype(jnp.float32)
 
         global_matrix = jnp.broadcast_to(
             global_features, (self.action_dim, global_features.shape[-1])

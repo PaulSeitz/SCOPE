@@ -67,6 +67,23 @@ Meta concatenates the full object matrix onto a global raw flatten. Meta
 the global part). The transferable per-object embed lives on **skill**
 `oc_embed` only.
 
+### Meta `META_INPUT_MODE: oc_simple*`
+
+Slim meta encodings for robustness ablations (`per_object_mlp` only). Suite:
+`seaquest_meta_oc_ablation`.
+
+| Mode | Global | Per slot |
+|---|---|---|
+| `oc_simple` | player xywh + O₂ + collected_divers | absolute xywh + active + label OH |
+| `oc_simple_rel` | same | Δx, Δy, dist, same_lane, lane_delta, active + label OH |
+| `oc_simple_role` | simple + role counts/min-dist | same as `oc_simple` |
+| `oc_simple_rel_role` | simple + role pool | same as `oc_simple_rel` |
+| `oc_simple_inv` | simple + lives + active COLLECT count | same as `oc_simple` |
+
+**Omitted across the family:** `visual_id`, orientation/state, raw RAM flatten,
+score digits. NOOP / FIRE reserved slots and the Seaquest surface waypoint stay
+in the object matrix; masking still controls selectability.
+
 ## Pixels (`pixel_embed`)
 
 ```
