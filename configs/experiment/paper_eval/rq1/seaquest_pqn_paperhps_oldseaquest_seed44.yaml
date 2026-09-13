@@ -1,9 +1,5 @@
-# Flat PQN with paper Table-5 HPs on *pre-spawn-fix* Seaquest.
-# Isolates training-config change vs env change (compare to seaquest_pqn_newseaquest).
-#
-# MUST launch with old JAXAtari (no diver re-arm / spawn-cadence fixes), e.g.:
-#   --jaxatari-root /path/to/JAXAtari@pre-spawnfix
-# Do NOT point at JAXAtari-seaquest-robustness for this stem.
+# Paper-HP PQN on ENV_NAME=old_seaquest (dense diver re-arm), seed=44.
+# Requires JAXAtari-seaquest-robustness with jax_old_seaquest registered.
 
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: train
@@ -12,7 +8,7 @@ PAPER_EVAL_MODS: seaquest
 NUM_SEEDS: 1
 
 ALG_NAME: flat_pqn
-ENV_NAME: seaquest
+ENV_NAME: old_seaquest
 TRAIN_MODE: flat_pqn
 OBJECT_CENTRIC: false
 PIXEL_RESIZE: true
@@ -22,15 +18,16 @@ USE_NATIVE_DOWNSCALING: true
 NORM_TYPE: layer_norm
 NORM_INPUT: false
 LR_LINEAR_DECAY: false
-SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_pqn_paperhps_oldseaquest
-WANDB_RUN_NAME: sq_paper_rq1_pqn_pixel_paperhps_oldseaquest
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_pqn_paperhps_oldseaquest_seed44
+WANDB_RUN_NAME: sq_paper_rq1_pqn_pixel_paperhps_oldseaquest_seed44
 WANDB_TAGS:
 - suite:pqn_paperhps_oldseaquest
 - rq:1
-- env:seaquest
+- env:old_seaquest
 - train_mode:flat_pqn
 - variant:pqn_pixel_paper_hps
 - probe:oldseaquest_paperhps
+- seed:44
 
 TOTAL_TIMESTEPS: 24985600
 TOTAL_TIMESTEPS_DECAY: 24985600
@@ -56,3 +53,5 @@ EPS_DECAY: 0.1
 GAME_MODS: null
 EVAL_GAME_MODS: null
 SEED: 44
+EVAL_SEED: 10044
+EVAL_NUM_SEEDS: 3

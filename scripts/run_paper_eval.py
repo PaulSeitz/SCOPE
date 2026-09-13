@@ -840,29 +840,37 @@ NEWSEAQUEST_SPAWNFIX_STEMS = (
     "surfacesub5_skillmech_eval_full_newseaquest",
 )
 
-# Paper-HP PQN on *old* Seaquest (pre-spawn-fix). Isolates env vs config.
-# Requires --jaxatari-root pointing at pre-spawnfix JAXAtari (NOT robustness).
+# Paper-HP PQN on old_seaquest (dense diver re-arm) × seeds 44/45/46.
+# Uses ENV_NAME=old_seaquest in the same robustness jaxatari checkout.
+#   python scripts/materialize_seaquest_env_vs_config_seeds.py
 #   python scripts/run_paper_eval.py --suite pqn_paperhps_oldseaquest \
-#     --gpus 2 --wait-deps --lean --jaxatari-root /path/to/old/JAXAtari
+#     --gpus 2,3 --wait-deps --lean \
+#     --jaxatari-root /path/to/JAXAtari-seaquest-robustness
+# Do not pass --seed (YAML SEED per stem).
 PQN_PAPERHPS_OLDSEAQUEST_SUITE = "pqn_paperhps_oldseaquest"
-PQN_PAPERHPS_OLDSEAQUEST_STEMS = (
-    "seaquest_pqn_paperhps_oldseaquest",
-    "seaquest_pqn_eval_paperhps_oldseaquest",
+_PQN_OLDSEAQUEST_SEEDS = (44, 45, 46)
+PQN_PAPERHPS_OLDSEAQUEST_STEMS = tuple(
+    f"seaquest_pqn_paperhps_oldseaquest_seed{seed}" for seed in _PQN_OLDSEAQUEST_SEEDS
+) + tuple(
+    f"seaquest_pqn_eval_paperhps_oldseaquest_seed{seed}"
+    for seed in _PQN_OLDSEAQUEST_SEEDS
 )
 
-# clip10 skillmech on spawn-fixed Seaquest with OFF_POLICY=true (vs collapse at false).
+# clip10 skillmech on spawn-fixed Seaquest with OFF_POLICY=true × seeds 44/45/46.
+#   python scripts/materialize_seaquest_env_vs_config_seeds.py
 #   python scripts/run_paper_eval.py --suite newseaquest_clip10_offpolicy \
-#     --gpus 3 --wait-deps --lean \
+#     --gpus 2,3 --wait-deps --lean \
 #     --jaxatari-root /path/to/JAXAtari-seaquest-robustness
 NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE = "newseaquest_clip10_offpolicy"
-_NEWSEAQUEST_CLIP10_OFFPOLICY_TRAIN = (
+_NEWSEAQUEST_CLIP10_OFFPOLICY_SEEDS = (44, 45, 46)
+NEWSEAQUEST_CLIP10_OFFPOLICY_STEMS = tuple(
     "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
-    "surfacesub5_skillmech_newseaquest_offpolicy"
-)
-NEWSEAQUEST_CLIP10_OFFPOLICY_STEMS = (
-    _NEWSEAQUEST_CLIP10_OFFPOLICY_TRAIN,
+    f"surfacesub5_skillmech_newseaquest_offpolicy_seed{seed}"
+    for seed in _NEWSEAQUEST_CLIP10_OFFPOLICY_SEEDS
+) + tuple(
     "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_"
-    "surfacesub5_skillmech_eval_full_newseaquest_offpolicy",
+    f"surfacesub5_skillmech_eval_full_newseaquest_offpolicy_seed{seed}"
+    for seed in _NEWSEAQUEST_CLIP10_OFFPOLICY_SEEDS
 )
 
 # Same-scaffolding fixed ego-rule baselines vs clip10 skillmech transfer.
@@ -2787,7 +2795,9 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_ACTION_DIM",
     "SKILL_POLICY_MODE",
     "FIXED_EGO_ALIGN_DEG",
-    # Training-time flag; allow eval YAML to pin it for logging / future hooks.
+    "SEED",
+    "EVAL_SEED",
+    "EVAL_NUM_SEEDS",
     "OFF_POLICY",
 )
 
@@ -2869,7 +2879,25 @@ def _run_mod_eval(
     if seed is not None:
         cfg["SEED"] = int(seed)
     cfg.setdefault("SEED", DEFAULT_SEED)
-    base_seed = int(cfg["SEED"])
+    train_seed = int(cfg["SEED"])
+    # Eval episode RNGs must not reuse the training seed (avoids lucky-seed
+    # overfitting on Seaquest). Prefer explicit EVAL_SEED; else train_seed+10000.
+    if "EVAL_SEED" in raw:
+        eval_base_seed = int(raw["EVAL_SEED"])
+    elif "EVAL_SEED" in cfg:
+        eval_base_seed = int(cfg["EVAL_SEED"])
+    else:
+        eval_base_seed = train_seed + 10_000
+    eval_num_seeds = int(
+        raw.get("EVAL_NUM_SEEDS", cfg.get("EVAL_NUM_SEEDS", raw.get("NUM_SEEDS", 1)))
+    )
+    if eval_num_seeds < 1:
+        eval_num_seeds = 1
+    if eval_base_seed == train_seed:
+        raise SystemExit(
+            f"Eval seed collision for {path.stem}: EVAL_SEED={eval_base_seed} equals "
+            f"train SEED={train_seed}. Set EVAL_SEED to a distinct value."
+        )
 
     skills_path = raw.get("PAPER_EVAL_SKILLS_CKPT")
     meta_path = raw.get("PAPER_EVAL_META_CKPT")
@@ -2883,7 +2911,7 @@ def _run_mod_eval(
             _skill_ckpt_from_save(
                 cfg.get("SAVE_PATH", raw.get("SAVE_PATH", ".")),
                 env_name if kind != "transfer" else "seaquest",
-                base_seed,
+                train_seed,
             )
         )
         # Transfer always loads Seaquest skills
@@ -2921,6 +2949,11 @@ def _run_mod_eval(
         / f"{path.stem}_mods.json"
     )
     print(f"\n{'=' * 70}\n  EVAL mods: {path.relative_to(CONFIG_DIR)} kind={kind}\n{'=' * 70}")
+    print(
+        f"  train_SEED={train_seed}  EVAL_SEED={eval_base_seed}  "
+        f"EVAL_NUM_SEEDS={eval_num_seeds}  episodes/seed={eval_episodes}",
+        flush=True,
+    )
     cfg_env = str(cfg.get("ENV_NAME", "")).lower().strip()
     raw_env = str(env_name).lower().strip()
     if kind in {
@@ -2948,8 +2981,8 @@ def _run_mod_eval(
             trial=trial,
             mod_keys=list(raw["PAPER_EVAL_MOD_KEYS"]) if raw.get("PAPER_EVAL_MOD_KEYS") else None,
             num_episodes=eval_episodes,
-            num_seeds=1,
-            base_seed=base_seed,
+            num_seeds=eval_num_seeds,
+            base_seed=eval_base_seed,
             max_frames=eval_max_frames,
             output_json=out_json,
             extra_meta={
@@ -2960,6 +2993,9 @@ def _run_mod_eval(
                 "paper_eval_kind": kind,
                 "heuristic_mode": cfg.get("HEURISTIC_MODE"),
                 "no_target_game_action": cfg.get("NO_TARGET_GAME_ACTION"),
+                "train_seed": train_seed,
+                "eval_seed": eval_base_seed,
+                "eval_num_seeds": eval_num_seeds,
             },
             wandb_mode=wandb_mode,
         )
@@ -3226,10 +3262,10 @@ def main() -> None:
             f"{NEWSEAQUEST_SPAWNFIX_SUITE}: retrain PQN + clip10 skillmech "
             "(OFF_POLICY=false) on spawn-fixed Seaquest, then full SQ mods "
             "(fresh SAVE_PATHs; --wait-deps --gpus 2,3). "
-            f"{PQN_PAPERHPS_OLDSEAQUEST_SUITE}: paper-HP PQN on pre-spawn-fix "
-            "Seaquest (isolates env vs config; --jaxatari-root=old). "
+            f"{PQN_PAPERHPS_OLDSEAQUEST_SUITE}: paper-HP PQN on old_seaquest "
+            "×3 seeds (ENV_NAME=old_seaquest dense re-arm; EVAL_SEED≠SEED). "
             f"{NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE}: clip10 skillmech on "
-            "spawn-fixed Seaquest with OFF_POLICY=true (collapse check). "
+            "spawn-fixed Seaquest OFF_POLICY=true ×3 seeds (EVAL_SEED≠SEED). "
             f"{FIXED_EGO_SKILL_BASELINE_SUITE}: same scaffolding as clip10 "
             "skillmech transfer, but fixed ego-angle rules / constant ego "
             "actions instead of learned Q-heads (SQ + Pong/BR/PH). "

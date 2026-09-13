@@ -436,7 +436,7 @@ def resolve_action_mappers(components, config: dict) -> tuple[Callable, Callable
         return components.action_mapper, components.inverse_action_mapper
 
     mapper, inverse = make_facing_relative_mappers(components.jax_game_id)
-    if str(components.jax_game_id).lower() == "seaquest":
+    if str(components.jax_game_id).lower() in {"seaquest", "old_seaquest"}:
         mapper = _wrap_seaquest_ascent_block(mapper)
     return mapper, inverse
 

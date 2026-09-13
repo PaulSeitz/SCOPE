@@ -20,7 +20,11 @@ class ModSpec:
 
 
 def load_mod_allowlist(env: str) -> dict[str, Any]:
-    path = MODS_DIR / f"{env.lower()}.yaml"
+    # old_seaquest shares the seaquest robustness mod registry/allowlist.
+    env_key = str(env).lower().strip()
+    if env_key == "old_seaquest":
+        env_key = "seaquest"
+    path = MODS_DIR / f"{env_key}.yaml"
     if not path.is_file():
         raise FileNotFoundError(f"No mod allowlist for env={env!r}: {path}")
     with path.open(encoding="utf-8") as f:

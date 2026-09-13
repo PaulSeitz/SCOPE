@@ -507,6 +507,24 @@ class EnvManager:
             forced_target_hook=seaquest_forced_target_hook,
             get_heuristic_with_state=seaquest_get_heuristic_with_state,
         )
+        # Same Seaquest stack; jax_game_id selects pre-spawn-fix diver re-arm.
+        self._registry["old_seaquest"] = EnvComponents(
+            name="OldSeaquest",
+            jax_game_id="old_seaquest",
+            semantic_wrapper_cls=SeaquestSemanticWrapper,
+            renderer_cls=SeaquestRenderer,
+            get_heuristic_target=get_heuristic_target,
+            no_target_idx=NO_TARGET_IDX,
+            action_mapper=seaquest_action_mapper,
+            inverse_action_mapper=seaquest_inverse_action_mapper,
+            reward_extractor=_wrap_reward_extractor_5arg(extract_all_skills_rewards),
+            fixed_target_idx_from_config=_default_fixed_target_idx_from_config,
+            extract_life_lost=_default_extract_life_lost,
+            resolve_curriculum_mods=_default_resolve_curriculum_mods,
+            meta_mask_hook=seaquest_meta_mask_hook,
+            forced_target_hook=seaquest_forced_target_hook,
+            get_heuristic_with_state=seaquest_get_heuristic_with_state,
+        )
 
         # ChopperCommand registration
         self._registry["choppercommand"] = EnvComponents(
@@ -856,7 +874,7 @@ class EnvManager:
         are read from the provided config dict.
         """
         components = self.get_components(env_name)
-        if components.jax_game_id == "seaquest":
+        if components.jax_game_id in {"seaquest", "old_seaquest"}:
             set_seaquest_action_mapper(
                 bool(config.get("USE_LEGACY_SEAQUEST_ACTION_MAPPER", False))
             )

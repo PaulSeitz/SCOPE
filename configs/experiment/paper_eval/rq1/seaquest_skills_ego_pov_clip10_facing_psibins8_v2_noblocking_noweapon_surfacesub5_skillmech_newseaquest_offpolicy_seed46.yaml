@@ -1,5 +1,4 @@
-# clip10 skillmech on spawn-fixed Seaquest with OFF_POLICY=true (collapse check).
-# Compare to …_skillmech_newseaquest (OFF_POLICY=false, base≈0 at eval).
+# clip10 skillmech on spawn-fixed Seaquest, OFF_POLICY=true, seed=46.
 
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: train
@@ -31,8 +30,8 @@ ENV_NAME: seaquest
 USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
-SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech_newseaquest_offpolicy
-WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_clip10_skillmech_newseaquest_offpolicy_true
+SAVE_PATH: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech_newseaquest_offpolicy_seed46
+WANDB_RUN_NAME: sq_paper_rq1_skills_ego_pov_clip10_skillmech_newseaquest_offpolicy_seed46
 WANDB_TAGS:
 - suite:newseaquest_clip10_offpolicy
 - rq:1
@@ -41,16 +40,13 @@ WANDB_TAGS:
 - skill_input:ego
 - mapper:pov_facing
 - ego:phi_bins8
-- ablation:collect_death
-- destroy:contact_fail
-- destroy:living_penalty
-- ablation:ego_min_channels
 - ablation:skillmech
 - ego:noblocking
 - ego:noweapon
 - ego:clip10
 - ablation:off_policy_true
 - probe:newseaquest_spawnfix
+- seed:46
 SKILL_INPUT_MODE: ego
 SKILL_DEATH_PENALIZE_COLLECT: true
 RECORD_VIDEO: false
@@ -106,5 +102,7 @@ alg:
   DESTROY_CONTACT_FAIL: true
   DESTROY_LIVING_PENALTY: true
   USE_EGO_SHOT_FEATURES: false
-SEED: 44
+SEED: 46
+EVAL_SEED: 10046
+EVAL_NUM_SEEDS: 3
 SURFACE_SUB_NEAR_RANGE: 5
