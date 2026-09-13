@@ -2736,6 +2736,8 @@ _EVAL_OVERRIDE_KEYS = (
     "EGO_ACTION_DIM",
     "SKILL_POLICY_MODE",
     "FIXED_EGO_ALIGN_DEG",
+    # Training-time flag; allow eval YAML to pin it for logging / future hooks.
+    "OFF_POLICY",
 )
 
 

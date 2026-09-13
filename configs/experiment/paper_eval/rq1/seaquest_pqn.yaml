@@ -1,7 +1,8 @@
 # paper_eval/rq1/seaquest_pqn.yaml
 # Flat PQN pixel baseline — matched frame budget to RQ1 skill arms.
-# W&B: compare ``charts/avg_game_return`` to hierarchical skills (full-game,
-# unclipped). Do NOT compare to charts/avg_episodic_return (per-life).
+# Algorithm HPs match PQN paper Table 5 (Atari). W&B: compare
+# ``charts/avg_game_return`` to hierarchical skills (full-game, unclipped).
+# Do NOT compare to charts/avg_episodic_return (per-life).
 
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: train
@@ -27,14 +28,15 @@ WANDB_TAGS:
 - rq:1
 - env:seaquest
 - train_mode:flat_pqn
-- variant:pqn_pixel_matched_skip4
+- variant:pqn_pixel_paper_hps
 
+# Keep RQ1 matched agent-step budget; paper Table 9 uses 400M frames (~100M steps).
 TOTAL_TIMESTEPS: 24985600
 TOTAL_TIMESTEPS_DECAY: 24985600
 NUM_ENVS: 128
-NUM_STEPS: 128
-NUM_EPOCHS: 4
-NUM_MINIBATCHES: 64
+NUM_STEPS: 32
+NUM_EPOCHS: 2
+NUM_MINIBATCHES: 32
 FRAME_SKIP: 4
 FRAME_STACK_SIZE: 4
 FIRST_FIRE: true
@@ -43,12 +45,12 @@ EPISODIC_LIFE: true
 CLIP_REWARD: true
 GAMMA: 0.99
 LAMBDA: 0.65
-LR: 0.0001
-MAX_GRAD_NORM: 0.8
+LR: 0.00025
+MAX_GRAD_NORM: 10
 HIDDEN_SIZE: 128
 NUM_LAYERS: 2
-EPS_START: 0.2
-EPS_FINISH: 0.01
-EPS_DECAY: 0.2
+EPS_START: 1.0
+EPS_FINISH: 0.001
+EPS_DECAY: 0.1
 GAME_MODS: null
 EVAL_GAME_MODS: null
