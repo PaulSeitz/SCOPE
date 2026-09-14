@@ -69,12 +69,15 @@ class NavigateTo:
     """Target a fixed object slot until the stage completion rule fires.
 
     ``slot`` is an index into the full object array (including meta-reserved
-    slots).  ``complete_when``:
+    slots).      ``complete_when``:
       - ``"arrive"``: player centre within ``arrive_dist`` of the slot centre
         (ladder / surface waypoints).
       - ``"inactive"``: slot becomes inactive (fruit collected, enemy gone).
         Stays locked on the slot until then; ``arrive_dist`` is unused.
       - ``"either"``: arrive **or** inactive (skip already-cleared stages).
+      - ``"crossed"``: player centre has passed the slot centre horizontally
+        (``cross_dir`` +1 → ``px > ox + margin``, −1 → ``px < ox - margin``).
+        Used for JUMP_OVER hazards; ``arrive_dist`` is unused.
 
     ``skip_if_inactive`` (arrive mode only): when True (default), a permanently
     inactive padded slot completes the stage immediately.  Set False when the
@@ -94,6 +97,18 @@ class NavigateTo:
     when the tall player box already overlaps a low waypoint; ``max`` stops
     ladder-top stages completing while still low in the shaft.
 
+    ``arrive_x_slack`` (arrive mode): when set, also require
+    ``|px - ox| <= arrive_x_slack`` so a vertically-overlapping but
+    horizontally-far player (e.g. still in a ladder shaft beside a belt-lip
+    COLLECT) cannot complete the stage.
+
+    ``arrive_center_max`` (arrive mode): when set, stage completes when the
+    player centre is within this many pixels of the slot centre
+    (``hypot(px-ox, py-oy)``) — ignores AABB ``arrive_dist``.
+
+    ``past_x`` (``complete_when="past_x"``): absolute clear line. With
+    ``cross_dir`` +1, done when ``px > past_x``; with −1 when ``px < past_x``.
+
     ``skip_if_player_above_px``: when set, the stage completes (and stops
     targeting the slot) if the player's feet are higher on screen than the
     object centre by more than this many pixels.  Used for hanging fruits that
@@ -103,7 +118,7 @@ class NavigateTo:
 
     slot: int
     arrive_dist: float = 8.0
-    complete_when: str = "arrive"  # "arrive" | "inactive" | "either"
+    complete_when: str = "arrive"  # arrive|inactive|either|crossed|past_x
     skip_if_inactive: bool = True
     platform_reach_y_slack: Optional[float] = None
     platform_reach_x_slack: Optional[float] = None
@@ -111,7 +126,13 @@ class NavigateTo:
     platform_reach_dy_max: Optional[float] = None
     arrive_feet_oy_min: Optional[float] = None
     arrive_feet_oy_max: Optional[float] = None
+    arrive_x_slack: Optional[float] = None
+    arrive_center_max: Optional[float] = None
     skip_if_player_above_px: Optional[float] = None
+    # crossed / past_x: +1 = clear to the right, -1 = clear to the left.
+    cross_dir: Optional[int] = None
+    cross_margin_px: float = 0.0
+    past_x: Optional[float] = None
     kind: str = field(default="navigate_to", init=False)
 
 

@@ -19,10 +19,15 @@ Layout (game_max_objects=31, +1 meta NOOP → 32):
   [3-6]   ladder bottoms    (COLLECT waypoints; 0=center, 1=right, 2=left)
   [7-10]  ladder tops       (COLLECT waypoints; spawn-adjacent tops start inactive)
   [11-13] items             (COLLECT)
-  [14-15] doors             (NAVIGATE)
-  [16-17] ropes             (COLLECT grab WPs near rope top — jump targets)
+  [14-15] doors             (COLLECT — showcase merges NAVIGATE into COLLECT)
+  [16-17] ropes             (COLLECT grab WPs near rope top — optional / return)
   [18]    conveyors         (BLOCKER)
-  [19-30] platforms         (BLOCKER; unused slots may host room-4 gap AVOID)
+  [19-30] platforms         (BLOCKER; room-4 also hosts shaft bead + edge
+                            COLLECT; gap slots parked off-screen)
+
+Room-4 path scaffolding (obs coords; see ``montezuma_policy.WP*``):
+  platform / ladder slots stamped from numbered waypoint centres so the
+  policy file is the single place to retune trigger positions.
 
 With meta-NOOP prepended, planner slots are +1 (enemies start at 1).
 """
@@ -37,7 +42,6 @@ from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
     LABEL_BLOCKER,
     LABEL_COLLECT,
-    LABEL_NAVIGATE,
     LABEL_NOOP,
 )
 from concept_based_learning.environments.skill_rewards import (
@@ -127,16 +131,8 @@ _ROPE_GRAB_W = 8
 _ROPE_GRAB_H = 8
 _ROPE_GRAB_TOP_INSET = 2  # px below ropes_top
 
-# Room-4 mid-tier fall-through gaps (jump hazards). Injected into unused
-# platform slots as AVOID so skills learn to clear them rather than walk in.
-# Geometry measured against the classic starting room (room_id=4) in *state*
-# coordinates (render offset applied in ``_patch_raw_observation``).
-_ROOM4_GAP_AVOIDS = (
-    # (x, y, w, h) — left gap between key ledge and center shaft
-    (36, 58, 28, 28),
-    # right gap between center shaft and right mid platform
-    (96, 58, 28, 28),
-)
+# Room-4 mid-tier scaffolding / gap geometry lives in montezuma_policy
+# (numbered WP* centres).  This wrapper only stamps those obs-space boxes.
 
 
 def _squeeze_trailing_singleton(leaf):
@@ -265,8 +261,9 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         # Inject in state-y, then shift player + objects to match renderer (y+47).
         semantic_obs = self._inject_ladder_waypoints(semantic_obs, unwrapped, new_player)
         semantic_obs = self._inject_rope_grab_collects(semantic_obs, unwrapped)
-        semantic_obs = self._inject_room4_gap_avoids(semantic_obs, unwrapped)
-        return self._apply_render_y_offset(semantic_obs)
+        semantic_obs = self._apply_render_y_offset(semantic_obs)
+        # Path WP centres live in obs space (see montezuma_policy.WP*); stamp last.
+        return self._apply_room4_path_stamps(semantic_obs, unwrapped)
 
     def _apply_render_y_offset(self, semantic_obs):
         """Map state-y observations onto the rendered room (HUD band is 47px)."""
@@ -372,39 +369,67 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
             )
         )
 
-    def _inject_room4_gap_avoids(self, semantic_obs, env_state):
-        """Stamp mid-tier fall-through gaps as AVOID (room 4 only)."""
-        objects = semantic_obs.objects
-        meta = self.meta_reserved_slots
-        # Reuse trailing unused platform slots (after the conveyor at PLATFORM0).
-        gap0 = meta + PLATFORM0 + 1  # skip conveyor slot
-        n_gaps = len(_ROOM4_GAP_AVOIDS)
-        in_room4 = jnp.asarray(env_state.room_id, dtype=jnp.int32) == jnp.int32(4)
+    def _apply_room4_path_stamps(self, semantic_obs, env_state):
+        """Overwrite room-4 path WPs from ``montezuma_policy`` WP* centres.
 
-        xs = jnp.asarray([g[0] for g in _ROOM4_GAP_AVOIDS], dtype=objects.x.dtype)
-        ys = jnp.asarray([g[1] for g in _ROOM4_GAP_AVOIDS], dtype=objects.y.dtype)
-        ws = jnp.asarray([g[2] for g in _ROOM4_GAP_AVOIDS], dtype=objects.width.dtype)
-        hs = jnp.asarray([g[3] for g in _ROOM4_GAP_AVOIDS], dtype=objects.height.dtype)
-        act = jnp.where(
-            in_room4,
-            jnp.ones(n_gaps, dtype=objects.active.dtype),
-            jnp.zeros(n_gaps, dtype=objects.active.dtype),
+        Late-import avoids a circular import (policy needs PLAYER_STATE_DYING).
+        Ladder tops that the climb injector already marked inactive (spawn on
+        L0_TOP) keep ``active=0``; scaffolding slots are forced active.
+        """
+        # Late import: policy imports PLAYER_STATE_DYING from this module.
+        from concept_based_learning.environments.montezumarevenge.montezuma_policy import (
+            _SLOT_EDGE,
+            _SLOT_GAP_L,
+            _SLOT_GAP_R,
+            _SLOT_ROPE,
+            _SLOT_SHAFT,
+            room4_path_stamps,
         )
-        labs = jnp.full(n_gaps, LABEL_AVOID, dtype=objects.semantic_label.dtype)
 
-        def _set(leaf, values):
-            vals = jnp.asarray(values).astype(leaf.dtype)
-            stacked = jnp.broadcast_to(vals, (leaf.shape[0], n_gaps))
-            return leaf.at[:, gap0 : gap0 + n_gaps].set(stacked)
+        objects = semantic_obs.objects
+        in_room4 = jnp.asarray(env_state.room_id, dtype=jnp.int32) == jnp.int32(4)
+        stamps = room4_path_stamps()
+        force_active = {_SLOT_SHAFT, _SLOT_EDGE, _SLOT_ROPE}
+        force_inactive = {_SLOT_GAP_L, _SLOT_GAP_R}
+
+        new_x = objects.x
+        new_y = objects.y
+        new_w = objects.width
+        new_h = objects.height
+        new_act = objects.active
+        new_lab = objects.semantic_label
+
+        for slot, (x, y, w, h, lab) in stamps.items():
+            def _set1(leaf, value, _slot=slot):
+                vals = jnp.asarray(value).astype(leaf.dtype)
+                stacked = jnp.broadcast_to(vals, (leaf.shape[0],))
+                return leaf.at[:, _slot].set(stacked)
+
+            # Park off-screen when not in room 4.
+            sx = jnp.where(in_room4, jnp.float32(x), jnp.float32(0.0))
+            sy = jnp.where(in_room4, jnp.float32(y), jnp.float32(-40.0))
+            new_x = _set1(new_x, sx)
+            new_y = _set1(new_y, sy)
+            new_w = _set1(new_w, float(w))
+            new_h = _set1(new_h, float(h))
+            new_lab = _set1(new_lab, int(lab))
+            if slot in force_active:
+                new_act = _set1(
+                    new_act,
+                    jnp.where(in_room4, jnp.int32(1), jnp.int32(0)),
+                )
+            elif slot in force_inactive:
+                new_act = _set1(new_act, jnp.int32(0))
+            # else: keep ladder active flags from _inject_ladder_waypoints
 
         return semantic_obs.replace(
             objects=objects.replace(
-                x=_set(objects.x, xs),
-                y=_set(objects.y, ys),
-                width=_set(objects.width, ws),
-                height=_set(objects.height, hs),
-                active=_set(objects.active, act),
-                semantic_label=_set(objects.semantic_label, labs),
+                x=new_x,
+                y=new_y,
+                width=new_w,
+                height=new_h,
+                active=new_act,
+                semantic_label=new_lab,
             )
         )
 
@@ -522,7 +547,7 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
                 jnp.full(_N_ENEMIES, LABEL_AVOID, dtype=jnp.int32),
                 jnp.full(_N_WAYPOINTS, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_ITEMS, LABEL_COLLECT, dtype=jnp.int32),
-                jnp.full(_N_DOORS, LABEL_NAVIGATE, dtype=jnp.int32),
+                jnp.full(_N_DOORS, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_ROPES, LABEL_COLLECT, dtype=jnp.int32),
                 jnp.full(_N_CONVEYORS, LABEL_BLOCKER, dtype=jnp.int32),
                 jnp.full(_N_PLATFORMS, LABEL_BLOCKER, dtype=jnp.int32),

@@ -138,6 +138,9 @@ ENVS: dict[str, dict] = {
         "scratch": True,
         "transfer": False,
         "tandem": False,
+        # Showcase: COLLECT approach + JUMP_OVER chasm (NAVIGATE head idle).
+        "num_skills": 5,
+        "skill_names": ["DESTROY", "COLLECT", "AVOID", "NAVIGATE", "JUMP_OVER"],
     },
 }
 
@@ -204,6 +207,12 @@ def _write(path: Path, text: str, *, dry: bool) -> None:
 def _facing_scratch_yaml(env: str, meta: dict) -> str:
     stem = f"{env}_from_scratch_ego_pov_{SPINE}"
     heu = meta["heu"]
+    num_skills = int(meta.get("num_skills", 4))
+    skill_names = meta.get(
+        "skill_names",
+        ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"][:num_skills],
+    )
+    skill_names_yaml = "\n".join(f"          - {n}" for n in skill_names)
     return dedent(
         f"""\
         PAPER_EVAL_RQ: 2
@@ -256,12 +265,9 @@ def _facing_scratch_yaml(env: str, meta: dict) -> str:
         DESTROY_CONTACT_FAIL: true
         DESTROY_LIVING_PENALTY: true
         alg:
-          NUM_SKILLS: 4
+          NUM_SKILLS: {num_skills}
           SKILL_NAMES:
-          - DESTROY
-          - COLLECT
-          - AVOID
-          - NAVIGATE
+{skill_names_yaml}
           MAX_OBJECTS: {meta['max_objects']}
           EGO_ACTION_DIM: 18
           HIDDEN_SIZE: 128

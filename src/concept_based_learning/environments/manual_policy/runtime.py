@@ -115,7 +115,18 @@ def _eval_navigate_to(
         False,
     )
     dist = jnp.where(active, ctx.distances[slot], jnp.inf)
-    arrived = jnp.logical_and(active, dist <= float(node.arrive_dist))
+    center_max = getattr(node, "arrive_center_max", None)
+    if center_max is not None:
+        ox = jnp.where(
+            jnp.logical_and(slot >= 0, slot < ctx.n), ctx.ox[slot], ctx.px
+        )
+        oy = jnp.where(
+            jnp.logical_and(slot >= 0, slot < ctx.n), ctx.oy[slot], ctx.py
+        )
+        center_dist = jnp.hypot(ctx.px - ox, ctx.py - oy)
+        arrived = jnp.logical_and(active, center_dist <= float(center_max))
+    else:
+        arrived = jnp.logical_and(active, dist <= float(node.arrive_dist))
     feet_oy_min = getattr(node, "arrive_feet_oy_min", None)
     feet_oy_max = getattr(node, "arrive_feet_oy_max", None)
     if feet_oy_min is not None or feet_oy_max is not None:
@@ -129,6 +140,12 @@ def _eval_navigate_to(
         if feet_oy_max is not None:
             feet_ok = jnp.logical_and(feet_ok, feet_dy <= float(feet_oy_max))
         arrived = jnp.logical_and(arrived, feet_ok)
+    x_slack = getattr(node, "arrive_x_slack", None)
+    if x_slack is not None:
+        ox = jnp.where(
+            jnp.logical_and(slot >= 0, slot < ctx.n), ctx.ox[slot], ctx.px
+        )
+        arrived = jnp.logical_and(arrived, jnp.abs(ctx.px - ox) <= float(x_slack))
     inactive = jnp.logical_not(active)
 
     mode = str(node.complete_when)
@@ -136,6 +153,32 @@ def _eval_navigate_to(
         done = inactive
     elif mode == "either":
         done = jnp.logical_or(arrived, inactive)
+    elif mode == "past_x":
+        # Absolute clear line in obs x (tunable waypoint constant).
+        threshold = float(getattr(node, "past_x", 0.0) or 0.0)
+        direction = int(getattr(node, "cross_dir", None) or 1)
+        if direction >= 0:
+            crossed = ctx.px > threshold
+        else:
+            crossed = ctx.px < threshold
+        done = jnp.logical_and(active, crossed)
+        if bool(getattr(node, "skip_if_inactive", True)):
+            done = jnp.logical_or(done, inactive)
+    elif mode == "crossed":
+        # JUMP_OVER-style: stay locked on the hazard until the player centre
+        # has passed it horizontally (death resets the Sequence elsewhere).
+        ox = jnp.where(
+            jnp.logical_and(slot >= 0, slot < ctx.n), ctx.ox[slot], ctx.px
+        )
+        direction = int(getattr(node, "cross_dir", None) or 1)
+        margin = float(getattr(node, "cross_margin_px", 0.0) or 0.0)
+        if direction >= 0:
+            crossed = ctx.px > ox + margin
+        else:
+            crossed = ctx.px < ox - margin
+        done = jnp.logical_and(active, crossed)
+        if bool(getattr(node, "skip_if_inactive", True)):
+            done = jnp.logical_or(done, inactive)
     else:  # "arrive"
         done = arrived
         # Skip stages whose waypoint was never spawned (padded inactive ladders),
@@ -159,9 +202,9 @@ def _eval_navigate_to(
                 y_ok = jnp.logical_and(dy >= lo, dy <= hi)
             else:
                 y_ok = ctx.py <= oy + float(y_slack)
-            x_slack = getattr(node, "platform_reach_x_slack", None)
-            if x_slack is not None:
-                x_ok = jnp.abs(ctx.px - ox) <= float(x_slack)
+            plat_x_slack = getattr(node, "platform_reach_x_slack", None)
+            if plat_x_slack is not None:
+                x_ok = jnp.abs(ctx.px - ox) <= float(plat_x_slack)
                 platform_reached = jnp.logical_and(y_ok, x_ok)
             else:
                 platform_reached = y_ok
