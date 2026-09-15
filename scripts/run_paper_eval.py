@@ -1070,10 +1070,13 @@ ALE_CLIP10_HEU_SMOKE_STEMS = (
     )
 )
 
-# Seaquest tandem meta-OC input ablation (from-scratch ~25M + home mod eval).
+# Seaquest tandem meta-OC input ablation (clip10 + sparse C/D/A ~25M + home eval).
+# Compare to pixel tandem sparse from sparse_cda_clean.
 #   python scripts/materialize_seaquest_meta_oc_ablation.py
-#   python scripts/run_paper_eval.py --suite seaquest_meta_oc_ablation \\
-#       --gpus 0,1,2 --wait-deps --lean
+#   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
+#       --suite seaquest_meta_oc_sparse --wait-deps --skip-rq-gate --video
+SEAQUEST_META_OC_SPARSE_SUITE = "seaquest_meta_oc_sparse"
+# Legacy suite name still works (same sparse stems).
 SEAQUEST_META_OC_ABLATION_SUITE = "seaquest_meta_oc_ablation"
 _SEAQUEST_META_OC_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
 _SEAQUEST_META_OC_TOKENS = (
@@ -1084,12 +1087,30 @@ _SEAQUEST_META_OC_TOKENS = (
     "oc_simple_rel_role",
     "oc_simple_inv",
 )
-SEAQUEST_META_OC_ABLATION_STEMS = tuple(
-    f"seaquest_from_scratch_tandem_{tok}_ego_pov_{_SEAQUEST_META_OC_SPINE}"
+SEAQUEST_META_OC_SPARSE_STEMS = tuple(
+    f"seaquest_from_scratch_tandem_{tok}_ego_pov_{_SEAQUEST_META_OC_SPINE}_sparse_cda"
     for tok in _SEAQUEST_META_OC_TOKENS
 ) + tuple(
-    f"seaquest_from_scratch_tandem_{tok}_ego_pov_{_SEAQUEST_META_OC_SPINE}_eval"
+    f"seaquest_from_scratch_tandem_{tok}_ego_pov_{_SEAQUEST_META_OC_SPINE}_sparse_cda_eval"
     for tok in _SEAQUEST_META_OC_TOKENS
+)
+SEAQUEST_META_OC_ABLATION_STEMS = SEAQUEST_META_OC_SPARSE_STEMS
+
+# Sparse C/D/A clip50 + clip100 skills (last horizon probe; one GPU sequential).
+#   python scripts/materialize_sparse_cda_clip_sweep.py
+#   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
+#       --suite sparse_cda_clip_sweep --wait-deps --skip-rq-gate --video
+SPARSE_CDA_CLIP_SWEEP_SUITE = "sparse_cda_clip_sweep"
+_SPARSE_CDA_CLIP_SWEEP_CLIPS = (50, 100)
+SPARSE_CDA_CLIP_SWEEP_STEMS = tuple(
+    stem
+    for clip in _SPARSE_CDA_CLIP_SWEEP_CLIPS
+    for stem in (
+        f"seaquest_skills_ego_pov_clip{clip}_facing_psibins8_v2_noblocking_noweapon_"
+        f"surfacesub5_skillmech_sparse_cda",
+        f"seaquest_skills_ego_pov_clip{clip}_facing_psibins8_v2_noblocking_noweapon_"
+        f"surfacesub5_skillmech_sparse_cda_eval_full",
+    )
 )
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -1748,6 +1769,8 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
     ALE_CLIP10_HEU_SMOKE_SUITE: ALE_CLIP10_HEU_SMOKE_STEMS,
     SEAQUEST_META_OC_ABLATION_SUITE: SEAQUEST_META_OC_ABLATION_STEMS,
+    SEAQUEST_META_OC_SPARSE_SUITE: SEAQUEST_META_OC_SPARSE_STEMS,
+    SPARSE_CDA_CLIP_SWEEP_SUITE: SPARSE_CDA_CLIP_SWEEP_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -1846,6 +1869,8 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: "ego_cfire",
     ALE_CLIP10_HEU_SMOKE_SUITE: "ale_c10",
     SEAQUEST_META_OC_ABLATION_SUITE: "meta_oc",
+    SEAQUEST_META_OC_SPARSE_SUITE: "meta_oc",
+    SPARSE_CDA_CLIP_SWEEP_SUITE: "sparse",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -3389,9 +3414,11 @@ def main() -> None:
             "story — SQ 25M+eval+ZS (gpu0), BR+MZ 10M (gpu1), SQ pixel tandem "
             "20M+eval (gpu2); use bash scripts/run_sparse_cda_clean.sh --gpus … "
             "--video (not --lean). "
-            f"{SEAQUEST_META_OC_ABLATION_SUITE}: SQ tandem meta-OC input modes "
-            "(oc_embed + oc_simple*) ~25M + home eval; materialize then "
-            "--gpus 0,1,2 --wait-deps --lean --skip-rq-gate. "
+            f"{SPARSE_CDA_CLIP_SWEEP_SUITE}: sparse C/D/A Seaquest skills "
+            "clip50 then clip100 (train+eval each); one GPU. "
+            f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
+            "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
+            "(vs pixel tandem sparse); --wait-deps --skip-rq-gate --video. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
