@@ -228,6 +228,7 @@ def run_mod_eval(
     paper_core_only: bool = False,
     trial: bool = False,
     mod_keys: list[str] | None = None,
+    mods_allowlist: str | None = None,
     num_episodes: int = 3,
     num_seeds: int = 1,
     base_seed: int = 44,
@@ -248,6 +249,9 @@ def run_mod_eval(
         scaffolding with hand-coded ego-action rules (no skill checkpoint)
       - ``flat_pqn``: flat PQN checkpoint
 
+    ``mods_allowlist``: optional paper_eval mods YAML stem (e.g. ``seaquest_visual_ood``)
+    when it differs from ``env_name``. Defaults to ``env_name``.
+
     Always writes CSV when ``output_csv_stem`` or ``output_json`` is set:
       ``{stem}_summary.csv`` and ``{stem}_episodes.csv``, plus appends into
       ``master_csv_dir/all_mod_eval_{summary,episodes}.csv`` when provided.
@@ -258,14 +262,15 @@ def run_mod_eval(
     """
     from concept_based_learning.paper_eval.csv_export import write_mod_eval_csvs
 
+    allowlist = str(mods_allowlist or env_name)
     mod_specs = mod_specs_for_env(
-        env_name,
+        allowlist,
         paper_core_only=paper_core_only,
         trial=trial,
         keys=mod_keys,
     )
     if not mod_specs:
-        raise ValueError(f"No mods selected for env={env_name}")
+        raise ValueError(f"No mods selected for allowlist={allowlist} env={env_name}")
 
     kind = agent_kind.lower().strip()
     payload: dict[str, Any] = {

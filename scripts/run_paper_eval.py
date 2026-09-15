@@ -76,6 +76,13 @@ Usage:
   python scripts/run_paper_eval.py --suite pov_facing_v2_phase2 --gpus 0,1 --wait-deps --lean
   # COLLECT/DESTROY sparse reward arms (sequential; see tmp/collect_sparse_arms_LOG.md):
   bash scripts/run_collect_sparse_arms.sh --gpus 0 --wait-deps --lean
+  # Sparse C/D/A clean story (3 GPUs; wandb videos on — do not use --lean):
+  #   python scripts/materialize_sparse_cda_clean.py
+  #   bash scripts/run_sparse_cda_clean.sh --gpus 0,1,2
+  # Meta-OC tandem ablation (tomorrow):
+  #   python scripts/materialize_seaquest_meta_oc_ablation.py
+  #   python scripts/run_paper_eval.py --suite seaquest_meta_oc_ablation \\
+  #       --gpus 0,1,2 --wait-deps --lean --skip-rq-gate
   # Facing v2 breadth (3 tmux sessions — pin GPUs; do not use --gpus here):
   #   GPU0: φ8 zero-shot BR+PH → Phoenix from-scratch φ8
   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py --suite pov_facing_v2_gpu0 --wait-deps --lean
@@ -1085,6 +1092,53 @@ SEAQUEST_META_OC_ABLATION_STEMS = tuple(
     for tok in _SEAQUEST_META_OC_TOKENS
 )
 
+# Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
+# Uneven pipelines → per-GPU suites (do not use --gpus round-robin on the union).
+#   python scripts/materialize_sparse_cda_clean.py
+#   bash scripts/run_sparse_cda_clean.sh --gpus 0,1,2
+SPARSE_CDA_CLEAN_SUITE = "sparse_cda_clean"
+SPARSE_CDA_CLEAN_GPU0_SUITE = "sparse_cda_clean_gpu0"
+SPARSE_CDA_CLEAN_GPU1_SUITE = "sparse_cda_clean_gpu1"
+SPARSE_CDA_CLEAN_GPU2_SUITE = "sparse_cda_clean_gpu2"
+_SPARSE_CDA_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+_SPARSE_CDA_SQ = (
+    f"seaquest_skills_ego_pov_{_SPARSE_CDA_SPINE}_skillmech_sparse_cda"
+)
+_SPARSE_CDA_TRANSFER_ENVS = (
+    "spaceinvaders",
+    "beamrider",
+    "timepilot",
+    "asteroids",
+    "pong",
+    "breakout",
+    "freeway",
+    "namethisgame",
+    "phoenix",
+)
+SPARSE_CDA_CLEAN_GPU0_STEMS = (
+    _SPARSE_CDA_SQ,
+    f"{_SPARSE_CDA_SQ}_eval_full",
+) + tuple(
+    f"{env}_transfer_ego_pov_{_SPARSE_CDA_SPINE}_skillmech_sparse_cda"
+    for env in _SPARSE_CDA_TRANSFER_ENVS
+)
+SPARSE_CDA_CLEAN_GPU1_STEMS = (
+    f"beamrider_from_scratch_ego_pov_{_SPARSE_CDA_SPINE}_sparse_cda_10m",
+    f"montezumarevenge_from_scratch_ego_pov_{_SPARSE_CDA_SPINE}_sparse_cda_10m",
+)
+_SPARSE_CDA_TANDEM = (
+    f"seaquest_from_scratch_tandem_pixel_ego_pov_{_SPARSE_CDA_SPINE}_sparse_cda_20m"
+)
+SPARSE_CDA_CLEAN_GPU2_STEMS = (
+    _SPARSE_CDA_TANDEM,
+    f"{_SPARSE_CDA_TANDEM}_eval",
+)
+SPARSE_CDA_CLEAN_STEMS = (
+    SPARSE_CDA_CLEAN_GPU0_STEMS
+    + SPARSE_CDA_CLEAN_GPU1_STEMS
+    + SPARSE_CDA_CLEAN_GPU2_STEMS
+)
+
 # Alias: full ground-up batch = tier A (most users start here).
 THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
 THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
@@ -1694,6 +1748,10 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_SUITE: EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS,
     ALE_CLIP10_HEU_SMOKE_SUITE: ALE_CLIP10_HEU_SMOKE_STEMS,
     SEAQUEST_META_OC_ABLATION_SUITE: SEAQUEST_META_OC_ABLATION_STEMS,
+    SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
+    SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
+    SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
+    SPARSE_CDA_CLEAN_GPU2_SUITE: SPARSE_CDA_CLEAN_GPU2_STEMS,
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
@@ -1836,6 +1894,10 @@ SUITE_RTPT: dict[str, str] = {
     POV_FACING_ABLATION_GPU1_SUITE: "facing_abl",
     POV_FACING_ABLATION_GPU2_SUITE: "facing_abl",
     POV_FACING_ABLATION_PHIDEG_SUITE: "facing_abl",
+    SPARSE_CDA_CLEAN_SUITE: "sparse",
+    SPARSE_CDA_CLEAN_GPU0_SUITE: "sparse",
+    SPARSE_CDA_CLEAN_GPU1_SUITE: "sparse",
+    SPARSE_CDA_CLEAN_GPU2_SUITE: "sparse",
     COLLECT_SPARSE_ARMS_SUITE: "sparse",
     RESTRAINED_EGO_SUITE: "restrain",
 }
@@ -2029,6 +2091,36 @@ def _configure_lean_disk() -> Path:
     return tmp_root
 
 
+def _is_from_scratch_train(raw: dict[str, Any], *, stem: str = "") -> bool:
+    """True for base from-scratch train YAMLs (not ZS/finetune/transfer/eval).
+
+    Used to gate end-of-train wandb videos: only scratch trains get RECORD_VIDEO
+    when ``--video`` is set, so review stays cheap and focused on base behavior.
+    """
+    phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
+    if phase != "train":
+        return False
+    kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
+    if kind in {
+        "transfer",
+        "heuristic_random",
+        "fixed_skills",
+        "fixed_ego_rules",
+        "constant_ego",
+    }:
+        return False
+    name = (stem or str(raw.get("WANDB_RUN_NAME", ""))).lower()
+    if "from_scratch" in name or "from_scratch" in stem.lower():
+        return True
+    # Fallback: train with no upstream skill/meta init and empty requires.
+    if raw.get("INIT_MODEL_PATH") or raw.get("SKILLS_MODEL_PATH"):
+        return False
+    requires = raw.get("PAPER_EVAL_REQUIRES") or []
+    if isinstance(requires, (list, tuple)) and len(requires) > 0:
+        return False
+    return True
+
+
 def _apply_run_defaults(
     cfg: dict[str, Any],
     *,
@@ -2188,6 +2280,7 @@ def experiment_done(path: Path, *, seed: int) -> tuple[bool, str]:
         if isinstance(env_name, list):
             env_name = env_name[0] if env_name else "seaquest"
         env_name = str(env_name).lower()
+        mods_allowlist = str(raw.get("PAPER_EVAL_MODS") or env_name).lower()
         out = _eval_json_path(path.stem)
         expected = (
             list(raw["PAPER_EVAL_MOD_KEYS"])
@@ -2195,7 +2288,7 @@ def experiment_done(path: Path, *, seed: int) -> tuple[bool, str]:
             else None
         )
         ok, detail = _eval_json_complete(
-            out, env_name=env_name, expected_mod_keys=expected
+            out, env_name=mods_allowlist, expected_mod_keys=expected
         )
         if ok:
             return True, f"eval {detail}"
@@ -2980,6 +3073,7 @@ def _run_mod_eval(
             object_centric=object_centric,
             trial=trial,
             mod_keys=list(raw["PAPER_EVAL_MOD_KEYS"]) if raw.get("PAPER_EVAL_MOD_KEYS") else None,
+            mods_allowlist=str(raw.get("PAPER_EVAL_MODS") or env_name),
             num_episodes=eval_episodes,
             num_seeds=eval_num_seeds,
             base_seed=eval_base_seed,
@@ -3035,10 +3129,19 @@ def _run_experiment(
     ):
         _check_rq_gate([path], seed=int(seed if seed is not None else DEFAULT_SEED))
 
+    # --video only records end-of-train base episodes for from-scratch trains
+    # (eval / ZS / finetune / transfer stay silent to keep wandb + disk light).
+    train_video = bool(record_video) and _is_from_scratch_train(raw, stem=path.stem)
+    if record_video and not train_video:
+        print(
+            f"  video: skip (not from-scratch train): {path.stem}",
+            flush=True,
+        )
+
     train_kwargs = dict(
         wandb_mode=wandb_mode,
         trial_steps=trial_steps,
-        record_video=record_video,
+        record_video=train_video,
         seed=seed,
         batch_tag=batch_tag,
         save_training_metrics_csv=save_training_metrics_csv,
@@ -3282,6 +3385,13 @@ def main() -> None:
             "SQ 10M (+ sparse C/D/A 10M); Δxy skillmech neg-control + Pong/BR/PH; "
             "pixel+ego tandem on SQ+scratch except Montezuma "
             "(home mod eval + ZS from SQ tandem skills); trains first → --gpus 0,1,2. "
+            f"{SPARSE_CDA_CLEAN_SUITE} / _gpu0|_gpu1|_gpu2: sparse C/D/A clean "
+            "story — SQ 25M+eval+ZS (gpu0), BR+MZ 10M (gpu1), SQ pixel tandem "
+            "20M+eval (gpu2); use bash scripts/run_sparse_cda_clean.sh --gpus … "
+            "--video (not --lean). "
+            f"{SEAQUEST_META_OC_ABLATION_SUITE}: SQ tandem meta-OC input modes "
+            "(oc_embed + oc_simple*) ~25M + home eval; materialize then "
+            "--gpus 0,1,2 --wait-deps --lean --skip-rq-gate. "
             f"{DISTBINS8_PIPELINE_SUITE}: train distance-bins8 variant, then full "
             "Seaquest/Pong/BeamRider eval. "
             f"{KANGAROO_LIFETIME_SUITE}: Kangaroo noclip+angbins skills train "
@@ -3398,7 +3508,10 @@ def main() -> None:
     parser.add_argument(
         "--video",
         action="store_true",
-        help="Record end-of-train videos (default: off; videos burn disk).",
+        help=(
+            "Record end-of-train wandb videos for from-scratch base trains only "
+            "(default: off; skips eval/ZS/finetune/transfer)."
+        ),
     )
     parser.add_argument(
         "--no-video",
