@@ -1101,7 +1101,21 @@ SEAQUEST_META_OC_ABLATION_STEMS = SEAQUEST_META_OC_SPARSE_STEMS
 #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
 #       --suite sparse_cda_clip_sweep --wait-deps --skip-rq-gate --video
 SPARSE_CDA_CLIP_SWEEP_SUITE = "sparse_cda_clip_sweep"
+SPARSE_CDA_CLIP_TRANSFER_SUITE = "sparse_cda_clip_transfer"
+SPARSE_CDA_CLIP_TRANSFER_GPU0_SUITE = "sparse_cda_clip_transfer_gpu0"
+SPARSE_CDA_CLIP_TRANSFER_GPU1_SUITE = "sparse_cda_clip_transfer_gpu1"
 _SPARSE_CDA_CLIP_SWEEP_CLIPS = (50, 100)
+_SPARSE_CDA_CLIP_TRANSFER_ENVS = (
+    "spaceinvaders",
+    "beamrider",
+    "timepilot",
+    "asteroids",
+    "pong",
+    "breakout",
+    "freeway",
+    "namethisgame",
+    "phoenix",
+)
 SPARSE_CDA_CLIP_SWEEP_STEMS = tuple(
     stem
     for clip in _SPARSE_CDA_CLIP_SWEEP_CLIPS
@@ -1111,6 +1125,22 @@ SPARSE_CDA_CLIP_SWEEP_STEMS = tuple(
         f"seaquest_skills_ego_pov_clip{clip}_facing_psibins8_v2_noblocking_noweapon_"
         f"surfacesub5_skillmech_sparse_cda_eval_full",
     )
+)
+
+
+def _sparse_cda_clip_transfer_stems(clip: int) -> tuple[str, ...]:
+    return tuple(
+        f"{env}_transfer_ego_pov_clip{clip}_facing_psibins8_v2_noblocking_noweapon_"
+        f"surfacesub5_skillmech_sparse_cda"
+        for env in _SPARSE_CDA_CLIP_TRANSFER_ENVS
+    )
+
+
+# Parallel: gpu0 = clip50 ZS (9), gpu1 = clip100 ZS (9). Union kept for one-GPU runs.
+SPARSE_CDA_CLIP_TRANSFER_GPU0_STEMS = _sparse_cda_clip_transfer_stems(50)
+SPARSE_CDA_CLIP_TRANSFER_GPU1_STEMS = _sparse_cda_clip_transfer_stems(100)
+SPARSE_CDA_CLIP_TRANSFER_STEMS = (
+    SPARSE_CDA_CLIP_TRANSFER_GPU0_STEMS + SPARSE_CDA_CLIP_TRANSFER_GPU1_STEMS
 )
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -1771,6 +1801,9 @@ SUITE_STEMS = {
     SEAQUEST_META_OC_ABLATION_SUITE: SEAQUEST_META_OC_ABLATION_STEMS,
     SEAQUEST_META_OC_SPARSE_SUITE: SEAQUEST_META_OC_SPARSE_STEMS,
     SPARSE_CDA_CLIP_SWEEP_SUITE: SPARSE_CDA_CLIP_SWEEP_STEMS,
+    SPARSE_CDA_CLIP_TRANSFER_SUITE: SPARSE_CDA_CLIP_TRANSFER_STEMS,
+    SPARSE_CDA_CLIP_TRANSFER_GPU0_SUITE: SPARSE_CDA_CLIP_TRANSFER_GPU0_STEMS,
+    SPARSE_CDA_CLIP_TRANSFER_GPU1_SUITE: SPARSE_CDA_CLIP_TRANSFER_GPU1_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -1871,6 +1904,9 @@ SUITE_RTPT: dict[str, str] = {
     SEAQUEST_META_OC_ABLATION_SUITE: "meta_oc",
     SEAQUEST_META_OC_SPARSE_SUITE: "meta_oc",
     SPARSE_CDA_CLIP_SWEEP_SUITE: "sparse",
+    SPARSE_CDA_CLIP_TRANSFER_SUITE: "sparse_zs",
+    SPARSE_CDA_CLIP_TRANSFER_GPU0_SUITE: "sparse_zs",
+    SPARSE_CDA_CLIP_TRANSFER_GPU1_SUITE: "sparse_zs",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -3416,6 +3452,11 @@ def main() -> None:
             "--video (not --lean). "
             f"{SPARSE_CDA_CLIP_SWEEP_SUITE}: sparse C/D/A Seaquest skills "
             "clip50 then clip100 (train+eval each); one GPU. "
+            f"{SPARSE_CDA_CLIP_TRANSFER_SUITE} / _gpu0|_gpu1: ZS transfers for "
+            "sparse clip50 (gpu0) then clip100 (gpu1) across clean-story envs "
+            "(needs train ckpts); parallel: two terminals with "
+            "--suite sparse_cda_clip_transfer_gpu{{0,1}} --wait-deps "
+            "--skip-rq-gate. "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
             "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
             "(vs pixel tandem sparse); --wait-deps --skip-rq-gate --video. "
