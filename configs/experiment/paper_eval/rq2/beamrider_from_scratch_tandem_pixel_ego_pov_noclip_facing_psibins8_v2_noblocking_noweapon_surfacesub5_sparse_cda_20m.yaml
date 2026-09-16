@@ -1,0 +1,132 @@
+# beamrider tandem from-scratch — pixel meta + ego skills (~20M).
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: train
+PAPER_EVAL_KIND: tandem
+PAPER_EVAL_MODS: beamrider
+PAPER_EVAL_REQUIRES_RQ1: []
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: tandem
+META_ARCHITECTURE: per_object_mlp
+ENV_NAME: beamrider
+USE_POV_RELATIVE_MAPPER: true
+USE_POV_FIXED_BILATERAL: false
+USE_POV_FACING_FRAME: true
+EGO_POSE_XY: false
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: false
+USE_EGO_WEAPON_FEATURES: false
+USE_EGO_SHOT_FEATURES: false
+AVOID_INTERRUPT_RANGE: 55
+AVOID_INTERRUPT_RANGE_Y: 55
+SURFACE_SUB_AVOID_RANGE_X: 5
+SURFACE_SUB_AVOID_RANGE_Y: 5
+EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_ANGLE_BINS: null
+EGO_PSI_ANGLE_BINS: 8
+EGO_LEGAL_ACTION_MASK: false
+SURFACE_SUB_NEAR_RANGE: 5
+SAVE_PATH: ./outputs/models/paper_eval/rq2/beamrider_from_scratch_tandem_pixel_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_20m
+WANDB_RUN_NAME: br_paper_tandem_pixel_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_20m
+WANDB_TAGS:
+- suite:noclip_sparse_smoke
+- rq:2
+- env:beamrider
+- role:transfer
+- ego:noblocking
+- ego:noweapon
+- ego:noclip
+- ablation:sparse_cda
+- budget:20m
+- phase:from_scratch
+- train_mode:tandem
+- meta_input:pixel
+- skill_input:ego
+- mapper:pov_facing
+- ego:phi_bins8
+- probe:tandem_scratch
+META_PIXEL_DO_RESIZE: true
+META_PIXEL_USE_NATIVE_DOWNSCALING: true
+META_PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+META_PIXEL_GRAYSCALE: true
+SKILL_PIXEL_CNN_CHANNELS:
+- 16
+- 32
+GAME_MODS: null
+EVAL_GAME_MODS: null
+META_INPUT_MODE: pixel_embed
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: false
+COLLECT_SPARSE_ONLY: true
+AVOID_SPARSE_ONLY: true
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 31
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  META_HIDDEN_SIZE: 256
+  META_PER_OBJECT_NUM_LAYERS: 3
+  META_FLAT_NUM_LAYERS: 3
+  META_EMBED_DIM: 256
+  SKILL_EMBED_DIM: 256
+  META_LR: 0.0005
+  SKILL_LR: 0.0005
+  META_USE_NOOP_TARGET: true
+  META_NOOP_TARGET_IDX: 0
+  META_SWITCH_PENALTY: -0.05
+  META_DEATH_PENALTY: -10.0
+  META_REWARD_LAMBDA: 1.0
+  CLIP_REWARD: true
+  FIRST_FIRE: true
+  STICKY_ACTIONS: false
+  EPISODIC_LIFE: true
+  FRAME_STACK_SIZE: 4
+  FRAME_SKIP: 4
+  TOTAL_TIMESTEPS: 19988480
+  NUM_ENVS: 128
+  NUM_STEPS: 128
+  NUM_EPOCHS: 4
+  NUM_MINIBATCHES: 64
+  GAMMA: 0.99
+  LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: false
+  RELABEL_K_OBJECTS: null
+  EPS_START: 0.1
+  EPS_FINISH: 0.01
+  EPS_DECAY: 0.2
+  META_INPUT_MODE: pixel_embed
+  SKILL_INPUT_MODE: ego
+  META_PIXEL_CNN_CHANNELS:
+  - 16
+  - 32
+  HEURISTIC_MODE: env_specific
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: false
+  COLLECT_SPARSE_ONLY: true
+  AVOID_SPARSE_ONLY: true
+  USE_EGO_SHOT_FEATURES: false
+  SKILL_LR_FINISH: 0.0001
+  SKILL_LR_DECAY: 0.5
+  SKILL_BOOTSTRAP: q_lambda
+  SKILL_LAMBDA: 0.65
+  SKILL_GAMMA: 0.99
+SEED: 44

@@ -1,13 +1,17 @@
 # Evaluation plan (locked decisions)
 
-Date: 2026-09-07 (distance-clip section amended 2026-09-10). Thesis claim:
+Date: 2026-09-07 (distance-clip section amended 2026-09-10; sparse noclip
+lock 2026-09-16). Thesis claim:
 **strict informational abstraction** on System 1 (egocentric, bounded pose)
 yields in-domain competence, robustness, and *homologous* skill transfer.
 Facing-frame φ8 + surfacesub5 labeling are frozen. **Distance clip locked
-to clip10** (near-field information bound — see §0.1). Remaining work:
-(1) heuristic/skill smoke across ALE bases + transfer targets,
-(2) wider but shallower ALE matrix, (3) Montezuma showcase, (4) Freeway
-limitation, (5) mods workshop (`docs/MODS_PLAN.md`).
+to noclip** under sparse C/D/A (see §0.1; clip10 remains the near-field
+control). Remaining work:
+(1) suite **`noclip_sparse_smoke`** — 20M ego scratch + flat PQN +
+from-scratch tandem on bases/transfers (see §5),
+(2) cross-base ZS / FT grid, (3) Montezuma showcase (deferred; policy
+broken), (4) Freeway limitation, (5) mods workshop (`docs/MODS_PLAN.md`).
+**Pong:** keep as intercept fail cell; no fix campaign.
 
 ## Why this direction
 
@@ -29,8 +33,8 @@ limitation, (5) mods workshop (`docs/MODS_PLAN.md`).
 
 **Do not rework:** facing-locked POV mapper, facing-frame φ, φ8 bins,
 surfacesub5 / navigatesurface *labeling* (surface ≠ COLLECT). Size, velocity,
-shot geometry stay off. Distance clip: **open** (§0.1) — do not start a new
-encoding campaign; pick clip10 or clip50 and move on.
+shot geometry stay off. Distance clip: **locked to noclip** under sparse C/D/A
+(§0.1); do not reopen clip sweeps.
 
 **Do (few runs, v2 checkpoint recipe) — suite `ego_min_channels`:**
 
@@ -78,23 +82,37 @@ Quirk (not a planned arm): Pong labeled DESTROY instead of COLLECT
 
 ---
 
-## 0.1 Distance clip — surfacesub5 spine (open lock)
+## 0.1 Distance clip — surfacesub5 spine
 
 After §0, the live recipe moved to **noweapon + surfacesub5** (isotropic
-AVOID 55×55, surface-sub dodge 5×5, φ8, no blocking/weapon extras) under
-suite `ego_min_noweapon_surfacesub5_clipsweep`. That is the spine the
-tables below use. Raw syncs:
+AVOID 55×55, surface-sub dodge 5×5, φ8, no blocking/weapon extras). Raw
+syncs (shaped / skillmech provenance):
 `tmp/ego_min_surfacesub5_clipsweep/`, `tmp/ego_min_surfacesub5_distabl/`,
-`tmp/ego_min_surfacesub5_distbands/`, `tmp/ego_min_surfacesub5_cliprand/`.
+`tmp/ego_min_surfacesub5_distbands/`, `tmp/ego_min_surfacesub5_cliprand/`,
+`tmp/ego_min_surfacesub5_skillmech_rw/`.
 
-**Locked:** **clip10** on noweapon + surfacesub5 + φ8, with **ungated
-skill-mechanics rewards** (every skill’s mechanics on the current target;
-stem `…_surfacesub5_skillmech`). Near-field information bound: high-res
-distance only for close objects; mid-range saturation is intentional.
-Clip50 remains the competence-ceiling control — cite in appendix, do not
-re-sweep. Pre-ungate clipsweep numbers (`tmp/ego_min_surfacesub5_clipsweep/`)
-are provenance only; live cite
-`tmp/ego_min_surfacesub5_skillmech_rw/` (SQ ~27k, BR ~1.3k, PH ~3.9k).
+### Live lock (sparse C/D/A, 2026-09-16) — **noclip**
+
+**Locked:** `EGO_DISTANCE_CLIP_MAX_PX: null` (**noclip**) on noweapon +
+surfacesub5 + φ8 + **sparse C/D/A** (`COLLECT_SPARSE_ONLY` /
+`AVOID_SPARSE_ONLY`, `DESTROY_LIVING_PENALTY: false`). Stem:
+`seaquest_skills_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech_sparse_cda`.
+Sync: `tmp/cluster1_sparse_cda_clip_extremes/`. Details:
+`docs/DISTANCE_CLIP_SAUCE.md`.
+
+Rationale: under sparse rewards clip10/50/100 were already close on SQ home;
+extremes showed **clip0 dead** and **noclip best home (~27k)** with healthy
+mods vs PQN. Accepted ZS tax: Freeway (original clip motivation), softer
+NTG/Breakout. No more clip sweeps on this spine.
+
+Clip10 remains the near-field **control** cite; clip50/100 are ablations only.
+
+### Provenance (pre-sparse skillmech) — clip10
+
+**Historical lock:** **clip10** + ungated skillmech rewards on the same ego
+spine (SQ ~27k in `tmp/ego_min_surfacesub5_skillmech_rw/`). Near-field
+information-bound story for shaped COLLECT transfer. Do not reopen that
+sweep; superseded for the sparse clean story by noclip above.
 
 **Attribution baseline (same scaffolding):** suite
 `fixed_ego_skill_baseline` keeps heuristic / labels / facing-frame obs /
@@ -112,7 +130,7 @@ distance-pose / can_fire encoding spam on this spine. Next is heuristic
 smoke across ALE envs (§5.2–3) then the matrix (§3).
 
 Lean (historical): clip10 vs clip50 meeting table kept below for provenance.
-Skillmech refresh of the locked clip10 cell:
+Skillmech refresh of the then-locked clip10 cell:
 
 | cell | pre-ungate clip10 | **skillmech clip10** |
 |------|------------------:|---------------------:|
@@ -201,10 +219,10 @@ matrix (§3) on clip10.
 | **Seaquest** | Main robustness env; **all** skill input modes (ego / pixel / oc). |
 | **Phoenix** | Second shooter layout; labels already exist; Space Invaders is a free homologous target. |
 | **Name This Game** | Homologous underwater world (COLLECT + DESTROY). Policy: when the catcher/treasure field appears, **stick COLLECT** and keep it selected while it is active; dense reward for staying inside. Easy heuristic. |
+| **Asteroids** | Promoted turn-family base (2026-09-16): true continuous heading, `USE_POV_TURN_PRIMITIVES` (strafe≠turn). Native POV test; SQ→AS ZS allowed to fail. |
 
-Time Pilot and Asteroids: **wire + smoke both**. At least one becomes a
-**base** even if SQ→them fails (strafe ≠ turn family; see §2). Scratch +
-transfer *between* them is the interesting cell.
+Time Pilot stays **transfer** (8-way homologous target for later AS→TP).
+Do not promote both; one turn-family base is enough.
 
 ### Transfer targets (same list from every base)
 
@@ -212,11 +230,10 @@ transfer *between* them is the interesting cell.
 |-----|------|
 | Space Invaders | Phoenix-family DESTROY |
 | Beamrider | already a win; keep |
-| Time Pilot | omni DESTROY, 8-way facing, no Chopper turbo |
-| Asteroids | continuous facing; native POV test |
+| Time Pilot | omni DESTROY, 8-way; homologous turn-family target from Asteroids |
 | Pong + Breakout | intercept family (drop Tennis) |
 | Freeway | limitation (single-target vs gap) |
-| Name This Game / Phoenix / Seaquest | cross-base (when not the source) |
+| Name This Game / Phoenix / Seaquest / Asteroids | cross-base (when not the source) |
 
 **Deferred:** Kaboom (cleaner 1D catch / lateral-null) — not in upstream
 jaxatari yet; label/policy code is parked unregistered.
@@ -266,10 +283,10 @@ a failed Seaquest transfer.
 
 ## 3. Run matrix
 
-Budget: **20M** skill/PQN trains (down from ~25M), **128 envs** unchanged,
-**5M** finetune. Match PQN step count to skills. 10M is OK for transfer
-*scratch* if 20M does not fit; do not mix 10M and 20M inside one comparison
-column.
+Budget: **hard `19_988_480`** agent steps for every skill / PQN / tandem
+train in the live matrix (batch-aligned “20M”; never mix with legacy
+`24_985_600` / “25M” cells). **5M** finetune later. Match PQN step count
+to skills. Do not mix budgets inside one comparison column.
 
 Cross-transfer ZS is **base env only** (no full mod grid per cell). A few
 hours of eval, not a few days of train.
@@ -277,13 +294,13 @@ hours of eval, not a few days of train.
 | Block | Where | Modes | Notes |
 |-------|--------|-------|--------|
 | Skill train | Seaquest | ego, pixel, oc | thesis: ego is better **here** |
-| Skill train | Phoenix, NTG (+ TP/Asteroids if promoted) | **ego only** | universal finding, not a second pixel/oc bake-off |
+| Skill train | Phoenix, NTG, Asteroids | **ego only** | universal finding, not a second pixel/oc bake-off |
 | PQN baselines | all **bases** | pixel (+ oc if cheap) | required |
 | PQN baselines | **transfer** envs | pixel, once | ceiling; one-time at the chosen step count |
-| Scratch skills | all transfer envs | **ego** | pain point; 10–20M |
-| Finetune 5M | every base → every transfer | ego | necessary ceiling vs ZS |
-| Finetune 5M | Seaquest → transfers | pixel / oc as well | “full modes only on SQ” |
-| RQ3 tandem | bases (SQ required; Phoenix/NTG nice) | pixel or oc meta + **frozen or jointly trained ego skills** | **no meta-only** |
+| Scratch skills | all transfer envs | **ego** | pain point; 20M |
+| Finetune 5M | every base → every transfer | ego | necessary ceiling vs ZS (later) |
+| Finetune 5M | Seaquest → transfers | pixel / oc as well | “full modes only on SQ” (later) |
+| RQ3 tandem | all smoke envs this tranche | pixel meta + ego skills **from scratch** | warmstart skills→tandem deferred; **no meta-only** |
 | RQ3 eval | that env’s **full mod suite** | tandem | compositionality + robustness |
 | RQ3 transfer | skills from tandem ckpt only | ego ZS + target heuristic | meta stays home; same grid as skills-only, to show tandem did not wreck System 1 |
 
@@ -329,20 +346,23 @@ template. (Kaboom deferred until the env lands upstream.)
 
 ## 5. Order of work
 
-1. **Minimal ego** trains + SQ/Pong/BR/PH eval → lock spine channels (§0).
-1b. **Distance clip lock** (clip10 vs clip50 on surfacesub5) — §0.1; then freeze.
-2. **Labels + heuristics:** NTG (sticky COLLECT), Time Pilot, Asteroids;
-   Breakout already exists; SI exists. (Kaboom deferred — not upstream yet.)
-3. **Smoke** TP / Asteroids / Chopper with frozen SQ ego (current
-   spine). Decide TP/Asteroids base vs transfer-only.
+1. **Minimal ego** trains + SQ/Pong/BR/PH eval → lock spine channels (§0). ✅
+1b. **Distance clip lock** — sparse C/D/A → **noclip** (§0.1). ✅
+2. **Labels + heuristics:** NTG / TP / Asteroids wired. ✅
+3. **Next:** suite **`noclip_sparse_smoke`** / `_gpu0` / `_gpu1` —
+   per env (bases + transfers): ego scratch 20M + flat PQN 20M +
+   from-scratch pixel tandem 20M + home mod evals. Asteroids = 4th base;
+   TP = transfer; Montezuma deferred; no FT / no warmstart tandem /
+   no cross-ZS in this suite. Materialize:
+   `python scripts/materialize_noclip_sparse_smoke.py`
 4. **Mods workshop** (categories above × env). Implement missing jaxatari
    mods only for the locked ~8–12.
-5. **Base trains** (SQ all modes, other bases ego + PQN) at 20M.
-6. **Cross-ZS grid** (every base → every target, ego, base mod only).
-7. **Scratch + FT** on transfers (ego; SQ also pixel/oc FT).
-8. **RQ3 tandem** on bases + full mod eval; ZS the **skills** (not the meta).
-9. **Montezuma L1** plan video + heuristic/PQN controls.
-10. Write with Freeway as limitation, Pong/Breakout as intercept
+5. **Cross-ZS grid** (every base → every target, ego, base mod only).
+6. **FT 5M** on transfers (ego; SQ also pixel/oc FT).
+7. **RQ3 warmstart** (skills→tandem) on envs that already show tandem
+   competence; ZS the **skills** (not the meta).
+8. **Montezuma L1** nice-to-have only (policy broken).
+9. Write with Freeway as limitation, Pong/Breakout as intercept
     family, homologous DESTROY as the transfer win.
     (Kaboom joins the intercept family once the env is upstream.)
 
