@@ -8,10 +8,13 @@ Bases: seaquest, phoenix, namethisgame, asteroids
 Transfers: timepilot, pong, breakout, beamrider, spaceinvaders, freeway
 
     python scripts/materialize_noclip_sparse_smoke.py
+    # three terminals:
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
         --suite noclip_sparse_smoke_gpu0 --wait-deps --skip-rq-gate
     CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \
         --suite noclip_sparse_smoke_gpu1 --wait-deps --skip-rq-gate
+    CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \
+        --suite noclip_sparse_smoke_gpu2 --wait-deps --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -673,32 +676,45 @@ def env_pipeline_stems(env: str) -> tuple[str, ...]:
     )
 
 
+# 3-GPU split (10 envs → 4+3+3). SQ full-mod pipeline stays on gpu0.
+GPU0_ENVS: tuple[str, ...] = ("seaquest", "phoenix", "namethisgame", "asteroids")
+GPU1_ENVS: tuple[str, ...] = ("timepilot", "pong", "breakout")
+GPU2_ENVS: tuple[str, ...] = ("beamrider", "spaceinvaders", "freeway")
+
+
 def gpu0_envs() -> tuple[str, ...]:
-    mid = len(ENV_ORDER) // 2
-    return ENV_ORDER[:mid]
+    return GPU0_ENVS
 
 
 def gpu1_envs() -> tuple[str, ...]:
-    mid = len(ENV_ORDER) // 2
-    return ENV_ORDER[mid:]
+    return GPU1_ENVS
+
+
+def gpu2_envs() -> tuple[str, ...]:
+    return GPU2_ENVS
+
+
+def _stems_for(envs: tuple[str, ...]) -> tuple[str, ...]:
+    out: list[str] = []
+    for env in envs:
+        out.extend(env_pipeline_stems(env))
+    return tuple(out)
 
 
 def gpu0_stems() -> tuple[str, ...]:
-    out: list[str] = []
-    for env in gpu0_envs():
-        out.extend(env_pipeline_stems(env))
-    return tuple(out)
+    return _stems_for(gpu0_envs())
 
 
 def gpu1_stems() -> tuple[str, ...]:
-    out: list[str] = []
-    for env in gpu1_envs():
-        out.extend(env_pipeline_stems(env))
-    return tuple(out)
+    return _stems_for(gpu1_envs())
+
+
+def gpu2_stems() -> tuple[str, ...]:
+    return _stems_for(gpu2_envs())
 
 
 def all_stems() -> tuple[str, ...]:
-    return gpu0_stems() + gpu1_stems()
+    return gpu0_stems() + gpu1_stems() + gpu2_stems()
 
 
 def materialize(*, dry: bool) -> None:
@@ -715,12 +731,15 @@ def materialize(*, dry: bool) -> None:
         _write(tandem_dir / f"{tandem}.yaml", _tandem_train_yaml(env), dry=dry)
         _write(tandem_dir / f"{tandem}_eval.yaml", _tandem_eval_yaml(env), dry=dry)
 
+    assert set(ENV_ORDER) == set(GPU0_ENVS + GPU1_ENVS + GPU2_ENVS)
     print(
         f"\nenvs={len(ENV_ORDER)} stems={len(all_stems())} "
-        f"gpu0={len(gpu0_stems())} gpu1={len(gpu1_stems())}"
+        f"gpu0={len(gpu0_stems())} gpu1={len(gpu1_stems())} "
+        f"gpu2={len(gpu2_stems())}"
     )
     print(f"gpu0 envs: {', '.join(gpu0_envs())}")
     print(f"gpu1 envs: {', '.join(gpu1_envs())}")
+    print(f"gpu2 envs: {', '.join(gpu2_envs())}")
 
 
 def main() -> None:

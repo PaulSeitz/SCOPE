@@ -1187,18 +1187,23 @@ SPARSE_CDA_CLIP_EXTREMES_STEMS = (
     SPARSE_CDA_CLIP_EXTREMES_GPU0_STEMS + SPARSE_CDA_CLIP_EXTREMES_GPU1_STEMS
 )
 
-# Noclip + sparse C/D/A full-eval smoke (20M hard; 2 GPUs).
+# Noclip + sparse C/D/A full-eval smoke (20M hard; 3 GPUs).
 #   python scripts/materialize_noclip_sparse_smoke.py
 #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
 #       --suite noclip_sparse_smoke_gpu0 --wait-deps --skip-rq-gate
 #   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \
 #       --suite noclip_sparse_smoke_gpu1 --wait-deps --skip-rq-gate
+#   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \
+#       --suite noclip_sparse_smoke_gpu2 --wait-deps --skip-rq-gate
 NOCLIP_SPARSE_SMOKE_SUITE = "noclip_sparse_smoke"
 NOCLIP_SPARSE_SMOKE_GPU0_SUITE = "noclip_sparse_smoke_gpu0"
 NOCLIP_SPARSE_SMOKE_GPU1_SUITE = "noclip_sparse_smoke_gpu1"
+NOCLIP_SPARSE_SMOKE_GPU2_SUITE = "noclip_sparse_smoke_gpu2"
 
 
-def _noclip_sparse_smoke_stems() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _noclip_sparse_smoke_stems() -> tuple[
+    tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
+]:
     """Load stem lists from the materializer (single source of truth)."""
     import sys
 
@@ -1209,15 +1214,17 @@ def _noclip_sparse_smoke_stems() -> tuple[tuple[str, ...], tuple[str, ...], tupl
         all_stems,
         gpu0_stems,
         gpu1_stems,
+        gpu2_stems,
     )
 
-    return all_stems(), gpu0_stems(), gpu1_stems()
+    return all_stems(), gpu0_stems(), gpu1_stems(), gpu2_stems()
 
 
 (
     NOCLIP_SPARSE_SMOKE_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU0_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU1_STEMS,
+    NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
 ) = _noclip_sparse_smoke_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -1887,6 +1894,7 @@ SUITE_STEMS = {
     NOCLIP_SPARSE_SMOKE_SUITE: NOCLIP_SPARSE_SMOKE_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU0_SUITE: NOCLIP_SPARSE_SMOKE_GPU0_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU1_SUITE: NOCLIP_SPARSE_SMOKE_GPU1_STEMS,
+    NOCLIP_SPARSE_SMOKE_GPU2_SUITE: NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -1996,6 +2004,7 @@ SUITE_RTPT: dict[str, str] = {
     NOCLIP_SPARSE_SMOKE_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_GPU0_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_GPU1_SUITE: "noclip_sm",
+    NOCLIP_SPARSE_SMOKE_GPU2_SUITE: "noclip_sm",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -3551,10 +3560,10 @@ def main() -> None:
             "pixel-meta tandem 20M from clip10 sparse skills (gpu1); "
             "two terminals with --suite sparse_cda_clip_extremes_gpu{{0,1}} "
             "--wait-deps --skip-rq-gate. "
-            f"{NOCLIP_SPARSE_SMOKE_SUITE} / _gpu0|_gpu1: noclip+sparse 20M "
+            f"{NOCLIP_SPARSE_SMOKE_SUITE} / _gpu0|_gpu1|_gpu2: noclip+sparse 20M "
             "ego scratch + flat PQN + from-scratch tandem on bases "
-            "(SQ/PH/NTG/AS) + transfers; two terminals with "
-            "--suite noclip_sparse_smoke_gpu{{0,1}} --wait-deps --skip-rq-gate. "
+            "(SQ/PH/NTG/AS) + transfers; three terminals with "
+            "--suite noclip_sparse_smoke_gpu{{0,1,2}} --wait-deps --skip-rq-gate. "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
             "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
             "(vs pixel tandem sparse); --wait-deps --skip-rq-gate --video. "
