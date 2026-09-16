@@ -349,7 +349,7 @@ template. (Kaboom deferred until the env lands upstream.)
 1. **Minimal ego** trains + SQ/Pong/BR/PH eval → lock spine channels (§0). ✅
 1b. **Distance clip lock** — sparse C/D/A → **noclip** (§0.1). ✅
 2. **Labels + heuristics:** NTG / TP / Asteroids wired. ✅
-3. **Next:** suite **`noclip_sparse_smoke`** / `_gpu0` / `_gpu1` —
+3. **Next:** suite **`noclip_sparse_smoke`** / `_gpu0` / `_gpu1` / `_gpu2` —
    per env (bases + transfers): ego scratch 20M + flat PQN 20M +
    from-scratch pixel tandem 20M + home mod evals. Asteroids = 4th base;
    TP = transfer; Montezuma deferred; no FT / no warmstart tandem /
