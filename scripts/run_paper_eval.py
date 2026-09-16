@@ -1143,6 +1143,55 @@ SPARSE_CDA_CLIP_TRANSFER_STEMS = (
     SPARSE_CDA_CLIP_TRANSFER_GPU0_STEMS + SPARSE_CDA_CLIP_TRANSFER_GPU1_STEMS
 )
 
+# Sparse C/D/A clip extremes overnight (clip0 / noclip + tandem-from-skills).
+#   python scripts/materialize_sparse_cda_clip_extremes.py
+#   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
+#       --suite sparse_cda_clip_extremes_gpu0 --wait-deps --skip-rq-gate
+#   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \
+#       --suite sparse_cda_clip_extremes_gpu1 --wait-deps --skip-rq-gate
+#   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \
+#       --suite sparse_cda_clip_extremes_gpu2 --wait-deps --skip-rq-gate
+SPARSE_CDA_CLIP_EXTREMES_SUITE = "sparse_cda_clip_extremes"
+SPARSE_CDA_CLIP_EXTREMES_GPU0_SUITE = "sparse_cda_clip_extremes_gpu0"
+SPARSE_CDA_CLIP_EXTREMES_GPU1_SUITE = "sparse_cda_clip_extremes_gpu1"
+SPARSE_CDA_CLIP_EXTREMES_GPU2_SUITE = "sparse_cda_clip_extremes_gpu2"
+_SPARSE_CDA_EXTREMES_SPINE_CLIP0 = (
+    "clip0_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+)
+_SPARSE_CDA_EXTREMES_SPINE_NOCLIP = (
+    "noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
+)
+_SPARSE_CDA_EXTREMES_TRANSFER_ENVS = _SPARSE_CDA_CLIP_TRANSFER_ENVS
+
+
+def _sparse_cda_extremes_clip_pipeline(spine: str) -> tuple[str, ...]:
+    train = f"seaquest_skills_ego_pov_{spine}_skillmech_sparse_cda"
+    return (train, f"{train}_eval_full") + tuple(
+        f"{env}_transfer_ego_pov_{spine}_skillmech_sparse_cda"
+        for env in _SPARSE_CDA_EXTREMES_TRANSFER_ENVS
+    )
+
+
+SPARSE_CDA_CLIP_EXTREMES_GPU0_STEMS = _sparse_cda_extremes_clip_pipeline(
+    _SPARSE_CDA_EXTREMES_SPINE_CLIP0
+)
+SPARSE_CDA_CLIP_EXTREMES_GPU1_STEMS = _sparse_cda_extremes_clip_pipeline(
+    _SPARSE_CDA_EXTREMES_SPINE_NOCLIP
+)
+_SPARSE_CDA_TANDEM_FROM_SKILLS = (
+    "seaquest_tandem_pixel_from_skills_ego_pov_clip10_facing_psibins8_v2_"
+    "noblocking_noweapon_surfacesub5_sparse_cda_20m"
+)
+SPARSE_CDA_CLIP_EXTREMES_GPU2_STEMS = (
+    _SPARSE_CDA_TANDEM_FROM_SKILLS,
+    f"{_SPARSE_CDA_TANDEM_FROM_SKILLS}_eval",
+)
+SPARSE_CDA_CLIP_EXTREMES_STEMS = (
+    SPARSE_CDA_CLIP_EXTREMES_GPU0_STEMS
+    + SPARSE_CDA_CLIP_EXTREMES_GPU1_STEMS
+    + SPARSE_CDA_CLIP_EXTREMES_GPU2_STEMS
+)
+
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
 # Uneven pipelines → per-GPU suites (do not use --gpus round-robin on the union).
 #   python scripts/materialize_sparse_cda_clean.py
@@ -1804,6 +1853,10 @@ SUITE_STEMS = {
     SPARSE_CDA_CLIP_TRANSFER_SUITE: SPARSE_CDA_CLIP_TRANSFER_STEMS,
     SPARSE_CDA_CLIP_TRANSFER_GPU0_SUITE: SPARSE_CDA_CLIP_TRANSFER_GPU0_STEMS,
     SPARSE_CDA_CLIP_TRANSFER_GPU1_SUITE: SPARSE_CDA_CLIP_TRANSFER_GPU1_STEMS,
+    SPARSE_CDA_CLIP_EXTREMES_SUITE: SPARSE_CDA_CLIP_EXTREMES_STEMS,
+    SPARSE_CDA_CLIP_EXTREMES_GPU0_SUITE: SPARSE_CDA_CLIP_EXTREMES_GPU0_STEMS,
+    SPARSE_CDA_CLIP_EXTREMES_GPU1_SUITE: SPARSE_CDA_CLIP_EXTREMES_GPU1_STEMS,
+    SPARSE_CDA_CLIP_EXTREMES_GPU2_SUITE: SPARSE_CDA_CLIP_EXTREMES_GPU2_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -1907,6 +1960,10 @@ SUITE_RTPT: dict[str, str] = {
     SPARSE_CDA_CLIP_TRANSFER_SUITE: "sparse_zs",
     SPARSE_CDA_CLIP_TRANSFER_GPU0_SUITE: "sparse_zs",
     SPARSE_CDA_CLIP_TRANSFER_GPU1_SUITE: "sparse_zs",
+    SPARSE_CDA_CLIP_EXTREMES_SUITE: "sparse_ex",
+    SPARSE_CDA_CLIP_EXTREMES_GPU0_SUITE: "sparse_ex",
+    SPARSE_CDA_CLIP_EXTREMES_GPU1_SUITE: "sparse_ex",
+    SPARSE_CDA_CLIP_EXTREMES_GPU2_SUITE: "sparse_ex",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -3457,6 +3514,11 @@ def main() -> None:
             "(needs train ckpts); parallel: two terminals with "
             "--suite sparse_cda_clip_transfer_gpu{{0,1}} --wait-deps "
             "--skip-rq-gate. "
+            f"{SPARSE_CDA_CLIP_EXTREMES_SUITE} / _gpu0|_gpu1|_gpu2: overnight "
+            "clip0 (gpu0) + noclip (gpu1) train/eval/ZS + pixel-meta tandem "
+            "20M warm-started from clip10 sparse skills (gpu2); three "
+            "terminals with --suite sparse_cda_clip_extremes_gpu{{0,1,2}} "
+            "--wait-deps --skip-rq-gate. "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
             "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
             "(vs pixel tandem sparse); --wait-deps --skip-rq-gate --video. "
