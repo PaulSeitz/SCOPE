@@ -9,19 +9,16 @@ Same reward contract as ``sparse_cda_clean``. Arms:
     from-scratch sparse tandem 20M, but ``INIT_MODEL_PATH`` = clip10 sparse
     skills-only ckpt (skills keep training; meta from scratch)
 
-Suites (3-GPU overnight — plain ``run_paper_eval.py``, no shell wrappers)::
+Suites (2-GPU overnight — plain ``run_paper_eval.py``, no shell wrappers)::
 
   sparse_cda_clip_extremes_gpu0  — clip0 train → eval → ZS transfers
-  sparse_cda_clip_extremes_gpu1  — noclip train → eval → ZS transfers
-  sparse_cda_clip_extremes_gpu2  — tandem-from-skills 20M → home eval
+  sparse_cda_clip_extremes_gpu1  — noclip train → eval → ZS → tandem-from-skills 20M → eval
 
     python scripts/materialize_sparse_cda_clip_extremes.py
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
         --suite sparse_cda_clip_extremes_gpu0 --wait-deps --skip-rq-gate
     CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
         --suite sparse_cda_clip_extremes_gpu1 --wait-deps --skip-rq-gate
-    CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \\
-        --suite sparse_cda_clip_extremes_gpu2 --wait-deps --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -593,15 +590,11 @@ def gpu0_stems() -> tuple[str, ...]:
 
 
 def gpu1_stems() -> tuple[str, ...]:
-    return _clip_pipeline_stems("noclip")
-
-
-def gpu2_stems() -> tuple[str, ...]:
-    return (TANDEM_TRAIN, TANDEM_EVAL)
+    return _clip_pipeline_stems("noclip") + (TANDEM_TRAIN, TANDEM_EVAL)
 
 
 def all_stems() -> tuple[str, ...]:
-    return gpu0_stems() + gpu1_stems() + gpu2_stems()
+    return gpu0_stems() + gpu1_stems()
 
 
 def main() -> None:
@@ -616,8 +609,7 @@ def main() -> None:
     _write(_RQ3 / f"{TANDEM_TRAIN}.yaml", _tandem_train_yaml())
     _write(_RQ3 / f"{TANDEM_EVAL}.yaml", _tandem_eval_yaml())
     print(f"\ngpu0 clip0: {len(gpu0_stems())} stems")
-    print(f"gpu1 noclip: {len(gpu1_stems())} stems")
-    print(f"gpu2 tandem-from-skills: {len(gpu2_stems())} stems")
+    print(f"gpu1 noclip+tandem: {len(gpu1_stems())} stems")
     print(f"union: {len(all_stems())} stems")
 
 
