@@ -1195,14 +1195,22 @@ SPARSE_CDA_CLIP_EXTREMES_STEMS = (
 #       --suite noclip_sparse_smoke_gpu1 --wait-deps --skip-rq-gate
 #   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \
 #       --suite noclip_sparse_smoke_gpu2 --wait-deps --skip-rq-gate
+# After AS/TP tandem SystemExit cascade, fill gaps on one GPU:
+#   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
+#       --suite noclip_sparse_smoke_rerun --wait-deps --skip-rq-gate --resume
 NOCLIP_SPARSE_SMOKE_SUITE = "noclip_sparse_smoke"
 NOCLIP_SPARSE_SMOKE_GPU0_SUITE = "noclip_sparse_smoke_gpu0"
 NOCLIP_SPARSE_SMOKE_GPU1_SUITE = "noclip_sparse_smoke_gpu1"
 NOCLIP_SPARSE_SMOKE_GPU2_SUITE = "noclip_sparse_smoke_gpu2"
+NOCLIP_SPARSE_SMOKE_RERUN_SUITE = "noclip_sparse_smoke_rerun"
 
 
 def _noclip_sparse_smoke_stems() -> tuple[
-    tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
 ]:
     """Load stem lists from the materializer (single source of truth)."""
     import sys
@@ -1215,9 +1223,10 @@ def _noclip_sparse_smoke_stems() -> tuple[
         gpu0_stems,
         gpu1_stems,
         gpu2_stems,
+        rerun_stems,
     )
 
-    return all_stems(), gpu0_stems(), gpu1_stems(), gpu2_stems()
+    return all_stems(), gpu0_stems(), gpu1_stems(), gpu2_stems(), rerun_stems()
 
 
 (
@@ -1225,6 +1234,7 @@ def _noclip_sparse_smoke_stems() -> tuple[
     NOCLIP_SPARSE_SMOKE_GPU0_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU1_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
+    NOCLIP_SPARSE_SMOKE_RERUN_STEMS,
 ) = _noclip_sparse_smoke_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -1895,6 +1905,7 @@ SUITE_STEMS = {
     NOCLIP_SPARSE_SMOKE_GPU0_SUITE: NOCLIP_SPARSE_SMOKE_GPU0_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU1_SUITE: NOCLIP_SPARSE_SMOKE_GPU1_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU2_SUITE: NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
+    NOCLIP_SPARSE_SMOKE_RERUN_SUITE: NOCLIP_SPARSE_SMOKE_RERUN_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -2005,6 +2016,7 @@ SUITE_RTPT: dict[str, str] = {
     NOCLIP_SPARSE_SMOKE_GPU0_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_GPU1_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_GPU2_SUITE: "noclip_sm",
+    NOCLIP_SPARSE_SMOKE_RERUN_SUITE: "noclip_sm",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -2535,15 +2547,19 @@ def _check_rq_gate(paths: list[Path], *, seed: int) -> None:
     missing: list[str] = []
     for path in paths:
         raw = _load_yaml(path)
-        requires = list(raw.get("PAPER_EVAL_REQUIRES_RQ1") or [])
-        rq = int(raw.get("PAPER_EVAL_RQ", 1))
-        kind = str(raw.get("PAPER_EVAL_KIND", "")).lower()
-        phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
-        # Default gate for RQ>=2 train/finetune/transfer (not from_scratch with empty requires)
-        if not requires and rq >= 2 and phase != "train":
-            requires = list(RQ1_SKILL_STEMS[:1])  # at least ego
-        if kind in {"meta", "tandem"} and not requires:
-            requires = ["seaquest_skills_ego"]
+        # Explicit PAPER_EVAL_REQUIRES_RQ1 (even []) wins — from-scratch tandem
+        # sets [] and must not inherit the legacy seaquest_skills_ego wait.
+        if "PAPER_EVAL_REQUIRES_RQ1" in raw:
+            requires = list(raw.get("PAPER_EVAL_REQUIRES_RQ1") or [])
+        else:
+            requires = []
+            rq = int(raw.get("PAPER_EVAL_RQ", 1))
+            kind = str(raw.get("PAPER_EVAL_KIND", "")).lower()
+            phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
+            if not requires and rq >= 2 and phase != "train":
+                requires = list(RQ1_SKILL_STEMS[:1])
+            if kind in {"meta", "tandem"} and not requires:
+                requires = ["seaquest_skills_ego"]
         for stem in requires:
             ok, ckpt = _rq1_checkpoint_ready(str(stem), seed=seed)
             if not ok:
@@ -2557,7 +2573,9 @@ def _check_rq_gate(paths: list[Path], *, seed: int) -> None:
 
 def _required_rq1_stems(path: Path) -> list[str]:
     raw = _load_yaml(path)
-    requires = list(raw.get("PAPER_EVAL_REQUIRES_RQ1") or [])
+    if "PAPER_EVAL_REQUIRES_RQ1" in raw:
+        return [str(s) for s in (raw.get("PAPER_EVAL_REQUIRES_RQ1") or [])]
+    requires: list[str] = []
     rq = int(raw.get("PAPER_EVAL_RQ", 1))
     kind = str(raw.get("PAPER_EVAL_KIND", "")).lower()
     phase = str(raw.get("PAPER_EVAL_PHASE", "train")).lower()
@@ -3562,7 +3580,10 @@ def main() -> None:
             "--wait-deps --skip-rq-gate. "
             f"{NOCLIP_SPARSE_SMOKE_SUITE} / _gpu0|_gpu1|_gpu2: noclip+sparse 20M "
             "ego scratch + flat PQN + from-scratch tandem on bases "
-            "(SQ/PH/NTG/AS) + transfers; three terminals with "
+            "(SQ/PH/NTG/AS) + transfers (AS/TP skip tandem — turn not wired); "
+            f"{NOCLIP_SPARSE_SMOKE_RERUN_SUITE}: single-GPU --resume fill for "
+            "cascade gaps after turn+tandem SystemExit; "
+            "three terminals with "
             "--suite noclip_sparse_smoke_gpu{{0,1,2}} --wait-deps --skip-rq-gate. "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
             "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
