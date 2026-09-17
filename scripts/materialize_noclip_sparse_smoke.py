@@ -688,26 +688,14 @@ def env_pipeline_stems(env: str) -> tuple[str, ...]:
     return tuple(stems)
 
 
-# Stems that the AS/TP tandem SystemExit typically cascades past (schedule
-# reorders: rq2 tandem trains before most evals). Use with --resume.
-# Intentionally omits AS/TP tandem (unsupported) and gpu2 (no turn abort).
+# Single-GPU fill for work the dead gpu1 worker never reached.
+# Use with --resume. Omit AS/TP tandem (turn unsupported).
+#
+# Leave gpu0 alone to finish Phoenix tandem → NTG → Asteroids. This suite
+# only re-schedules Pong + Breakout (full skills/PQN/tandem pipelines).
 RERUN_STEMS: tuple[str, ...] = (
-    # gpu0 — after asteroids tandem abort
-    f"{_skills_stem('asteroids')}_eval",
-    f"{_skills_stem('namethisgame')}_eval",
-    f"{_skills_stem('phoenix')}_eval",
-    _tandem_stem("namethisgame"),
-    f"{_tandem_stem('namethisgame')}_eval",
-    _tandem_stem("phoenix"),
-    f"{_tandem_stem('phoenix')}_eval",
-    _tandem_stem("seaquest"),
-    f"{_tandem_stem('seaquest')}_eval",
-    # gpu1 — after timepilot tandem abort
-    f"{_skills_stem('breakout')}_eval",
-    f"{_skills_stem('pong')}_eval",
-    f"{_skills_stem('timepilot')}_eval",
-    f"{_tandem_stem('breakout')}_eval",
-    f"{_tandem_stem('pong')}_eval",
+    *env_pipeline_stems("pong"),
+    *env_pipeline_stems("breakout"),
 )
 
 
