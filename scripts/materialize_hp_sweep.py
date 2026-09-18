@@ -8,9 +8,9 @@ Stage ``skills`` — broader skills HP grid with locked ε B (unless a cell
 overrides). Constant ``SKILL_LR`` (no finish). Same mod gate + Pong/Beamrider
 base ZS. Each cell = 4 stems (train + SQ eval + 2 ZS).
 
-Stage ``tandem`` — from-scratch pixel-meta tandem ~5M; skill ε/LR locked to B
-defaults; sweep meta LR / meta ε / switch penalty. Home mod eval only
-(no ZS — keeps the suite light).
+Stage ``tandem`` — from-scratch pixel-meta tandem ~5M; skill ε locked to B,
+``SKILL_LR`` locked to skills-sweep winner ``lr1e3`` (1e-3); sweep meta LR /
+meta ε / switch penalty. Home mod eval only (no ZS — keeps the suite light).
 
     python scripts/materialize_hp_sweep.py --stage skills
     python scripts/materialize_hp_sweep.py --stage tandem
@@ -36,7 +36,10 @@ SPARSE_TAG = "sparse_cda"
 # 305 × 128 × 128 — batch-aligned ~5M probe budget.
 TIMESTEPS_5M = 4_997_120
 BUDGET_TAG = "5m"
-SKILL_LR = 0.0005  # constant; no SKILL_LR_FINISH
+# Skills-grid default (hp_sweep_skills baseline / ε-B anchor). Constant LR.
+SKILL_LR = 0.0005
+# Locked after hp_sweep_skills: lr1e3 won the robustness gate.
+LOCKED_SKILL_LR = 0.001
 
 # Locked after eps_sanity (cell B): stable on gate mods.
 LOCKED_EPS_START = 0.2
@@ -107,7 +110,7 @@ CELLS_SKILLS: dict[str, dict] = {
     "lam05": _locked_eps(LAMBDA=0.5, SKILL_LAMBDA=0.5),  # NEXUS options
 }
 
-# Tandem meta grid — skills use locked ε B + SKILL_LR=5e-4 via SKILL_EPS_*.
+# Tandem meta grid — skills use locked ε B + LOCKED_SKILL_LR via SKILL_EPS_*/SKILL_LR.
 # EPS_START feeds meta ε when META_EPS_* unset (train_tandem fallback).
 CELLS_TANDEM: dict[str, dict] = {
     "meta_lr1e4": {"META_LR": 1e-4, "EPS_START": 0.1},
@@ -628,7 +631,7 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
         "  META_EMBED_DIM: 256",
         "  SKILL_EMBED_DIM: 256",
         f"  META_LR: {meta_lr}",
-        f"  SKILL_LR: {SKILL_LR}",
+        f"  SKILL_LR: {LOCKED_SKILL_LR}",
         "  META_USE_NOOP_TARGET: true",
         "  META_NOOP_TARGET_IDX: 0",
         f"  META_SWITCH_PENALTY: {switch}",
@@ -824,7 +827,8 @@ def materialize(*, stage: str, dry: bool) -> None:
         stems = tandem_sweep_stems()
         print(
             f"\n{SUITE_TANDEM}: {len(CELLS_TANDEM)} cells, {len(stems)} stems "
-            f"({len(CELLS_TANDEM)}×2: train+home eval; skill ε locked B)"
+            f"({len(CELLS_TANDEM)}×2: train+home eval; "
+            f"skill ε B + LR={LOCKED_SKILL_LR})"
         )
         for tag in CELLS_TANDEM:
             print(f"  {tag}: {CELLS_TANDEM[tag]}")
