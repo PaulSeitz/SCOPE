@@ -1195,17 +1195,22 @@ SPARSE_CDA_CLIP_EXTREMES_STEMS = (
 #       --suite noclip_sparse_smoke_gpu1 --wait-deps --skip-rq-gate
 #   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \
 #       --suite noclip_sparse_smoke_gpu2 --wait-deps --skip-rq-gate
-# After AS/TP tandem SystemExit cascade, fill gaps on one GPU:
+# After cascade gaps, fill on one GPU:
 #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
 #       --suite noclip_sparse_smoke_rerun --wait-deps --skip-rq-gate --resume
+# AS/TP tandem catch-up (turn primitives now wired in tandem):
+#   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
+#       --suite noclip_sparse_smoke_as_tp_tandem --wait-deps --skip-rq-gate
 NOCLIP_SPARSE_SMOKE_SUITE = "noclip_sparse_smoke"
 NOCLIP_SPARSE_SMOKE_GPU0_SUITE = "noclip_sparse_smoke_gpu0"
 NOCLIP_SPARSE_SMOKE_GPU1_SUITE = "noclip_sparse_smoke_gpu1"
 NOCLIP_SPARSE_SMOKE_GPU2_SUITE = "noclip_sparse_smoke_gpu2"
 NOCLIP_SPARSE_SMOKE_RERUN_SUITE = "noclip_sparse_smoke_rerun"
+NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE = "noclip_sparse_smoke_as_tp_tandem"
 
 
 def _noclip_sparse_smoke_stems() -> tuple[
+    tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
@@ -1220,13 +1225,21 @@ def _noclip_sparse_smoke_stems() -> tuple[
         sys.path.insert(0, scripts_dir)
     from materialize_noclip_sparse_smoke import (  # type: ignore
         all_stems,
+        as_tp_tandem_stems,
         gpu0_stems,
         gpu1_stems,
         gpu2_stems,
         rerun_stems,
     )
 
-    return all_stems(), gpu0_stems(), gpu1_stems(), gpu2_stems(), rerun_stems()
+    return (
+        all_stems(),
+        gpu0_stems(),
+        gpu1_stems(),
+        gpu2_stems(),
+        rerun_stems(),
+        as_tp_tandem_stems(),
+    )
 
 
 (
@@ -1235,6 +1248,7 @@ def _noclip_sparse_smoke_stems() -> tuple[
     NOCLIP_SPARSE_SMOKE_GPU1_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
     NOCLIP_SPARSE_SMOKE_RERUN_STEMS,
+    NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_STEMS,
 ) = _noclip_sparse_smoke_stems()
 
 # Exploration sanity + later HP sweeps (constant SKILL_LR; see materialize_hp_sweep.py).
@@ -1932,6 +1946,7 @@ SUITE_STEMS = {
     NOCLIP_SPARSE_SMOKE_GPU1_SUITE: NOCLIP_SPARSE_SMOKE_GPU1_STEMS,
     NOCLIP_SPARSE_SMOKE_GPU2_SUITE: NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
     NOCLIP_SPARSE_SMOKE_RERUN_SUITE: NOCLIP_SPARSE_SMOKE_RERUN_STEMS,
+    NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE: NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_STEMS,
     EPS_SANITY_SUITE: EPS_SANITY_STEMS,
     HP_SWEEP_SKILLS_SUITE: HP_SWEEP_SKILLS_STEMS,
     HP_SWEEP_TANDEM_SUITE: HP_SWEEP_TANDEM_STEMS,
@@ -2046,6 +2061,7 @@ SUITE_RTPT: dict[str, str] = {
     NOCLIP_SPARSE_SMOKE_GPU1_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_GPU2_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_RERUN_SUITE: "noclip_sm",
+    NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE: "noclip_sm",
     EPS_SANITY_SUITE: "eps_san",
     HP_SWEEP_SKILLS_SUITE: "hp_sk",
     HP_SWEEP_TANDEM_SUITE: "hp_td",
@@ -3613,9 +3629,11 @@ def main() -> None:
             "--wait-deps --skip-rq-gate. "
             f"{NOCLIP_SPARSE_SMOKE_SUITE} / _gpu0|_gpu1|_gpu2: noclip+sparse 20M "
             "ego scratch + flat PQN + from-scratch tandem on bases "
-            "(SQ/PH/NTG/AS) + transfers (AS/TP skip tandem — turn not wired); "
+            "(SQ/PH/NTG/AS) + transfers (AS/TP turn primitives on skills+tandem); "
             f"{NOCLIP_SPARSE_SMOKE_RERUN_SUITE}: single-GPU --resume fill for "
-            "cascade gaps after turn+tandem SystemExit; "
+            "cascade gaps; "
+            f"{NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE}: AS+TP tandem train/eval "
+            "catch-up; "
             "three terminals with "
             "--suite noclip_sparse_smoke_gpu{{0,1,2}} --wait-deps --skip-rq-gate. "
             f"{EPS_SANITY_SUITE}: Seaquest skills ~5M ε schedule sanity "

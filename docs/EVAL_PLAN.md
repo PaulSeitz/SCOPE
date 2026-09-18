@@ -353,7 +353,9 @@ template. (Kaboom deferred until the env lands upstream.)
    per env (bases + transfers): ego scratch 20M + flat PQN 20M +
    from-scratch pixel tandem 20M + home mod evals. Asteroids = 4th base;
    TP = transfer; Montezuma deferred; no FT / no warmstart tandem /
-   no cross-ZS in this suite. Materialize:
+   no cross-ZS in this suite. AS/TP use turn primitives on skills **and**
+   tandem (`noclip_sparse_smoke_as_tp_tandem` catch-up if the first smoke
+   skipped those cells). Materialize:
    `python scripts/materialize_noclip_sparse_smoke.py`
 4. **Mods workshop** (categories above × env). Implement missing jaxatari
    mods only for the locked ~8–12.

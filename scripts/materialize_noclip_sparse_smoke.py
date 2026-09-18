@@ -7,7 +7,7 @@ pixel-meta tandem — each ``19_988_480`` steps — plus home mod evals.
 Bases: seaquest, phoenix, namethisgame, asteroids
 Transfers: timepilot, pong, breakout, beamrider, spaceinvaders, freeway
 
-Asteroids / Time Pilot skip tandem (turn primitives are skills_only-only).
+Asteroids / Time Pilot use turn primitives (dim 6) on skills *and* tandem.
 
     python scripts/materialize_noclip_sparse_smoke.py
     # three terminals:
@@ -17,9 +17,12 @@ Asteroids / Time Pilot skip tandem (turn primitives are skills_only-only).
         --suite noclip_sparse_smoke_gpu1 --wait-deps --skip-rq-gate
     CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py \\
         --suite noclip_sparse_smoke_gpu2 --wait-deps --skip-rq-gate
-    # fill gaps after a turn+tandem abort (single GPU, skips done work):
+    # fill gaps after a cascade abort (single GPU, skips done work):
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
         --suite noclip_sparse_smoke_rerun --wait-deps --skip-rq-gate --resume
+    # AS/TP tandem catch-up (omitted from the first smoke while turn was skills-only):
+    CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
+        --suite noclip_sparse_smoke_as_tp_tandem --wait-deps --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -667,25 +670,29 @@ def _tandem_eval_yaml(env: str) -> str:
 
 
 def env_pipeline_stems(env: str) -> tuple[str, ...]:
-    """Train→eval order for one env.
-
-    Turn-primitive envs (asteroids / timepilot) skip tandem: ``main.py``
-    ``outer_make_tandem_train`` SystemExits when ``USE_POV_TURN_PRIMITIVES``
-    is set (heading state not carried in the tandem trainer).
-    """
-    stems = [
+    """Train→eval order for one env (skills → PQN → tandem, each with home eval)."""
+    return (
         _skills_stem(env),
         f"{_skills_stem(env)}_eval",
         _pqn_stem(env),
         f"{_pqn_stem(env)}_eval",
-    ]
-    if env not in TURN_ENVS:
-        stems.extend([_tandem_stem(env), f"{_tandem_stem(env)}_eval"])
-    return tuple(stems)
+        _tandem_stem(env),
+        f"{_tandem_stem(env)}_eval",
+    )
+
+
+def as_tp_tandem_stems() -> tuple[str, ...]:
+    """Catch-up: Asteroids + Time Pilot tandem train/eval only."""
+    return (
+        _tandem_stem("asteroids"),
+        f"{_tandem_stem('asteroids')}_eval",
+        _tandem_stem("timepilot"),
+        f"{_tandem_stem('timepilot')}_eval",
+    )
 
 
 # Single-GPU fill for work the dead gpu1 worker never reached.
-# Use with --resume. Omit AS/TP tandem (turn unsupported).
+# Use with --resume.
 #
 # Leave gpu0 alone to finish Phoenix tandem → NTG → Asteroids. This suite
 # only re-schedules Pong + Breakout (full skills/PQN/tandem pipelines).
@@ -749,9 +756,6 @@ def materialize(*, dry: bool) -> None:
         _write(skills_dir / f"{skills}_eval.yaml", _skills_eval_yaml(env), dry=dry)
         _write(_RQ1 / f"{pqn}.yaml", _pqn_train_yaml(env), dry=dry)
         _write(_RQ1 / f"{pqn}_eval.yaml", _pqn_eval_yaml(env), dry=dry)
-        if env in TURN_ENVS:
-            # Do not write / refresh unsupported turn+tandem configs.
-            continue
         tandem = _tandem_stem(env)
         tandem_dir = _RQ3 if env == "seaquest" else _RQ2
         _write(tandem_dir / f"{tandem}.yaml", _tandem_train_yaml(env), dry=dry)
@@ -761,12 +765,13 @@ def materialize(*, dry: bool) -> None:
     print(
         f"\nenvs={len(ENV_ORDER)} stems={len(all_stems())} "
         f"gpu0={len(gpu0_stems())} gpu1={len(gpu1_stems())} "
-        f"gpu2={len(gpu2_stems())} rerun={len(rerun_stems())}"
+        f"gpu2={len(gpu2_stems())} rerun={len(rerun_stems())} "
+        f"as_tp_tandem={len(as_tp_tandem_stems())}"
     )
     print(f"gpu0 envs: {', '.join(gpu0_envs())}")
     print(f"gpu1 envs: {', '.join(gpu1_envs())}")
     print(f"gpu2 envs: {', '.join(gpu2_envs())}")
-    print("skip tandem: asteroids, timepilot (turn primitives unsupported in tandem)")
+    print(f"as_tp_tandem suite: {', '.join(as_tp_tandem_stems())}")
     print(f"rerun suite: {', '.join(rerun_stems())}")
 
 
