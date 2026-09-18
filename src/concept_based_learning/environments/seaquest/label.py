@@ -50,6 +50,12 @@ _SURFACE_SUB_ENEMY_SLOT = 24
 # Thesis collectsurface spine uses COLLECT; navigatesurface A/B restores NAVIGATE.
 SEAQUEST_SURFACE_LABEL = LABEL_COLLECT
 
+# Eval-only E2 remap for ``swap_diver_enemy_labels`` (paper_eval ModSpec.relabel).
+# Matches the fork plugin: OC channels swap divers ↔ first 4 enemies, so labels
+# must follow those slots. Never enable from GAME_MODS alone; env_manager forces
+# this off when ``train=True``.
+SEAQUEST_SWAP_DIVER_ENEMY_LABELS = False
+
 _SURFACE_LABEL_ALIASES = {
     "collect": LABEL_COLLECT,
     "label_collect": LABEL_COLLECT,
@@ -73,6 +79,12 @@ def set_seaquest_surface_label(label) -> None:
         SEAQUEST_SURFACE_LABEL = _SURFACE_LABEL_ALIASES[key]
         return
     SEAQUEST_SURFACE_LABEL = int(label)
+
+
+def set_seaquest_swap_diver_enemy_labels(enabled) -> None:
+    """Eval-only: remap diver↔enemy skill labels after fork OC channel swap."""
+    global SEAQUEST_SWAP_DIVER_ENEMY_LABELS
+    SEAQUEST_SWAP_DIVER_ENEMY_LABELS = bool(enabled)
 
 
 def select_surface_waypoint_x(
@@ -310,13 +322,23 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         enemy_missiles_h      = projectiles.height[1:]
         enemy_missiles_active = projectiles.active[1:]
 
-        # Labels
-        diver_labels          = jnp.full(4,  LABEL_COLLECT, dtype=jnp.int32)
-        enemy_labels          = jnp.concatenate([
-            jnp.full(24, LABEL_DESTROY, dtype=jnp.int32),
-            jnp.array([LABEL_AVOID],    dtype=jnp.int32),   # surface sub
-        ])
-        enemy_missile_labels  = jnp.full(4,  LABEL_AVOID, dtype=jnp.int32)
+        # Labels (standard: divers COLLECT, sharks/subs DESTROY, surface sub AVOID).
+        # With SEAQUEST_SWAP_DIVER_ENEMY_LABELS (eval E2): fork SwapDiverEnemyLabelsMod
+        # puts enemies in diver slots and divers in enemy[:4], so remap those slots.
+        if SEAQUEST_SWAP_DIVER_ENEMY_LABELS:
+            diver_labels = jnp.full(4, LABEL_DESTROY, dtype=jnp.int32)
+            enemy_labels = jnp.concatenate([
+                jnp.full(4, LABEL_COLLECT, dtype=jnp.int32),   # divers in enemy[:4]
+                jnp.full(20, LABEL_DESTROY, dtype=jnp.int32),  # remaining enemies
+                jnp.array([LABEL_AVOID], dtype=jnp.int32),     # surface sub
+            ])
+        else:
+            diver_labels = jnp.full(4, LABEL_COLLECT, dtype=jnp.int32)
+            enemy_labels = jnp.concatenate([
+                jnp.full(24, LABEL_DESTROY, dtype=jnp.int32),
+                jnp.array([LABEL_AVOID], dtype=jnp.int32),  # surface sub
+            ])
+        enemy_missile_labels = jnp.full(4, LABEL_AVOID, dtype=jnp.int32)
 
         # can_go_offscreen flags: enemies and missiles scroll off the screen edges.
         diver_offscreen         = jnp.zeros(4,  dtype=jnp.int32)
@@ -408,16 +430,14 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
     def _stamp_events_on_observation(self, semantic_obs, kill_mask):
         if kill_mask is None:
             return semantic_obs
-        # Game layout (34 slots) → +1 meta-NOOP → 35 stacked object indices.
+        # Game layout (34 slots) then trailing meta-NOOP → 35 stacked object indices.
         was_killed_game = jnp.concatenate([
             jnp.zeros(4, dtype=jnp.int32),
             kill_mask.astype(jnp.int32),
             jnp.zeros(4, dtype=jnp.int32),
             jnp.zeros(1, dtype=jnp.int32),
         ])
-        was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), was_killed_game]
-        )
+        was_killed_with_noop = self._with_meta_event_padding(was_killed_game)
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))

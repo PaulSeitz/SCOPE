@@ -39,7 +39,7 @@ alg:
   META_DEATH_PENALTY: 0.0
   # Freeway tandem disables NOOP target; meta picks cars or the top COLLECT goal.
   META_USE_NOOP_TARGET: true
-  META_NOOP_TARGET_IDX: 0
+  META_NOOP_TARGET_IDX: null
   META_REWARD_LAMBDA: 1.0
 
   RESTRICT_FIRE_FOR_NON_DESTROY: false

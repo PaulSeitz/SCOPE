@@ -95,9 +95,6 @@ Usage:
   #   python scripts/materialize_thesis_facing_suite.py
   #   CUDA_VISIBLE_DEVICES=0,1 python scripts/run_paper_eval.py \\
   #     --suite thesis_facing --gpus 0,1 --wait-deps --lean --resume
-  # Turn primitives alone (train + Seaquest mod eval + Pong zero-shot):
-  CUDA_VISIBLE_DEVICES=3 python scripts/run_paper_eval.py --suite pov_turn --wait-deps --lean
-
   # Surface-gap reward retrains (AABB approach shaping; obs–reward aligned):
   #   2 GPUs — Kangaroo (clip50+θ8) + Seaquest navigatesurface → SQ eval → Pong:
   python scripts/run_paper_eval.py --suite surfacegap_dual --gpus 0,1 --wait-deps --lean
@@ -971,15 +968,13 @@ EGO_MIN_SURFACESUB5_CANFIRE_OVERNIGHT_STEMS = (
   #   python scripts/materialize_seaquest_meta_oc_ablation.py
   #   python scripts/run_paper_eval.py --suite seaquest_meta_oc_ablation \\
   #       --gpus 0,1,2 --wait-deps --lean
-# Asteroids/Time Pilot scratch use turn primitives (dim 6); ZS stays facing so SQ loads.
+# Asteroids/Time Pilot scratch use the same facing spine as other ALE envs.
 # SQ ZS source: …_surfacesub5_skillmech (ungated multi-skill rewards).
 # Appended: Montezuma scratch; SQ skills 10M (+ sparse C/D/A 10M); Δxy skillmech
 # negative control (+ Pong/BR/PH ZS); pixel+ego tandem on SQ+scratch except
 # Montezuma (home mod eval + ZS from SQ tandem skills only).
 ALE_CLIP10_HEU_SMOKE_SUITE = "ale_clip10_heu_smoke"
 _ALE_CLIP10_SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
-_ALE_CLIP10_TURN_SPINE = "clip10_turn_psibins8_v2_noblocking_noweapon_surfacesub5"
-_ALE_CLIP10_TURN_SCRATCH = frozenset({"asteroids", "timepilot"})
 _ALE_CLIP10_SCRATCH_ENVS = (
     "phoenix",
     "namethisgame",
@@ -1023,11 +1018,8 @@ _ALE_CLIP10_DELTAXY_ZS = ("pong", "beamrider", "phoenix")
 
 
 def _ale_clip10_scratch_spine(env: str) -> str:
-    return (
-        _ALE_CLIP10_TURN_SPINE
-        if env in _ALE_CLIP10_TURN_SCRATCH
-        else _ALE_CLIP10_SPINE
-    )
+    del env
+    return _ALE_CLIP10_SPINE
 
 
 def _ale_clip10_tandem_stem(env: str) -> str:
@@ -1200,6 +1192,7 @@ SPARSE_CDA_CLIP_EXTREMES_STEMS = (
 #       --suite noclip_sparse_smoke_rerun --wait-deps --skip-rq-gate --resume
 # AS/TP tandem catch-up (turn primitives now wired in tandem):
 #   CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \
+#       --suite noclip_sparse_smoke_as_tp_scratch --wait-deps --skip-rq-gate
 #       --suite noclip_sparse_smoke_as_tp_tandem --wait-deps --skip-rq-gate
 NOCLIP_SPARSE_SMOKE_SUITE = "noclip_sparse_smoke"
 NOCLIP_SPARSE_SMOKE_GPU0_SUITE = "noclip_sparse_smoke_gpu0"
@@ -1207,9 +1200,11 @@ NOCLIP_SPARSE_SMOKE_GPU1_SUITE = "noclip_sparse_smoke_gpu1"
 NOCLIP_SPARSE_SMOKE_GPU2_SUITE = "noclip_sparse_smoke_gpu2"
 NOCLIP_SPARSE_SMOKE_RERUN_SUITE = "noclip_sparse_smoke_rerun"
 NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE = "noclip_sparse_smoke_as_tp_tandem"
+NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_SUITE = "noclip_sparse_smoke_as_tp_scratch"
 
 
 def _noclip_sparse_smoke_stems() -> tuple[
+    tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
@@ -1225,6 +1220,7 @@ def _noclip_sparse_smoke_stems() -> tuple[
         sys.path.insert(0, scripts_dir)
     from materialize_noclip_sparse_smoke import (  # type: ignore
         all_stems,
+        as_tp_scratch_stems,
         as_tp_tandem_stems,
         gpu0_stems,
         gpu1_stems,
@@ -1239,6 +1235,7 @@ def _noclip_sparse_smoke_stems() -> tuple[
         gpu2_stems(),
         rerun_stems(),
         as_tp_tandem_stems(),
+        as_tp_scratch_stems(),
     )
 
 
@@ -1249,6 +1246,7 @@ def _noclip_sparse_smoke_stems() -> tuple[
     NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
     NOCLIP_SPARSE_SMOKE_RERUN_STEMS,
     NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_STEMS,
+    NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_STEMS,
 ) = _noclip_sparse_smoke_stems()
 
 # Exploration sanity + later HP sweeps (constant SKILL_LR; see materialize_hp_sweep.py).
@@ -1626,14 +1624,6 @@ POV_VEL_PSIBINS8_STEMS = (
     "seaquest_skills_ego_pov_clip50_vel_psibins8_eval_full",
     "pong_transfer_ego_pov_clip50_vel_psibins8",
 )
-# Persistent-heading turn primitives (6 ego actions) on the vel+ψ-bins8 obs.
-POV_TURN_SUITE = "pov_turn"
-POV_TURN_STEMS = (
-    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn",
-    "seaquest_skills_ego_pov_clip50_vel_psibins8_turn_eval_full",
-    "pong_transfer_ego_pov_clip50_vel_psibins8_turn",
-)
-
 # Virtual bilateral sectors (target-selected L/R or U/D) + forward-hemisphere φ.
 # Order is shard-critical: 3 GPUs each own one full arm (train → eval → pong → beam).
 POV_FIXED2_SUITE = "pov_fixed2"
@@ -1947,6 +1937,7 @@ SUITE_STEMS = {
     NOCLIP_SPARSE_SMOKE_GPU2_SUITE: NOCLIP_SPARSE_SMOKE_GPU2_STEMS,
     NOCLIP_SPARSE_SMOKE_RERUN_SUITE: NOCLIP_SPARSE_SMOKE_RERUN_STEMS,
     NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE: NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_STEMS,
+    NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_SUITE: NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_STEMS,
     EPS_SANITY_SUITE: EPS_SANITY_STEMS,
     HP_SWEEP_SKILLS_SUITE: HP_SWEEP_SKILLS_STEMS,
     HP_SWEEP_TANDEM_SUITE: HP_SWEEP_TANDEM_STEMS,
@@ -1979,7 +1970,6 @@ SUITE_STEMS = {
     POV_VEL_SUITE: POV_VEL_STEMS,
     POV_PSIBINS8_SUITE: POV_PSIBINS8_STEMS,
     POV_VEL_PSIBINS8_SUITE: POV_VEL_PSIBINS8_STEMS,
-    POV_TURN_SUITE: POV_TURN_STEMS,
     POV_FIXED2_SUITE: POV_FIXED2_STEMS,
     POV_FIXED2_TRAIN_SUITE: POV_FIXED2_TRAIN_STEMS,
     POV_FACING_SUITE: POV_FACING_STEMS,
@@ -2062,6 +2052,7 @@ SUITE_RTPT: dict[str, str] = {
     NOCLIP_SPARSE_SMOKE_GPU2_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_RERUN_SUITE: "noclip_sm",
     NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE: "noclip_sm",
+    NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_SUITE: "noclip_sm",
     EPS_SANITY_SUITE: "eps_san",
     HP_SWEEP_SKILLS_SUITE: "hp_sk",
     HP_SWEEP_TANDEM_SUITE: "hp_td",
@@ -2094,7 +2085,6 @@ SUITE_RTPT: dict[str, str] = {
     POV_VEL_SUITE: "pov_vel",
     POV_PSIBINS8_SUITE: "psi8",
     POV_VEL_PSIBINS8_SUITE: "vel_psi8",
-    POV_TURN_SUITE: "turn",
     POV_FIXED2_SUITE: "fixed2",
     POV_FIXED2_TRAIN_SUITE: "fixed2",
     POV_FACING_SUITE: "facing",
@@ -3108,9 +3098,6 @@ _EVAL_OVERRIDE_KEYS = (
     "POV_BILATERAL_AXIS",
     "USE_POV_FACING_FRAME",
     "EGO_POSE_XY",
-    "USE_POV_TURN_PRIMITIVES",
-    "POV_TURN_STEP_DEG",
-    "POV_TURN_INITIAL_HEADING_DEG",
     "EGO_ACTION_DIM",
     "SKILL_POLICY_MODE",
     "FIXED_EGO_ALIGN_DEG",
@@ -3629,9 +3616,11 @@ def main() -> None:
             "--wait-deps --skip-rq-gate. "
             f"{NOCLIP_SPARSE_SMOKE_SUITE} / _gpu0|_gpu1|_gpu2: noclip+sparse 20M "
             "ego scratch + flat PQN + from-scratch tandem on bases "
-            "(SQ/PH/NTG/AS) + transfers (AS/TP turn primitives on skills+tandem); "
+            "(SQ/PH/NTG/AS) + transfers (AS/TP rotate-aim facing motor); "
             f"{NOCLIP_SPARSE_SMOKE_RERUN_SUITE}: single-GPU --resume fill for "
             "cascade gaps; "
+            f"{NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_SUITE}: AS+TP skills+tandem "
+            "trains only (no evals) after rotate-aim remount; "
             f"{NOCLIP_SPARSE_SMOKE_AS_TP_TANDEM_SUITE}: AS+TP tandem train/eval "
             "catch-up; "
             "three terminals with "

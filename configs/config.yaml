@@ -41,7 +41,7 @@ META_ARCHITECTURE: "per_object_mlp"
 # Object layout: index 0 is always reserved meta NOOP (see meta_object_layout.py).
 # MAX_OBJECTS counts that slot plus game entities (configs use env-specific totals).
 # META_USE_NOOP_TARGET: false
-# META_NOOP_TARGET_IDX: 0
+# META_NOOP_TARGET_IDX: null
 # Hidden trunk depth per meta architecture (fallback: META_NUM_LAYERS, then 3).
 META_NUM_LAYERS: 3
 META_PER_OBJECT_NUM_LAYERS: 3   # per_object_mlp only

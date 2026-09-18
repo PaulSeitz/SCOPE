@@ -1,0 +1,14 @@
+---
+description: Do not use open_resource/API to open canvases or diagram images — tell the user the path to open manually
+alwaysApply: true
+---
+
+# Manual open for canvases / viz assets
+
+`cursor-app-control.open_resource` (and similar “open in Glass” APIs) are unreliable in this environment — hangs or no-ops are a consistent issue.
+
+When producing a canvas, generated diagram, or other file the user should view:
+
+- **Do not** call `open_resource` (or equivalent) to open it.
+- **Do** give the exact filesystem path and tell the user to open it manually.
+- Same for `.canvas.tsx` under `~/.cursor/projects/.../canvases/` — name the file; do not try to open it via API.

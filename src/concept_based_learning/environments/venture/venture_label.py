@@ -110,12 +110,7 @@ class VentureSemanticWrapper(JaxatariSemanticBaseWrapper):
     def _stamp_events_on_observation(self, semantic_obs, kill_mask):
         if kill_mask is None:
             return semantic_obs
-        was_killed_with_meta = jnp.concatenate(
-            [
-                jnp.zeros(self.meta_reserved_slots, dtype=jnp.int32),
-                kill_mask.astype(jnp.int32),
-            ]
-        )
+        was_killed_with_meta = self._with_meta_event_padding(kill_mask)
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_meta)
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
@@ -123,12 +118,7 @@ class VentureSemanticWrapper(JaxatariSemanticBaseWrapper):
     def _stamp_collect_events_on_observation(self, semantic_obs, collect_mask):
         if collect_mask is None:
             return semantic_obs
-        was_collected_with_meta = jnp.concatenate(
-            [
-                jnp.zeros(self.meta_reserved_slots, dtype=jnp.int32),
-                collect_mask.astype(jnp.int32),
-            ]
-        )
+        was_collected_with_meta = self._with_meta_event_padding(collect_mask)
         objects = semantic_obs.objects
         new_wc = objects.was_collected.at[-1].set(was_collected_with_meta)
         return semantic_obs.replace(objects=objects.replace(was_collected=new_wc))

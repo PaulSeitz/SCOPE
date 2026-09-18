@@ -47,11 +47,6 @@ def configure_pov_fixed_bilateral_from_config(config: dict | None) -> None:
             "USE_POV_FIXED_BILATERAL requires USE_POV_RELATIVE_MAPPER: the mapper "
             "still uses body-relative facing tables keyed by virtual sector."
         )
-    if enabled and bool(cfg.get("USE_POV_TURN_PRIMITIVES", False)):
-        raise ValueError(
-            "USE_POV_FIXED_BILATERAL is incompatible with USE_POV_TURN_PRIMITIVES: "
-            "sector selection is target-based, not heading-integrated."
-        )
     if enabled and bool(cfg.get("USE_EGO_VELOCITY_FEATURES", False)):
         raise ValueError(
             "USE_POV_FIXED_BILATERAL does not define a velocity channel; set "

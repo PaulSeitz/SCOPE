@@ -31,11 +31,30 @@ def merge_train_and_eval_game_mods(
 
     Eval specs replace GAME_MODS; if the agent was trained with e.g.
     ``no_surfacing_death``, that mod must still apply on ``base`` / OOD keys.
+
+    Does **not** enable CBL label remaps — those are driven only by
+    ``ModSpec.relabel`` via ``_apply_eval_mod_label_overrides``.
     """
     train = [str(m) for m in (config.get("GAME_MODS") or []) if m]
     extra = [str(m) for m in (eval_mods or []) if m]
     merged = list(dict.fromkeys(train + extra))
     return merged or None
+
+
+def _apply_eval_mod_label_overrides(
+    eval_cfg: dict[str, Any], mod: ModSpec
+) -> dict[str, Any]:
+    """Eval-only semantic label overrides for architecture adaptability (E2).
+
+    Driven solely by ``mod.relabel`` from the allowlist YAML — never by whether
+    ``swap_diver_enemy_labels`` (or any other key) appears in merged GAME_MODS.
+    Sets ``_PAPER_EVAL_MOD_RELABEL`` so env_manager will not apply the remap on
+    train-time ``test_env`` builds that lack this sentinel.
+    """
+    eval_cfg["_PAPER_EVAL_MOD_RELABEL"] = True
+    # Explicit False on every condition so a prior True cannot stick via shared dicts.
+    eval_cfg["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] = bool(mod.relabel)
+    return eval_cfg
 
 
 def _rtpt_tick_eval_mod() -> None:
@@ -132,7 +151,9 @@ def run_hierarchical_mod_eval(
         merged = merge_train_and_eval_game_mods(config, mod.mods)
         eval_cfg["GAME_MODS"] = merged
         eval_cfg.pop("EVAL_GAME_MODS", None)
-        print(f"\n--- hierarchical / {mod.key} (mods={merged or 'none'}) ---")
+        _apply_eval_mod_label_overrides(eval_cfg, mod)
+        relabel_s = " relabel=on" if mod.relabel else ""
+        print(f"\n--- hierarchical / {mod.key} (mods={merged or 'none'}){relabel_s} ---")
         stats = run_greedy_eval_episodes(
             eval_cfg,
             params_tree=params_tree,
@@ -145,6 +166,7 @@ def run_hierarchical_mod_eval(
         )
         stats["mods"] = list(merged or ())
         stats["category"] = mod.category
+        stats["relabel"] = bool(mod.relabel)
         results[mod.key] = stats
         _rtpt_tick_eval_mod()
     _attach_drop_from_base(results)
@@ -200,9 +222,14 @@ def _overlay_ego_flags_from_skill_config(
             "EGO_ANGLE_BINS",
             "EGO_ANGLE_BINS_SCALAR",
             "EGO_ANGLE_SINCOS_SNAP",
+            "EGO_PSI_ANGLE_BINS",
+            "EGO_PSI_ANGLE_SCALAR",
+            "EGO_POSE_XY",
+            "USE_POV_RELATIVE_MAPPER",
+            "USE_POV_FIXED_BILATERAL",
+            "USE_POV_FACING_FRAME",
             "FRAME_STACK_SIZE",
             "SKILL_INPUT_MODE",
-            "USE_POV_RELATIVE_MAPPER",
         ):
             if key not in src:
                 continue
@@ -286,7 +313,15 @@ def run_mod_eval(
         "max_frames": int(max_frames),
         "skill_input_mode": str(config.get("SKILL_INPUT_MODE", "")),
         "meta_input_mode": str(config.get("META_INPUT_MODE", "")),
-        "mods": [{"key": m.key, "mods": list(m.mods), "category": m.category} for m in mod_specs],
+        "mods": [
+            {
+                "key": m.key,
+                "mods": list(m.mods),
+                "category": m.category,
+                "relabel": bool(m.relabel),
+            }
+            for m in mod_specs
+        ],
     }
     if extra_meta:
         payload.update(extra_meta)

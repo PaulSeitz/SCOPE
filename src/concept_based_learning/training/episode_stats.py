@@ -69,6 +69,8 @@ def remaining_lives_from_semantic_state(state):
         lives = env_state.lives
     elif hasattr(env_state, "player_lives"):
         lives = env_state.player_lives
+    elif hasattr(env_state, "lives_remaining"):
+        lives = env_state.lives_remaining
     else:
         lives = jnp.array(1, dtype=jnp.int32)
     return lives.astype(jnp.int32)

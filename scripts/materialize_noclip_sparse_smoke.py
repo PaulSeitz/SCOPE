@@ -7,7 +7,8 @@ pixel-meta tandem — each ``19_988_480`` steps — plus home mod evals.
 Bases: seaquest, phoenix, namethisgame, asteroids
 Transfers: timepilot, pong, breakout, beamrider, spaceinvaders, freeway
 
-Asteroids / Time Pilot use turn primitives (dim 6) on skills *and* tandem.
+Asteroids / Time Pilot use facing-frame + rotate-aim motor (dim 18) on skills
+and tandem (same mapper as transfer).
 
     python scripts/materialize_noclip_sparse_smoke.py
     # three terminals:
@@ -20,7 +21,10 @@ Asteroids / Time Pilot use turn primitives (dim 6) on skills *and* tandem.
     # fill gaps after a cascade abort (single GPU, skips done work):
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
         --suite noclip_sparse_smoke_rerun --wait-deps --skip-rq-gate --resume
-    # AS/TP tandem catch-up (omitted from the first smoke while turn was skills-only):
+    # AS+TP from-scratch only (skills + tandem trains; no home/ZS evals):
+    CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
+        --suite noclip_sparse_smoke_as_tp_scratch --wait-deps --skip-rq-gate
+    # AS/TP tandem catch-up (train+home eval):
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
         --suite noclip_sparse_smoke_as_tp_tandem --wait-deps --skip-rq-gate
 """
@@ -37,8 +41,6 @@ _RQ3 = _ROOT / "configs/experiment/paper_eval/rq3"
 
 SUITE = "noclip_sparse_smoke"
 SPINE = "noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
-TURN_SPINE = "noclip_turn_psibins8_v2_noblocking_noweapon_surfacesub5"
-TURN_ENVS = frozenset({"asteroids", "timepilot"})
 SPARSE_TAG = "sparse_cda"
 BUDGET_TAG = "20m"
 TIMESTEPS = 19_988_480
@@ -77,7 +79,8 @@ def _role(env: str) -> str:
 
 
 def _spine(env: str) -> str:
-    return TURN_SPINE if env in TURN_ENVS else SPINE
+    del env
+    return SPINE
 
 
 def _skills_stem(env: str) -> str:
@@ -134,32 +137,7 @@ def _write(path: Path, body: str, *, dry: bool) -> None:
 
 
 def _ego_lines(env: str) -> list[str]:
-    if env in TURN_ENVS:
-        step = 22.5 if env == "asteroids" else 45.0
-        return [
-            "USE_POV_RELATIVE_MAPPER: true",
-            "USE_POV_FIXED_BILATERAL: false",
-            "USE_POV_FACING_FRAME: false",
-            "USE_POV_TURN_PRIMITIVES: true",
-            f"POV_TURN_STEP_DEG: {step}",
-            "POV_TURN_INITIAL_HEADING_DEG: null",
-            "EGO_POSE_XY: false",
-            "USE_LEGACY_EGO_OBS: false",
-            "USE_EGO_SIZE_FEATURES: false",
-            "USE_EGO_VELOCITY_FEATURES: false",
-            "USE_EGO_BLOCKING_FEATURES: false",
-            "USE_EGO_WEAPON_FEATURES: false",
-            "USE_EGO_SHOT_FEATURES: false",
-            "AVOID_INTERRUPT_RANGE: 55",
-            "AVOID_INTERRUPT_RANGE_Y: 55",
-            "SURFACE_SUB_AVOID_RANGE_X: 5",
-            "SURFACE_SUB_AVOID_RANGE_Y: 5",
-            "EGO_DISTANCE_CLIP_MAX_PX: null",
-            "EGO_ANGLE_BINS: null",
-            "EGO_PSI_ANGLE_BINS: 8",
-            "EGO_LEGAL_ACTION_MASK: false",
-            "SURFACE_SUB_NEAR_RANGE: 5",
-        ]
+    del env
     return [
         "USE_POV_RELATIVE_MAPPER: true",
         "USE_POV_FIXED_BILATERAL: false",
@@ -192,13 +170,10 @@ def _seaquest_legacy_lines() -> list[str]:
 
 
 def _mapper_tags(env: str) -> list[str]:
-    if env in TURN_ENVS:
-        return [
-            "- mapper:pov_relative",
-            "- mapper:turn_primitives",
-            "- ego:psi_bins8",
-        ]
-    return ["- mapper:pov_facing", "- ego:phi_bins8"]
+    tags = ["- mapper:pov_facing", "- ego:phi_bins8"]
+    if env in {"asteroids", "timepilot"}:
+        tags.append("- motor:rotate_aim")
+    return tags
 
 
 def _sparse_top() -> list[str]:
@@ -239,8 +214,6 @@ def _skills_train_yaml(env: str) -> str:
     spine = _spine(env)
     rq = _skills_rq(env)
     rq_dir = _skills_rq_dir(env)
-    turn = env in TURN_ENVS
-    ego_dim = 6 if turn else 18
     phase = "skills_only" if env == "seaquest" else "from_scratch"
     lines: list[str] = [
         f"# {env} ego skills — noclip + sparse C/D/A (~20M).",
@@ -287,7 +260,7 @@ def _skills_train_yaml(env: str) -> str:
         "  - AVOID",
         "  - NAVIGATE",
         f"  MAX_OBJECTS: {meta['max_objects']}",
-        f"  EGO_ACTION_DIM: {ego_dim}",
+        "  EGO_ACTION_DIM: 18",
         "  HIDDEN_SIZE: 128",
         "  NUM_LAYERS: 3",
         "  SKILL_EMBED_DIM: 256",
@@ -322,6 +295,7 @@ def _skills_train_yaml(env: str) -> str:
         "  SKILL_INPUT_MODE: ego",
         "  SKILL_DEATH_PENALIZE_COLLECT: true",
     ]
+    # NOTE: sparse + shot flags appended below; keep EGO_ACTION_DIM at 18 for all envs.
     lines += _sparse_alg()
     lines += [
         "  USE_EGO_SHOT_FEATURES: false",
@@ -484,8 +458,6 @@ def _tandem_train_yaml(env: str) -> str:
     spine = _spine(env)
     rq = _tandem_rq(env)
     rq_dir = _tandem_rq_dir(env)
-    turn = env in TURN_ENVS
-    ego_dim = 6 if turn else 18
     lines: list[str] = [
         f"# {env} tandem from-scratch — pixel meta + ego skills (~20M).",
         f"PAPER_EVAL_RQ: {rq}",
@@ -524,8 +496,8 @@ def _tandem_train_yaml(env: str) -> str:
         "- 84",
         "META_PIXEL_GRAYSCALE: true",
         "SKILL_PIXEL_CNN_CHANNELS:",
-        "- 16",
         "- 32",
+        "- 64",
         "GAME_MODS: null",
         "EVAL_GAME_MODS: null",
         "META_INPUT_MODE: pixel_embed",
@@ -545,7 +517,7 @@ def _tandem_train_yaml(env: str) -> str:
         "  - AVOID",
         "  - NAVIGATE",
         f"  MAX_OBJECTS: {meta['max_objects']}",
-        f"  EGO_ACTION_DIM: {ego_dim}",
+        "  EGO_ACTION_DIM: 18",
         "  HIDDEN_SIZE: 128",
         "  NUM_LAYERS: 3",
         "  META_HIDDEN_SIZE: 256",
@@ -556,9 +528,9 @@ def _tandem_train_yaml(env: str) -> str:
         "  META_LR: 0.0005",
         "  SKILL_LR: 0.0005",
         "  META_USE_NOOP_TARGET: true",
-        "  META_NOOP_TARGET_IDX: 0",
+        "  META_NOOP_TARGET_IDX: null",
         "  META_SWITCH_PENALTY: -0.05",
-        "  META_DEATH_PENALTY: -10.0",
+        "  META_DEATH_PENALTY: 0.0",
         "  META_REWARD_LAMBDA: 1.0",
         "  CLIP_REWARD: true",
         "  FIRST_FIRE: true",
@@ -584,8 +556,8 @@ def _tandem_train_yaml(env: str) -> str:
         "  META_INPUT_MODE: pixel_embed",
         "  SKILL_INPUT_MODE: ego",
         "  META_PIXEL_CNN_CHANNELS:",
-        "  - 16",
         "  - 32",
+        "  - 64",
         f"  HEURISTIC_MODE: {meta['heu']}",
         "  SKILL_DEATH_PENALIZE_COLLECT: true",
     ]
@@ -681,6 +653,19 @@ def env_pipeline_stems(env: str) -> tuple[str, ...]:
     )
 
 
+def as_tp_scratch_stems() -> tuple[str, ...]:
+    """Asteroids + Time Pilot from-scratch trains only (skills + tandem).
+
+    No home-mod or ZS transfer evals — reschedule after rotate-aim motor landed.
+    """
+    return (
+        _skills_stem("asteroids"),
+        _tandem_stem("asteroids"),
+        _skills_stem("timepilot"),
+        _tandem_stem("timepilot"),
+    )
+
+
 def as_tp_tandem_stems() -> tuple[str, ...]:
     """Catch-up: Asteroids + Time Pilot tandem train/eval only."""
     return (
@@ -766,11 +751,13 @@ def materialize(*, dry: bool) -> None:
         f"\nenvs={len(ENV_ORDER)} stems={len(all_stems())} "
         f"gpu0={len(gpu0_stems())} gpu1={len(gpu1_stems())} "
         f"gpu2={len(gpu2_stems())} rerun={len(rerun_stems())} "
-        f"as_tp_tandem={len(as_tp_tandem_stems())}"
+        f"as_tp_tandem={len(as_tp_tandem_stems())} "
+        f"as_tp_scratch={len(as_tp_scratch_stems())}"
     )
     print(f"gpu0 envs: {', '.join(gpu0_envs())}")
     print(f"gpu1 envs: {', '.join(gpu1_envs())}")
     print(f"gpu2 envs: {', '.join(gpu2_envs())}")
+    print(f"as_tp_scratch suite: {', '.join(as_tp_scratch_stems())}")
     print(f"as_tp_tandem suite: {', '.join(as_tp_tandem_stems())}")
     print(f"rerun suite: {', '.join(rerun_stems())}")
 

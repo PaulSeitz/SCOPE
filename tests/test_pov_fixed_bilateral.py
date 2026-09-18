@@ -45,16 +45,6 @@ def test_flag_requires_pov_mapper():
         configure_pov_fixed_bilateral_from_config({"USE_POV_FIXED_BILATERAL": True})
 
 
-def test_incompatible_with_turn_primitives():
-    with pytest.raises(ValueError, match="incompatible with USE_POV_TURN_PRIMITIVES"):
-        configure_pov_fixed_bilateral_from_config(
-            {
-                **FIXED2_BASE_CFG,
-                "USE_POV_TURN_PRIMITIVES": True,
-            }
-        )
-
-
 def test_incompatible_with_velocity():
     with pytest.raises(ValueError, match="USE_EGO_VELOCITY_FEATURES"):
         configure_pov_fixed_bilateral_from_config(

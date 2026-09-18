@@ -37,9 +37,9 @@ def extract_all_skills_rewards(
 # ACTION_SET indices (Discrete(14) → ALE ids):
 #   0=NOOP 1=FIRE 2=UP 3=RIGHT 4=LEFT 5=DOWN 6=UPRIGHT 7=UPLEFT
 #   8=UPFIRE 9=RIGHTFIRE 10=LEFTFIRE 11=DOWNFIRE 12=UPRIGHTFIRE 13=UPLEFTFIRE
-# LEFT/RIGHT rotate, UP thrusts. DOWN/DOWNFIRE are hyperspace — never map them.
+# LEFT/RIGHT rotate, UP thrusts, DOWN/DOWNFIRE = hyperspace (ego BACKWARD*).
 _ASTEROIDS_MOVE = [3, 6, 2, 7, 4, 7, 2, 6]  # R DR D→UP DL L UL U UR
-_ASTEROIDS_MOVE_FIRE = [9, 12, 8, 13, 10, 13, 8, 12]  # no DOWNFIRE (11)
+_ASTEROIDS_MOVE_FIRE = [9, 12, 8, 13, 10, 13, 8, 12]  # strafe-table legacy; POV uses rotate_aim
 
 asteroids_action_mapper, asteroids_inverse_action_mapper = make_target_aligned_action_mappers(
     noop_action=0,
@@ -105,9 +105,7 @@ class AsteroidsSemanticWrapper(JaxatariSemanticBaseWrapper):
     def _stamp_events_on_observation(self, semantic_obs, kill_mask):
         if kill_mask is None:
             return semantic_obs
-        was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32)]
-        )
+        was_killed_with_noop = self._with_meta_event_padding(kill_mask)
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))

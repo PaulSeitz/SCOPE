@@ -42,7 +42,6 @@ from concept_based_learning.observations.egocentric import (
     skill_ego_flat_dim,
 )
 from concept_based_learning.observations.pov_relative import resolve_action_mappers
-from concept_based_learning.observations.pov_turn import resolve_turn_mapper
 from concept_based_learning.training.skill_params import flatten_skill_params
 from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
 from concept_based_learning.pqn_visualizer import (
@@ -177,7 +176,6 @@ def outer_make_train(config, frozen_meta_params=None):
         no_target_idx=components.no_target_idx,
         action_mapper=action_mapper,
         inverse_action_mapper=inverse_action_mapper,
-        turn_action_mapper=resolve_turn_mapper(components, config),
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
@@ -258,7 +256,6 @@ def outer_make_tandem_train(config):
         get_heuristic_target=heuristic_fn,
         action_mapper=action_mapper,
         inverse_action_mapper=inverse_action_mapper,
-        turn_action_mapper=resolve_turn_mapper(components, config),
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         meta_mask_hook=components.meta_mask_hook,
@@ -479,6 +476,7 @@ def single_run(config):
                         distances,
                         angles,
                         renderer,
+                        pov_overlay,
                     ) = run_eval_rollout(
                         phase_config,
                         params_tree=current_params,
@@ -499,6 +497,7 @@ def single_run(config):
                         video_key=video_key,
                         wandb_step=global_step_end_of_phase,
                         video_output_path=video_output_path,
+                        pov_overlay=pov_overlay,
                     )
                     wait_for_video_finish()
                     print(f"End-of-phase video for '{phase.name}' finished.")
@@ -708,6 +707,7 @@ def single_run(config):
                     distances,
                     angles,
                     renderer,
+                    pov_overlay,
                 ) = run_eval_rollout(
                     tandem_config,
                     params_tree=final_skill_params,
@@ -730,6 +730,7 @@ def single_run(config):
                     video_output_path=(
                         video_output_path if not use_wandb_video else None
                     ),
+                    pov_overlay=pov_overlay,
                 )
                 wait_for_video_finish()
             else:

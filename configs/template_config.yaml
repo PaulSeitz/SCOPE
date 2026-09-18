@@ -74,11 +74,8 @@ USE_LEGACY_SEAQUEST_ACTION_MAPPER: false           # Use old orientation-relativ
 USE_POV_RELATIVE_MAPPER: false                     # Body-facing mapper + sin/cos(ψ) ego obs (view=toward target). Options: true/false.
 USE_POV_FIXED_BILATERAL: false                     # Virtual L/R (or U/D) sectors from target geometry; forward-hemisphere φ obs. Requires USE_POV_RELATIVE_MAPPER. Options: true/false.
 POV_BILATERAL_AXIS: null                            # Override env profile axis for fixed bilateral: horizontal | vertical. null=use env profile. Options: null, horizontal, vertical.
-USE_POV_FACING_FRAME: false                        # FPS ego: view=player facing; target pose in body frame. Requires USE_POV_RELATIVE_MAPPER; incompatible with fixed bilateral / turn. Options: true/false.
+USE_POV_FACING_FRAME: false                        # FPS ego: view=player facing; target pose in body frame. Requires USE_POV_RELATIVE_MAPPER; incompatible with fixed bilateral. Options: true/false.
 EGO_POSE_XY: false                                 # Facing-frame only: emit (fwd, lat) instead of (distance, φ). Options: true/false.
-USE_POV_TURN_PRIMITIVES: false                     # POV-only: 6 turn primitives over a persistent internal heading (needs EGO_ACTION_DIM=6). Options: true/false.
-POV_TURN_STEP_DEG: 45.0                            # Degrees rotated per TURN_LEFT/TURN_RIGHT. Options: float in (0, 180].
-POV_TURN_INITIAL_HEADING_DEG: null                 # Heading at episode start / after reset. null=env POV profile bin-0 facing.
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: true             # Prevent ascent near surface in legacy behavior. Options: true/false.
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false   # Guard near-surface deaths in legacy behavior. Options: true/false.
 SEAQUEST_SURFACE_LABEL: collect                    # Surface WP skill: collect (thesis spine) | navigate (A/B restore). Options: collect|navigate.
@@ -117,10 +114,10 @@ DEBUG_INPUTS: false                  # Log/check rollout + train input shapes/fi
 # DEBUG_INPUTS_LOG_EVERY_N_UPDATES: 1 # Host log cadence while debugging. Options: int >= 1.
 
 # Optional meta special targets.
-META_USE_NOOP_TARGET: false         # Add/select NOOP pseudo-target. Options: true/false.
-META_NOOP_TARGET_IDX: 0             # Object index reserved for NOOP target. Options: int in [0, MAX_OBJECTS-1].
-META_USE_FIRE_TARGET: false         # Add/select FIRE pseudo-target. Options: true/false.
-META_FIRE_TARGET_IDX: 1             # Object index reserved for FIRE pseudo-target. Options: int in [0, MAX_OBJECTS-1].
+META_USE_NOOP_TARGET: false         # Add/select NOOP pseudo-target (appended last). Options: true/false.
+META_NOOP_TARGET_IDX: null          # NOOP slot index; null/"last"/<0 → MAX_OBJECTS-1. Options: int|null.
+META_USE_FIRE_TARGET: false         # Add/select FIRE pseudo-target (trailing block, before NOOP). Options: true/false.
+META_FIRE_TARGET_IDX: null          # FIRE slot index; null/"last"/<0 → MAX_OBJECTS-2. Options: int|null.
 META_FIRE_GAME_ACTION: 1            # Primitive game action triggered by FIRE target. Options: int action id.
 
 # Target persistence (meta output override across steps).
@@ -173,7 +170,7 @@ alg:
   META_NUM_EPOCHS: 3                # Meta epochs override in tandem. Options: int >= 1.
   META_REWARD_LAMBDA: 1.0           # Meta reward blending factor in tandem. Options: float.
   META_SWITCH_PENALTY: -0.05        # Penalty per meta target switch. Options: float.
-  META_DEATH_PENALTY: -10.0         # Penalty when life is lost/death event occurs. Options: float.
+  META_DEATH_PENALTY: 0.0           # Extra meta penalty on life loss (0 = off; env/episodic life still ends episode). Options: float.
 
   # Epsilon schedules.
   EPS_START: 0.3                    # Base epsilon start. Options: float in [0,1].

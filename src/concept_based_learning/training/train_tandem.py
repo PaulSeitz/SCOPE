@@ -14,12 +14,6 @@ from concept_based_learning.observations.action_space import (
     mask_q_with_legal_ego,
 )
 from concept_based_learning.observations.egocentric import get_ego_obs
-from concept_based_learning.observations.pov_turn import (
-    TURN_EGO_ACTION_DIM,
-    heading_after,
-    initial_heading_deg,
-    make_turn_legal_mask_fn,
-)
 from concept_based_learning.networks.skill_network import (
     OBJECT_CONDITIONED_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
@@ -106,7 +100,6 @@ def make_tandem_train(
     get_heuristic_target,
     action_mapper,
     inverse_action_mapper,
-    turn_action_mapper=None,
     extract_all_skills_rewards,
     extract_life_lost,
     meta_mask_hook,
@@ -132,29 +125,14 @@ def make_tandem_train(
     num_skills = config["NUM_SKILLS"]
     max_objects = config["MAX_OBJECTS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
-    use_turn_primitives = turn_action_mapper is not None
-    if use_turn_primitives and int(ego_action_dim) != TURN_EGO_ACTION_DIM:
-        raise ValueError(
-            f"USE_POV_TURN_PRIMITIVES needs EGO_ACTION_DIM={TURN_EGO_ACTION_DIM}, "
-            f"got {ego_action_dim}."
-        )
     use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
-    if use_turn_primitives:
-        turn_legal_mask_fn = make_turn_legal_mask_fn(
-            turn_action_mapper,
-            noop_action=int(ego_mapper_noop_action),
-            fire_action=int(ego_mapper_fire_action),
-        )
-        legal_ego_mask_fn = None
-    else:
-        turn_legal_mask_fn = None
-        legal_ego_mask_fn = make_legal_ego_mask_fn(
-            action_mapper,
-            mode=legal_ego_mask_mode_from_config(config) or "realized",
-            noop_action=int(ego_mapper_noop_action),
-            fire_action=int(ego_mapper_fire_action),
-            ego_action_dim=int(ego_action_dim),
-        )
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
+        action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
+        noop_action=int(ego_mapper_noop_action),
+        fire_action=int(ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
     skill_warmup_updates = int(config.get("SKILL_WARMUP_UPDATES", 0))
     meta_learn_during_warmup = bool(config.get("META_LEARN_DURING_WARMUP", False))
     meta_num_epochs = int(config.get("META_NUM_EPOCHS", config["NUM_EPOCHS"]))
@@ -286,29 +264,25 @@ def make_tandem_train(
             greedy_actions,
         )
 
-    def _skill_inputs(raw_obs, objects, target_idxs, headings=None):
+    def _skill_inputs(raw_obs, objects, target_idxs):
         if skill_input_mode in ("ego", "ego_embed"):
-            if headings is None:
-                return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
-            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs, headings)
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
         if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
-            if headings is None:
-                return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
-            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs, headings)
+            return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
             "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
         )
 
-    def _skill_input_single(raw_obs, objects, target_idx, heading=None):
+    def _skill_input_single(raw_obs, objects, target_idx):
         if skill_input_mode in ("ego", "ego_embed"):
-            return get_ego_obs(raw_obs, objects, target_idx, heading)
+            return get_ego_obs(raw_obs, objects, target_idx)
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
         if skill_input_mode in PIXEL_SKILL_INPUT_MODES:
-            return get_ego_obs(raw_obs, objects, target_idx, heading)
+            return get_ego_obs(raw_obs, objects, target_idx)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
             "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
@@ -327,7 +301,6 @@ def make_tandem_train(
             meta_state,
             skill_states,
             expl_state,
-            headings,
             running_returns,
             returned_episode_returns,
             returned_episode_lengths,
@@ -340,7 +313,6 @@ def make_tandem_train(
         ) = runner_state
         collect_carry = (
             expl_state,
-            headings,
             running_returns,
             returned_episode_returns,
             returned_episode_lengths,
@@ -355,7 +327,6 @@ def make_tandem_train(
     def _pack_runner_state(meta_state, skill_states, collect_carry, rng):
         (
             expl_state,
-            headings,
             running_returns,
             returned_episode_returns,
             returned_episode_lengths,
@@ -369,7 +340,6 @@ def make_tandem_train(
             meta_state,
             skill_states,
             expl_state,
-            headings,
             running_returns,
             returned_episode_returns,
             returned_episode_lengths,
@@ -407,9 +377,6 @@ def make_tandem_train(
                 lambda x: jnp.expand_dims(x, axis=0), probe_obs.objects
             ),
             jnp.expand_dims(probe_target, axis=0),
-            jnp.full((1,), initial_heading_deg(), dtype=jnp.float32)
-            if use_turn_primitives
-            else None,
         )[0]
         probe_pixel = (
             probe_obs.pixel_observation
@@ -463,9 +430,6 @@ def make_tandem_train(
 
         rng, _rng = jax.random.split(rng)
         init_expl = jax.vmap(env.reset)(jax.random.split(_rng, config["NUM_ENVS"]))
-        init_headings = jnp.full(
-            (config["NUM_ENVS"],), initial_heading_deg(), dtype=jnp.float32
-        )
         init_running_returns = jnp.zeros((config["NUM_ENVS"],), dtype=jnp.float32)
         returned_episode_returns, returned_episode_lengths, episode_lengths = (
             init_per_env_episode_stats(config["NUM_ENVS"])
@@ -481,7 +445,6 @@ def make_tandem_train(
             skill_states,
             (
                 init_expl,
-                init_headings,
                 init_running_returns,
                 returned_episode_returns,
                 returned_episode_lengths,
@@ -498,7 +461,6 @@ def make_tandem_train(
         """R1 — env rollout; returns updated carry, transitions, persist carry, car_hits, infos."""
         (
             expl_state,
-            headings,
             running_returns,
             returned_episode_returns,
             returned_episode_lengths,
@@ -516,7 +478,6 @@ def make_tandem_train(
                 running_returns,
                 rng,
                 last_targets,
-                headings,
                 car_hits_sum,
                 persist_steps_remaining,
                 suspended_mission_idxs,
@@ -638,12 +599,10 @@ def make_tandem_train(
                 last_obs.objects.semantic_label, safe_target_idxs
             )
             active_skills = label_to_skill_idx(raw_labels)
-            step_headings = headings if use_turn_primitives else None
             ego_obses = _skill_inputs(
                 last_obs.raw_observation,
                 last_obs.objects,
                 safe_target_idxs,
-                step_headings,
             )
             pixel_obses = (
                 last_obs.pixel_observation
@@ -702,14 +661,11 @@ def make_tandem_train(
                 mask_row = build_mask_for_skill(skill_idx)
                 mask = jnp.broadcast_to(mask_row, (config["NUM_ENVS"], ego_action_dim))
                 if use_legal_ego_mask:
-                    if use_turn_primitives:
-                        dyn = jax.vmap(turn_legal_mask_fn)(headings)
-                    else:
-                        dyn = jax.vmap(legal_ego_mask_fn)(
-                            last_obs.raw_observation,
-                            safe_target_idxs,
-                            last_obs.objects,
-                        )
+                    dyn = jax.vmap(legal_ego_mask_fn)(
+                        last_obs.raw_observation,
+                        safe_target_idxs,
+                        last_obs.objects,
+                    )
                     mask = jnp.logical_and(mask, dyn)
 
                 ego_action = jax.vmap(eps_greedy_exploration)(
@@ -760,25 +716,12 @@ def make_tandem_train(
             force_noop = jnp.logical_or(target_obj_idxs == no_target_idx, meta_noop)
             chosen_ego_actions = jnp.where(force_noop, 0, chosen_ego_actions)
 
-            if use_turn_primitives:
-                # Integrate the turn first: the primitive moves along the heading
-                # it just rotated to, so the mapper sees the post-turn heading.
-                new_headings = jax.vmap(heading_after)(headings, chosen_ego_actions)
-                global_actions = jax.vmap(turn_action_mapper)(
-                    chosen_ego_actions,
-                    new_headings,
-                    last_obs.raw_observation,
-                    target_obj_idxs,
-                    last_obs.objects,
-                )
-            else:
-                new_headings = headings
-                global_actions = jax.vmap(action_mapper)(
-                    chosen_ego_actions,
-                    last_obs.raw_observation,
-                    target_obj_idxs,
-                    last_obs.objects,
-                )
+            global_actions = jax.vmap(action_mapper)(
+                chosen_ego_actions,
+                last_obs.raw_observation,
+                target_obj_idxs,
+                last_obs.objects,
+            )
             global_actions = jnp.where(
                 meta_fire,
                 jnp.full_like(global_actions, meta_fire_action),
@@ -898,7 +841,7 @@ def make_tandem_train(
                 meta_reward_lambda * base_env_reward
                 + (1.0 - meta_reward_lambda) * active_skill_reward
             )
-            meta_death_penalty = float(config.get("META_DEATH_PENALTY", -5.0))
+            meta_death_penalty = float(config.get("META_DEATH_PENALTY", 0.0))
             meta_switch_penalty = float(config.get("META_SWITCH_PENALTY", -0.5))
             meta_reward = (
                 blended_reward
@@ -918,8 +861,6 @@ def make_tandem_train(
             next_state_for_rollout = merge_reset_where_done(
                 new_env_state, reset_state, reset_mask
             )
-            init_heading = jnp.float32(initial_heading_deg())
-            headings = jnp.where(reset_mask, init_heading, new_headings)
             target_obj_idxs = jnp.where(
                 new_done,
                 jnp.full_like(target_obj_idxs, no_target_idx),
@@ -938,12 +879,10 @@ def make_tandem_train(
                     objs, raw, config, hook=meta_mask_hook
                 )
             )(next_obs_for_rollout.objects, next_obs_for_rollout.raw_observation)
-            next_step_headings = headings if use_turn_primitives else None
             next_ego_obses = _skill_inputs(
                 next_obs_for_rollout.raw_observation,
                 next_obs_for_rollout.objects,
                 safe_target_idxs,
-                next_step_headings,
             )
 
             if relabel_all_objects:
@@ -1101,7 +1040,6 @@ def make_tandem_train(
                 running_returns,
                 rng,
                 target_obj_idxs,
-                headings,
                 car_hits_sum,
                 persist_steps_remaining,
                 suspended_mission_idxs,
@@ -1131,7 +1069,6 @@ def make_tandem_train(
                 running_returns,
                 _rng,
                 init_targets,
-                headings,
                 init_car_hits_sum,
                 init_persist_steps,
                 init_suspended_mission,
@@ -1163,7 +1100,6 @@ def make_tandem_train(
             running_returns,
             rng,
             _last_targets,
-            headings,
             car_hits_sum,
             _persist_steps_remaining,
             _suspended_mission_idxs,
@@ -1184,7 +1120,6 @@ def make_tandem_train(
         )
         new_collect_carry = (
             expl_state,
-            headings,
             running_returns,
             returned_episode_returns,
             returned_episode_lengths,

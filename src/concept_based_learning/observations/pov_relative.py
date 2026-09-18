@@ -61,11 +61,11 @@ _MOVE_SPECS: dict[str, tuple[int, int, list[int], list[int]]] = {
     "spaceinvaders": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [4, 4, 1, 5, 5, 5, 1, 4]),
     "montezumarevenge": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
     "venture": (0, 1, [3, 8, 5, 9, 4, 7, 2, 6], [11, 16, 13, 17, 12, 15, 10, 14]),
-    # Asteroids ACTION_SET indices. DOWN/DOWNFIRE are hyperspace — map D→UP.
+    # Asteroids / Time Pilot: strafe tables kept for reference only. Live POV
+    # mapping uses rotate-to-aim motors in ``pov_rotate_aim`` (LEFT/RIGHT turn).
     "asteroids": (0, 1, [3, 6, 2, 7, 4, 7, 2, 6], [9, 12, 8, 13, 10, 13, 8, 12]),
     # Name This Game: same compact horizontal set as SpaceInvaders.
     "namethisgame": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [4, 4, 1, 5, 5, 5, 1, 4]),
-    # Time Pilot: cardinal-only ACTION_SET; diagonals collapse.
     "timepilot": (0, 1, [3, 3, 5, 4, 4, 4, 2, 3], [7, 7, 9, 8, 8, 8, 6, 7]),
     # Kaboom deferred (not in upstream jaxatari yet).
     # "kaboom": (0, 1, [2, 2, 0, 3, 3, 3, 0, 2], [2, 2, 1, 3, 3, 3, 1, 2]),
@@ -175,9 +175,8 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "horizontal",
     },
     "asteroids": {
-        # 16-way heading (22.5°). Screen degrees = sprite + (−90°). Honest motor
-        # is USE_POV_TURN_PRIMITIVES; these bins keep facing-frame obs/mapper
-        # aligned when turn primitives are off.
+        # 16-way heading (22.5°). Screen degrees = sprite + (−90°).
+        # POV motor is rotate/thrust (``pov_rotate_aim``), not world-strafe.
         "facing_deg_bins": tuple(
             ((-90.0 + i * 22.5 + 180.0) % 360.0) - 180.0 for i in range(16)
         ),
@@ -193,9 +192,9 @@ _POV_PROFILES: dict[str, dict[str, Any]] = {
         "bilateral_axis": "vertical",
     },
     "timepilot": {
-        # 8-way absolute-aim + stepwise rotate. Buttons request a compass heading;
-        # the game rotates one tick toward it (shortest path). 8 bins make ego
-        # FORWARD = current nose direction rather than a coarse L/R strafe.
+        # 8-way absolute-aim + stepwise rotate. POV mapper (``pov_rotate_aim``)
+        # picks the cardinal button that turns one tick LEFT/RIGHT from the
+        # current nose; FORWARD holds the current cardinal.
         "facing_deg_bins": (0.0, 45.0, 90.0, 135.0, 180.0, -135.0, -90.0, -45.0),
         "facing_deg_bin0": -90.0,
         "facing_deg_bin1": 90.0,
@@ -364,6 +363,18 @@ def make_facing_relative_mappers(
 ) -> tuple[Callable, Callable]:
     """Return (forward_mapper, inverse_mapper) for a game id."""
     game_key = str(jax_game_id).lower()
+    if game_key == "asteroids":
+        from concept_based_learning.observations.pov_rotate_aim import (
+            make_asteroids_rotate_mappers,
+        )
+
+        return make_asteroids_rotate_mappers(player_getter=player_getter)
+    if game_key == "timepilot":
+        from concept_based_learning.observations.pov_rotate_aim import (
+            make_timepilot_rotate_mappers,
+        )
+
+        return make_timepilot_rotate_mappers(player_getter=player_getter)
     if game_key not in _MOVE_SPECS:
         raise ValueError(
             f"No POV-relative move spec for jax_game_id={jax_game_id!r}. "

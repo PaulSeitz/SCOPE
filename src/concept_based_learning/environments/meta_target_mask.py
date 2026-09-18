@@ -8,8 +8,8 @@ import jax.numpy as jnp
 
 from concept_based_learning.environments.datatypes import LABEL_BLOCKER, LABEL_NOOP
 from concept_based_learning.environments.meta_object_layout import (
-    META_FIRE_OBJECT_IDX,
-    META_NOOP_OBJECT_IDX,
+    meta_fire_slot_index,
+    meta_noop_slot_index,
 )
 
 # jax_phoenix: enemy state >= 4 means death animation (not a valid target).
@@ -30,14 +30,49 @@ def _latest_object_frame(field: jnp.ndarray) -> jnp.ndarray:
     return field
 
 
+def _config_max_objects(config: Optional[dict]) -> int:
+    if not config:
+        return 0
+    return int(config.get("MAX_OBJECTS", 0))
+
+
+def _resolve_slot_idx(raw, *, default: int) -> int:
+    """``None`` / ``\"last\"`` / negative → ``default`` (absolute last-slot helpers)."""
+    if raw is None or raw == "last":
+        return int(default)
+    idx = int(raw)
+    if idx < 0:
+        return int(default)
+    return idx
+
+
+def meta_noop_target_idx(config: Optional[dict]) -> int:
+    """Object index for learnable NOOP (default: last slot = ``MAX_OBJECTS - 1``)."""
+    mo = _config_max_objects(config)
+    default = meta_noop_slot_index(mo)
+    if not config:
+        return default
+    return _resolve_slot_idx(config.get("META_NOOP_TARGET_IDX", None), default=default)
+
+
+def meta_fire_target_idx(config: Optional[dict]) -> int:
+    """Object index for learnable FIRE (default: first trailing reserved = ``MAX_OBJECTS - 2``)."""
+    mo = _config_max_objects(config)
+    # Assume 2 reserved when FIRE is used; callers with reserved=1 should not enable FIRE.
+    default = meta_fire_slot_index(mo, num_reserved=2)
+    if not config:
+        return default
+    return _resolve_slot_idx(config.get("META_FIRE_TARGET_IDX", None), default=default)
+
+
 def meta_noop_target_enabled(config: Optional[dict]) -> bool:
     """True when a dedicated meta-policy slot is reserved for learnable NOOP."""
     if not config:
         return False
     use_noop = bool(config.get("META_USE_NOOP_TARGET", False))
-    idx = int(config.get("META_NOOP_TARGET_IDX", 0))
-    max_objects = int(config.get("MAX_OBJECTS", 0))
-    return use_noop and 0 <= idx < max_objects
+    max_objects = _config_max_objects(config)
+    idx = meta_noop_target_idx(config)
+    return use_noop and max_objects > 0 and 0 <= idx < max_objects
 
 
 def meta_fire_target_enabled(config: Optional[dict]) -> bool:
@@ -45,23 +80,9 @@ def meta_fire_target_enabled(config: Optional[dict]) -> bool:
     if not config:
         return False
     use_fire = bool(config.get("META_USE_FIRE_TARGET", False))
-    idx = int(config.get("META_FIRE_TARGET_IDX", META_FIRE_OBJECT_IDX))
-    max_objects = int(config.get("MAX_OBJECTS", 0))
-    return use_fire and 0 <= idx < max_objects
-
-
-def meta_noop_target_idx(config: Optional[dict]) -> int:
-    """Object index used as the learnable NOOP meta action (defaults to reserved slot 0)."""
-    if not config:
-        return META_NOOP_OBJECT_IDX
-    return int(config.get("META_NOOP_TARGET_IDX", META_NOOP_OBJECT_IDX))
-
-
-def meta_fire_target_idx(config: Optional[dict]) -> int:
-    """Object index used as the learnable FIRE meta action (defaults to reserved slot 1)."""
-    if not config:
-        return META_FIRE_OBJECT_IDX
-    return int(config.get("META_FIRE_TARGET_IDX", META_FIRE_OBJECT_IDX))
+    max_objects = _config_max_objects(config)
+    idx = meta_fire_target_idx(config)
+    return use_fire and max_objects > 0 and 0 <= idx < max_objects
 
 
 def meta_fire_game_action(config: Optional[dict]) -> int:

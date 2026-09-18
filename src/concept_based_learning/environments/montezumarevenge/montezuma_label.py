@@ -283,9 +283,9 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         """Fill reserved COLLECT waypoint slots from current room ladders."""
         wp = _ladder_waypoints_from_state(env_state, player=player)
         objects = semantic_obs.objects
-        # Object arrays are [stack, max_objects] after meta prepend.
-        # Game layout starts at meta_reserved_slots (usually 1).
-        meta = self.meta_reserved_slots
+        # Object arrays are [stack, max_objects] after meta append.
+        # Game layout starts at index 0; meta slots are appended.
+        meta = self.game_slot_origin
         bot0 = meta + WP_BOT0
         top0 = meta + WP_TOP0
         n = _N_LADDERS
@@ -336,7 +336,7 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
         stand height — COLLECT must jump the chasm to arrive (room-1 right gap).
         """
         objects = semantic_obs.objects
-        meta = self.meta_reserved_slots
+        meta = self.game_slot_origin
         rope0 = meta + ROPE0
         n = _N_ROPES
         active = env_state.ropes_active.astype(jnp.int32)
@@ -462,9 +462,7 @@ class MontezumaRevengeSemanticWrapper(JaxatariSemanticBaseWrapper):
     def _stamp_collect_events_on_observation(self, semantic_obs, collect_mask):
         if collect_mask is None:
             return semantic_obs
-        was_collected_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), collect_mask.astype(jnp.int32)]
-        )
+        was_collected_with_noop = self._with_meta_event_padding(collect_mask)
         objects = semantic_obs.objects
         new_wc = objects.was_collected.at[-1].set(was_collected_with_noop)
         return semantic_obs.replace(objects=objects.replace(was_collected=new_wc))

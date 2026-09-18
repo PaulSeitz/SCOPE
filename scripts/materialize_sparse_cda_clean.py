@@ -522,8 +522,8 @@ def _tandem_train_yaml() -> str:
         - 84
         META_PIXEL_GRAYSCALE: true
         SKILL_PIXEL_CNN_CHANNELS:
-        - 16
         - 32
+        - 64
         GAME_MODS: null
         EVAL_GAME_MODS: null
         META_INPUT_MODE: pixel_embed
@@ -554,9 +554,9 @@ def _tandem_train_yaml() -> str:
           META_LR: 0.0005
           SKILL_LR: 0.0005
           META_USE_NOOP_TARGET: true
-          META_NOOP_TARGET_IDX: 0
+          META_NOOP_TARGET_IDX: null
           META_SWITCH_PENALTY: -0.05
-          META_DEATH_PENALTY: -10.0
+          META_DEATH_PENALTY: 0.0
           META_REWARD_LAMBDA: 1.0
           CLIP_REWARD: true
           FIRST_FIRE: true
@@ -582,8 +582,8 @@ def _tandem_train_yaml() -> str:
           META_INPUT_MODE: pixel_embed
           SKILL_INPUT_MODE: ego
           META_PIXEL_CNN_CHANNELS:
-          - 16
           - 32
+          - 64
           HEURISTIC_MODE: env_specific
           SKILL_DEATH_PENALIZE_COLLECT: true
           __SPARSE_ALG__

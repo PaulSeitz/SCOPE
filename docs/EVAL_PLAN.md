@@ -219,7 +219,7 @@ matrix (§3) on clip10.
 | **Seaquest** | Main robustness env; **all** skill input modes (ego / pixel / oc). |
 | **Phoenix** | Second shooter layout; labels already exist; Space Invaders is a free homologous target. |
 | **Name This Game** | Homologous underwater world (COLLECT + DESTROY). Policy: when the catcher/treasure field appears, **stick COLLECT** and keep it selected while it is active; dense reward for staying inside. Easy heuristic. |
-| **Asteroids** | Promoted turn-family base (2026-09-16): true continuous heading, `USE_POV_TURN_PRIMITIVES` (strafe≠turn). Native POV test; SQ→AS ZS allowed to fail. |
+| **Asteroids** | Rotate/thrust family base: continuous ship facing + `pov_rotate_aim` motor (LEFT/RIGHT turn). SQ→AS ZS allowed to fail (strafe≠turn). |
 
 Time Pilot stays **transfer** (8-way homologous target for later AS→TP).
 Do not promote both; one turn-family base is enough.
@@ -264,20 +264,18 @@ So Seaquest is not “continuous facing that happens to look L/R.” It is
 **strafe-in-8-world-dirs + flip the hull**. Ego LEFT means translate
 perpendicular to facing, not rotate the ship.
 
-- **Time Pilot (8-way):** facing-frame 8-bin snap still exists for SQ→TP ZS
-  (strafe≠turn fail cell). Scratch / homologous AS↔TP trains use
-  `USE_POV_TURN_PRIMITIVES`: θ_h at 45° ticks, FORWARD = absolute-aim along
-  θ_h (cardinal ACTION_SET).
-- **Asteroids:** true continuous heading. Honest mapping is FORWARD=thrust,
-  LEFT/RIGHT=**turn** (no strafe) via `USE_POV_TURN_PRIMITIVES` (6 actions,
-  22.5° ticks) — **incompatible** with facing-frame. Do not pretend 18-way
-  strafe exists for scratch training.
+- **Time Pilot / Asteroids:** POV facing = **real ship nose** (facing-frame
+  bins: 16-way AS, 8-way TP). Shared 18-dim ego layout with Seaquest, but the
+  POV mapper is **rotate-to-aim** (`pov_rotate_aim`): LEFT/RIGHT turn, FORWARD
+  thrusts (AS) or holds heading (TP). Transfer and from-scratch use the **same**
+  mapper + facing-frame flags. SQ→AS/TP ZS is still allowed to fail (strafe ≠
+  turn); AS↔TP homologous transfer can succeed.
 
 **Story we want:** SQ → TP/Asteroids ZS is allowed to fail (strafe ≠ turn).
-Scratch-train one of them as a **base**, then transfer to the other. If that
-works, skills learned the rotate-and-thrust mechanic; they just were not
-born with it on Seaquest. That is homologous transfer inside a family, not
-a failed Seaquest transfer.
+Scratch-train one of them as a **base** with the rotate-aim motor, then transfer
+to the other. If that works, skills learned rotate-and-thrust; they just were
+not born with it on Seaquest. Homologous transfer inside a family, not a
+failed Seaquest transfer.
 
 ---
 
@@ -353,9 +351,8 @@ template. (Kaboom deferred until the env lands upstream.)
    per env (bases + transfers): ego scratch 20M + flat PQN 20M +
    from-scratch pixel tandem 20M + home mod evals. Asteroids = 4th base;
    TP = transfer; Montezuma deferred; no FT / no warmstart tandem /
-   no cross-ZS in this suite. AS/TP use turn primitives on skills **and**
-   tandem (`noclip_sparse_smoke_as_tp_tandem` catch-up if the first smoke
-   skipped those cells). Materialize:
+   no cross-ZS in this suite. AS/TP use facing-frame spines (θ_h purged).
+   Materialize:
    `python scripts/materialize_noclip_sparse_smoke.py`
 4. **Mods workshop** (categories above × env). Implement missing jaxatari
    mods only for the locked ~8–12.

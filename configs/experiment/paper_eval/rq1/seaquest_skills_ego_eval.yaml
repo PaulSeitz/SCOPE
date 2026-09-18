@@ -47,5 +47,5 @@ alg:
   HEURISTIC_MODE: env_specific
   SKILL_INPUT_MODE: ego
   SKILL_PIXEL_CNN_CHANNELS:
-  - 16
   - 32
+  - 64

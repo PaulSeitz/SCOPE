@@ -74,20 +74,60 @@ def _load_config_for_skills(
     from concept_based_learning.paper_eval.eval_harness import (
         _overlay_ego_flags_from_skill_config,
     )
+    from concept_based_learning.environments.datatypes import (
+        configure_label_routing_from_config,
+    )
+    from concept_based_learning.observations.egocentric import (
+        configure_ego_obs_from_config,
+    )
     from concept_based_learning.pqn_visualizer import (
+        _print_ego_runtime_summary,
         align_config_with_skill_checkpoint,
+        find_checkpoint_config_path,
         load_base_config,
         load_config_for_checkpoint,
         load_params_from_file,
     )
 
-    base = load_base_config(experiment=experiment)
-    base, _ = load_config_for_checkpoint(str(skills_path), base)
+    # Prefer the training sidecar next to the checkpoint. If missing, try the
+    # experiment yaml named after the run stem (parent of env/).
+    exp = experiment
+    sidecar = find_checkpoint_config_path(str(skills_path))
+    if exp is None and sidecar is None:
+        # .../tmp/eval18/<stem>/<env>/ckpt.safetensors → stem
+        stem = skills_path.parent.parent.name
+        for rq in ("rq1", "rq2", "rq3"):
+            cand = (
+                Path(__file__).resolve().parents[1]
+                / "configs"
+                / "experiment"
+                / "paper_eval"
+                / rq
+                / f"{stem}.yaml"
+            )
+            if cand.is_file():
+                exp = f"paper_eval/{rq}/{stem}"
+                print(f"No sidecar; falling back to experiment={exp}")
+                break
+        if exp is None:
+            raise SystemExit(
+                f"No training *_config.yaml next to {skills_path} and no matching "
+                f"configs/experiment/paper_eval/*/{{stem}}.yaml for stem={stem!r}. "
+                "Sync the sidecar or pass --experiment."
+            )
+
+    base = load_base_config(experiment=exp)
+    base, loaded_sidecar = load_config_for_checkpoint(str(skills_path), base)
+    if not loaded_sidecar and sidecar is None and exp is None:
+        raise SystemExit(f"Failed to load training config for {skills_path}")
     base["ENV_NAME"] = env_name
     params = load_params_from_file(str(skills_path))
     base = _overlay_ego_flags_from_skill_config(base, skills_path)
     base = align_config_with_skill_checkpoint(base, params)
     base["WANDB_MODE"] = "disabled"
+    configure_ego_obs_from_config(base)
+    configure_label_routing_from_config(base)
+    _print_ego_runtime_summary(base)
     return base, params
 
 
@@ -130,6 +170,25 @@ def main() -> None:
         help=f"Directory for MP4s (default: {DEFAULT_OUT})",
     )
     parser.add_argument("--max-frames", type=int, default=600)
+    parser.add_argument(
+        "--stop-on-done",
+        dest="stop_on_done",
+        action="store_true",
+        help="End the rollout at the first env done (one full game).",
+    )
+    parser.add_argument(
+        "--no-stop-on-done",
+        dest="stop_on_done",
+        action="store_false",
+        help="Keep rolling until --max-frames even after done (multi-episode demo).",
+    )
+    parser.set_defaults(stop_on_done=True)
+    parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=1,
+        help="Log/render every N env steps (VIDEO_FRAME_STRIDE). 4 is common in paper suites.",
+    )
     parser.add_argument("--seed", type=int, default=44)
     parser.add_argument(
         "--experiment",
@@ -194,6 +253,8 @@ def main() -> None:
     )
     cfg["SEED"] = int(args.seed)
     cfg["VIDEO_MAX_FRAMES"] = int(args.max_frames)
+    cfg["VIDEO_STOP_ON_DONE"] = bool(args.stop_on_done)
+    cfg["VIDEO_FRAME_STRIDE"] = max(1, int(args.frame_stride))
     apply_visualizer_config_overrides(
         cfg,
         no_outline=bool(args.no_outline),
@@ -239,6 +300,7 @@ def main() -> None:
             distances,
             angles,
             renderer,
+            pov_overlay,
         ) = run_eval_rollout(
             eval_cfg,
             params_tree=params,
@@ -261,6 +323,7 @@ def main() -> None:
             draw_target_outline_overlay=bool(
                 eval_cfg.get("VISUALIZER_DRAW_TARGET_OUTLINE", True)
             ),
+            pov_overlay=pov_overlay,
         )
         wait_for_video_finish()
 

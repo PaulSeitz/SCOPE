@@ -94,8 +94,8 @@ alg:
   EPS_DECAY: 0.2
   HEURISTIC_MODE: env_specific
   SKILL_PIXEL_CNN_CHANNELS:
-  - 16
   - 32
+  - 64
   SKILL_INPUT_MODE: pixel_embed
   SKILL_DEATH_PENALIZE_COLLECT: true
   DESTROY_CONTACT_FAIL: true

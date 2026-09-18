@@ -1,6 +1,10 @@
 """Tests for stacking train GAME_MODS onto paper_eval OOD keys."""
 
-from concept_based_learning.paper_eval.eval_harness import merge_train_and_eval_game_mods
+from concept_based_learning.paper_eval.eval_harness import (
+    _apply_eval_mod_label_overrides,
+    merge_train_and_eval_game_mods,
+)
+from concept_based_learning.paper_eval.mods import ModSpec, mod_specs_for_env
 
 
 def test_merge_empty():
@@ -22,3 +26,46 @@ def test_merge_dedupes():
     assert merge_train_and_eval_game_mods(cfg, ["no_surfacing_death"]) == [
         "no_surfacing_death"
     ]
+
+
+def test_merge_does_not_enable_label_swap():
+    """GAME_MODS union must never imply CBL label remapping."""
+    cfg = {"GAME_MODS": ["swap_diver_enemy_labels"]}
+    merged = merge_train_and_eval_game_mods(cfg, ["lane_scramble"])
+    assert "swap_diver_enemy_labels" in merged
+    assert "SEAQUEST_SWAP_DIVER_ENEMY_LABELS" not in cfg
+
+
+def test_relabel_override_only_from_modspec():
+    base = {"GAME_MODS": None}
+    on = _apply_eval_mod_label_overrides(
+        dict(base),
+        ModSpec(
+            key="swap_diver_enemy_labels",
+            mods=("swap_diver_enemy_labels",),
+            category="semantic",
+            relabel=True,
+        ),
+    )
+    assert on["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] is True
+    assert on["_PAPER_EVAL_MOD_RELABEL"] is True
+
+    off = _apply_eval_mod_label_overrides(
+        dict(base),
+        ModSpec(key="base", mods=(), category="control", relabel=False),
+    )
+    assert off["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] is False
+    assert off["_PAPER_EVAL_MOD_RELABEL"] is True
+
+
+def test_seaquest_allowlist_wires_new_keys():
+    specs = {s.key: s for s in mod_specs_for_env("seaquest")}
+    assert "lane_scramble" in specs
+    assert specs["lane_scramble"].mods == ("lane_scramble",)
+    assert specs["lane_scramble"].category == "layout"
+    assert "dynamic_lane_drift" in specs
+    assert specs["dynamic_lane_drift"].category == "layout"
+    assert "micro_swarm" in specs
+    swap = specs["swap_diver_enemy_labels"]
+    assert swap.mods == ("swap_diver_enemy_labels",)
+    assert swap.relabel is True

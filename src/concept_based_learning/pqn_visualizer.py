@@ -85,9 +85,9 @@ from concept_based_learning.environments.meta_target_mask import (
     is_meta_noop_target,
     meta_fire_game_action,
     meta_fire_target_enabled,
-    meta_fire_target_idx,
+    meta_fire_target_idx as resolve_meta_fire_target_idx,
     meta_noop_target_enabled,
-    meta_noop_target_idx,
+    meta_noop_target_idx as resolve_meta_noop_target_idx,
 )
 from concept_based_learning.environments.meta_target_persistence import (
     commit_meta_targets,
@@ -109,15 +109,6 @@ from concept_based_learning.observations.pov_fixed_bilateral import using_pov_fi
 from concept_based_learning.observations.pov_facing_frame import (
     using_ego_pose_xy,
     using_pov_facing_frame,
-)
-from concept_based_learning.observations.pov_turn import (
-    TURN_EGO_ACTION_NAMES,
-    heading_after,
-    initial_heading_deg,
-    make_turn_legal_mask_fn,
-    resolve_turn_mapper,
-    turn_step_deg,
-    using_pov_turn_primitives,
 )
 from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
@@ -143,7 +134,7 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-POV_MODE_CHOICES = ("auto", "relative", "fixed-bilateral", "facing", "turn")
+POV_MODE_CHOICES = ("auto", "relative", "fixed-bilateral", "facing")
 
 
 def apply_visualizer_config_overrides(
@@ -176,24 +167,16 @@ def apply_visualizer_config_overrides(
         config["USE_POV_RELATIVE_MAPPER"] = True
         config["USE_POV_FIXED_BILATERAL"] = False
         config["USE_POV_FACING_FRAME"] = False
-        config["USE_POV_TURN_PRIMITIVES"] = False
     elif mode == "fixed-bilateral":
         config["USE_POV_RELATIVE_MAPPER"] = True
         config["USE_POV_FIXED_BILATERAL"] = True
         config["USE_POV_FACING_FRAME"] = False
-        config["USE_POV_TURN_PRIMITIVES"] = False
         config["USE_EGO_VELOCITY_FEATURES"] = False
     elif mode == "facing":
         config["USE_POV_RELATIVE_MAPPER"] = True
         config["USE_POV_FIXED_BILATERAL"] = False
         config["USE_POV_FACING_FRAME"] = True
-        config["USE_POV_TURN_PRIMITIVES"] = False
         config["USE_EGO_VELOCITY_FEATURES"] = False
-    elif mode == "turn":
-        config["USE_POV_RELATIVE_MAPPER"] = True
-        config["USE_POV_FIXED_BILATERAL"] = False
-        config["USE_POV_FACING_FRAME"] = False
-        config["USE_POV_TURN_PRIMITIVES"] = True
 
     if pov_bilateral_axis is not None:
         config["POV_BILATERAL_AXIS"] = str(pov_bilateral_axis).lower().strip()
@@ -332,12 +315,7 @@ def _print_ego_runtime_summary(config: dict) -> None:
     clip_note = f"distance_clip={clip_px}px" if clip_px is not None else "distance_clip=off"
     stack = int(config.get("FRAME_STACK_SIZE", 4))
     ch = ego_obs_channels_per_frame()
-    if using_pov_turn_primitives():
-        pov_note = (
-            f"POV=turn_primitives(step={turn_step_deg()}°, "
-            f"init_heading={initial_heading_deg()}°)"
-        )
-    elif using_pov_facing_frame():
+    if using_pov_facing_frame():
         if using_ego_pose_xy():
             pose_note = "pose=xy(fwd,lat)"
         elif config.get("EGO_PSI_ANGLE_BINS"):
@@ -826,17 +804,10 @@ def _hud_target_distance_px(raw_obs, objects, target_obj_idx: int, last_frame_eg
     return distance_pixels_from_feature(float(last_frame_ego[0]))
 
 
-def _initial_heading_or_none():
-    """Heading seed for shape-probe ego obs; ``None`` unless turn primitives are on."""
-    if not using_pov_turn_primitives():
-        return None
-    return jnp.float32(initial_heading_deg())
-
-
-def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx, heading_deg=None):
+def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     if mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
-        return get_ego_obs(raw_obs, objects, target_idx, heading_deg)
+        return get_ego_obs(raw_obs, objects, target_idx)
     if mode == "oc_embed":
         return flatten_raw_observation(raw_obs)
     raise ValueError(
@@ -1069,8 +1040,6 @@ def _make_jitted_greedy_episode_runner(
     use_policy_state = heuristic_with_state is not None
     no_target_idx = int(components.no_target_idx)
     action_mapper, _ = resolve_action_mappers(components, config)
-    turn_action_mapper = resolve_turn_mapper(components, config)
-    use_turn_primitives = turn_action_mapper is not None
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
 
@@ -1091,19 +1060,9 @@ def _make_jitted_greedy_episode_runner(
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
     )
-    turn_legal_mask_fn = (
-        make_turn_legal_mask_fn(
-            turn_action_mapper,
-            noop_action=int(components.ego_mapper_noop_action),
-            fire_action=int(components.ego_mapper_fire_action),
-        )
-        if use_turn_primitives
-        else None
-    )
-
     fixed_skill_policy = uses_fixed_skill_policy(config)
 
-    def _skill_game_action(obs, target, heading):
+    def _skill_game_action(obs, target):
         is_noop = is_meta_noop_target(
             target, config, noop_idx=int(noop_idx), enabled=noop_enabled
         )
@@ -1124,12 +1083,8 @@ def _make_jitted_greedy_episode_runner(
                 safe_target,
             )
             if use_legal_ego_mask:
-                legal = (
-                    turn_legal_mask_fn(heading)
-                    if use_turn_primitives
-                    else legal_ego_mask_fn(
-                        obs.raw_observation, safe_target, obs.objects
-                    )
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation, safe_target, obs.objects
                 )
                 # Fall back to NOOP if the chosen intention cannot be realized.
                 ego_a = jnp.where(legal[ego_a], ego_a, jnp.int32(0))
@@ -1139,7 +1094,6 @@ def _make_jitted_greedy_episode_runner(
                 obs.raw_observation,
                 obs.objects,
                 safe_target,
-                heading if use_turn_primitives else None,
             )
             pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
@@ -1170,28 +1124,17 @@ def _make_jitted_greedy_episode_runner(
                     q_skill,
                 )
             if use_legal_ego_mask:
-                legal = (
-                    turn_legal_mask_fn(heading)
-                    if use_turn_primitives
-                    else legal_ego_mask_fn(
-                        obs.raw_observation, safe_target, obs.objects
-                    )
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation, safe_target, obs.objects
                 )
                 q_skill = mask_q_with_legal_ego(q_skill, legal)
             ego_a = jnp.argmax(q_skill)
-        if use_turn_primitives:
-            new_heading = heading_after(heading, ego_a)
-            game_a = turn_action_mapper(
-                ego_a, new_heading, obs.raw_observation, target, obs.objects
-            )
-        else:
-            new_heading = heading
-            game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
+        game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
         game_a = jnp.where(is_fire, fire_action, game_a)
         # Idle / no-target: BeamRider needs FIRE to advance levels; default NOOP.
         game_a = jnp.where(target == no_target, idle_action, game_a)
         game_a = jnp.where(is_noop, 0, game_a)
-        return game_a.astype(jnp.int32), new_heading
+        return game_a.astype(jnp.int32)
 
     def run_episode(rng):
         rng, reset_key = jax.random.split(rng)
@@ -1298,10 +1241,7 @@ def _make_jitted_greedy_episode_runner(
                     config,
                 )[0].astype(jnp.int32)
 
-            game_a, new_heading = _skill_game_action(
-                obs, target, policy_state.heading_deg
-            )
-            policy_state = policy_state.replace(heading_deg=new_heading)
+            game_a = _skill_game_action(obs, target)
             new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
             metrics = update_metrics(metrics, state, new_state, new_obs, reward)
             new_done = jnp.logical_or(done, step_done)
@@ -1402,7 +1342,6 @@ def run_greedy_eval_episodes(
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
-        _initial_heading_or_none(),
     )
     validate_skill_checkpoint_ego_dim(config, int(dummy_ego.shape[-1]))
     if params_tree is not None:
@@ -1506,9 +1445,9 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    meta_noop_target_idx = int(resolve_meta_noop_target_idx(config))
     meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
-    meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
+    meta_fire_target_idx = int(resolve_meta_fire_target_idx(config))
     meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
@@ -1516,6 +1455,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
     frame_stride = max(1, int(config.get("VIDEO_FRAME_STRIDE", 1)))
     max_env_steps = int(max_frames) * frame_stride
+    stop_on_done = bool(config.get("VIDEO_STOP_ON_DONE", False))
 
     env, renderer = create_eval_env(config)
 
@@ -1528,8 +1468,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper, _ = resolve_action_mappers(components, config)
-    turn_action_mapper = resolve_turn_mapper(components, config)
-    use_turn_primitives = turn_action_mapper is not None
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
     reset_policy_on_life_lost = bool(
@@ -1543,15 +1481,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
-    )
-    turn_legal_mask_fn = (
-        make_turn_legal_mask_fn(
-            turn_action_mapper,
-            noop_action=int(components.ego_mapper_noop_action),
-            fire_action=int(components.ego_mapper_fire_action),
-        )
-        if use_turn_primitives
-        else None
     )
     fixed_skill_policy = uses_fixed_skill_policy(config)
     if fixed_skill_policy:
@@ -1577,7 +1506,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
-        _initial_heading_or_none(),
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
     validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
@@ -1654,6 +1582,12 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     obj_w_list = []
     obj_h_list = []
     obj_active_list = []
+    # POV overlay fields (same geometry as live visualizer detail mode)
+    player_xy_list = []
+    target_xy_list = []
+    facing_deg_list = []
+    chosen_ego_list = []
+    virtual_facing_deg_list = []
 
     # Persistent target index for the heuristic meta-policy
     prev_target_idx = no_target_idx
@@ -1728,6 +1662,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
         is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
+        chosen_ego = 0
         if is_meta_noop:
             global_action = 0
             active_skill_idx = 0
@@ -1757,7 +1692,6 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 obs.raw_observation,
                 obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
-                policy_state.heading_deg if use_turn_primitives else None,
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
             pixel_obs = _skill_pixel_obs_from_obs(config, obs)
@@ -1816,14 +1750,10 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                     )
                 )
                 if use_legal_ego_mask:
-                    legal = (
-                        turn_legal_mask_fn(policy_state.heading_deg)
-                        if use_turn_primitives
-                        else legal_ego_mask_fn(
-                            obs.raw_observation,
-                            target_idx_arr[0],
-                            obs.objects,
-                        )
+                    legal = legal_ego_mask_fn(
+                        obs.raw_observation,
+                        target_idx_arr[0],
+                        obs.objects,
                     )
                     if not bool(legal[chosen_ego]):
                         chosen_ego = 0
@@ -1857,39 +1787,22 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 if restrict_fire_for_non_destroy and active_skill_idx != 0:
                     q_active = q_active.at[fire_indices].set(-jnp.inf)
                 if use_legal_ego_mask:
-                    legal = (
-                        turn_legal_mask_fn(policy_state.heading_deg)
-                        if use_turn_primitives
-                        else legal_ego_mask_fn(
-                            obs.raw_observation,
-                            jnp.array(target_obj_idx, dtype=jnp.int32),
-                            obs.objects,
-                        )
+                    legal = legal_ego_mask_fn(
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
                     )
                     q_active = mask_q_with_legal_ego(q_active, legal)
 
                 chosen_ego = int(jnp.argmax(q_active))
-            if use_turn_primitives:
-                new_heading = heading_after(policy_state.heading_deg, chosen_ego)
-                policy_state = policy_state.replace(heading_deg=new_heading)
-                global_action = int(
-                    turn_action_mapper(
-                        chosen_ego,
-                        new_heading,
-                        obs.raw_observation,
-                        jnp.array(target_obj_idx, dtype=jnp.int32),
-                        obs.objects,
-                    )
+            global_action = int(
+                action_mapper(
+                    chosen_ego,
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
                 )
-            else:
-                global_action = int(
-                    action_mapper(
-                        chosen_ego,
-                        obs.raw_observation,
-                        jnp.array(target_obj_idx, dtype=jnp.int32),
-                        obs.objects,
-                    )
-                )
+            )
         # Step the environment
         prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
@@ -1921,7 +1834,63 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             obj_h_list.append(np.array(obs.objects.height[-1]))
             obj_active_list.append(np.array(obs.objects.active[-1]))
 
+            # Mirror live-viz POV overlay inputs (cone / facing arrow / target line).
+            player = _get_player(obs.raw_observation)
+            y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+            p_cx = float(player.x[-1] + player.width[-1] / 2.0)
+            p_cy = float(
+                _center_y(
+                    player.y[-1],
+                    player.height[-1],
+                    y_is_bottom_edge=y_is_bottom_edge,
+                )
+            )
+            t_xy = None
+            if target_obj_idx != no_target_idx:
+                t_xy = (
+                    float(
+                        obs.objects.x[-1, target_obj_idx]
+                        + obs.objects.width[-1, target_obj_idx] / 2.0
+                    ),
+                    float(
+                        _center_y(
+                            obs.objects.y[-1, target_obj_idx],
+                            obs.objects.height[-1, target_obj_idx],
+                            y_is_bottom_edge=y_is_bottom_edge,
+                        )
+                    ),
+                )
+            facing = None
+            virtual_facing = None
+            if using_pov_facing_frame():
+                facing, _, _, _ = compute_facing_frame_viz(
+                    obs.raw_observation,
+                    env_name,
+                    (p_cx, p_cy),
+                    t_xy,
+                )
+            elif using_pov_fixed_bilateral() and t_xy is not None:
+                _, _, virtual_facing, _ = compute_fixed_bilateral_viz(
+                    env_name, (p_cx, p_cy), t_xy
+                )
+            elif using_pov_relative():
+                try:
+                    facing = player_facing_deg(obs.raw_observation, env_name)
+                except Exception:
+                    facing = None
+            player_xy_list.append((p_cx, p_cy))
+            target_xy_list.append(t_xy)
+            facing_deg_list.append(
+                float(facing) if facing is not None else float("nan")
+            )
+            chosen_ego_list.append(int(chosen_ego))
+            virtual_facing_deg_list.append(
+                float(virtual_facing) if virtual_facing is not None else float("nan")
+            )
+
         if done:
+            if stop_on_done:
+                break
             # Keep filling the video budget across lives / episodes (demo rollouts).
             rng, rng_reset = jax.random.split(rng)
             obs, state = env.reset(rng_reset)
@@ -1963,6 +1932,14 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         np.stack(obj_h_list),
         np.stack(obj_active_list),
     )
+    pov_overlay = {
+        "no_target_idx": int(no_target_idx),
+        "player_xy": np.asarray(player_xy_list, dtype=np.float32),
+        "target_xy": target_xy_list,  # list of (x,y)|None — keep object identity
+        "facing_deg": np.asarray(facing_deg_list, dtype=np.float32),
+        "chosen_ego": np.asarray(chosen_ego_list, dtype=np.int32),
+        "virtual_facing_deg": np.asarray(virtual_facing_deg_list, dtype=np.float32),
+    }
 
     return (
         stacked_states,
@@ -1974,6 +1951,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         distances,
         angles,
         renderer,
+        pov_overlay,
     )
 
 
@@ -2010,9 +1988,9 @@ def run_live_visualization(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    meta_noop_target_idx = int(resolve_meta_noop_target_idx(config))
     meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
-    meta_fire_target_idx = int(config.get("META_FIRE_TARGET_IDX", 1))
+    meta_fire_target_idx = int(resolve_meta_fire_target_idx(config))
     meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
     # VIDEO_MAX_FRAMES is for recorded rollouts; live mode runs until quit unless capped.
     frame_limit = max_frames
@@ -2216,8 +2194,6 @@ def run_live_visualization(
     heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
     action_mapper, _ = resolve_action_mappers(components, config)
-    turn_action_mapper = resolve_turn_mapper(components, config)
-    use_turn_primitives = turn_action_mapper is not None
     forced_target_hook = components.forced_target_hook
     meta_mask_hook = components.meta_mask_hook
     reset_policy_on_life_lost = bool(
@@ -2231,15 +2207,6 @@ def run_live_visualization(
         noop_action=int(components.ego_mapper_noop_action),
         fire_action=int(components.ego_mapper_fire_action),
         ego_action_dim=int(ego_action_dim),
-    )
-    turn_legal_mask_fn = (
-        make_turn_legal_mask_fn(
-            turn_action_mapper,
-            noop_action=int(components.ego_mapper_noop_action),
-            fire_action=int(components.ego_mapper_fire_action),
-        )
-        if use_turn_primitives
-        else None
     )
     fixed_skill_policy = uses_fixed_skill_policy(config)
     if fixed_skill_policy:
@@ -2266,7 +2233,6 @@ def run_live_visualization(
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
-        _initial_heading_or_none(),
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
     validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
@@ -2424,11 +2390,7 @@ def run_live_visualization(
         return int(target_obj_idx)
 
     skill_names = [str(n) for n in (config.get("SKILL_NAMES") or [])]
-    _ego_action_names = (
-        dict(enumerate(TURN_EGO_ACTION_NAMES))
-        if use_turn_primitives
-        else {a.value: a.name for a in EgocentricAction}
-    )
+    _ego_action_names = {a.value: a.name for a in EgocentricAction}
 
     def _policy_action(target_obj_idx):
         nonlocal policy_state
@@ -2450,7 +2412,6 @@ def run_live_visualization(
             obs.raw_observation,
             obs.objects,
             jnp.array(target_obj_idx, dtype=jnp.int32),
-            policy_state.heading_deg if use_turn_primitives else None,
         )
         ego_obs_batch = ego_obs[jnp.newaxis, ...]
         pixel_obs = _skill_pixel_obs_from_obs(config, obs)
@@ -2504,14 +2465,10 @@ def run_live_visualization(
                 )
             )
             if use_legal_ego_mask:
-                legal = (
-                    turn_legal_mask_fn(policy_state.heading_deg)
-                    if use_turn_primitives
-                    else legal_ego_mask_fn(
-                        obs.raw_observation,
-                        jnp.array(target_obj_idx, dtype=jnp.int32),
-                        obs.objects,
-                    )
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
                 )
                 if not bool(legal[chosen_ego]):
                     chosen_ego = 0
@@ -2539,39 +2496,22 @@ def run_live_visualization(
             if restrict_fire_for_non_destroy and active_skill_idx != 0:
                 q_active = q_active.at[fire_indices].set(-jnp.inf)
             if use_legal_ego_mask:
-                legal = (
-                    turn_legal_mask_fn(policy_state.heading_deg)
-                    if use_turn_primitives
-                    else legal_ego_mask_fn(
-                        obs.raw_observation,
-                        jnp.array(target_obj_idx, dtype=jnp.int32),
-                        obs.objects,
-                    )
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
                 )
                 q_active = mask_q_with_legal_ego(q_active, legal)
 
             chosen_ego = int(jnp.argmax(q_active))
-        if use_turn_primitives:
-            new_heading = heading_after(policy_state.heading_deg, chosen_ego)
-            policy_state = policy_state.replace(heading_deg=new_heading)
-            global_action = int(
-                turn_action_mapper(
-                    chosen_ego,
-                    new_heading,
-                    obs.raw_observation,
-                    jnp.array(target_obj_idx, dtype=jnp.int32),
-                    obs.objects,
-                )
+        global_action = int(
+            action_mapper(
+                chosen_ego,
+                obs.raw_observation,
+                jnp.array(target_obj_idx, dtype=jnp.int32),
+                obs.objects,
             )
-        else:
-            global_action = int(
-                action_mapper(
-                    chosen_ego,
-                    obs.raw_observation,
-                    jnp.array(target_obj_idx, dtype=jnp.int32),
-                    obs.objects,
-                )
-            )
+        )
         return (
             global_action,
             active_skill_idx,
@@ -2646,16 +2586,11 @@ def run_live_visualization(
             sector_idx, phi_rad, virtual_facing_deg, bilateral_axis = (
                 compute_fixed_bilateral_viz(env_name, (p_cx, p_cy), target_xy)
             )
-        elif using_pov_relative() or use_turn_primitives:
+        elif using_pov_relative():
             try:
                 facing = player_facing_deg(obs.raw_observation, env_name)
             except Exception:
                 facing = None
-        heading = (
-            float(policy_state.heading_deg)
-            if use_turn_primitives
-            else None
-        )
         return LiveVizSnapshot(
             frame_rgb=frame,
             overlay_text=overlay,
@@ -2670,7 +2605,6 @@ def run_live_visualization(
             q_vals_active=q_vals_active,
             skill_name=skill_name,
             ego_name=ego_name,
-            heading_deg=heading,
             facing_deg=facing,
             player_xy=(p_cx, p_cy),
             target_xy=target_xy,
@@ -3034,7 +2968,7 @@ def main():
             "'relative' = sprite-facing POV with view locked on target; "
             "'fixed-bilateral' = virtual L/R (or U/D) sectors + forward-hemisphere φ; "
             "'facing' = FPS body frame (view=player facing); "
-            "'turn' = POV turn primitives; 'auto' = use checkpoint/paper-config as-is."
+            "'auto' = use checkpoint/paper-config as-is."
         ),
     )
     parser.add_argument(
@@ -3263,6 +3197,7 @@ def main():
         distances,
         angles,
         renderer,
+        pov_overlay,
     ) = run_eval_rollout(
         base_config,
         params_tree=params_tree,
@@ -3295,6 +3230,7 @@ def main():
         draw_target_outline_overlay=bool(
             base_config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True)
         ),
+        pov_overlay=pov_overlay,
     )
     wait_for_video_finish()
 

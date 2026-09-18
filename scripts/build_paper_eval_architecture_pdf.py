@@ -415,7 +415,7 @@ def page_pov_mapper(pdf: PdfPages) -> None:
         "USE_POV_RELATIVE_MAPPER — body-facing ego action table (required for facing / fixed2 / turn).",
         "USE_POV_FACING_FRAME — FPS obs: φ from player facing (thesis spine).",
         "EGO_POSE_XY — emit (fwd, lat) instead of (distance, φ) under facing frame.",
-        "USE_POV_FIXED_BILATERAL / USE_POV_TURN_PRIMITIVES — alternate POV ablations (not thesis default).",
+        "USE_POV_FIXED_BILATERAL — alternate POV ablation (not thesis default).",
         "",
         "## Pixel / OC under POV",
         "thesis_facing pairs pixel_pov / oc_pov arms with the same facing-relative mapper so",

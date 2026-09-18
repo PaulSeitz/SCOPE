@@ -17,6 +17,9 @@ class ModSpec:
     key: str
     mods: tuple[str, ...]
     category: str
+    # When True, eval harness sets SEAQUEST_SWAP_DIVER_ENEMY_LABELS for this
+    # condition only (architecture E2). Never inferred from GAME_MODS.
+    relabel: bool = False
 
 
 def load_mod_allowlist(env: str) -> dict[str, Any]:
@@ -48,6 +51,7 @@ def mod_specs_for_env(
             key=str(e["key"]),
             mods=tuple(e.get("mods") or ()),
             category=str(e.get("category", "other")),
+            relabel=bool(e.get("relabel", False)),
         )
         for e in entries
         if not e.get("skip_eval")

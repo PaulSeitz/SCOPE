@@ -63,13 +63,6 @@ def test_incompatible_with_fixed_bilateral():
         )
 
 
-def test_incompatible_with_turn_primitives():
-    with pytest.raises(ValueError, match="incompatible with USE_POV_TURN_PRIMITIVES"):
-        configure_pov_facing_frame_from_config(
-            {**FACING_BASE_CFG, "USE_POV_TURN_PRIMITIVES": True}
-        )
-
-
 def test_facing_right_forward_is_plus_x():
     fwd, lat = world_delta_to_facing_frame(
         jnp.float32(30.0), jnp.float32(10.0), jnp.float32(0.0)

@@ -89,8 +89,8 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         # Game layout: [enemies(8) | bullets(8) | boss(1)] = 17 slots, padded to
         # game_max_objects=20, then +1 meta NOOP → was_killed shape [stack, 21].
         pad = jnp.zeros(self.game_max_objects - kill_mask.shape[0], dtype=jnp.int32)
-        was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32), pad]
+        was_killed_with_noop = self._with_meta_event_padding(
+            jnp.concatenate([kill_mask.astype(jnp.int32), pad])
         )
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)

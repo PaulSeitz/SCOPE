@@ -14,7 +14,7 @@ from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     NUM_LABELS,
 )
-from concept_based_learning.environments.meta_object_layout import prepend_meta_reserved_slots
+from concept_based_learning.environments.meta_object_layout import append_meta_reserved_slots
 
 
 class JaxatariSemanticBaseWrapper(JaxatariWrapper):
@@ -28,13 +28,20 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         self.frame_skip = int(getattr(self._env, "_cbl_frame_skip", 1))
         self.clip_reward = bool(getattr(self._env, "_cbl_clip_reward", False))
         self._single_frame_api = not hasattr(self._env, "frame_stack_size")
-        # Total slots: indices 0..meta_reserved_slots-1 are synthetic meta actions.
+        # Trailing slots: synthetic meta actions (NOOP last; optional FIRE before it).
         self.meta_reserved_slots = int(meta_reserved_slots)
         self.max_objects = max_objects
         self.game_max_objects = max_objects - self.meta_reserved_slots
+        # Game entities occupy [0, game_max_objects); meta slots follow.
+        self.game_slot_origin = 0
 
         # Note: We wrap the original observation space inside a Dict space
         self._observation_space = self._make_observation_space()
+
+    def _with_meta_event_padding(self, game_event_mask):
+        """Pad a length-``game_max_objects`` event mask with trailing meta zeros."""
+        meta_z = jnp.zeros(self.meta_reserved_slots, dtype=jnp.int32)
+        return jnp.concatenate([game_event_mask.astype(jnp.int32), meta_z])
 
     def _infer_stack_size(self) -> int:
         """
@@ -125,10 +132,10 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
 
         # We vmap over the first axis (the frame stack)
         objects_stack = jax.vmap(self._extract_frame_objects)(raw_stack)
-        prepend = lambda objs: prepend_meta_reserved_slots(
+        append_meta = lambda objs: append_meta_reserved_slots(
             objs, num_reserved=self.meta_reserved_slots
         )
-        objects_stack = jax.vmap(prepend)(objects_stack)
+        objects_stack = jax.vmap(append_meta)(objects_stack)
 
         return SemanticObservation(
             raw_observation=raw_stack,  # Pass through the stacked object-centric observation

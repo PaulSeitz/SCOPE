@@ -56,7 +56,7 @@ alg:
 
   # Reward shaping for meta
   META_SWITCH_PENALTY: -0.005
-  META_DEATH_PENALTY: -5.0
+  META_DEATH_PENALTY: 0.0
 
   # Off-policy flag is read by the skill update path; irrelevant when skills are frozen
   # but keep it consistent with other configs

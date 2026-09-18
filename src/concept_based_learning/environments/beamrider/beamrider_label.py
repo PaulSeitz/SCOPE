@@ -45,12 +45,13 @@ beamrider_action_mapper, beamrider_inverse_action_mapper = make_target_aligned_a
 # Total = 29 objects
 _BEAMRIDER_MAX_OBJECTS = 31  # 29 game + 1 NOOP + 1 FIRE
 
-# Observation slot layout (game_max_objects=29, +2 meta slots prepended by wrapper):
+# Observation slot layout (game_max_objects=29, +2 meta slots appended by wrapper):
 #   DESTROY: [0-2] white_ufo(3), [3] kamikaze, [4] mothership
 #   AVOID:   [5-10] chasing_meteoroids(6), [11-19] enemy_shots(9),
 #            [20-22] falling_rocks(3), [23] lane_blockers, [24] bouncer
 #   COLLECT: [25-27] coins(3), [28] rejuvenator
 #            (rejuvenator → AVOID while shot/dead debris; slot index unchanged)
+#   META:    [29] FIRE, [30] NOOP  (MAX_OBJECTS=31)
 _N_UFO = 3
 _N_KAMIKAZE = 1
 _N_MOTHERSHIP = 1
@@ -120,9 +121,7 @@ class BeamriderSemanticWrapper(JaxatariSemanticBaseWrapper):
     def _stamp_events_on_observation(self, semantic_obs, kill_mask):
         if kill_mask is None:
             return semantic_obs
-        was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(self.meta_reserved_slots, dtype=jnp.int32), kill_mask.astype(jnp.int32)]
-        )
+        was_killed_with_noop = self._with_meta_event_padding(kill_mask)
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
         return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))

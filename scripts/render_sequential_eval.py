@@ -209,6 +209,7 @@ def rollout_to_mp4(
             distances,
             angles,
             renderer,
+            _pov_overlay,
         ) = run_eval_rollout(
             cfg,
             params_tree=skill_params,

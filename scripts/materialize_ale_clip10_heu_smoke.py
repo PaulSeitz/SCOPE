@@ -4,9 +4,8 @@
 Locked spine for most envs: facing φ8, clip10, noblocking, noweapon, surfacesub5
 (AVOID ranges kept for config parity; only Seaquest uses them).
 
-Asteroids / Time Pilot scratch trains use turn primitives instead (EGO_ACTION_DIM
-6, facing off): honest rotate/thrust (AS) and absolute-aim-under-θ_h (TP). SQ→AS/TP
-ZS stays on the facing spine so the Seaquest ckpt can load (strafe≠turn fail cell).
+All scratch trains (including Asteroids / Time Pilot) use the facing spine.
+SQ→AS/TP zero-shot stays on the same facing spine so the Seaquest ckpt can load.
 
 Skills trains (heuristic usability, ~25M):
   phoenix, namethisgame, timepilot, asteroids,  # EVAL_PLAN bases (+ TP/AS smoke)
@@ -46,9 +45,6 @@ _MODS = _ROOT / "configs/experiment/paper_eval/mods"
 
 SUITE = "ale_clip10_heu_smoke"
 SPINE = "clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
-TURN_SPINE = "clip10_turn_psibins8_v2_noblocking_noweapon_surfacesub5"
-# Rotate/thrust family: scratch must use turn primitives (not facing strafe).
-TURN_SCRATCH_ENVS = frozenset({"asteroids", "timepilot"})
 # SQ ZS source: ungated skill-mechanics clip10 (intended off-policy rewards).
 SQ_TRAIN = (
     "seaquest_skills_ego_pov_clip10_facing_psibins8_v2_noblocking_noweapon_surfacesub5_skillmech"
@@ -178,11 +174,13 @@ EXISTING_TRANSFERS: set[str] = set()
 
 
 def _scratch_spine(env: str) -> str:
-    return TURN_SPINE if env in TURN_SCRATCH_ENVS else SPINE
+    del env
+    return SPINE
 
 
 def _tandem_spine(env: str) -> str:
-    return _scratch_spine(env) if env != "seaquest" else SPINE
+    del env
+    return SPINE
 
 
 def _tandem_stem(env: str) -> str:
@@ -296,121 +294,6 @@ def _facing_scratch_yaml(env: str, meta: dict) -> str:
           LR: 0.0001
           MAX_GRAD_NORM: 0.8
           OFF_POLICY: true
-          RELABEL_ALL_OBJECTS: false
-          RELABEL_K_OBJECTS: null
-          SKILL_BOOTSTRAP: q_lambda
-          EPS_START: 0.2
-          EPS_FINISH: 0.01
-          EPS_DECAY: 0.2
-          HEURISTIC_MODE: {heu}
-          SKILL_INPUT_MODE: ego
-          SKILL_DEATH_PENALIZE_COLLECT: true
-          DESTROY_CONTACT_FAIL: true
-          DESTROY_LIVING_PENALTY: true
-          USE_EGO_SHOT_FEATURES: false
-        SEED: 44
-        SURFACE_SUB_NEAR_RANGE: 5
-        """
-    )
-
-
-def _turn_scratch_yaml(env: str, meta: dict) -> str:
-    """Asteroids / Time Pilot: 6 turn primitives, POV-relative ψ from θ_h."""
-    stem = f"{env}_from_scratch_ego_pov_{TURN_SPINE}"
-    heu = meta["heu"]
-    step = 22.5 if env == "asteroids" else 45.0
-    return dedent(
-        f"""\
-        PAPER_EVAL_RQ: 2
-        PAPER_EVAL_PHASE: train
-        PAPER_EVAL_KIND: skills
-        PAPER_EVAL_MODS: {env}
-        PAPER_EVAL_REQUIRES_RQ1: []
-        NUM_SEEDS: 1
-        ALG_NAME: hierarchical_pqn
-        TRAIN_MODE: skills_only
-        ENV_NAME: {env}
-        USE_POV_RELATIVE_MAPPER: true
-        USE_POV_FIXED_BILATERAL: false
-        USE_POV_FACING_FRAME: false
-        USE_POV_TURN_PRIMITIVES: true
-        POV_TURN_STEP_DEG: {step}
-        POV_TURN_INITIAL_HEADING_DEG: null
-        EGO_POSE_XY: false
-        SAVE_PATH: ./outputs/models/paper_eval/rq2/{stem}
-        WANDB_RUN_NAME: {meta['prefix']}_paper_rq2_scratch_ego_pov_{TURN_SPINE}
-        WANDB_TAGS:
-        - suite:{SUITE}
-        - rq:2
-        - env:{env}
-        - phase:from_scratch
-        - skill_input:ego
-        - mapper:pov_relative
-        - mapper:turn_primitives
-        - ego:psi_bins8
-        - ego:noblocking
-        - ego:noweapon
-        - ego:clip10
-        - ablation:ale_heu_smoke
-        USE_LEGACY_EGO_OBS: false
-        USE_EGO_SIZE_FEATURES: false
-        USE_EGO_VELOCITY_FEATURES: false
-        USE_EGO_BLOCKING_FEATURES: false
-        USE_EGO_WEAPON_FEATURES: false
-        USE_EGO_SHOT_FEATURES: false
-        AVOID_INTERRUPT_RANGE: 55
-        AVOID_INTERRUPT_RANGE_Y: 55
-        SURFACE_SUB_AVOID_RANGE_X: 5
-        SURFACE_SUB_AVOID_RANGE_Y: 5
-        EGO_DISTANCE_CLIP_MAX_PX: 10
-        EGO_ANGLE_BINS: null
-        EGO_PSI_ANGLE_BINS: 8
-        EGO_LEGAL_ACTION_MASK: false
-        GAME_MODS: null
-        EVAL_GAME_MODS: null
-        SKILL_INPUT_MODE: ego
-        HEURISTIC_MODE: {heu}
-        SKILL_DEATH_PENALIZE_COLLECT: true
-        RECORD_VIDEO: false
-        VIDEO_AT_END: false
-        DESTROY_CONTACT_FAIL: true
-        DESTROY_LIVING_PENALTY: true
-        alg:
-          NUM_SKILLS: 4
-          SKILL_NAMES:
-          - DESTROY
-          - COLLECT
-          - AVOID
-          - NAVIGATE
-          MAX_OBJECTS: {meta['max_objects']}
-          EGO_ACTION_DIM: 6
-          HIDDEN_SIZE: 128
-          NUM_LAYERS: 3
-          SKILL_EMBED_DIM: 256
-          SKILL_LR: 0.0005
-          SKILL_LR_FINISH: 0.0001
-          SKILL_LR_DECAY: 0.5
-          SKILL_REWARD_LAMBDA: 0.0
-          CLIP_REWARD: true
-          RESTRICT_FIRE_FOR_NON_DESTROY: false
-          FIRST_FIRE: true
-          STICKY_ACTIONS: false
-          EPISODIC_LIFE: true
-          FRAME_STACK_SIZE: 4
-          FRAME_SKIP: 4
-          TOTAL_TIMESTEPS: {TIMESTEPS}
-          NUM_ENVS: 128
-          NUM_STEPS: 128
-          NUM_EPOCHS: 4
-          NUM_MINIBATCHES: 64
-          GAMMA: 0.99
-          SKILL_GAMMA: 0.99
-          LAMBDA: 0.65
-          SKILL_LAMBDA: 0.65
-          LR: 0.0001
-          MAX_GRAD_NORM: 0.8
-          OFF_POLICY: true
-          # Turn primitives have no inverse mapper.
           RELABEL_ALL_OBJECTS: false
           RELABEL_K_OBJECTS: null
           SKILL_BOOTSTRAP: q_lambda
@@ -756,8 +639,8 @@ def _tandem_facing_yaml(env: str, meta: dict) -> str:
         - 84
         META_PIXEL_GRAYSCALE: true
         SKILL_PIXEL_CNN_CHANNELS:
-        - 16
         - 32
+        - 64
         GAME_MODS: null
         EVAL_GAME_MODS: null
         META_INPUT_MODE: pixel_embed
@@ -787,9 +670,9 @@ def _tandem_facing_yaml(env: str, meta: dict) -> str:
           META_LR: 0.0005
           SKILL_LR: 0.0005
           META_USE_NOOP_TARGET: true
-          META_NOOP_TARGET_IDX: 0
+          META_NOOP_TARGET_IDX: null
           META_SWITCH_PENALTY: -0.05
-          META_DEATH_PENALTY: -10.0
+          META_DEATH_PENALTY: 0.0
           META_REWARD_LAMBDA: 1.0
           CLIP_REWARD: true
           FIRST_FIRE: true
@@ -815,148 +698,8 @@ def _tandem_facing_yaml(env: str, meta: dict) -> str:
           META_INPUT_MODE: pixel_embed
           SKILL_INPUT_MODE: ego
           META_PIXEL_CNN_CHANNELS:
-          - 16
           - 32
-          HEURISTIC_MODE: {heu}
-          SKILL_DEATH_PENALIZE_COLLECT: true
-          DESTROY_CONTACT_FAIL: true
-          DESTROY_LIVING_PENALTY: true
-          USE_EGO_SHOT_FEATURES: false
-          SKILL_LR_FINISH: 0.0001
-          SKILL_LR_DECAY: 0.5
-          SKILL_BOOTSTRAP: q_lambda
-          SKILL_LAMBDA: 0.65
-          SKILL_GAMMA: 0.99
-        SEED: 44
-        SURFACE_SUB_NEAR_RANGE: 5
-        """
-    )
-
-
-def _tandem_turn_yaml(env: str, meta: dict) -> str:
-    spine = TURN_SPINE
-    stem = _tandem_stem(env)
-    heu = meta["heu"]
-    step = 22.5 if env == "asteroids" else 45.0
-    return dedent(
-        f"""\
-        # {env} tandem from-scratch — pixel meta + turn-primitive ego skills (~25M).
-        PAPER_EVAL_RQ: 2
-        PAPER_EVAL_PHASE: train
-        PAPER_EVAL_KIND: tandem
-        PAPER_EVAL_MODS: {env}
-        PAPER_EVAL_REQUIRES_RQ1: []
-        NUM_SEEDS: 1
-        ALG_NAME: hierarchical_pqn
-        TRAIN_MODE: tandem
-        META_ARCHITECTURE: per_object_mlp
-        ENV_NAME: {env}
-        USE_POV_RELATIVE_MAPPER: true
-        USE_POV_FIXED_BILATERAL: false
-        USE_POV_FACING_FRAME: false
-        USE_POV_TURN_PRIMITIVES: true
-        POV_TURN_STEP_DEG: {step}
-        POV_TURN_INITIAL_HEADING_DEG: null
-        EGO_POSE_XY: false
-        SAVE_PATH: ./outputs/models/paper_eval/rq2/{stem}
-        WANDB_RUN_NAME: {meta['prefix']}_paper_tandem_pixel_ego_pov_{spine}
-        WANDB_TAGS:
-        - suite:{SUITE}
-        - rq:2
-        - env:{env}
-        - phase:from_scratch
-        - train_mode:tandem
-        - meta_input:pixel
-        - skill_input:ego
-        - mapper:pov_relative
-        - mapper:turn_primitives
-        - ego:psi_bins8
-        - ego:noblocking
-        - ego:noweapon
-        - ego:clip10
-        - probe:tandem_scratch
-        USE_LEGACY_EGO_OBS: false
-        USE_EGO_SIZE_FEATURES: false
-        USE_EGO_VELOCITY_FEATURES: false
-        USE_EGO_BLOCKING_FEATURES: false
-        USE_EGO_WEAPON_FEATURES: false
-        USE_EGO_SHOT_FEATURES: false
-        AVOID_INTERRUPT_RANGE: 55
-        AVOID_INTERRUPT_RANGE_Y: 55
-        SURFACE_SUB_AVOID_RANGE_X: 5
-        SURFACE_SUB_AVOID_RANGE_Y: 5
-        EGO_DISTANCE_CLIP_MAX_PX: 10
-        EGO_ANGLE_BINS: null
-        EGO_PSI_ANGLE_BINS: 8
-        EGO_LEGAL_ACTION_MASK: false
-        META_PIXEL_DO_RESIZE: true
-        META_PIXEL_USE_NATIVE_DOWNSCALING: true
-        META_PIXEL_RESIZE_SHAPE:
-        - 84
-        - 84
-        META_PIXEL_GRAYSCALE: true
-        SKILL_PIXEL_CNN_CHANNELS:
-        - 16
-        - 32
-        GAME_MODS: null
-        EVAL_GAME_MODS: null
-        META_INPUT_MODE: pixel_embed
-        SKILL_INPUT_MODE: ego
-        HEURISTIC_MODE: {heu}
-        SKILL_DEATH_PENALIZE_COLLECT: true
-        RECORD_VIDEO: false
-        VIDEO_AT_END: false
-        DESTROY_CONTACT_FAIL: true
-        DESTROY_LIVING_PENALTY: true
-        alg:
-          NUM_SKILLS: 4
-          SKILL_NAMES:
-          - DESTROY
-          - COLLECT
-          - AVOID
-          - NAVIGATE
-          MAX_OBJECTS: {meta['max_objects']}
-          EGO_ACTION_DIM: 6
-          HIDDEN_SIZE: 128
-          NUM_LAYERS: 3
-          META_HIDDEN_SIZE: 256
-          META_PER_OBJECT_NUM_LAYERS: 3
-          META_FLAT_NUM_LAYERS: 3
-          META_EMBED_DIM: 256
-          SKILL_EMBED_DIM: 256
-          META_LR: 0.0005
-          SKILL_LR: 0.0005
-          META_USE_NOOP_TARGET: true
-          META_NOOP_TARGET_IDX: 0
-          META_SWITCH_PENALTY: -0.05
-          META_DEATH_PENALTY: -10.0
-          META_REWARD_LAMBDA: 1.0
-          CLIP_REWARD: true
-          FIRST_FIRE: true
-          STICKY_ACTIONS: false
-          EPISODIC_LIFE: true
-          FRAME_STACK_SIZE: 4
-          FRAME_SKIP: 4
-          TOTAL_TIMESTEPS: {TIMESTEPS}
-          NUM_ENVS: 128
-          NUM_STEPS: 128
-          NUM_EPOCHS: 4
-          NUM_MINIBATCHES: 64
-          GAMMA: 0.99
-          LAMBDA: 0.65
-          LR: 0.0001
-          MAX_GRAD_NORM: 0.8
-          OFF_POLICY: true
-          RELABEL_ALL_OBJECTS: false
-          RELABEL_K_OBJECTS: null
-          EPS_START: 0.1
-          EPS_FINISH: 0.01
-          EPS_DECAY: 0.2
-          META_INPUT_MODE: pixel_embed
-          SKILL_INPUT_MODE: ego
-          META_PIXEL_CNN_CHANNELS:
-          - 16
-          - 32
+          - 64
           HEURISTIC_MODE: {heu}
           SKILL_DEATH_PENALIZE_COLLECT: true
           DESTROY_CONTACT_FAIL: true
@@ -978,12 +721,7 @@ def _tandem_eval_yaml(env: str, meta: dict) -> str:
     stem = _tandem_stem(env)
     heu = meta["heu"]
     rq_dir = "rq3" if env == "seaquest" else "rq2"
-    turn = env in TURN_SCRATCH_ENVS
-    mapper_tags = (
-        "- mapper:pov_relative\n        - mapper:turn_primitives"
-        if turn
-        else "- mapper:pov_facing\n        - ego:phi_bins8"
-    )
+    mapper_tags = "- mapper:pov_facing\n        - ego:phi_bins8"
     return dedent(
         f"""\
         # Home-env mod eval for {stem} (skills + meta ckpts).
@@ -1417,20 +1155,7 @@ def materialize(*, dry: bool) -> None:
         if meta.get("scratch"):
             spine = _scratch_spine(env)
             stem = f"{env}_from_scratch_ego_pov_{spine}"
-            body = (
-                _turn_scratch_yaml(env, meta)
-                if env in TURN_SCRATCH_ENVS
-                else _facing_scratch_yaml(env, meta)
-            )
-            _write(_RQ2 / f"{stem}.yaml", body, dry=dry)
-            # Drop stale facing scratch YAMLs for turn envs.
-            if env in TURN_SCRATCH_ENVS:
-                stale = _RQ2 / f"{env}_from_scratch_ego_pov_{SPINE}.yaml"
-                if stale.exists() and not dry:
-                    stale.unlink()
-                    print(f"removed stale {stale.relative_to(_ROOT)}")
-                elif stale.exists() and dry:
-                    print(f"DRY remove {stale.relative_to(_ROOT)}")
+            _write(_RQ2 / f"{stem}.yaml", _facing_scratch_yaml(env, meta), dry=dry)
 
         if meta.get("transfer"):
             stem = f"{env}_transfer_ego_pov_{SPINE}"
@@ -1466,12 +1191,7 @@ def materialize(*, dry: bool) -> None:
         meta = _env_meta(env)
         stem = _tandem_stem(env)
         rq_dir = _RQ3 if env == "seaquest" else _RQ2
-        body = (
-            _tandem_turn_yaml(env, meta)
-            if env in TURN_SCRATCH_ENVS
-            else _tandem_facing_yaml(env, meta)
-        )
-        _write(rq_dir / f"{stem}.yaml", body, dry=dry)
+        _write(rq_dir / f"{stem}.yaml", _tandem_facing_yaml(env, meta), dry=dry)
         _write(rq_dir / f"{stem}_eval.yaml", _tandem_eval_yaml(env, meta), dry=dry)
 
     # --- append: ZS from SQ tandem skills ---

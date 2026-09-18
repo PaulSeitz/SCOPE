@@ -97,7 +97,8 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
                    target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                    wandb_step: int | None = None, distances=None, angles=None,
                    video_output_path: str | None = None,
-                   draw_target_outline_overlay: bool = True):
+                   draw_target_outline_overlay: bool = True,
+                   pov_overlay=None):
     global CURRENT_VIDEO_THREAD
 
     if renderer is None:
@@ -123,6 +124,7 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
             "angles": angles,
             "video_output_path": video_output_path,
             "draw_target_outline_overlay": draw_target_outline_overlay,
+            "pov_overlay": pov_overlay,
         },
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
@@ -235,7 +237,8 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
                   target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                   wandb_step: int | None = None, distances=None, angles=None,
                   video_output_path: str | None = None,
-                  draw_target_outline_overlay: bool = True):
+                  draw_target_outline_overlay: bool = True,
+                  pov_overlay=None):
     try:
         use_wandb = wandb.run is not None
         if not use_wandb and not video_output_path:
@@ -299,6 +302,54 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
                     frames[i], idx,
                     ox[i], oy[i], ow[i], oh[i], oactive[i],
                 )
+
+        # [Optional: POV overlay] facing cone / direction arrow / line to selected target
+        # (same drawing as live visualizer detail mode via apply_pov_overlay).
+        if pov_overlay is not None and target_obj_idxs is not None:
+            from concept_based_learning.visualizer_debug_panel import (
+                LiveVizSnapshot,
+                apply_pov_overlay,
+            )
+
+            no_target_idx = int(pov_overlay.get("no_target_idx", -1))
+            player_xy = pov_overlay["player_xy"]
+            target_xy_list = pov_overlay["target_xy"]
+            facing_deg = pov_overlay["facing_deg"]
+            chosen_ego = pov_overlay["chosen_ego"]
+            virtual_facing_deg = pov_overlay.get("virtual_facing_deg")
+            for i in range(len(frames)):
+                f = float(facing_deg[i]) if i < len(facing_deg) else float("nan")
+                vf = (
+                    float(virtual_facing_deg[i])
+                    if virtual_facing_deg is not None and i < len(virtual_facing_deg)
+                    else float("nan")
+                )
+                t_xy = target_xy_list[i] if i < len(target_xy_list) else None
+                ang = float(angles[i]) if angles is not None else 0.0
+                if np.isnan(ang):
+                    ang = 0.0
+                snap = LiveVizSnapshot(
+                    frame_rgb=np.transpose(frames[i], (1, 2, 0)),
+                    overlay_text="",
+                    target_obj_idx=int(target_obj_idxs[i]),
+                    no_target_idx=no_target_idx,
+                    global_action=0,
+                    active_skill_idx=int(active_agents[i]) if active_agents is not None else 0,
+                    chosen_ego=int(chosen_ego[i]) if i < len(chosen_ego) else 0,
+                    distance=float(distances[i]) if distances is not None else float("nan"),
+                    angle_rad=ang,
+                    ego_obs=None,
+                    q_vals_active=None,
+                    skill_name="",
+                    ego_name="",
+                    facing_deg=None if np.isnan(f) else f,
+                    player_xy=tuple(map(float, player_xy[i])),
+                    target_xy=None if t_xy is None else (float(t_xy[0]), float(t_xy[1])),
+                    frame_idx=i,
+                    virtual_facing_deg=None if np.isnan(vf) else vf,
+                )
+                overlaid = apply_pov_overlay(snap.frame_rgb, snap, show_fov_wedge=True)
+                frames[i] = np.transpose(overlaid, (2, 0, 1))
 
         # [Optional: Skill input overlay] Show distance and angle at bottom-center
         if distances is not None and angles is not None:

@@ -1,20 +1,17 @@
-# timepilot tandem from-scratch — pixel meta + ego skills (~20M).
+# asteroids tandem from-scratch — pixel meta + ego skills (~20M). Rotate-aim POV motor (same as transfer).
 PAPER_EVAL_RQ: 2
 PAPER_EVAL_PHASE: train
 PAPER_EVAL_KIND: tandem
-PAPER_EVAL_MODS: timepilot
+PAPER_EVAL_MODS: asteroids
 PAPER_EVAL_REQUIRES_RQ1: []
 NUM_SEEDS: 1
 ALG_NAME: hierarchical_pqn
 TRAIN_MODE: tandem
 META_ARCHITECTURE: per_object_mlp
-ENV_NAME: timepilot
+ENV_NAME: asteroids
 USE_POV_RELATIVE_MAPPER: true
 USE_POV_FIXED_BILATERAL: false
-USE_POV_FACING_FRAME: false
-USE_POV_TURN_PRIMITIVES: true
-POV_TURN_STEP_DEG: 45.0
-POV_TURN_INITIAL_HEADING_DEG: null
+USE_POV_FACING_FRAME: true
 EGO_POSE_XY: false
 USE_LEGACY_EGO_OBS: false
 USE_EGO_SIZE_FEATURES: false
@@ -31,13 +28,13 @@ EGO_ANGLE_BINS: null
 EGO_PSI_ANGLE_BINS: 8
 EGO_LEGAL_ACTION_MASK: false
 SURFACE_SUB_NEAR_RANGE: 5
-SAVE_PATH: ./outputs/models/paper_eval/rq2/timepilot_from_scratch_tandem_pixel_ego_pov_noclip_turn_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_20m
-WANDB_RUN_NAME: tp_paper_tandem_pixel_ego_pov_noclip_turn_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_20m
+SAVE_PATH: ./outputs/models/paper_eval/rq2/asteroids_from_scratch_tandem_pixel_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_20m
+WANDB_RUN_NAME: as_paper_tandem_pixel_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_20m
 WANDB_TAGS:
 - suite:noclip_sparse_smoke
 - rq:2
-- env:timepilot
-- role:transfer
+- env:asteroids
+- role:base
 - ego:noblocking
 - ego:noweapon
 - ego:noclip
@@ -47,9 +44,9 @@ WANDB_TAGS:
 - train_mode:tandem
 - meta_input:pixel
 - skill_input:ego
-- mapper:pov_relative
-- mapper:turn_primitives
-- ego:psi_bins8
+- mapper:pov_facing
+- ego:phi_bins8
+- motor:rotate_aim
 - probe:tandem_scratch
 META_PIXEL_DO_RESIZE: true
 META_PIXEL_USE_NATIVE_DOWNSCALING: true
@@ -58,8 +55,8 @@ META_PIXEL_RESIZE_SHAPE:
 - 84
 META_PIXEL_GRAYSCALE: true
 SKILL_PIXEL_CNN_CHANNELS:
-- 16
 - 32
+- 64
 GAME_MODS: null
 EVAL_GAME_MODS: null
 META_INPUT_MODE: pixel_embed
@@ -79,8 +76,8 @@ alg:
   - COLLECT
   - AVOID
   - NAVIGATE
-  MAX_OBJECTS: 7
-  EGO_ACTION_DIM: 6
+  MAX_OBJECTS: 18
+  EGO_ACTION_DIM: 18
   HIDDEN_SIZE: 128
   NUM_LAYERS: 3
   META_HIDDEN_SIZE: 256
@@ -91,9 +88,9 @@ alg:
   META_LR: 0.0005
   SKILL_LR: 0.0005
   META_USE_NOOP_TARGET: true
-  META_NOOP_TARGET_IDX: 0
+  META_NOOP_TARGET_IDX: null
   META_SWITCH_PENALTY: -0.05
-  META_DEATH_PENALTY: -10.0
+  META_DEATH_PENALTY: 0.0
   META_REWARD_LAMBDA: 1.0
   CLIP_REWARD: true
   FIRST_FIRE: true
@@ -119,8 +116,8 @@ alg:
   META_INPUT_MODE: pixel_embed
   SKILL_INPUT_MODE: ego
   META_PIXEL_CNN_CHANNELS:
-  - 16
   - 32
+  - 64
   HEURISTIC_MODE: env_specific
   SKILL_DEATH_PENALIZE_COLLECT: true
   DESTROY_CONTACT_FAIL: true
@@ -128,8 +125,6 @@ alg:
   COLLECT_SPARSE_ONLY: true
   AVOID_SPARSE_ONLY: true
   USE_EGO_SHOT_FEATURES: false
-  SKILL_LR_FINISH: 0.0001
-  SKILL_LR_DECAY: 0.5
   SKILL_BOOTSTRAP: q_lambda
   SKILL_LAMBDA: 0.65
   SKILL_GAMMA: 0.99

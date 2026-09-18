@@ -660,14 +660,10 @@ def configure_ego_obs_from_config(config: dict) -> None:
     from concept_based_learning.observations.pov_facing_frame import (
         configure_pov_facing_frame_from_config,
     )
-    from concept_based_learning.observations.pov_turn import (
-        configure_pov_turn_from_config,
-    )
 
     configure_pov_relative_from_config(config)
     configure_pov_fixed_bilateral_from_config(config)
     configure_pov_facing_frame_from_config(config)
-    configure_pov_turn_from_config(config)
     set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
     set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
     set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
@@ -1851,17 +1847,12 @@ def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
     return stacked.astype(jnp.float32).flatten()
 
 
-def _get_ego_obs_pov_relative(raw_observation, objects, target_idx, heading_deg=None):
+def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
     """POV-relative ego obs: view = toward target; ψ = facing − view; sin/cos(ψ).
 
     When velocity is enabled, emit one signed **approach** channel in the view
     frame (line of sight to target): positive = target closing on the player,
     negative = receding. Lateral drift is omitted — view is locked on target.
-
-    ``heading_deg`` overrides the sprite orientation as the facing used for ψ,
-    which is how the POV turn primitives close their control loop. It is a single
-    scalar broadcast across the frame stack: the integrator only tracks the
-    current heading, so ψ history varies through the target bearing alone.
     """
     from concept_based_learning.observations.pov_relative import pov_facing_psi_rad
 
@@ -1907,12 +1898,7 @@ def _get_ego_obs_pov_relative(raw_observation, objects, target_idx, heading_deg=
         t_h_hist,
     )
 
-    if heading_deg is None:
-        facing_deg = player.orientation
-    else:
-        facing_deg = jnp.broadcast_to(
-            jnp.asarray(heading_deg, dtype=jnp.float32), thetas.shape
-        )
+    facing_deg = player.orientation
     psis = pov_facing_psi_rad(facing_deg, thetas)
 
     rel_x = t_cxs - p_cxs
@@ -2418,17 +2404,12 @@ def _get_ego_obs_legacy(raw_observation, objects, target_idx):
 
 
 def get_ego_obs(
-    raw_observation, objects, target_idx, heading_deg=None, distance_clip_px=None
+    raw_observation, objects, target_idx, distance_clip_px=None
 ):
     """
     Build egocentric observations using the currently selected format.
 
     Toggle via `set_ego_obs_format(use_legacy=True/False)`.
-
-    ``heading_deg`` is only meaningful under the POV mapper with turn primitives,
-    where ψ must be measured against the integrated heading rather than the
-    sprite orientation. Omitting it there would silently feed the network a
-    facing it never commanded, so that case raises instead.
 
     ``distance_clip_px`` overrides ``EGO_DISTANCE_CLIP_MAX_PX`` for the scalar
     distance channel (train-time clip sampling). Other encodings ignore it.
@@ -2440,7 +2421,6 @@ def get_ego_obs(
     from concept_based_learning.observations.pov_facing_frame import (
         using_pov_facing_frame,
     )
-    from concept_based_learning.observations.pov_turn import using_pov_turn_primitives
 
     if using_pov_fixed_bilateral():
         return _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx)
@@ -2449,14 +2429,7 @@ def get_ego_obs(
             raw_observation, objects, target_idx, distance_clip_px=distance_clip_px
         )
     if using_pov_relative():
-        if heading_deg is None and using_pov_turn_primitives():
-            raise ValueError(
-                "USE_POV_TURN_PRIMITIVES is on but get_ego_obs was called without "
-                "heading_deg. Pass PolicyState.heading_deg from the rollout carry."
-            )
-        return _get_ego_obs_pov_relative(
-            raw_observation, objects, target_idx, heading_deg
-        )
+        return _get_ego_obs_pov_relative(raw_observation, objects, target_idx)
     # Legacy 10-ch ego path disabled for paper eval (see set_ego_obs_format).
     # if _USE_LEGACY_EGO_OBS:
     #     return _get_ego_obs_legacy(raw_observation, objects, target_idx)

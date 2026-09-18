@@ -10,7 +10,7 @@ When ``USE_POV_FACING_FRAME`` is enabled (requires ``USE_POV_RELATIVE_MAPPER``):
   ``EGO_POSE_XY`` is on.
 * **No sector switch** — flipping L/R only happens when the *player* turns.
 
-Incompatible with fixed bilateral and turn primitives.
+Incompatible with fixed bilateral.
 """
 
 from __future__ import annotations
@@ -47,11 +47,6 @@ def configure_pov_facing_frame_from_config(config: dict | None) -> None:
         raise ValueError(
             "USE_POV_FACING_FRAME is incompatible with USE_POV_FIXED_BILATERAL: "
             "fixed bilateral selects sectors from target geometry."
-        )
-    if enabled and bool(cfg.get("USE_POV_TURN_PRIMITIVES", False)):
-        raise ValueError(
-            "USE_POV_FACING_FRAME is incompatible with USE_POV_TURN_PRIMITIVES: "
-            "facing frame uses sprite/synthetic orientation, not an integrated heading."
         )
     _USE_POV_FACING_FRAME = enabled
     _EGO_POSE_XY = bool(cfg.get("EGO_POSE_XY", False)) if enabled else False

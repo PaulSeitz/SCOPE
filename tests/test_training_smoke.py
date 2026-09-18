@@ -25,30 +25,6 @@ def _load_experiment_config(name: str) -> dict:
 
 
 @pytest.mark.slow
-def test_pov_turn_primitives_compile_and_one_step():
-    """Persistent heading must survive the rollout carry, mapper and next-obs."""
-    config = {
-        **_load_experiment_config(
-            "paper_eval/rq1/seaquest_skills_ego_pov_clip50_vel_psibins8_turn"
-        ),
-        **_smoke_overrides(),
-    }
-    assert config["USE_POV_TURN_PRIMITIVES"] is True
-    assert config["EGO_ACTION_DIM"] == 6
-    train_fn, _, _ = outer_make_train(config)
-    train_vjit = jax.jit(jax.vmap(train_fn, in_axes=(0, None, None)))
-    rng = jax.random.split(jax.random.PRNGKey(0), config["NUM_SEEDS"])
-    print(
-        "Compiling turn-primitive train (first GPU compile for Seaquest POV can "
-        "take several minutes; the step itself is fast once compiled)...",
-        flush=True,
-    )
-    compiled = train_vjit.lower(rng, None, None).compile()
-    out = jax.block_until_ready(compiled(rng, None, None))
-    assert "runner_state" in out
-
-
-@pytest.mark.slow
 def test_skills_ego_embed_compile_and_one_step():
     """SKILL_INPUT_MODE=ego_embed: Dense projection of ego features before Q MLP."""
     config = {

@@ -57,7 +57,6 @@ class LiveVizSnapshot:
     q_vals_active: np.ndarray | None
     skill_name: str
     ego_name: str
-    heading_deg: float | None
     facing_deg: float | None
     player_xy: tuple[float, float]
     target_xy: tuple[float, float] | None
@@ -314,7 +313,7 @@ def apply_pov_overlay(
     if using_pov_fixed_bilateral() and snapshot.virtual_facing_deg is not None:
         facing = snapshot.virtual_facing_deg
     else:
-        facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
+        facing = snapshot.facing_deg
     if facing is not None:
         dx, dy = _deg_to_screen_vec(float(facing), 36.0)
         cv2.arrowedLine(
@@ -404,7 +403,7 @@ def _draw_compass(canvas: np.ndarray, snapshot: LiveVizSnapshot, x0: int, y0: in
     if using_pov_fixed_bilateral() and snapshot.virtual_facing_deg is not None:
         facing = snapshot.virtual_facing_deg
     else:
-        facing = snapshot.heading_deg if snapshot.heading_deg is not None else snapshot.facing_deg
+        facing = snapshot.facing_deg
     if facing is not None:
         dx, dy = _deg_to_screen_vec(float(facing), size * 0.32)
         cv2.arrowedLine(
@@ -739,20 +738,11 @@ def render_detail_panel(
             )
         else:
             psi_deg = np.nan
-            facing = (
-                snapshot.heading_deg
-                if snapshot.heading_deg is not None
-                else snapshot.facing_deg
-            )
+            facing = snapshot.facing_deg
             if facing is not None:
                 view_deg = float(np.rad2deg(snapshot.angle_rad))
                 psi_deg = ((float(facing) - view_deg + 180.0) % 360.0) - 180.0
             psi_txt = f" psi={psi_deg:.1f}deg" if np.isfinite(psi_deg) else ""
-            head_txt = (
-                f" head={snapshot.heading_deg:.0f}deg"
-                if snapshot.heading_deg is not None
-                else ""
-            )
             face_txt = (
                 f" face={snapshot.facing_deg:.0f}deg"
                 if snapshot.facing_deg is not None
@@ -761,7 +751,7 @@ def render_detail_panel(
             _draw_text(
                 panel,
                 f"d={snapshot.distance:.1f}px view={np.rad2deg(snapshot.angle_rad):.0f}deg"
-                f"{psi_txt}{head_txt}{face_txt}",
+                f"{psi_txt}{face_txt}",
                 x,
                 y,
                 scale=0.32,

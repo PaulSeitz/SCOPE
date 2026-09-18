@@ -262,8 +262,8 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         if kill_mask is None:
             return semantic_obs
         pad = jnp.zeros(self.game_max_objects - kill_mask.shape[0], dtype=jnp.int32)
-        was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32), pad]
+        was_killed_with_noop = self._with_meta_event_padding(
+            jnp.concatenate([kill_mask.astype(jnp.int32), pad])
         )
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)

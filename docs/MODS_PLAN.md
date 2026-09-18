@@ -12,6 +12,25 @@ own session later".
 - Depth: **Seaquest gets the full grid** (~17 mods / 20 eval conditions); every
   other env gets a short 4–6 mod strip on A / B / C / G only.
 
+### Locked short Seaquest showcase strip (2026-09-18)
+
+Paper figure / talk strip (eval keys, train stays `GAME_MODS: null`):
+
+1. `base`
+2. `shift_lanes`
+3. `lane_scramble` (layout)
+4. `dynamic_lane_drift` (layout)
+5. `change_background_color` (visual footnote; appearance OOD)
+6. `no_enemies` (alignment / farming foil)
+7. `swap_diver_enemy_labels` (**eval-only** CBL relabel via YAML `relabel: true`)
+8. `gravity`
+9. `faster_enemies`
+10. `micro_swarm` — multi-object / nearest-slot attention fail showcase
+    (replaces `only_submarines`; fork already implements MicroSwarmMod)
+
+**Explicitly not headlines:** `only_submarines`, `surface_sub_always`,
+`inverted_lanes`, `lethal_divers`, `random_color_enemies`.
+
 Inputs to this draft:
 - Locked-spine Seaquest RQ1 per-mod numbers
   (`outputs/models/paper_eval/eval/all_mod_eval_summary.csv`, mtime 2026-09-05).
@@ -335,14 +354,18 @@ Plus **1 new Phoenix mod** (formation reshuffle, bucket B).
 
 **Main repo:**
 
-7. Add the four already-implemented-but-unwired Seaquest mods to
-   `configs/experiment/paper_eval/mods/seaquest.yaml`: `swap_diver_enemy_labels`,
-   `collectable_sharks`, `extra_enemy_type`, `penalize_diver_shooting` (currently
-   stranded under `planned:`).
+7. Add the already-implemented-but-unwired Seaquest mods to
+   `configs/experiment/paper_eval/mods/seaquest.yaml`: `collectable_sharks`,
+   `extra_enemy_type`, `penalize_diver_shooting` (still under `planned:`).
+   **Done (2026-09-18):** `lane_scramble`, `dynamic_lane_drift`,
+   `swap_diver_enemy_labels` (+ eval-only `relabel:`), `micro_swarm`.
 8. **Label-override mechanism for E2.** Precedent exists —
    `set_seaquest_surface_label` in `environments/seaquest/label.py` already does
-   exactly this for one object class. Generalise it to a per-env override map
-   driven from config, then add a `relabel:` key to the mod YAML schema.
+   exactly this for one object class. **Done for swap:** YAML `relabel: true` →
+   harness sets `SEAQUEST_SWAP_DIVER_ENEMY_LABELS` + `_PAPER_EVAL_MOD_RELABEL`;
+   `make_env(train=True)` and any non-harness eval force the remap off. Extend
+   the same pattern for `lethal_divers@relabel` / `collectable_sharks@relabel`
+   when those cells are scheduled.
 9. Add `direction: harder|easier|neutral` to the mod YAML schema and to the
    summary CSV.
 10. Rewrite the reporting buckets from `control/semantic/dynamics/visual` to the
@@ -385,5 +408,15 @@ Two real limits:
   existing action table, not extend it.
 
 Our YAML already supports what we need: `key`, `mods`, `category`, `skip_eval`,
-`paper_core`. Adding `direction: harder|easier|neutral` and
-`relabel: true|false` (for E2) would cover the new schema needs.
+`paper_core`, and **`relabel: true|false`** (E2 — wired for
+`swap_diver_enemy_labels`). Adding `direction: harder|easier|neutral` would
+cover the remaining schema need.
+
+### `micro_swarm` — intended multi-object attention fail (fork-ready)
+
+Already in JAXAtari REGISTRY (`MicroSwarmMod`). Shrinks shark/sub hitboxes and
+fills empty lane slots by cloning the lane-front enemy with staggered X offsets,
+so many near-equidistant same-class DESTROY targets compete for the single
+nearest skill slot. Dominant failure mode: nearest-target thrash / missed
+critical threat — not heuristic schedule, subtype farming, or velocity OOD.
+No further JAX work required unless tuning density/size.

@@ -107,10 +107,8 @@ class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
             return semantic_obs
 
         # Game layout: [36 enemies | 3 bullets | 1 ufo] = 40 slots.
-        # After prepend_meta_noop_slot: shift by 1. Remaining padding stays 0.
-        was_killed_with_noop = jnp.concatenate(
-            [jnp.zeros(1, dtype=jnp.int32), kill_mask.astype(jnp.int32)]
-        )  # (41,)
+        # Meta NOOP slot is appended after game entities.
+        was_killed_with_noop = self._with_meta_event_padding(kill_mask)  # (41,)
 
         objects = semantic_obs.objects
         new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)

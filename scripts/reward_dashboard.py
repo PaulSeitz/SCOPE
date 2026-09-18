@@ -12,6 +12,8 @@ Controls:
     R                  : reset episode
     F                  : freeze / unfreeze
     N                  : single-step while frozen
+    W                  : hot-reload Montezuma WP* from montezuma_policy.py
+                         (also auto-reloads tmp/montezuma_waypoints.json)
     Q / ESC            : quit
 """
 import sys
@@ -709,8 +711,10 @@ class RewardDashboard:
 
         # ── controls ──────────────────────────────────────────────────────────
         cy = self.game_h + 20
-        text("Arrows+Space: move/fire   R: reset   F: freeze   N: step   Q: quit",
-             x0, cy, DARK_GRAY)
+        ctrl = "Arrows+Space: move/fire   R: reset   F: freeze   N: step   Q: quit"
+        if self._is_montezuma():
+            ctrl += "   W: reload WP*"
+        text(ctrl, x0, cy, DARK_GRAY)
         if self.frozen:
             text("*** FROZEN — press N to step ***", x0, cy + lh, YELLOW, bold=True)
 
@@ -742,10 +746,39 @@ class RewardDashboard:
                 return int(self._ale_to_idx[alt])
         return int(self._ale_to_idx.get(ACTION_NOOP, 0))
 
-    def handle_input(self) -> Tuple[int, bool, bool, bool, bool]:
+    def _is_montezuma(self) -> bool:
+        return "montezuma" in self.env_name
+
+    def _rebind_montezuma_heuristic(self) -> None:
+        """Pick up rebuilt callables after ``hot_reload`` / JSON reload."""
+        from concept_based_learning.environments.montezumarevenge import (
+            montezuma_policy as mp,
+        )
+
+        self.get_heuristic_with_state = mp.get_heuristic_target_with_state
+        self.get_heuristic_target = mp.get_heuristic_target
+
+    def _reload_montezuma_waypoints(self, *, from_py: bool) -> str:
+        """Reload WP* without resetting the env. Returns a short status line."""
+        from concept_based_learning.environments.montezumarevenge import (
+            montezuma_policy as mp,
+        )
+
+        if from_py:
+            mp = mp.hot_reload()
+            self._rebind_montezuma_heuristic()
+            self.policy_state = initial_policy_state(self.no_target_idx)
+            return f"W: reloaded WP* from .py  ARRIVE_R={mp.ARRIVE_R} WP0={mp.WP0}"
+        if mp.maybe_reload_waypoints_json():
+            self._rebind_montezuma_heuristic()
+            self.policy_state = initial_policy_state(self.no_target_idx)
+            return f"JSON: reloaded waypoints  ARRIVE_R={mp.ARRIVE_R} WP0={mp.WP0}"
+        return ""
+
+    def handle_input(self) -> Tuple[int, bool, bool, bool, bool, bool]:
         keys = pygame.key.get_pressed()
         ale_action = ACTION_NOOP
-        quit_, reset_, freeze_, step_ = False, False, False, False
+        quit_, reset_, freeze_, step_, reload_wp_ = False, False, False, False, False
 
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
@@ -759,6 +792,8 @@ class RewardDashboard:
                     freeze_ = True
                 elif ev.key == pygame.K_n:
                     step_ = True
+                elif ev.key == pygame.K_w:
+                    reload_wp_ = True
 
         u, d, l, r, sp = (keys[k] for k in (
             pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_SPACE
@@ -773,7 +808,14 @@ class RewardDashboard:
         elif l:       ale_action = ACTION_LEFTFIRE      if sp else ACTION_LEFT
         elif sp:      ale_action = ACTION_FIRE
 
-        return self._ale_to_env_action(ale_action), quit_, reset_, freeze_, step_
+        return (
+            self._ale_to_env_action(ale_action),
+            quit_,
+            reset_,
+            freeze_,
+            step_,
+            reload_wp_,
+        )
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
@@ -783,7 +825,7 @@ class RewardDashboard:
         running = True
 
         while running:
-            action, quit_, reset_, freeze_, step_ = self.handle_input()
+            action, quit_, reset_, freeze_, step_, reload_wp_ = self.handle_input()
             if quit_:
                 break
             if reset_:
@@ -792,6 +834,14 @@ class RewardDashboard:
                 continue
             if freeze_:
                 self.frozen = not self.frozen
+            if reload_wp_ and self._is_montezuma():
+                msg = self._reload_montezuma_waypoints(from_py=True)
+                if msg:
+                    print(msg, flush=True)
+            elif self._is_montezuma():
+                msg = self._reload_montezuma_waypoints(from_py=False)
+                if msg:
+                    print(msg, flush=True)
 
             if not self.frozen or step_:
                 if self.step(action):

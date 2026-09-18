@@ -87,18 +87,23 @@ def make_meta_train(
         FIRE_EGO_ACTION_INDICES = fire_ego_action_indices(EGO_ACTION_DIM)
     # Keep NOOP (ego action 0) always available, even if custom FIRE indices are misconfigured.
     NON_NOOP_FIRE_EGO_ACTION_INDICES = FIRE_EGO_ACTION_INDICES[FIRE_EGO_ACTION_INDICES != 0]
+    from concept_based_learning.environments.meta_target_mask import (
+        meta_fire_target_idx as _meta_fire_target_idx,
+        meta_noop_target_idx as _meta_noop_target_idx,
+    )
+
     META_USE_NOOP_TARGET = bool(config.get("META_USE_NOOP_TARGET", False))
-    META_NOOP_TARGET_IDX = int(config.get("META_NOOP_TARGET_IDX", 0))
+    META_NOOP_TARGET_IDX = int(_meta_noop_target_idx(config))
     meta_noop_target_enabled = META_USE_NOOP_TARGET and (0 <= META_NOOP_TARGET_IDX < MAX_OBJECTS)
     META_USE_FIRE_TARGET = bool(config.get("META_USE_FIRE_TARGET", False))
-    META_FIRE_TARGET_IDX = int(config.get("META_FIRE_TARGET_IDX", 1))
+    META_FIRE_TARGET_IDX = int(_meta_fire_target_idx(config))
     meta_fire_target_enabled = META_USE_FIRE_TARGET and (0 <= META_FIRE_TARGET_IDX < MAX_OBJECTS)
     META_FIRE_GAME_ACTION = int(config.get("META_FIRE_GAME_ACTION", 1))
     # Switching-cost / action-switch penalty for System 2.
     # Penalizes changing the selected target from the previous step to reduce
     # target jittering while still allowing deliberate switches.
     META_SWITCH_PENALTY = float(config.get("META_SWITCH_PENALTY", -0.5))
-    META_DEATH_PENALTY = float(config.get("META_DEATH_PENALTY", -5.0))
+    META_DEATH_PENALTY = float(config.get("META_DEATH_PENALTY", 0.0))
 
     def _apply_meta_target_mask_overrides(mask):
         if meta_noop_target_enabled:

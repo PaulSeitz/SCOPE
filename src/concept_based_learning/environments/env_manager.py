@@ -43,6 +43,7 @@ from concept_based_learning.environments.seaquest.label import (
     set_seaquest_ascent_block,
     set_seaquest_surface_label,
     set_seaquest_surfacing_death_guard,
+    set_seaquest_swap_diver_enemy_labels,
 )
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     get_heuristic_target,
@@ -886,6 +887,16 @@ class EnvManager:
             )
             # Always apply (default collect) so multi-job workers reset between stems.
             set_seaquest_surface_label(config.get("SEAQUEST_SURFACE_LABEL", "collect"))
+            # E2 diver↔enemy label remap is eval-only.
+            # Dual gate: ModSpec.relabel → harness sets SEAQUEST_SWAP_DIVER_ENEMY_LABELS
+            # and _PAPER_EVAL_MOD_RELABEL. Never inferred from GAME_MODS. Forced off
+            # on train=True and on any train-time test_env (no harness sentinel).
+            if train or not bool(config.get("_PAPER_EVAL_MOD_RELABEL", False)):
+                set_seaquest_swap_diver_enemy_labels(False)
+            else:
+                set_seaquest_swap_diver_enemy_labels(
+                    bool(config.get("SEAQUEST_SWAP_DIVER_ENEMY_LABELS", False))
+                )
         if components.jax_game_id == "freeway":
             set_freeway_heuristic_params(
                 threat_dist_thresh=config.get("FREEWAY_THREAT_DIST_THRESH", None),

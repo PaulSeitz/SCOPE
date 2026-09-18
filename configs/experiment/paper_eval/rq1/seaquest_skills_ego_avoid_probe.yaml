@@ -50,5 +50,5 @@ alg:
   HEURISTIC_MODE: avoid_only
   SKILL_INPUT_MODE: ego
   SKILL_PIXEL_CNN_CHANNELS:
-  - 16
   - 32
+  - 64
