@@ -3,12 +3,18 @@
 #   /home/paul/Documents/JAXAtari-seaquest-robustness
 #
 # Train on base (GAME_MODS: null). Eval harness iterates `eval_mods`.
+# Label remaps use YAML `relabel: true` → SEAQUEST_SWAP_DIVER_ENEMY_LABELS on
+# the eval config only (never inferred from GAME_MODS; forced off when train=True).
 
 env: seaquest
 status: ready  # registry present on robustness-mods fork
 
-# Single visual kept for the paper table; other visuals stay in registry_extra.
-visual_one: random_color_enemies
+# Appearance OOD (PQN probe 2026-09-14): inverted/bg collapse; mines ~0.17×.
+# Filter with PAPER_EVAL_MOD_KEYS if the paper table should keep only one.
+visual_candidates:
+  - inverted_colors
+  - change_background_color
+  - mines
 
 eval_mods:
   # control
@@ -49,6 +55,17 @@ eval_mods:
   - key: no_surfacing_death
     mods: [no_surfacing_death]
     category: semantic
+  # E2 versatility: fork swaps sprites + OC channels; CBL remaps labels eval-only.
+  - key: swap_diver_enemy_labels
+    mods: [swap_diver_enemy_labels]
+    category: semantic
+    relabel: true
+  # Multi-object attention fail (replaces only_submarines as failure showcase).
+  # Fork: MicroSwarmMod — pack enemy slots with tiny clones so nearest-slot
+  # DESTROY thrashing dominates (not subtype-difficulty or schedule failure).
+  - key: micro_swarm
+    mods: [micro_swarm]
+    category: semantic
   # dynamics (expect ego to struggle more here)
   - key: gravity
     mods: [gravity]
@@ -77,19 +94,32 @@ eval_mods:
   - key: inverted_lanes
     mods: [inverted_lanes]
     category: dynamics
-  # one visual
-  - key: random_color_enemies
-    mods: [random_color_enemies]
+  # layout / structural (lane geometry; registry keys match fork REGISTRY)
+  - key: lane_scramble
+    mods: [lane_scramble]
+    category: layout
+  - key: dynamic_lane_drift
+    mods: [dynamic_lane_drift]
+    category: layout
+  # visual / appearance (geometry & dynamics unchanged)
+  - key: inverted_colors
+    mods: [inverted_colors]
+    category: visual
+  - key: change_background_color
+    mods: [change_background_color]
+    category: visual
+  - key: mines
+    mods: [mines]
     category: visual
 
-# Present on fork but excluded from the main paper table (extra visuals).
+# Implemented on fork but not in the main paper table.
 registry_extra:
-  - mines
+  - random_color_enemies
   - fireballs
+  - grayscale
 
 # Planned additions (implement on the robustness-mods fork when ready).
 planned:
   - collectable_sharks
-  - swap_diver_enemy_labels
   - extra_enemy_type
   - penalize_diver_shooting

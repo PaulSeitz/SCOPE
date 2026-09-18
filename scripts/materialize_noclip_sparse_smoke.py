@@ -289,8 +289,6 @@ def _skills_train_yaml(env: str) -> str:
         "  NUM_LAYERS: 3",
         "  SKILL_EMBED_DIM: 256",
         "  SKILL_LR: 0.0005",
-        "  SKILL_LR_FINISH: 0.0001",
-        "  SKILL_LR_DECAY: 0.5",
         "  SKILL_REWARD_LAMBDA: 0.0",
         "  CLIP_REWARD: true",
         "  RESTRICT_FIRE_FOR_NON_DESTROY: false",
@@ -591,8 +589,6 @@ def _tandem_train_yaml(env: str) -> str:
     lines += _sparse_alg()
     lines += [
         "  USE_EGO_SHOT_FEATURES: false",
-        "  SKILL_LR_FINISH: 0.0001",
-        "  SKILL_LR_DECAY: 0.5",
         "  SKILL_BOOTSTRAP: q_lambda",
         "  SKILL_LAMBDA: 0.65",
         "  SKILL_GAMMA: 0.99",
