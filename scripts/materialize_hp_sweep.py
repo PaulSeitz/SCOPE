@@ -9,8 +9,9 @@ overrides). Constant ``SKILL_LR`` (no finish). Same mod gate + Pong/Beamrider
 base ZS. Each cell = 4 stems (train + SQ eval + 2 ZS).
 
 Stage ``tandem`` — from-scratch pixel-meta tandem ~5M; skill ε locked to B,
-``SKILL_LR`` locked to skills-sweep winner ``lr1e3`` (1e-3); sweep meta LR /
-meta ε / switch penalty. Home mod eval only (no ZS — keeps the suite light).
+``SKILL_LR`` locked to skills-sweep winner ``lr1e3`` (1e-3). Round-2 grid:
+meta-ε schedule (incl. PQN-style 1.0), plus LR×ε and switch×ε mixtures.
+Home mod eval only (no ZS).
 
     python scripts/materialize_hp_sweep.py --stage skills
     python scripts/materialize_hp_sweep.py --stage tandem
@@ -110,18 +111,69 @@ CELLS_SKILLS: dict[str, dict] = {
     "lam05": _locked_eps(LAMBDA=0.5, SKILL_LAMBDA=0.5),  # NEXUS options
 }
 
-# Tandem meta grid — skills use locked ε B + LOCKED_SKILL_LR via SKILL_EPS_*/SKILL_LR.
-# EPS_START feeds meta ε when META_EPS_* unset (train_tandem fallback).
+# Tandem round-2 — skills locked (ε B + SKILL_LR=1e-3). Axes are NOT
+# one-at-a-time: every cell sets META_LR / META_EPS_* / META_SWITCH_PENALTY
+# explicitly so "default" cells are not accidentally duplicated.
+#
+# Round-1 takeaways (noisy 1-seed): META_LR≈5e-4, switch≈−0.05 preferred;
+# −0.1 collapsed; meta ε 0.05–0.1 competitive. Round-2 adds PQN-style high
+# meta ε and LR×ε / switch×ε mixes.
+def _td(**extra: float | int | str) -> dict:
+    d: dict = {
+        "META_LR": 5e-4,
+        "META_SWITCH_PENALTY": -0.05,
+        "META_EPS_START": 0.1,
+        "META_EPS_FINISH": 0.01,
+        "META_EPS_DECAY": 0.2,
+    }
+    d.update(extra)
+    # Keep EPS_* in sync for train_tandem fallbacks / readability.
+    d.setdefault("EPS_START", d["META_EPS_START"])
+    d.setdefault("EPS_FINISH", d["META_EPS_FINISH"])
+    d.setdefault("EPS_DECAY", d["META_EPS_DECAY"])
+    return d
+
+
+def _td_eps(
+    start: float,
+    finish: float = 0.01,
+    decay: float = 0.2,
+    **extra: float | int | str,
+) -> dict:
+    return _td(
+        META_EPS_START=start,
+        META_EPS_FINISH=finish,
+        META_EPS_DECAY=decay,
+        EPS_START=start,
+        EPS_FINISH=finish,
+        EPS_DECAY=decay,
+        **extra,
+    )
+
+
 CELLS_TANDEM: dict[str, dict] = {
-    "meta_lr1e4": {"META_LR": 1e-4, "EPS_START": 0.1},
-    "meta_lr5e4": {"META_LR": 5e-4, "EPS_START": 0.1},
-    "meta_lr1e3": {"META_LR": 1e-3, "EPS_START": 0.1},
-    "meta_eps005": {"META_EPS_START": 0.05, "EPS_START": 0.05},
-    "meta_eps01": {"META_EPS_START": 0.1, "EPS_START": 0.1},
-    "meta_eps02": {"META_EPS_START": 0.2, "EPS_START": 0.2},
-    "switch0": {"META_SWITCH_PENALTY": 0.0, "EPS_START": 0.1},
-    "switch005": {"META_SWITCH_PENALTY": -0.05, "EPS_START": 0.1},
-    "switch01": {"META_SWITCH_PENALTY": -0.1, "EPS_START": 0.1},
+    # --- meta ε schedule (META_LR=5e-4, switch=−0.05) ---
+    "e005": _td_eps(0.05),
+    "e01": _td_eps(0.1),  # round-1-ish anchor
+    "e02": _td_eps(0.2),
+    "e05": _td_eps(0.5),
+    "e10_pqn": _td_eps(1.0, finish=0.001, decay=0.1),  # flat PQN / NEXUS-ish
+    "e10": _td_eps(1.0),
+    # --- LR × ε (switch=−0.05) ---
+    "lr1e3_e005": _td_eps(0.05, META_LR=1e-3),
+    "lr1e3_e01": _td_eps(0.1, META_LR=1e-3),
+    "lr1e3_e05": _td_eps(0.5, META_LR=1e-3),
+    "lr1e3_e10_pqn": _td_eps(1.0, finish=0.001, decay=0.1, META_LR=1e-3),
+    # --- free retarget (switch=0) × ε (META_LR=5e-4) ---
+    "sw0_e005": _td_eps(0.05, META_SWITCH_PENALTY=0.0),
+    "sw0_e01": _td_eps(0.1, META_SWITCH_PENALTY=0.0),
+    "sw0_e05": _td_eps(0.5, META_SWITCH_PENALTY=0.0),
+    "sw0_e10_pqn": _td_eps(1.0, finish=0.001, decay=0.1, META_SWITCH_PENALTY=0.0),
+    # --- triples: higher LR + free switch + strong ε ends ---
+    "lr1e3_sw0_e005": _td_eps(0.05, META_LR=1e-3, META_SWITCH_PENALTY=0.0),
+    "lr1e3_sw0_e10_pqn": _td_eps(
+        1.0, finish=0.001, decay=0.1, META_LR=1e-3, META_SWITCH_PENALTY=0.0
+    ),
 }
 
 
