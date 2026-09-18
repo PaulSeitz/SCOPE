@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Materialize hyperparameter-sweep suites on the noclip + sparse C/D/A spine.
 
-Stage ``eps`` (exploration sanity) — Seaquest skills-only ~5M, constant
-``SKILL_LR=5e-4`` (no LR decay), then home mod gate + Pong/Beamrider base ZS.
+Stage ``eps`` (done) — exploration sanity; **locked ε = B**
+(``0.2 → 0.01 / 0.2``). See suite ``eps_sanity``.
 
-Cells (B = current smoke ε with decay removed)::
+Stage ``skills`` — broader skills HP grid with locked ε B (unless a cell
+overrides). Constant ``SKILL_LR`` (no finish). Same mod gate + Pong/Beamrider
+base ZS. Each cell = 4 stems (train + SQ eval + 2 ZS).
 
-  A  EPS 0.1 → 0.01 / 0.2     (recent tandem-ish)
-  B  EPS 0.2 → 0.01 / 0.2     (current skills baseline, constant LR)
-  C  EPS 0.5 → 0.01 / 0.2
-  D  EPS 1.0 → 0.001 / 0.1    (flat PQN / NEXUS Seaquest)
-  E  EPS 1.0 → 0.01 / 0.2
+Stage ``tandem`` — from-scratch pixel-meta tandem ~5M; skill ε/LR locked to B
+defaults; sweep meta LR / meta ε / switch penalty. Home mod eval only
+(no ZS — keeps the suite light).
 
-Stage ``skills`` — later skills HP grid (scaffold; fill CELLS_SKILLS when ready).
-Stage ``tandem`` — later meta-side grid (scaffold).
-
-    python scripts/materialize_hp_sweep.py              # eps only
+    python scripts/materialize_hp_sweep.py --stage skills
+    python scripts/materialize_hp_sweep.py --stage tandem
     python scripts/materialize_hp_sweep.py --stage all
-    python scripts/run_paper_eval.py --suite eps_sanity \\
+    python scripts/run_paper_eval.py --suite hp_sweep_skills \\
+        --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
+    python scripts/run_paper_eval.py --suite hp_sweep_tandem \\
         --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
 """
 
@@ -29,6 +29,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _RQ1 = _ROOT / "configs/experiment/paper_eval/rq1"
 _RQ2 = _ROOT / "configs/experiment/paper_eval/rq2"
+_RQ3 = _ROOT / "configs/experiment/paper_eval/rq3"
 
 SPINE = "noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5"
 SPARSE_TAG = "sparse_cda"
@@ -36,6 +37,11 @@ SPARSE_TAG = "sparse_cda"
 TIMESTEPS_5M = 4_997_120
 BUDGET_TAG = "5m"
 SKILL_LR = 0.0005  # constant; no SKILL_LR_FINISH
+
+# Locked after eps_sanity (cell B): stable on gate mods.
+LOCKED_EPS_START = 0.2
+LOCKED_EPS_FINISH = 0.01
+LOCKED_EPS_DECAY = 0.2
 
 SUITE_EPS = "eps_sanity"
 SUITE_SKILLS = "hp_sweep_skills"
@@ -67,12 +73,53 @@ CELLS_EPS: dict[str, tuple[float, float, float]] = {
     "e_e10": (1.0, 0.01, 0.2),
 }
 
-# Later skills HP grid — same helpers / mod gate / transfers. Fill when Stage 1 runs.
-# Example shape: tag → dict of alg overrides (SKILL_LR, EPS_*, …).
-CELLS_SKILLS: dict[str, dict] = {}
+# Skills HP grid — ε locked to B unless a cell overrides EPS_*.
+# Explicit lr5e4 duplicates eps_sanity b_e02 so this suite is self-contained.
+def _locked_eps(**extra: float | int | str) -> dict:
+    d = {
+        "EPS_START": LOCKED_EPS_START,
+        "EPS_FINISH": LOCKED_EPS_FINISH,
+        "EPS_DECAY": LOCKED_EPS_DECAY,
+        "SKILL_LR": SKILL_LR,
+    }
+    d.update(extra)
+    return d
 
-# Later tandem meta grid (SKILL_EPS matched to winning skills cell).
-CELLS_TANDEM: dict[str, dict] = {}
+
+CELLS_SKILLS: dict[str, dict] = {
+    # --- learning rate (constant) ---
+    "lr5e5": _locked_eps(SKILL_LR=5e-5),
+    "lr1e4": _locked_eps(SKILL_LR=1e-4),  # NEXUS
+    "lr2p5e4": _locked_eps(SKILL_LR=2.5e-4),  # flat PQN
+    "lr5e4": _locked_eps(SKILL_LR=5e-4),  # locked B / smoke default
+    "lr1e3": _locked_eps(SKILL_LR=1e-3),
+    "lr2e3": _locked_eps(SKILL_LR=2e-3),
+    # --- ε anneal length (start fixed at 0.2) ---
+    "decay01": _locked_eps(EPS_DECAY=0.1),
+    "decay05": _locked_eps(EPS_DECAY=0.5),
+    "decay08": _locked_eps(EPS_DECAY=0.8),
+    # --- ε finish ---
+    "finish05": _locked_eps(EPS_FINISH=0.05),  # old code default finish
+    # --- grad clip ---
+    "clip05": _locked_eps(MAX_GRAD_NORM=0.5),
+    "clip10": _locked_eps(MAX_GRAD_NORM=10.0),  # flat PQN
+    # --- λ (skill bootstrap) ---
+    "lam05": _locked_eps(LAMBDA=0.5, SKILL_LAMBDA=0.5),  # NEXUS options
+}
+
+# Tandem meta grid — skills use locked ε B + SKILL_LR=5e-4 via SKILL_EPS_*.
+# EPS_START feeds meta ε when META_EPS_* unset (train_tandem fallback).
+CELLS_TANDEM: dict[str, dict] = {
+    "meta_lr1e4": {"META_LR": 1e-4, "EPS_START": 0.1},
+    "meta_lr5e4": {"META_LR": 5e-4, "EPS_START": 0.1},
+    "meta_lr1e3": {"META_LR": 1e-3, "EPS_START": 0.1},
+    "meta_eps005": {"META_EPS_START": 0.05, "EPS_START": 0.05},
+    "meta_eps01": {"META_EPS_START": 0.1, "EPS_START": 0.1},
+    "meta_eps02": {"META_EPS_START": 0.2, "EPS_START": 0.2},
+    "switch0": {"META_SWITCH_PENALTY": 0.0, "EPS_START": 0.1},
+    "switch005": {"META_SWITCH_PENALTY": -0.05, "EPS_START": 0.1},
+    "switch01": {"META_SWITCH_PENALTY": -0.1, "EPS_START": 0.1},
+}
 
 
 def _lines(*parts: str | list[str]) -> str:
@@ -150,6 +197,17 @@ def train_stem(suite: str, tag: str) -> str:
     )
 
 
+def tandem_train_stem(tag: str) -> str:
+    return (
+        f"seaquest_from_scratch_tandem_pixel_ego_pov_{SPINE}_{SPARSE_TAG}"
+        f"_{SUITE_TANDEM}_{tag}_{BUDGET_TAG}"
+    )
+
+
+def tandem_eval_stem(tag: str) -> str:
+    return f"{tandem_train_stem(tag)}_eval"
+
+
 def eval_stem(suite: str, tag: str) -> str:
     return f"{train_stem(suite, tag)}_eval"
 
@@ -209,6 +267,10 @@ def _skills_train_yaml(
         "RECORD_VIDEO: false",
         "VIDEO_AT_END: false",
     ]
+    extra = extra_alg or {}
+    max_grad = float(extra.get("MAX_GRAD_NORM", 0.8))
+    lam = float(extra.get("LAMBDA", 0.65))
+    skill_lam = float(extra.get("SKILL_LAMBDA", lam))
     lines += _sparse_top()
     lines += [
         "alg:",
@@ -239,10 +301,10 @@ def _skills_train_yaml(
         "  NUM_MINIBATCHES: 64",
         "  GAMMA: 0.99",
         "  SKILL_GAMMA: 0.99",
-        "  LAMBDA: 0.65",
-        "  SKILL_LAMBDA: 0.65",
+        f"  LAMBDA: {lam}",
+        f"  SKILL_LAMBDA: {skill_lam}",
         "  LR: 0.0001",
-        "  MAX_GRAD_NORM: 0.8",
+        f"  MAX_GRAD_NORM: {max_grad}",
         "  OFF_POLICY: true",
         "  RELABEL_ALL_OBJECTS: false",
         "  RELABEL_K_OBJECTS: null",
@@ -255,11 +317,19 @@ def _skills_train_yaml(
         "  SKILL_DEATH_PENALIZE_COLLECT: true",
     ]
     lines += _sparse_alg()
-    if extra_alg:
-        for k, v in extra_alg.items():
-            if k.startswith("EPS_") or k == "SKILL_LR":
-                continue  # already set
-            lines.append(f"  {k}: {v}")
+    skip_extra = {
+        "EPS_START",
+        "EPS_FINISH",
+        "EPS_DECAY",
+        "SKILL_LR",
+        "MAX_GRAD_NORM",
+        "LAMBDA",
+        "SKILL_LAMBDA",
+    }
+    for k, v in extra.items():
+        if k in skip_extra:
+            continue
+        lines.append(f"  {k}: {v}")
     lines += [
         "  USE_EGO_SHOT_FEATURES: false",
         "SEED: 44",
@@ -445,8 +515,9 @@ def skills_sweep_stems() -> tuple[str, ...]:
 
 
 def tandem_sweep_stems() -> tuple[str, ...]:
-    # Placeholder: tandem materialization not wired yet.
-    return tuple()
+    trains = tuple(tandem_train_stem(t) for t in CELLS_TANDEM)
+    evals = tuple(tandem_eval_stem(t) for t in CELLS_TANDEM)
+    return trains + evals
 
 
 def _materialize_eps(*, dry: bool) -> None:
@@ -475,17 +546,216 @@ def _materialize_eps(*, dry: bool) -> None:
             )
 
 
+def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
+    stem = tandem_train_stem(tag)
+    meta_lr = float(overrides.get("META_LR", 5e-4))
+    switch = float(overrides.get("META_SWITCH_PENALTY", -0.05))
+    eps_start = float(overrides.get("EPS_START", 0.1))
+    eps_finish = float(overrides.get("EPS_FINISH", 0.01))
+    eps_decay = float(overrides.get("EPS_DECAY", 0.2))
+    meta_eps_start = float(overrides.get("META_EPS_START", eps_start))
+    meta_eps_finish = float(overrides.get("META_EPS_FINISH", eps_finish))
+    meta_eps_decay = float(overrides.get("META_EPS_DECAY", eps_decay))
+    lines: list[str] = [
+        f"# Seaquest tandem — {SUITE_TANDEM} cell {tag} (~5M).",
+        "PAPER_EVAL_RQ: 3",
+        "PAPER_EVAL_PHASE: train",
+        "PAPER_EVAL_KIND: tandem",
+        "PAPER_EVAL_MODS: seaquest",
+        "PAPER_EVAL_REQUIRES_RQ1: []",
+        "NUM_SEEDS: 1",
+        "ALG_NAME: hierarchical_pqn",
+        "TRAIN_MODE: tandem",
+        "META_ARCHITECTURE: per_object_mlp",
+        "ENV_NAME: seaquest",
+    ]
+    lines += _ego_lines()
+    lines += [
+        f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{stem}",
+        f"WANDB_RUN_NAME: sq_paper_{SUITE_TANDEM}_{tag}_{BUDGET_TAG}",
+        "WANDB_TAGS:",
+        f"- suite:{SUITE_TANDEM}",
+        "- rq:3",
+        "- env:seaquest",
+        "- role:base",
+        "- ego:noblocking",
+        "- ego:noweapon",
+        "- ego:noclip",
+        f"- ablation:{SPARSE_TAG}",
+        f"- budget:{BUDGET_TAG}",
+        "- phase:from_scratch",
+        "- train_mode:tandem",
+        "- meta_input:pixel",
+        "- skill_input:ego",
+        "- mapper:pov_facing",
+        "- ego:phi_bins8",
+        "- probe:tandem_hpsweep",
+        f"- cell:{tag}",
+        "META_PIXEL_DO_RESIZE: true",
+        "META_PIXEL_USE_NATIVE_DOWNSCALING: true",
+        "META_PIXEL_RESIZE_SHAPE:",
+        "- 84",
+        "- 84",
+        "META_PIXEL_GRAYSCALE: true",
+        "SKILL_PIXEL_CNN_CHANNELS:",
+        "- 16",
+        "- 32",
+        "GAME_MODS: null",
+        "EVAL_GAME_MODS: null",
+        "META_INPUT_MODE: pixel_embed",
+        "SKILL_INPUT_MODE: ego",
+        "HEURISTIC_MODE: env_specific",
+        "SKILL_DEATH_PENALIZE_COLLECT: true",
+        "RECORD_VIDEO: false",
+        "VIDEO_AT_END: false",
+    ]
+    lines += _sparse_top()
+    lines += [
+        "alg:",
+        "  NUM_SKILLS: 4",
+        "  SKILL_NAMES:",
+        "  - DESTROY",
+        "  - COLLECT",
+        "  - AVOID",
+        "  - NAVIGATE",
+        "  MAX_OBJECTS: 35",
+        "  EGO_ACTION_DIM: 18",
+        "  HIDDEN_SIZE: 128",
+        "  NUM_LAYERS: 3",
+        "  META_HIDDEN_SIZE: 256",
+        "  META_PER_OBJECT_NUM_LAYERS: 3",
+        "  META_FLAT_NUM_LAYERS: 3",
+        "  META_EMBED_DIM: 256",
+        "  SKILL_EMBED_DIM: 256",
+        f"  META_LR: {meta_lr}",
+        f"  SKILL_LR: {SKILL_LR}",
+        "  META_USE_NOOP_TARGET: true",
+        "  META_NOOP_TARGET_IDX: 0",
+        f"  META_SWITCH_PENALTY: {switch}",
+        "  META_DEATH_PENALTY: -10.0",
+        "  META_REWARD_LAMBDA: 1.0",
+        "  CLIP_REWARD: true",
+        "  FIRST_FIRE: true",
+        "  STICKY_ACTIONS: false",
+        "  EPISODIC_LIFE: true",
+        "  FRAME_STACK_SIZE: 4",
+        "  FRAME_SKIP: 4",
+        f"  TOTAL_TIMESTEPS: {TIMESTEPS_5M}",
+        "  NUM_ENVS: 128",
+        "  NUM_STEPS: 128",
+        "  NUM_EPOCHS: 4",
+        "  NUM_MINIBATCHES: 64",
+        "  GAMMA: 0.99",
+        "  LAMBDA: 0.65",
+        "  LR: 0.0001",
+        "  MAX_GRAD_NORM: 0.8",
+        "  OFF_POLICY: true",
+        "  RELABEL_ALL_OBJECTS: false",
+        "  RELABEL_K_OBJECTS: null",
+        f"  EPS_START: {eps_start}",
+        f"  EPS_FINISH: {eps_finish}",
+        f"  EPS_DECAY: {eps_decay}",
+        # Keep skill exploration on locked B even when meta EPS_START differs.
+        f"  SKILL_EPS_START: {LOCKED_EPS_START}",
+        f"  SKILL_EPS_FINISH: {LOCKED_EPS_FINISH}",
+        f"  SKILL_EPS_DECAY: {LOCKED_EPS_DECAY}",
+        f"  META_EPS_START: {meta_eps_start}",
+        f"  META_EPS_FINISH: {meta_eps_finish}",
+        f"  META_EPS_DECAY: {meta_eps_decay}",
+        "  META_INPUT_MODE: pixel_embed",
+        "  SKILL_INPUT_MODE: ego",
+        "  META_PIXEL_CNN_CHANNELS:",
+        "  - 16",
+        "  - 32",
+        "  HEURISTIC_MODE: env_specific",
+        "  SKILL_DEATH_PENALIZE_COLLECT: true",
+    ]
+    lines += _sparse_alg()
+    lines += [
+        "  USE_EGO_SHOT_FEATURES: false",
+        "  SKILL_BOOTSTRAP: q_lambda",
+        "  SKILL_LAMBDA: 0.65",
+        "  SKILL_GAMMA: 0.99",
+        "SEED: 44",
+    ]
+    return _lines(lines)
+
+
+def _tandem_eval_yaml(*, tag: str) -> str:
+    stem = tandem_train_stem(tag)
+    skills_ckpt = (
+        f"./outputs/models/paper_eval/rq3/{stem}/seaquest/"
+        f"hierarchical_pqn_seaquest_seed44_skills.safetensors"
+    )
+    meta_ckpt = (
+        f"./outputs/models/paper_eval/rq3/{stem}/seaquest/"
+        f"hierarchical_pqn_seaquest_seed44_meta.safetensors"
+    )
+    lines: list[str] = [
+        "PAPER_EVAL_RQ: 3",
+        "PAPER_EVAL_PHASE: eval",
+        "PAPER_EVAL_KIND: tandem",
+        "PAPER_EVAL_MODS: seaquest",
+    ]
+    lines += _mod_keys_yaml()
+    lines += [
+        "PAPER_EVAL_REQUIRES_RQ1:",
+        f"- {stem}",
+        f"PAPER_EVAL_SKILLS_CKPT: {skills_ckpt}",
+        f"PAPER_EVAL_META_CKPT: {meta_ckpt}",
+        f"PAPER_EVAL_ARCHITECTURE_OF: {stem}",
+        "NUM_SEEDS: 1",
+        "ALG_NAME: hierarchical_pqn",
+        "TRAIN_MODE: tandem",
+        "ENV_NAME: seaquest",
+        f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{stem}",
+        f"WANDB_RUN_NAME: sq_paper_eval_{SUITE_TANDEM}_{tag}_{BUDGET_TAG}",
+        "WANDB_TAGS:",
+        f"- suite:{SUITE_TANDEM}",
+        "- rq:3",
+        "- env:seaquest",
+        "- phase:mod_eval",
+        "- train_mode:tandem",
+        "- meta_input:pixel",
+        "- skill_input:ego",
+        "- mapper:pov_facing",
+        "- ego:phi_bins8",
+        f"- cell:{tag}",
+        "SKILL_INPUT_MODE: ego",
+        "META_INPUT_MODE: pixel_embed",
+        "HEURISTIC_MODE: env_specific",
+        "SKILL_DEATH_PENALIZE_COLLECT: true",
+    ]
+    lines += _sparse_top()
+    lines += [
+        "EGO_DISTANCE_CLIP_MAX_PX: null",
+        "EGO_PSI_ANGLE_BINS: 8",
+        "alg:",
+        "  SKILL_INPUT_MODE: ego",
+        "  META_INPUT_MODE: pixel_embed",
+        "  HEURISTIC_MODE: env_specific",
+        "  SKILL_DEATH_PENALIZE_COLLECT: true",
+    ]
+    lines += _sparse_alg()
+    lines += [
+        "  USE_EGO_SHOT_FEATURES: false",
+        "  EGO_DISTANCE_CLIP_MAX_PX: null",
+        "  EGO_PSI_ANGLE_BINS: 8",
+        "SEED: 44",
+        "EVAL_SEED: 10044",
+        "EVAL_NUM_SEEDS: 3",
+    ]
+    return _lines(lines)
+
+
 def _materialize_skills(*, dry: bool) -> None:
     if not CELLS_SKILLS:
-        print(
-            f"(skip {SUITE_SKILLS}: CELLS_SKILLS empty — fill in "
-            "materialize_hp_sweep.py when Stage 1 runs)"
-        )
+        print(f"(skip {SUITE_SKILLS}: CELLS_SKILLS empty)")
         return
     for tag, overrides in CELLS_SKILLS.items():
-        eps_s = float(overrides.get("EPS_START", 1.0))
-        eps_f = float(overrides.get("EPS_FINISH", 0.001))
-        eps_d = float(overrides.get("EPS_DECAY", 0.1))
+        eps_s = float(overrides.get("EPS_START", LOCKED_EPS_START))
+        eps_f = float(overrides.get("EPS_FINISH", LOCKED_EPS_FINISH))
+        eps_d = float(overrides.get("EPS_DECAY", LOCKED_EPS_DECAY))
         lr = float(overrides.get("SKILL_LR", SKILL_LR))
         _write(
             _RQ1 / f"{train_stem(SUITE_SKILLS, tag)}.yaml",
@@ -515,13 +785,19 @@ def _materialize_skills(*, dry: bool) -> None:
 
 def _materialize_tandem(*, dry: bool) -> None:
     if not CELLS_TANDEM:
-        print(
-            f"(skip {SUITE_TANDEM}: CELLS_TANDEM empty — fill after skills lock)"
-        )
+        print(f"(skip {SUITE_TANDEM}: CELLS_TANDEM empty)")
         return
-    raise NotImplementedError(
-        "Tandem HP cells: wire train_tandem YAMLs here once Stage 3 starts."
-    )
+    for tag, overrides in CELLS_TANDEM.items():
+        _write(
+            _RQ3 / f"{tandem_train_stem(tag)}.yaml",
+            _tandem_train_yaml(tag=tag, overrides=overrides),
+            dry=dry,
+        )
+        _write(
+            _RQ3 / f"{tandem_eval_stem(tag)}.yaml",
+            _tandem_eval_yaml(tag=tag),
+            dry=dry,
+        )
 
 
 def materialize(*, stage: str, dry: bool) -> None:
@@ -536,10 +812,22 @@ def materialize(*, stage: str, dry: bool) -> None:
             print(f"  {tag}: EPS {sched[0]} → {sched[1]} / {sched[2]}")
     if stage in ("skills", "all"):
         _materialize_skills(dry=dry)
-        print(f"{SUITE_SKILLS}: {len(CELLS_SKILLS)} cells")
+        stems = skills_sweep_stems()
+        print(
+            f"\n{SUITE_SKILLS}: {len(CELLS_SKILLS)} cells, {len(stems)} stems "
+            f"({len(CELLS_SKILLS)}×4: train+eval+pong+br)"
+        )
+        for tag in CELLS_SKILLS:
+            print(f"  {tag}: {CELLS_SKILLS[tag]}")
     if stage in ("tandem", "all"):
         _materialize_tandem(dry=dry)
-        print(f"{SUITE_TANDEM}: {len(CELLS_TANDEM)} cells")
+        stems = tandem_sweep_stems()
+        print(
+            f"\n{SUITE_TANDEM}: {len(CELLS_TANDEM)} cells, {len(stems)} stems "
+            f"({len(CELLS_TANDEM)}×2: train+home eval; skill ε locked B)"
+        )
+        for tag in CELLS_TANDEM:
+            print(f"  {tag}: {CELLS_TANDEM[tag]}")
 
 
 def main() -> None:

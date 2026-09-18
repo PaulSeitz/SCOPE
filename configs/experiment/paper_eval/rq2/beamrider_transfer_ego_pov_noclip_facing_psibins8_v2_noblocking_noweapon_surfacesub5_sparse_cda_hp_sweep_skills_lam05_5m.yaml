@@ -1,0 +1,83 @@
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: transfer
+PAPER_EVAL_MODS: beamrider
+PAPER_EVAL_MOD_KEYS:
+- base
+PAPER_EVAL_REQUIRES_RQ1:
+- seaquest_skills_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_hp_sweep_skills_lam05_5m
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/rq1/seaquest_skills_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_hp_sweep_skills_lam05_5m/seaquest/hierarchical_pqn_seaquest_seed44.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: seaquest_skills_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_hp_sweep_skills_lam05_5m
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: beamrider
+USE_POV_RELATIVE_MAPPER: true
+USE_POV_FIXED_BILATERAL: false
+USE_POV_FACING_FRAME: true
+EGO_POSE_XY: false
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: false
+USE_EGO_WEAPON_FEATURES: false
+USE_EGO_SHOT_FEATURES: false
+AVOID_INTERRUPT_RANGE: 55
+AVOID_INTERRUPT_RANGE_Y: 55
+SURFACE_SUB_AVOID_RANGE_X: 5
+SURFACE_SUB_AVOID_RANGE_Y: 5
+EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_PSI_ANGLE_BINS: 8
+EGO_LEGAL_ACTION_MASK: false
+SURFACE_SUB_NEAR_RANGE: 5
+SAVE_PATH: ./outputs/models/paper_eval/rq2/beamrider_transfer_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_hp_sweep_skills_lam05_5m
+WANDB_RUN_NAME: br_paper_hp_sweep_skills_lam05_zs_5m
+WANDB_TAGS:
+- suite:hp_sweep_skills
+- rq:2
+- env:beamrider
+- phase:zero_shot
+- skill_input:ego
+- mapper:pov_facing
+- ego:phi_bins8
+- ego:noblocking
+- ego:noweapon
+- ego:noclip
+- ablation:sparse_cda
+- cell:lam05
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SKILL_INPUT_MODE: ego
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: false
+COLLECT_SPARSE_ONLY: true
+AVOID_SPARSE_ONLY: true
+alg:
+  NUM_SKILLS: 4
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  - NAVIGATE
+  MAX_OBJECTS: 31
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: ego
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: false
+  COLLECT_SPARSE_ONLY: true
+  AVOID_SPARSE_ONLY: true
+  USE_EGO_SHOT_FEATURES: false
+SEED: 44
+EVAL_SEED: 10044
+EVAL_NUM_SEEDS: 3
