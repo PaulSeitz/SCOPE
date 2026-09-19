@@ -8,26 +8,22 @@ Stage ``skills`` — broader skills HP grid with locked ε B (unless a cell
 overrides). Constant ``SKILL_LR`` (no finish). Same mod gate + Pong/Beamrider
 base ZS. Each cell = 4 stems (train + SQ eval + 2 ZS).
 
-Stage ``tandem`` — from-scratch pixel-meta tandem ~5M; skill ε locked to B,
-``SKILL_LR`` locked to skills-sweep winner ``lr1e3`` (1e-3). Round-2 grid:
-meta-ε schedule (incl. PQN-style 1.0), plus LR×ε and switch×ε mixtures.
-Home mod eval only (no ZS). Current materializer uses pixel CNN ``[32, 64]``.
+Stage ``tandem`` — clean restart suite ``hp_sweep_tandem_v2``: from-scratch
+pixel-meta tandem ~5M; skill ε locked to B, ``SKILL_LR`` locked to skills
+winner ``lr1e3`` (1e-3). Same mix grid as round-2. Frozen defaults: pixel CNN
+``[32, 64]``, ``META_DEATH_PENALTY=0``, ``EGO_ACTION_DIM=18`` (rotate-aim).
+Home mod eval only (no ZS). Do **not** rematerialize mid-run.
 
-Stage ``tandem_ckpt16`` — **eval-only recovery** for checkpoints trained with
-pixel CNN ``[16, 32]`` before the baseline rematerialize. Writes frozen
-``*_arch_ckpt16.yaml`` + ``*_eval_ckpt16.yaml``; does **not** touch the
-``[32, 64]`` train YAMLs. Suite ``hp_sweep_tandem_ckpt16``.
+Stage ``tandem_ckpt16`` — archival eval-only recovery for the abandoned
+``hp_sweep_tandem`` mix ckpts (CNN ``[16, 32]``). Not used for the v2 restart.
 
     python scripts/materialize_hp_sweep.py --stage skills
     python scripts/materialize_hp_sweep.py --stage tandem
-    python scripts/materialize_hp_sweep.py --stage tandem_ckpt16
     python scripts/materialize_hp_sweep.py --stage all
     python scripts/run_paper_eval.py --suite hp_sweep_skills \\
         --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
-    python scripts/run_paper_eval.py --suite hp_sweep_tandem \\
-        --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
-    python scripts/run_paper_eval.py --suite hp_sweep_tandem_ckpt16 \\
-        --gpus 0,1,2,3 --eval-only --resume --skip-rq-gate --lean
+    python scripts/run_paper_eval.py --suite hp_sweep_tandem_v2 \\
+        --gpus 0,1,2 --wait-deps --skip-rq-gate --lean
 """
 
 from __future__ import annotations
@@ -57,11 +53,16 @@ LOCKED_EPS_DECAY = 0.2
 
 SUITE_EPS = "eps_sanity"
 SUITE_SKILLS = "hp_sweep_skills"
-SUITE_TANDEM = "hp_sweep_tandem"
+# Clean restart after mid-sweep CNN/death/motor churn invalidated mix ckpts.
+SUITE_TANDEM = "hp_sweep_tandem_v2"
+# Abandoned mix-suite stem tag (ckpt16 recovery only).
+SUITE_TANDEM_LEGACY = "hp_sweep_tandem"
 SUITE_TANDEM_CKPT16 = "hp_sweep_tandem_ckpt16"
 
-# Pixel CNN used when the mix-grid trains ran (before baseline rematerialize).
+# Pixel CNN used when the legacy mix-grid trains ran (before baseline rematerialize).
 CKPT16_PIXEL_CNN_CHANNELS = (16, 32)
+# Frozen v2 / baseline-aligned pixel CNN — do not change mid-sweep.
+TANDEM_PIXEL_CNN_CHANNELS = (32, 64)
 
 # Home competence / robustness gate (plus base). User ranks the table.
 MOD_KEYS: tuple[str, ...] = (
@@ -264,24 +265,30 @@ def train_stem(suite: str, tag: str) -> str:
     )
 
 
-def tandem_train_stem(tag: str) -> str:
+def tandem_train_stem(tag: str, *, suite: str | None = None) -> str:
+    suite_name = suite or SUITE_TANDEM
     return (
         f"seaquest_from_scratch_tandem_pixel_ego_pov_{SPINE}_{SPARSE_TAG}"
-        f"_{SUITE_TANDEM}_{tag}_{BUDGET_TAG}"
+        f"_{suite_name}_{tag}_{BUDGET_TAG}"
     )
 
 
-def tandem_eval_stem(tag: str) -> str:
-    return f"{tandem_train_stem(tag)}_eval"
+def tandem_eval_stem(tag: str, *, suite: str | None = None) -> str:
+    return f"{tandem_train_stem(tag, suite=suite)}_eval"
+
+
+def tandem_legacy_train_stem(tag: str) -> str:
+    """Stem for abandoned hp_sweep_tandem mix checkpoints."""
+    return tandem_train_stem(tag, suite=SUITE_TANDEM_LEGACY)
 
 
 def tandem_arch_ckpt16_stem(tag: str) -> str:
     """Frozen architecture snapshot matching already-trained [16, 32] ckpts."""
-    return f"{tandem_train_stem(tag)}_arch_ckpt16"
+    return f"{tandem_legacy_train_stem(tag)}_arch_ckpt16"
 
 
 def tandem_eval_ckpt16_stem(tag: str) -> str:
-    return f"{tandem_train_stem(tag)}_eval_ckpt16"
+    return f"{tandem_legacy_train_stem(tag)}_eval_ckpt16"
 
 
 def eval_stem(suite: str, tag: str) -> str:
@@ -631,7 +638,7 @@ def _tandem_train_yaml(
     *,
     tag: str,
     overrides: dict,
-    pixel_cnn_channels: tuple[int, int] = (32, 64),
+    pixel_cnn_channels: tuple[int, int] = TANDEM_PIXEL_CNN_CHANNELS,
     meta_death_penalty: float = 0.0,
     save_stem: str | None = None,
     header_note: str | None = None,
@@ -781,9 +788,10 @@ def _tandem_eval_yaml(
     tag: str,
     architecture_of: str | None = None,
     suite_tag: str | None = None,
+    ckpt_stem: str | None = None,
     extra_tags: tuple[str, ...] = (),
 ) -> str:
-    stem = tandem_train_stem(tag)
+    stem = ckpt_stem or tandem_train_stem(tag)
     arch = architecture_of or stem
     suite = suite_tag or SUITE_TANDEM
     skills_ckpt = (
@@ -908,29 +916,30 @@ def _materialize_tandem(*, dry: bool) -> None:
 
 
 def _materialize_tandem_ckpt16(*, dry: bool) -> None:
-    """Frozen arch + eval YAMLs for ckpts trained with pixel CNN [16, 32].
+    """Frozen arch + eval YAMLs for legacy mix ckpts (pixel CNN [16, 32]).
 
-    Does not modify the current [32, 64] train YAMLs. Do not train from
-    ``*_arch_ckpt16.yaml`` — architecture reference only.
+    Archival only — the overnight restart is ``hp_sweep_tandem_v2``.
+    Do not train from ``*_arch_ckpt16.yaml``.
     """
     if not CELLS_TANDEM:
         print(f"(skip {SUITE_TANDEM_CKPT16}: CELLS_TANDEM empty)")
         return
     for tag, overrides in CELLS_TANDEM.items():
         arch = tandem_arch_ckpt16_stem(tag)
+        legacy = tandem_legacy_train_stem(tag)
         _write(
             _RQ3 / f"{arch}.yaml",
             _tandem_train_yaml(
                 tag=tag,
                 overrides=overrides,
                 pixel_cnn_channels=CKPT16_PIXEL_CNN_CHANNELS,
-                save_stem=tandem_train_stem(tag),
+                save_stem=legacy,
                 suite_tag=SUITE_TANDEM_CKPT16,
                 header_note=(
                     f"# ARCHITECTURE SNAPSHOT ONLY — do not train.\n"
-                    f"# Matches hp_sweep_tandem cell {tag} checkpoints trained "
-                    f"with pixel CNN {list(CKPT16_PIXEL_CNN_CHANNELS)} "
-                    f"(before baseline rematerialize to [32, 64])."
+                    f"# Matches abandoned {SUITE_TANDEM_LEGACY} cell {tag} "
+                    f"ckpts trained with pixel CNN "
+                    f"{list(CKPT16_PIXEL_CNN_CHANNELS)}."
                 ),
             ),
             dry=dry,
@@ -941,6 +950,7 @@ def _materialize_tandem_ckpt16(*, dry: bool) -> None:
                 tag=tag,
                 architecture_of=arch,
                 suite_tag=SUITE_TANDEM_CKPT16,
+                ckpt_stem=legacy,
                 extra_tags=("recovery:ckpt16_cnn",),
             ),
             dry=dry,
@@ -972,7 +982,8 @@ def materialize(*, stage: str, dry: bool) -> None:
         print(
             f"\n{SUITE_TANDEM}: {len(CELLS_TANDEM)} cells, {len(stems)} stems "
             f"({len(CELLS_TANDEM)}×2: train+home eval; "
-            f"skill ε B + LR={LOCKED_SKILL_LR})"
+            f"skill ε B + LR={LOCKED_SKILL_LR}; "
+            f"CNN {list(TANDEM_PIXEL_CNN_CHANNELS)}; death=0)"
         )
         for tag in CELLS_TANDEM:
             print(f"  {tag}: {CELLS_TANDEM[tag]}")

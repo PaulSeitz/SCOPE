@@ -1255,9 +1255,9 @@ def _noclip_sparse_smoke_stems() -> tuple[
 #       --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
 EPS_SANITY_SUITE = "eps_sanity"
 HP_SWEEP_SKILLS_SUITE = "hp_sweep_skills"
-HP_SWEEP_TANDEM_SUITE = "hp_sweep_tandem"
-# Eval-only recovery: ckpts trained with pixel CNN [16, 32] before tandem
-# baseline rematerialize to [32, 64]. Does not retrain; uses *_eval_ckpt16.
+# Clean restart of the mix grid under frozen [32, 64] / death=0 / EGO 18.
+HP_SWEEP_TANDEM_SUITE = "hp_sweep_tandem_v2"
+# Archival: eval-only recovery for abandoned hp_sweep_tandem [16, 32] ckpts.
 HP_SWEEP_TANDEM_CKPT16_SUITE = "hp_sweep_tandem_ckpt16"
 
 
@@ -2072,7 +2072,7 @@ SUITE_RTPT: dict[str, str] = {
     NOCLIP_SPARSE_SMOKE_AS_TP_SCRATCH_SUITE: "noclip_sm",
     EPS_SANITY_SUITE: "eps_san",
     HP_SWEEP_SKILLS_SUITE: "hp_sk",
-    HP_SWEEP_TANDEM_SUITE: "hp_td",
+    HP_SWEEP_TANDEM_SUITE: "hp_td_v2",
     HP_SWEEP_TANDEM_CKPT16_SUITE: "hp_td16",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
@@ -3649,15 +3649,13 @@ def main() -> None:
             f"{HP_SWEEP_SKILLS_SUITE}: LR grid + ε-decay05 probe with locked ε B; "
             "python scripts/materialize_hp_sweep.py --stage skills then "
             "--suite hp_sweep_skills --gpus … --wait-deps --skip-rq-gate. "
-            f"{HP_SWEEP_TANDEM_SUITE}: tandem meta mix grid (ε schedule + "
-            "LR×ε / switch×ε; skill ε B + SKILL_LR=1e-3); "
+            f"{HP_SWEEP_TANDEM_SUITE}: clean-restart tandem meta mix grid "
+            "(ε / LR×ε / switch×ε; skill ε B + SKILL_LR=1e-3; CNN [32, 64], "
+            "death=0, EGO 18); "
             "python scripts/materialize_hp_sweep.py --stage tandem then "
-            "--suite hp_sweep_tandem --gpus … --wait-deps --skip-rq-gate. "
-            f"{HP_SWEEP_TANDEM_CKPT16_SUITE}: eval-only recovery for tandem "
-            "ckpts trained with pixel CNN [16, 32] (frozen *_arch_ckpt16; "
-            "does not touch [32, 64] baseline train YAMLs); "
-            "python scripts/materialize_hp_sweep.py --stage tandem_ckpt16 then "
-            "--suite hp_sweep_tandem_ckpt16 --eval-only --resume --skip-rq-gate. "
+            "--suite hp_sweep_tandem_v2 --gpus … --wait-deps --skip-rq-gate. "
+            f"{HP_SWEEP_TANDEM_CKPT16_SUITE}: archival eval-only for abandoned "
+            "hp_sweep_tandem [16, 32] ckpts (not the overnight restart). "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
             "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
             "(vs pixel tandem sparse); --wait-deps --skip-rq-gate --video. "
