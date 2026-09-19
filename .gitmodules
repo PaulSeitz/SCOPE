@@ -1,0 +1,4 @@
+[submodule "third_party/symbolic_options"]
+	path = third_party/symbolic_options
+	url = https://github.com/remunds/symbolic_options.git
+	branch = develop

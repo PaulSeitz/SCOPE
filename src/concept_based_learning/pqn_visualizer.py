@@ -1045,8 +1045,8 @@ def _make_jitted_greedy_episode_runner(
 
     noop_enabled = meta_noop_target_enabled(config)
     fire_enabled = meta_fire_target_enabled(config)
-    noop_idx = jnp.int32(meta_noop_target_idx(config))
-    fire_idx = jnp.int32(meta_fire_target_idx(config))
+    noop_idx = jnp.int32(resolve_meta_noop_target_idx(config))
+    fire_idx = jnp.int32(resolve_meta_fire_target_idx(config))
     fire_action = jnp.int32(meta_fire_game_action(config))
     no_target = jnp.int32(no_target_idx)
     fire_indices = fire_ego_action_indices(ego_action_dim)

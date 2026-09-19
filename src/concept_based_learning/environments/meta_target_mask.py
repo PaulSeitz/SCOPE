@@ -33,7 +33,10 @@ def _latest_object_frame(field: jnp.ndarray) -> jnp.ndarray:
 def _config_max_objects(config: Optional[dict]) -> int:
     if not config:
         return 0
-    return int(config.get("MAX_OBJECTS", 0))
+    raw = config.get("MAX_OBJECTS", 0)
+    if raw is None:
+        return 0
+    return int(raw)
 
 
 def _resolve_slot_idx(raw, *, default: int) -> int:
