@@ -8,22 +8,16 @@ Stage ``skills`` — broader skills HP grid with locked ε B (unless a cell
 overrides). Constant ``SKILL_LR`` (no finish). Same mod gate + Pong/Beamrider
 base ZS. Each cell = 4 stems (train + SQ eval + 2 ZS).
 
-Stage ``tandem`` — clean restart suite ``hp_sweep_tandem_v2``: from-scratch
-pixel-meta tandem ~5M; skill ε locked to B, ``SKILL_LR`` locked to skills
-winner ``lr1e3`` (1e-3). Same mix grid as round-2. Frozen defaults: pixel CNN
-``[32, 64]``, ``META_DEATH_PENALTY=0``, ``EGO_ACTION_DIM=18`` (rotate-aim).
-Home mod eval only (no ZS). Do **not** rematerialize mid-run.
+Stage ``tandem_e01`` — locked ``e01`` HPs (ε_meta 0.1, META_LR 5e-4,
+switch −0.05; skill ε B + SKILL_LR 1e-3; CNN [32, 64]) at full budgets
+``20m`` and ``100m`` (+ home mod eval). Suite ``tandem_e01_scale``.
 
-Stage ``tandem_ckpt16`` — archival eval-only recovery for the abandoned
-``hp_sweep_tandem`` mix ckpts (CNN ``[16, 32]``). Not used for the v2 restart.
-
-    python scripts/materialize_hp_sweep.py --stage skills
     python scripts/materialize_hp_sweep.py --stage tandem
-    python scripts/materialize_hp_sweep.py --stage all
-    python scripts/run_paper_eval.py --suite hp_sweep_skills \\
-        --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
+    python scripts/materialize_hp_sweep.py --stage tandem_e01
     python scripts/run_paper_eval.py --suite hp_sweep_tandem_v2 \\
         --gpus 0,1,2 --wait-deps --skip-rq-gate --lean
+    python scripts/run_paper_eval.py --suite tandem_e01_scale \\
+        --gpus 0,1 --wait-deps --skip-rq-gate --lean
 """
 
 from __future__ import annotations
@@ -41,6 +35,9 @@ SPARSE_TAG = "sparse_cda"
 # 305 × 128 × 128 — batch-aligned ~5M probe budget.
 TIMESTEPS_5M = 4_997_120
 BUDGET_TAG = "5m"
+# Full Seaquest tandem defaults (batch-aligned).
+TIMESTEPS_20M = 19_988_480  # 1220 × 128 × 128
+TIMESTEPS_100M = 99_991_552  # 6103 × 128 × 128 (~100M)
 # Skills-grid default (hp_sweep_skills baseline / ε-B anchor). Constant LR.
 SKILL_LR = 0.0005
 # Locked after hp_sweep_skills: lr1e3 won the robustness gate.
@@ -58,6 +55,8 @@ SUITE_TANDEM = "hp_sweep_tandem_v2"
 # Abandoned mix-suite stem tag (ckpt16 recovery only).
 SUITE_TANDEM_LEGACY = "hp_sweep_tandem"
 SUITE_TANDEM_CKPT16 = "hp_sweep_tandem_ckpt16"
+# Locked e01 HPs at full budgets (20M + 100M scale).
+SUITE_TANDEM_E01 = "tandem_e01_scale"
 
 # Pixel CNN used when the legacy mix-grid trains ran (before baseline rematerialize).
 CKPT16_PIXEL_CNN_CHANNELS = (16, 32)
@@ -289,6 +288,25 @@ def tandem_arch_ckpt16_stem(tag: str) -> str:
 
 def tandem_eval_ckpt16_stem(tag: str) -> str:
     return f"{tandem_legacy_train_stem(tag)}_eval_ckpt16"
+
+
+def tandem_e01_train_stem(budget: str) -> str:
+    """Locked e01 HPs at full budget (``20m`` / ``100m``)."""
+    return (
+        f"seaquest_from_scratch_tandem_pixel_ego_pov_{SPINE}_{SPARSE_TAG}"
+        f"_{SUITE_TANDEM_E01}_{budget}"
+    )
+
+
+def tandem_e01_eval_stem(budget: str) -> str:
+    return f"{tandem_e01_train_stem(budget)}_eval"
+
+
+def tandem_e01_scale_stems() -> tuple[str, ...]:
+    """Trains-first: 20M then 100M, then their home evals."""
+    trains = tuple(tandem_e01_train_stem(b) for b in ("20m", "100m"))
+    evals = tuple(tandem_e01_eval_stem(b) for b in ("20m", "100m"))
+    return trains + evals
 
 
 def eval_stem(suite: str, tag: str) -> str:
@@ -643,10 +661,14 @@ def _tandem_train_yaml(
     save_stem: str | None = None,
     header_note: str | None = None,
     suite_tag: str | None = None,
+    total_timesteps: int = TIMESTEPS_5M,
+    budget_tag: str | None = None,
+    probe_tag: str = "tandem_hpsweep",
 ) -> str:
     """Train-shaped tandem YAML. ``save_stem`` controls SAVE_PATH (ckpt dir)."""
     ckpt_stem = save_stem or tandem_train_stem(tag)
     suite = suite_tag or SUITE_TANDEM
+    budget = budget_tag or BUDGET_TAG
     meta_lr = float(overrides.get("META_LR", 5e-4))
     switch = float(overrides.get("META_SWITCH_PENALTY", -0.05))
     eps_start = float(overrides.get("EPS_START", 0.1))
@@ -657,7 +679,7 @@ def _tandem_train_yaml(
     meta_eps_decay = float(overrides.get("META_EPS_DECAY", eps_decay))
     c0, c1 = int(pixel_cnn_channels[0]), int(pixel_cnn_channels[1])
     header = header_note or (
-        f"# Seaquest tandem — {SUITE_TANDEM} cell {tag} (~5M)."
+        f"# Seaquest tandem — {suite} cell {tag} (~{budget})."
     )
     lines: list[str] = [
         header,
@@ -675,7 +697,7 @@ def _tandem_train_yaml(
     lines += _ego_lines()
     lines += [
         f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{ckpt_stem}",
-        f"WANDB_RUN_NAME: sq_paper_{suite}_{tag}_{BUDGET_TAG}",
+        f"WANDB_RUN_NAME: sq_paper_{suite}_{tag}_{budget}",
         "WANDB_TAGS:",
         f"- suite:{suite}",
         "- rq:3",
@@ -685,14 +707,14 @@ def _tandem_train_yaml(
         "- ego:noweapon",
         "- ego:noclip",
         f"- ablation:{SPARSE_TAG}",
-        f"- budget:{BUDGET_TAG}",
+        f"- budget:{budget}",
         "- phase:from_scratch",
         "- train_mode:tandem",
         "- meta_input:pixel",
         "- skill_input:ego",
         "- mapper:pov_facing",
         "- ego:phi_bins8",
-        "- probe:tandem_hpsweep",
+        f"- probe:{probe_tag}",
         f"- cell:{tag}",
         "META_PIXEL_DO_RESIZE: true",
         "META_PIXEL_USE_NATIVE_DOWNSCALING: true",
@@ -743,7 +765,7 @@ def _tandem_train_yaml(
         "  EPISODIC_LIFE: true",
         "  FRAME_STACK_SIZE: 4",
         "  FRAME_SKIP: 4",
-        f"  TOTAL_TIMESTEPS: {TIMESTEPS_5M}",
+        f"  TOTAL_TIMESTEPS: {int(total_timesteps)}",
         "  NUM_ENVS: 128",
         "  NUM_STEPS: 128",
         "  NUM_EPOCHS: 4",
@@ -789,11 +811,13 @@ def _tandem_eval_yaml(
     architecture_of: str | None = None,
     suite_tag: str | None = None,
     ckpt_stem: str | None = None,
+    budget_tag: str | None = None,
     extra_tags: tuple[str, ...] = (),
 ) -> str:
     stem = ckpt_stem or tandem_train_stem(tag)
     arch = architecture_of or stem
     suite = suite_tag or SUITE_TANDEM
+    budget = budget_tag or BUDGET_TAG
     skills_ckpt = (
         f"./outputs/models/paper_eval/rq3/{stem}/seaquest/"
         f"hierarchical_pqn_seaquest_seed44_skills.safetensors"
@@ -820,7 +844,7 @@ def _tandem_eval_yaml(
         "TRAIN_MODE: tandem",
         "ENV_NAME: seaquest",
         f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{stem}",
-        f"WANDB_RUN_NAME: sq_paper_eval_{suite}_{tag}_{BUDGET_TAG}",
+        f"WANDB_RUN_NAME: sq_paper_eval_{suite}_{tag}_{budget}",
         "WANDB_TAGS:",
         f"- suite:{suite}",
         "- rq:3",
@@ -831,6 +855,7 @@ def _tandem_eval_yaml(
         "- skill_input:ego",
         "- mapper:pov_facing",
         "- ego:phi_bins8",
+        f"- budget:{budget}",
         f"- cell:{tag}",
     ]
     for t in extra_tags:
@@ -957,6 +982,48 @@ def _materialize_tandem_ckpt16(*, dry: bool) -> None:
         )
 
 
+def _materialize_tandem_e01(*, dry: bool) -> None:
+    """Locked hp_sweep_tandem_v2 e01 HPs at 20M and ~100M (+ home eval)."""
+    overrides = CELLS_TANDEM["e01"]
+    budgets: tuple[tuple[str, int], ...] = (
+        ("20m", TIMESTEPS_20M),
+        ("100m", TIMESTEPS_100M),
+    )
+    for budget, steps in budgets:
+        stem = tandem_e01_train_stem(budget)
+        _write(
+            _RQ3 / f"{stem}.yaml",
+            _tandem_train_yaml(
+                tag="e01",
+                overrides=overrides,
+                save_stem=stem,
+                suite_tag=SUITE_TANDEM_E01,
+                total_timesteps=steps,
+                budget_tag=budget,
+                probe_tag="tandem_e01_scale",
+                header_note=(
+                    f"# Seaquest tandem — locked e01 HPs (~{budget}).\n"
+                    f"# From hp_sweep_tandem_v2: meta ε 0.1→0.01/0.2, "
+                    f"META_LR=5e-4, switch=−0.05; skill ε B + SKILL_LR=1e-3; "
+                    f"CNN {list(TANDEM_PIXEL_CNN_CHANNELS)}; death=0."
+                ),
+            ),
+            dry=dry,
+        )
+        _write(
+            _RQ3 / f"{tandem_e01_eval_stem(budget)}.yaml",
+            _tandem_eval_yaml(
+                tag="e01",
+                architecture_of=stem,
+                suite_tag=SUITE_TANDEM_E01,
+                ckpt_stem=stem,
+                budget_tag=budget,
+                extra_tags=("lock:e01", f"budget:{budget}"),
+            ),
+            dry=dry,
+        )
+
+
 def materialize(*, stage: str, dry: bool) -> None:
     if stage in ("eps", "all"):
         _materialize_eps(dry=dry)
@@ -987,23 +1054,40 @@ def materialize(*, stage: str, dry: bool) -> None:
         )
         for tag in CELLS_TANDEM:
             print(f"  {tag}: {CELLS_TANDEM[tag]}")
-    if stage in ("tandem_ckpt16", "all"):
+    if stage in ("tandem_ckpt16",):
         _materialize_tandem_ckpt16(dry=dry)
         stems = tandem_ckpt16_eval_stems()
         print(
             f"\n{SUITE_TANDEM_CKPT16}: {len(stems)} eval-only stems "
             f"(arch frozen to CNN {list(CKPT16_PIXEL_CNN_CHANNELS)}; "
-            f"ckpts from {SUITE_TANDEM} trains)"
+            f"ckpts from {SUITE_TANDEM_LEGACY} trains)"
         )
         for tag in CELLS_TANDEM:
             print(f"  {tag}: arch={tandem_arch_ckpt16_stem(tag)}")
+    if stage in ("tandem_e01", "all"):
+        _materialize_tandem_e01(dry=dry)
+        stems = tandem_e01_scale_stems()
+        print(
+            f"\n{SUITE_TANDEM_E01}: {len(stems)} stems "
+            f"(20M+100M train+eval; locked e01; "
+            f"CNN {list(TANDEM_PIXEL_CNN_CHANNELS)})"
+        )
+        for b, steps in (("20m", TIMESTEPS_20M), ("100m", TIMESTEPS_100M)):
+            print(f"  {b}: timesteps={steps} stem={tandem_e01_train_stem(b)}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--stage",
-        choices=("eps", "skills", "tandem", "tandem_ckpt16", "all"),
+        choices=(
+            "eps",
+            "skills",
+            "tandem",
+            "tandem_ckpt16",
+            "tandem_e01",
+            "all",
+        ),
         default="eps",
         help="Which stage to materialize (default: eps sanity).",
     )

@@ -1259,10 +1259,16 @@ HP_SWEEP_SKILLS_SUITE = "hp_sweep_skills"
 HP_SWEEP_TANDEM_SUITE = "hp_sweep_tandem_v2"
 # Archival: eval-only recovery for abandoned hp_sweep_tandem [16, 32] ckpts.
 HP_SWEEP_TANDEM_CKPT16_SUITE = "hp_sweep_tandem_ckpt16"
+# Locked e01 HPs at 20M + ~100M (scale curve after hp_sweep_tandem_v2).
+TANDEM_E01_SCALE_SUITE = "tandem_e01_scale"
 
 
 def _hp_sweep_stems() -> tuple[
-    tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1273,6 +1279,7 @@ def _hp_sweep_stems() -> tuple[
         eps_sanity_stems,
         skills_sweep_stems,
         tandem_ckpt16_eval_stems,
+        tandem_e01_scale_stems,
         tandem_sweep_stems,
     )
 
@@ -1281,6 +1288,7 @@ def _hp_sweep_stems() -> tuple[
         skills_sweep_stems(),
         tandem_sweep_stems(),
         tandem_ckpt16_eval_stems(),
+        tandem_e01_scale_stems(),
     )
 
 
@@ -1289,6 +1297,7 @@ def _hp_sweep_stems() -> tuple[
     HP_SWEEP_SKILLS_STEMS,
     HP_SWEEP_TANDEM_STEMS,
     HP_SWEEP_TANDEM_CKPT16_STEMS,
+    TANDEM_E01_SCALE_STEMS,
 ) = _hp_sweep_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -1958,6 +1967,7 @@ SUITE_STEMS = {
     HP_SWEEP_SKILLS_SUITE: HP_SWEEP_SKILLS_STEMS,
     HP_SWEEP_TANDEM_SUITE: HP_SWEEP_TANDEM_STEMS,
     HP_SWEEP_TANDEM_CKPT16_SUITE: HP_SWEEP_TANDEM_CKPT16_STEMS,
+    TANDEM_E01_SCALE_SUITE: TANDEM_E01_SCALE_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -2074,6 +2084,7 @@ SUITE_RTPT: dict[str, str] = {
     HP_SWEEP_SKILLS_SUITE: "hp_sk",
     HP_SWEEP_TANDEM_SUITE: "hp_td_v2",
     HP_SWEEP_TANDEM_CKPT16_SUITE: "hp_td16",
+    TANDEM_E01_SCALE_SUITE: "td_e01",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -3654,6 +3665,10 @@ def main() -> None:
             "death=0, EGO 18); "
             "python scripts/materialize_hp_sweep.py --stage tandem then "
             "--suite hp_sweep_tandem_v2 --gpus … --wait-deps --skip-rq-gate. "
+            f"{TANDEM_E01_SCALE_SUITE}: locked e01 HPs at 20M + ~100M "
+            "(+ home mod eval); "
+            "python scripts/materialize_hp_sweep.py --stage tandem_e01 then "
+            "--suite tandem_e01_scale --gpus … --wait-deps --skip-rq-gate. "
             f"{HP_SWEEP_TANDEM_CKPT16_SUITE}: archival eval-only for abandoned "
             "hp_sweep_tandem [16, 32] ckpts (not the overnight restart). "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
