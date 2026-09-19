@@ -1256,9 +1256,14 @@ def _noclip_sparse_smoke_stems() -> tuple[
 EPS_SANITY_SUITE = "eps_sanity"
 HP_SWEEP_SKILLS_SUITE = "hp_sweep_skills"
 HP_SWEEP_TANDEM_SUITE = "hp_sweep_tandem"
+# Eval-only recovery: ckpts trained with pixel CNN [16, 32] before tandem
+# baseline rematerialize to [32, 64]. Does not retrain; uses *_eval_ckpt16.
+HP_SWEEP_TANDEM_CKPT16_SUITE = "hp_sweep_tandem_ckpt16"
 
 
-def _hp_sweep_stems() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _hp_sweep_stems() -> tuple[
+    tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
+]:
     import sys
 
     scripts_dir = str(Path(__file__).resolve().parent)
@@ -1267,13 +1272,24 @@ def _hp_sweep_stems() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]
     from materialize_hp_sweep import (  # type: ignore
         eps_sanity_stems,
         skills_sweep_stems,
+        tandem_ckpt16_eval_stems,
         tandem_sweep_stems,
     )
 
-    return eps_sanity_stems(), skills_sweep_stems(), tandem_sweep_stems()
+    return (
+        eps_sanity_stems(),
+        skills_sweep_stems(),
+        tandem_sweep_stems(),
+        tandem_ckpt16_eval_stems(),
+    )
 
 
-EPS_SANITY_STEMS, HP_SWEEP_SKILLS_STEMS, HP_SWEEP_TANDEM_STEMS = _hp_sweep_stems()
+(
+    EPS_SANITY_STEMS,
+    HP_SWEEP_SKILLS_STEMS,
+    HP_SWEEP_TANDEM_STEMS,
+    HP_SWEEP_TANDEM_CKPT16_STEMS,
+) = _hp_sweep_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
 # Uneven pipelines → per-GPU suites (do not use --gpus round-robin on the union).
@@ -1941,6 +1957,7 @@ SUITE_STEMS = {
     EPS_SANITY_SUITE: EPS_SANITY_STEMS,
     HP_SWEEP_SKILLS_SUITE: HP_SWEEP_SKILLS_STEMS,
     HP_SWEEP_TANDEM_SUITE: HP_SWEEP_TANDEM_STEMS,
+    HP_SWEEP_TANDEM_CKPT16_SUITE: HP_SWEEP_TANDEM_CKPT16_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -2056,6 +2073,7 @@ SUITE_RTPT: dict[str, str] = {
     EPS_SANITY_SUITE: "eps_san",
     HP_SWEEP_SKILLS_SUITE: "hp_sk",
     HP_SWEEP_TANDEM_SUITE: "hp_td",
+    HP_SWEEP_TANDEM_CKPT16_SUITE: "hp_td16",
     NAVIGATE_SURFACE_CENTRES_SUITE: "nav_ctr",
     SURFACEGAP_GEOM_DUAL_SUITE: "sgap_geom",
     KANGAROO_SURFACEGAP_SUITE: "kg_sgap",
@@ -3635,6 +3653,11 @@ def main() -> None:
             "LR×ε / switch×ε; skill ε B + SKILL_LR=1e-3); "
             "python scripts/materialize_hp_sweep.py --stage tandem then "
             "--suite hp_sweep_tandem --gpus … --wait-deps --skip-rq-gate. "
+            f"{HP_SWEEP_TANDEM_CKPT16_SUITE}: eval-only recovery for tandem "
+            "ckpts trained with pixel CNN [16, 32] (frozen *_arch_ckpt16; "
+            "does not touch [32, 64] baseline train YAMLs); "
+            "python scripts/materialize_hp_sweep.py --stage tandem_ckpt16 then "
+            "--suite hp_sweep_tandem_ckpt16 --eval-only --resume --skip-rq-gate. "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "
             "(oc_embed + oc_simple*) clip10 sparse C/D/A ~25M + home eval "
             "(vs pixel tandem sparse); --wait-deps --skip-rq-gate --video. "

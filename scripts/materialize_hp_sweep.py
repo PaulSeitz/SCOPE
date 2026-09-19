@@ -11,15 +11,23 @@ base ZS. Each cell = 4 stems (train + SQ eval + 2 ZS).
 Stage ``tandem`` — from-scratch pixel-meta tandem ~5M; skill ε locked to B,
 ``SKILL_LR`` locked to skills-sweep winner ``lr1e3`` (1e-3). Round-2 grid:
 meta-ε schedule (incl. PQN-style 1.0), plus LR×ε and switch×ε mixtures.
-Home mod eval only (no ZS).
+Home mod eval only (no ZS). Current materializer uses pixel CNN ``[32, 64]``.
+
+Stage ``tandem_ckpt16`` — **eval-only recovery** for checkpoints trained with
+pixel CNN ``[16, 32]`` before the baseline rematerialize. Writes frozen
+``*_arch_ckpt16.yaml`` + ``*_eval_ckpt16.yaml``; does **not** touch the
+``[32, 64]`` train YAMLs. Suite ``hp_sweep_tandem_ckpt16``.
 
     python scripts/materialize_hp_sweep.py --stage skills
     python scripts/materialize_hp_sweep.py --stage tandem
+    python scripts/materialize_hp_sweep.py --stage tandem_ckpt16
     python scripts/materialize_hp_sweep.py --stage all
     python scripts/run_paper_eval.py --suite hp_sweep_skills \\
         --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
     python scripts/run_paper_eval.py --suite hp_sweep_tandem \\
         --gpus 0,1,2,3 --wait-deps --skip-rq-gate --lean
+    python scripts/run_paper_eval.py --suite hp_sweep_tandem_ckpt16 \\
+        --gpus 0,1,2,3 --eval-only --resume --skip-rq-gate --lean
 """
 
 from __future__ import annotations
@@ -50,6 +58,10 @@ LOCKED_EPS_DECAY = 0.2
 SUITE_EPS = "eps_sanity"
 SUITE_SKILLS = "hp_sweep_skills"
 SUITE_TANDEM = "hp_sweep_tandem"
+SUITE_TANDEM_CKPT16 = "hp_sweep_tandem_ckpt16"
+
+# Pixel CNN used when the mix-grid trains ran (before baseline rematerialize).
+CKPT16_PIXEL_CNN_CHANNELS = (16, 32)
 
 # Home competence / robustness gate (plus base). User ranks the table.
 MOD_KEYS: tuple[str, ...] = (
@@ -261,6 +273,15 @@ def tandem_train_stem(tag: str) -> str:
 
 def tandem_eval_stem(tag: str) -> str:
     return f"{tandem_train_stem(tag)}_eval"
+
+
+def tandem_arch_ckpt16_stem(tag: str) -> str:
+    """Frozen architecture snapshot matching already-trained [16, 32] ckpts."""
+    return f"{tandem_train_stem(tag)}_arch_ckpt16"
+
+
+def tandem_eval_ckpt16_stem(tag: str) -> str:
+    return f"{tandem_train_stem(tag)}_eval_ckpt16"
 
 
 def eval_stem(suite: str, tag: str) -> str:
@@ -575,6 +596,11 @@ def tandem_sweep_stems() -> tuple[str, ...]:
     return trains + evals
 
 
+def tandem_ckpt16_eval_stems() -> tuple[str, ...]:
+    """Eval-only stems that load existing trains with frozen [16, 32] arch."""
+    return tuple(tandem_eval_ckpt16_stem(t) for t in CELLS_TANDEM)
+
+
 def _materialize_eps(*, dry: bool) -> None:
     for tag, (eps_s, eps_f, eps_d) in CELLS_EPS.items():
         _write(
@@ -601,8 +627,19 @@ def _materialize_eps(*, dry: bool) -> None:
             )
 
 
-def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
-    stem = tandem_train_stem(tag)
+def _tandem_train_yaml(
+    *,
+    tag: str,
+    overrides: dict,
+    pixel_cnn_channels: tuple[int, int] = (32, 64),
+    meta_death_penalty: float = 0.0,
+    save_stem: str | None = None,
+    header_note: str | None = None,
+    suite_tag: str | None = None,
+) -> str:
+    """Train-shaped tandem YAML. ``save_stem`` controls SAVE_PATH (ckpt dir)."""
+    ckpt_stem = save_stem or tandem_train_stem(tag)
+    suite = suite_tag or SUITE_TANDEM
     meta_lr = float(overrides.get("META_LR", 5e-4))
     switch = float(overrides.get("META_SWITCH_PENALTY", -0.05))
     eps_start = float(overrides.get("EPS_START", 0.1))
@@ -611,8 +648,12 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
     meta_eps_start = float(overrides.get("META_EPS_START", eps_start))
     meta_eps_finish = float(overrides.get("META_EPS_FINISH", eps_finish))
     meta_eps_decay = float(overrides.get("META_EPS_DECAY", eps_decay))
+    c0, c1 = int(pixel_cnn_channels[0]), int(pixel_cnn_channels[1])
+    header = header_note or (
+        f"# Seaquest tandem — {SUITE_TANDEM} cell {tag} (~5M)."
+    )
     lines: list[str] = [
-        f"# Seaquest tandem — {SUITE_TANDEM} cell {tag} (~5M).",
+        header,
         "PAPER_EVAL_RQ: 3",
         "PAPER_EVAL_PHASE: train",
         "PAPER_EVAL_KIND: tandem",
@@ -626,10 +667,10 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
     ]
     lines += _ego_lines()
     lines += [
-        f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{stem}",
-        f"WANDB_RUN_NAME: sq_paper_{SUITE_TANDEM}_{tag}_{BUDGET_TAG}",
+        f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{ckpt_stem}",
+        f"WANDB_RUN_NAME: sq_paper_{suite}_{tag}_{BUDGET_TAG}",
         "WANDB_TAGS:",
-        f"- suite:{SUITE_TANDEM}",
+        f"- suite:{suite}",
         "- rq:3",
         "- env:seaquest",
         "- role:base",
@@ -653,8 +694,8 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
         "- 84",
         "META_PIXEL_GRAYSCALE: true",
         "SKILL_PIXEL_CNN_CHANNELS:",
-        "- 32",
-        "- 64",
+        f"- {c0}",
+        f"- {c1}",
         "GAME_MODS: null",
         "EVAL_GAME_MODS: null",
         "META_INPUT_MODE: pixel_embed",
@@ -687,7 +728,7 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
         "  META_USE_NOOP_TARGET: true",
         "  META_NOOP_TARGET_IDX: null",
         f"  META_SWITCH_PENALTY: {switch}",
-        "  META_DEATH_PENALTY: 0.0",
+        f"  META_DEATH_PENALTY: {meta_death_penalty}",
         "  META_REWARD_LAMBDA: 1.0",
         "  CLIP_REWARD: true",
         "  FIRST_FIRE: true",
@@ -710,7 +751,6 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
         f"  EPS_START: {eps_start}",
         f"  EPS_FINISH: {eps_finish}",
         f"  EPS_DECAY: {eps_decay}",
-        # Keep skill exploration on locked B even when meta EPS_START differs.
         f"  SKILL_EPS_START: {LOCKED_EPS_START}",
         f"  SKILL_EPS_FINISH: {LOCKED_EPS_FINISH}",
         f"  SKILL_EPS_DECAY: {LOCKED_EPS_DECAY}",
@@ -720,8 +760,8 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
         "  META_INPUT_MODE: pixel_embed",
         "  SKILL_INPUT_MODE: ego",
         "  META_PIXEL_CNN_CHANNELS:",
-        "  - 32",
-        "  - 64",
+        f"  - {c0}",
+        f"  - {c1}",
         "  HEURISTIC_MODE: env_specific",
         "  SKILL_DEATH_PENALIZE_COLLECT: true",
     ]
@@ -736,8 +776,16 @@ def _tandem_train_yaml(*, tag: str, overrides: dict) -> str:
     return _lines(lines)
 
 
-def _tandem_eval_yaml(*, tag: str) -> str:
+def _tandem_eval_yaml(
+    *,
+    tag: str,
+    architecture_of: str | None = None,
+    suite_tag: str | None = None,
+    extra_tags: tuple[str, ...] = (),
+) -> str:
     stem = tandem_train_stem(tag)
+    arch = architecture_of or stem
+    suite = suite_tag or SUITE_TANDEM
     skills_ckpt = (
         f"./outputs/models/paper_eval/rq3/{stem}/seaquest/"
         f"hierarchical_pqn_seaquest_seed44_skills.safetensors"
@@ -758,15 +806,15 @@ def _tandem_eval_yaml(*, tag: str) -> str:
         f"- {stem}",
         f"PAPER_EVAL_SKILLS_CKPT: {skills_ckpt}",
         f"PAPER_EVAL_META_CKPT: {meta_ckpt}",
-        f"PAPER_EVAL_ARCHITECTURE_OF: {stem}",
+        f"PAPER_EVAL_ARCHITECTURE_OF: {arch}",
         "NUM_SEEDS: 1",
         "ALG_NAME: hierarchical_pqn",
         "TRAIN_MODE: tandem",
         "ENV_NAME: seaquest",
         f"SAVE_PATH: ./outputs/models/paper_eval/rq3/{stem}",
-        f"WANDB_RUN_NAME: sq_paper_eval_{SUITE_TANDEM}_{tag}_{BUDGET_TAG}",
+        f"WANDB_RUN_NAME: sq_paper_eval_{suite}_{tag}_{BUDGET_TAG}",
         "WANDB_TAGS:",
-        f"- suite:{SUITE_TANDEM}",
+        f"- suite:{suite}",
         "- rq:3",
         "- env:seaquest",
         "- phase:mod_eval",
@@ -776,6 +824,10 @@ def _tandem_eval_yaml(*, tag: str) -> str:
         "- mapper:pov_facing",
         "- ego:phi_bins8",
         f"- cell:{tag}",
+    ]
+    for t in extra_tags:
+        lines.append(f"- {t}")
+    lines += [
         "SKILL_INPUT_MODE: ego",
         "META_INPUT_MODE: pixel_embed",
         "HEURISTIC_MODE: env_specific",
@@ -855,6 +907,46 @@ def _materialize_tandem(*, dry: bool) -> None:
         )
 
 
+def _materialize_tandem_ckpt16(*, dry: bool) -> None:
+    """Frozen arch + eval YAMLs for ckpts trained with pixel CNN [16, 32].
+
+    Does not modify the current [32, 64] train YAMLs. Do not train from
+    ``*_arch_ckpt16.yaml`` — architecture reference only.
+    """
+    if not CELLS_TANDEM:
+        print(f"(skip {SUITE_TANDEM_CKPT16}: CELLS_TANDEM empty)")
+        return
+    for tag, overrides in CELLS_TANDEM.items():
+        arch = tandem_arch_ckpt16_stem(tag)
+        _write(
+            _RQ3 / f"{arch}.yaml",
+            _tandem_train_yaml(
+                tag=tag,
+                overrides=overrides,
+                pixel_cnn_channels=CKPT16_PIXEL_CNN_CHANNELS,
+                save_stem=tandem_train_stem(tag),
+                suite_tag=SUITE_TANDEM_CKPT16,
+                header_note=(
+                    f"# ARCHITECTURE SNAPSHOT ONLY — do not train.\n"
+                    f"# Matches hp_sweep_tandem cell {tag} checkpoints trained "
+                    f"with pixel CNN {list(CKPT16_PIXEL_CNN_CHANNELS)} "
+                    f"(before baseline rematerialize to [32, 64])."
+                ),
+            ),
+            dry=dry,
+        )
+        _write(
+            _RQ3 / f"{tandem_eval_ckpt16_stem(tag)}.yaml",
+            _tandem_eval_yaml(
+                tag=tag,
+                architecture_of=arch,
+                suite_tag=SUITE_TANDEM_CKPT16,
+                extra_tags=("recovery:ckpt16_cnn",),
+            ),
+            dry=dry,
+        )
+
+
 def materialize(*, stage: str, dry: bool) -> None:
     if stage in ("eps", "all"):
         _materialize_eps(dry=dry)
@@ -884,13 +976,23 @@ def materialize(*, stage: str, dry: bool) -> None:
         )
         for tag in CELLS_TANDEM:
             print(f"  {tag}: {CELLS_TANDEM[tag]}")
+    if stage in ("tandem_ckpt16", "all"):
+        _materialize_tandem_ckpt16(dry=dry)
+        stems = tandem_ckpt16_eval_stems()
+        print(
+            f"\n{SUITE_TANDEM_CKPT16}: {len(stems)} eval-only stems "
+            f"(arch frozen to CNN {list(CKPT16_PIXEL_CNN_CHANNELS)}; "
+            f"ckpts from {SUITE_TANDEM} trains)"
+        )
+        for tag in CELLS_TANDEM:
+            print(f"  {tag}: arch={tandem_arch_ckpt16_stem(tag)}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--stage",
-        choices=("eps", "skills", "tandem", "all"),
+        choices=("eps", "skills", "tandem", "tandem_ckpt16", "all"),
         default="eps",
         help="Which stage to materialize (default: eps sanity).",
     )
