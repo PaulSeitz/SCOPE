@@ -12,12 +12,17 @@ Stage ``tandem_e01`` — locked ``e01`` HPs (ε_meta 0.1, META_LR 5e-4,
 switch −0.05; skill ε B + SKILL_LR 1e-3; CNN [32, 64]) at full budgets
 ``20m`` and ``100m`` (+ home mod eval). Suite ``tandem_e01_scale``.
 
-    python scripts/materialize_hp_sweep.py --stage tandem
+Stage ``tandem_e01_oc`` — same e01 HPs / budgets with meta
+``oc_simple_rel_role`` (best mode from ``seaquest_meta_oc_sparse``).
+Suite ``tandem_e01_oc_scale`` — paired robustness check vs pixel tandem
+and vs skill-only gate.
+
     python scripts/materialize_hp_sweep.py --stage tandem_e01
-    python scripts/run_paper_eval.py --suite hp_sweep_tandem_v2 \\
-        --gpus 0,1,2 --wait-deps --skip-rq-gate --lean
+    python scripts/materialize_hp_sweep.py --stage tandem_e01_oc
     python scripts/run_paper_eval.py --suite tandem_e01_scale \\
         --gpus 0,1 --wait-deps --skip-rq-gate --lean
+    python scripts/run_paper_eval.py --suite tandem_e01_oc_scale \\
+        --gpus 2,3 --wait-deps --skip-rq-gate --lean
 """
 
 from __future__ import annotations
@@ -57,6 +62,9 @@ SUITE_TANDEM_LEGACY = "hp_sweep_tandem"
 SUITE_TANDEM_CKPT16 = "hp_sweep_tandem_ckpt16"
 # Locked e01 HPs at full budgets (20M + 100M scale).
 SUITE_TANDEM_E01 = "tandem_e01_scale"
+# Same e01 HPs with best meta-OC input (seaquest_meta_oc_sparse winner).
+SUITE_TANDEM_E01_OC = "tandem_e01_oc_scale"
+LOCKED_META_OC_MODE = "oc_simple_rel_role"
 
 # Pixel CNN used when the legacy mix-grid trains ran (before baseline rematerialize).
 CKPT16_PIXEL_CNN_CHANNELS = (16, 32)
@@ -290,22 +298,41 @@ def tandem_eval_ckpt16_stem(tag: str) -> str:
     return f"{tandem_legacy_train_stem(tag)}_eval_ckpt16"
 
 
-def tandem_e01_train_stem(budget: str) -> str:
+def tandem_e01_train_stem(
+    budget: str, *, meta_token: str = "pixel", suite: str | None = None
+) -> str:
     """Locked e01 HPs at full budget (``20m`` / ``100m``)."""
+    suite_name = suite or (
+        SUITE_TANDEM_E01_OC if meta_token != "pixel" else SUITE_TANDEM_E01
+    )
     return (
-        f"seaquest_from_scratch_tandem_pixel_ego_pov_{SPINE}_{SPARSE_TAG}"
-        f"_{SUITE_TANDEM_E01}_{budget}"
+        f"seaquest_from_scratch_tandem_{meta_token}_ego_pov_{SPINE}_{SPARSE_TAG}"
+        f"_{suite_name}_{budget}"
     )
 
 
-def tandem_e01_eval_stem(budget: str) -> str:
-    return f"{tandem_e01_train_stem(budget)}_eval"
+def tandem_e01_eval_stem(
+    budget: str, *, meta_token: str = "pixel", suite: str | None = None
+) -> str:
+    return f"{tandem_e01_train_stem(budget, meta_token=meta_token, suite=suite)}_eval"
 
 
 def tandem_e01_scale_stems() -> tuple[str, ...]:
-    """Trains-first: 20M then 100M, then their home evals."""
+    """Trains-first: 20M then 100M, then their home evals (pixel meta)."""
     trains = tuple(tandem_e01_train_stem(b) for b in ("20m", "100m"))
     evals = tuple(tandem_e01_eval_stem(b) for b in ("20m", "100m"))
+    return trains + evals
+
+
+def tandem_e01_oc_scale_stems() -> tuple[str, ...]:
+    """Same budgets with locked best OC meta (``oc_simple_rel_role``)."""
+    tok = LOCKED_META_OC_MODE
+    trains = tuple(
+        tandem_e01_train_stem(b, meta_token=tok) for b in ("20m", "100m")
+    )
+    evals = tuple(
+        tandem_e01_eval_stem(b, meta_token=tok) for b in ("20m", "100m")
+    )
     return trains + evals
 
 
@@ -664,11 +691,18 @@ def _tandem_train_yaml(
     total_timesteps: int = TIMESTEPS_5M,
     budget_tag: str | None = None,
     probe_tag: str = "tandem_hpsweep",
+    meta_input_mode: str = "pixel_embed",
 ) -> str:
     """Train-shaped tandem YAML. ``save_stem`` controls SAVE_PATH (ckpt dir)."""
     ckpt_stem = save_stem or tandem_train_stem(tag)
     suite = suite_tag or SUITE_TANDEM
     budget = budget_tag or BUDGET_TAG
+    meta_mode = str(meta_input_mode).lower().strip()
+    if meta_mode in ("pixel", "pixel_embed"):
+        meta_mode = "pixel_embed"
+        meta_wandb = "pixel"
+    else:
+        meta_wandb = meta_mode
     meta_lr = float(overrides.get("META_LR", 5e-4))
     switch = float(overrides.get("META_SWITCH_PENALTY", -0.05))
     eps_start = float(overrides.get("EPS_START", 0.1))
@@ -710,7 +744,7 @@ def _tandem_train_yaml(
         f"- budget:{budget}",
         "- phase:from_scratch",
         "- train_mode:tandem",
-        "- meta_input:pixel",
+        f"- meta_input:{meta_wandb}",
         "- skill_input:ego",
         "- mapper:pov_facing",
         "- ego:phi_bins8",
@@ -727,7 +761,7 @@ def _tandem_train_yaml(
         f"- {c1}",
         "GAME_MODS: null",
         "EVAL_GAME_MODS: null",
-        "META_INPUT_MODE: pixel_embed",
+        f"META_INPUT_MODE: {meta_mode}",
         "SKILL_INPUT_MODE: ego",
         "HEURISTIC_MODE: env_specific",
         "SKILL_DEATH_PENALIZE_COLLECT: true",
@@ -786,7 +820,7 @@ def _tandem_train_yaml(
         f"  META_EPS_START: {meta_eps_start}",
         f"  META_EPS_FINISH: {meta_eps_finish}",
         f"  META_EPS_DECAY: {meta_eps_decay}",
-        "  META_INPUT_MODE: pixel_embed",
+        f"  META_INPUT_MODE: {meta_mode}",
         "  SKILL_INPUT_MODE: ego",
         "  META_PIXEL_CNN_CHANNELS:",
         f"  - {c0}",
@@ -812,12 +846,19 @@ def _tandem_eval_yaml(
     suite_tag: str | None = None,
     ckpt_stem: str | None = None,
     budget_tag: str | None = None,
+    meta_input_mode: str = "pixel_embed",
     extra_tags: tuple[str, ...] = (),
 ) -> str:
     stem = ckpt_stem or tandem_train_stem(tag)
     arch = architecture_of or stem
     suite = suite_tag or SUITE_TANDEM
     budget = budget_tag or BUDGET_TAG
+    meta_mode = str(meta_input_mode).lower().strip()
+    if meta_mode in ("pixel", "pixel_embed"):
+        meta_wandb = "pixel"
+        meta_mode = "pixel_embed"
+    else:
+        meta_wandb = meta_mode
     skills_ckpt = (
         f"./outputs/models/paper_eval/rq3/{stem}/seaquest/"
         f"hierarchical_pqn_seaquest_seed44_skills.safetensors"
@@ -851,7 +892,7 @@ def _tandem_eval_yaml(
         "- env:seaquest",
         "- phase:mod_eval",
         "- train_mode:tandem",
-        "- meta_input:pixel",
+        f"- meta_input:{meta_wandb}",
         "- skill_input:ego",
         "- mapper:pov_facing",
         "- ego:phi_bins8",
@@ -862,7 +903,7 @@ def _tandem_eval_yaml(
         lines.append(f"- {t}")
     lines += [
         "SKILL_INPUT_MODE: ego",
-        "META_INPUT_MODE: pixel_embed",
+        f"META_INPUT_MODE: {meta_mode}",
         "HEURISTIC_MODE: env_specific",
         "SKILL_DEATH_PENALIZE_COLLECT: true",
     ]
@@ -872,7 +913,7 @@ def _tandem_eval_yaml(
         "EGO_PSI_ANGLE_BINS: 8",
         "alg:",
         "  SKILL_INPUT_MODE: ego",
-        "  META_INPUT_MODE: pixel_embed",
+        f"  META_INPUT_MODE: {meta_mode}",
         "  HEURISTIC_MODE: env_specific",
         "  SKILL_DEATH_PENALIZE_COLLECT: true",
     ]
@@ -1024,6 +1065,56 @@ def _materialize_tandem_e01(*, dry: bool) -> None:
         )
 
 
+def _materialize_tandem_e01_oc(*, dry: bool) -> None:
+    """Locked e01 HPs + best OC meta (``oc_simple_rel_role``) at 20M / 100M."""
+    overrides = CELLS_TANDEM["e01"]
+    tok = LOCKED_META_OC_MODE
+    budgets: tuple[tuple[str, int], ...] = (
+        ("20m", TIMESTEPS_20M),
+        ("100m", TIMESTEPS_100M),
+    )
+    for budget, steps in budgets:
+        stem = tandem_e01_train_stem(budget, meta_token=tok)
+        _write(
+            _RQ3 / f"{stem}.yaml",
+            _tandem_train_yaml(
+                tag="e01",
+                overrides=overrides,
+                save_stem=stem,
+                suite_tag=SUITE_TANDEM_E01_OC,
+                total_timesteps=steps,
+                budget_tag=budget,
+                probe_tag="tandem_e01_oc_scale",
+                meta_input_mode=tok,
+                header_note=(
+                    f"# Seaquest tandem OC — locked e01 HPs (~{budget}).\n"
+                    f"# Meta input: {tok} (seaquest_meta_oc_sparse winner).\n"
+                    f"# Same HPs as tandem_e01_scale: meta ε 0.1→0.01/0.2, "
+                    f"META_LR=5e-4, switch=−0.05; skill ε B + SKILL_LR=1e-3; "
+                    f"death=0. Skills still ego (robustness check vs skill-only)."
+                ),
+            ),
+            dry=dry,
+        )
+        _write(
+            _RQ3 / f"{tandem_e01_eval_stem(budget, meta_token=tok)}.yaml",
+            _tandem_eval_yaml(
+                tag="e01",
+                architecture_of=stem,
+                suite_tag=SUITE_TANDEM_E01_OC,
+                ckpt_stem=stem,
+                budget_tag=budget,
+                meta_input_mode=tok,
+                extra_tags=(
+                    "lock:e01",
+                    f"budget:{budget}",
+                    f"meta_oc:{tok}",
+                ),
+            ),
+            dry=dry,
+        )
+
+
 def materialize(*, stage: str, dry: bool) -> None:
     if stage in ("eps", "all"):
         _materialize_eps(dry=dry)
@@ -1074,6 +1165,19 @@ def materialize(*, stage: str, dry: bool) -> None:
         )
         for b, steps in (("20m", TIMESTEPS_20M), ("100m", TIMESTEPS_100M)):
             print(f"  {b}: timesteps={steps} stem={tandem_e01_train_stem(b)}")
+    if stage in ("tandem_e01_oc", "all"):
+        _materialize_tandem_e01_oc(dry=dry)
+        stems = tandem_e01_oc_scale_stems()
+        tok = LOCKED_META_OC_MODE
+        print(
+            f"\n{SUITE_TANDEM_E01_OC}: {len(stems)} stems "
+            f"(20M+100M train+eval; locked e01; meta={tok})"
+        )
+        for b, steps in (("20m", TIMESTEPS_20M), ("100m", TIMESTEPS_100M)):
+            print(
+                f"  {b}: timesteps={steps} "
+                f"stem={tandem_e01_train_stem(b, meta_token=tok)}"
+            )
 
 
 def main() -> None:
@@ -1086,6 +1190,7 @@ def main() -> None:
             "tandem",
             "tandem_ckpt16",
             "tandem_e01",
+            "tandem_e01_oc",
             "all",
         ),
         default="eps",
