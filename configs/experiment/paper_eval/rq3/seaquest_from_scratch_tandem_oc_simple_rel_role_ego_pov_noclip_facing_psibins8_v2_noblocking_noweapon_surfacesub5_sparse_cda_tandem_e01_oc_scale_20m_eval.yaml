@@ -21,7 +21,7 @@ ALG_NAME: hierarchical_pqn
 TRAIN_MODE: tandem
 ENV_NAME: seaquest
 SAVE_PATH: ./outputs/models/paper_eval/rq3/seaquest_from_scratch_tandem_oc_simple_rel_role_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_tandem_e01_oc_scale_20m
-WANDB_RUN_NAME: sq_paper_eval_tandem_e01_oc_scale_e01_20m
+WANDB_RUN_NAME: sq_paper_eval_tandem_e01_oc_scale_oc_simple_rel_role_20m
 WANDB_TAGS:
 - suite:tandem_e01_oc_scale
 - rq:3
@@ -33,7 +33,7 @@ WANDB_TAGS:
 - mapper:pov_facing
 - ego:phi_bins8
 - budget:20m
-- cell:e01
+- cell:oc_simple_rel_role
 - lock:e01
 - budget:20m
 - meta_oc:oc_simple_rel_role

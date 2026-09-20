@@ -1,6 +1,6 @@
 # Seaquest tandem OC — locked e01 HPs (~20m).
-# Meta input: oc_simple_rel_role (seaquest_meta_oc_sparse winner).
-# Same HPs as tandem_e01_scale: meta ε 0.1→0.01/0.2, META_LR=5e-4, switch=−0.05; skill ε B + SKILL_LR=1e-3; death=0. Skills still ego (robustness check vs skill-only).
+# Meta input: oc_simple_rel_role (seaquest_meta_oc_sparse probe).
+# Same HPs as tandem_e01_scale 20M: meta ε 0.1→0.01/0.2, META_LR=5e-4, switch=−0.05; skill ε B + SKILL_LR=1e-3; death=0. Skills still ego. Home eval = locked MOD_KEYS.
 PAPER_EVAL_RQ: 3
 PAPER_EVAL_PHASE: train
 PAPER_EVAL_KIND: tandem
@@ -34,7 +34,7 @@ USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
 SAVE_PATH: ./outputs/models/paper_eval/rq3/seaquest_from_scratch_tandem_oc_simple_rel_role_ego_pov_noclip_facing_psibins8_v2_noblocking_noweapon_surfacesub5_sparse_cda_tandem_e01_oc_scale_20m
-WANDB_RUN_NAME: sq_paper_tandem_e01_oc_scale_e01_20m
+WANDB_RUN_NAME: sq_paper_tandem_e01_oc_scale_oc_simple_rel_role_20m
 WANDB_TAGS:
 - suite:tandem_e01_oc_scale
 - rq:3
@@ -52,7 +52,7 @@ WANDB_TAGS:
 - mapper:pov_facing
 - ego:phi_bins8
 - probe:tandem_e01_oc_scale
-- cell:e01
+- cell:oc_simple_rel_role
 META_PIXEL_DO_RESIZE: true
 META_PIXEL_USE_NATIVE_DOWNSCALING: true
 META_PIXEL_RESIZE_SHAPE:

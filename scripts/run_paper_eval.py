@@ -1261,7 +1261,7 @@ HP_SWEEP_TANDEM_SUITE = "hp_sweep_tandem_v2"
 HP_SWEEP_TANDEM_CKPT16_SUITE = "hp_sweep_tandem_ckpt16"
 # Locked e01 HPs at 20M + ~100M (scale curve after hp_sweep_tandem_v2).
 TANDEM_E01_SCALE_SUITE = "tandem_e01_scale"
-# Same e01 HPs with best OC meta (oc_simple_rel_role) — robustness vs skill-only.
+# Same e01 HPs; three OC metas at 20M (farming / robustness probe).
 TANDEM_E01_OC_SCALE_SUITE = "tandem_e01_oc_scale"
 
 
@@ -3677,9 +3677,9 @@ def main() -> None:
             "(+ home mod eval); "
             "python scripts/materialize_hp_sweep.py --stage tandem_e01 then "
             "--suite tandem_e01_scale --gpus … --wait-deps --skip-rq-gate. "
-            f"{TANDEM_E01_OC_SCALE_SUITE}: same e01 HPs / budgets with meta "
-            "oc_simple_rel_role (seaquest_meta_oc_sparse winner) — check "
-            "skill-ego robustness under OC meta; "
+            f"{TANDEM_E01_OC_SCALE_SUITE}: locked e01 HPs at 20M for three OC "
+            "metas (oc_simple_rel_role / oc_simple_role / oc_embed) + locked "
+            "home mod eval — farming / robustness vs skill-only; "
             "python scripts/materialize_hp_sweep.py --stage tandem_e01_oc then "
             "--suite tandem_e01_oc_scale --gpus … --wait-deps --skip-rq-gate. "
             f"{HP_SWEEP_TANDEM_CKPT16_SUITE}: archival eval-only for abandoned "
