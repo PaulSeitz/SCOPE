@@ -1,0 +1,65 @@
+# Home mod eval for final_10m tandem (pixel).
+PAPER_EVAL_RQ: 3
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: tandem
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_MOD_KEYS:
+- base
+- shift_lanes
+- lane_scramble
+- dynamic_lane_drift
+- random_spawns
+- change_background_color
+- no_enemies
+- swap_diver_enemy_labels
+- gravity
+- faster_enemies
+PAPER_EVAL_REQUIRES_RQ1:
+- final_10m_tandem_pixel_ego
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/final_10m/final_10m_tandem_pixel_ego/seaquest/hierarchical_pqn_seaquest_seed44_skills.safetensors
+PAPER_EVAL_META_CKPT: ./outputs/models/paper_eval/final_10m/final_10m_tandem_pixel_ego/seaquest/hierarchical_pqn_seaquest_seed44_meta.safetensors
+PAPER_EVAL_ARCHITECTURE_OF: final_10m_tandem_pixel_ego
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: tandem
+ENV_NAME: seaquest
+SAVE_PATH: ./outputs/models/paper_eval/final_10m/final_10m_tandem_pixel_ego
+WANDB_RUN_NAME: sq_final_10m_eval_tandem_pixel_10m
+WANDB_TAGS:
+- suite:final_10m
+- rq:3
+- env:seaquest
+- phase:mod_eval
+- train_mode:tandem
+- meta_input:pixel
+- skill_input:ego
+- mapper:pov_facing
+- ego:phi_bins8
+- budget:10m
+- lock:tandem_e01
+- cell:pixel
+SKILL_INPUT_MODE: ego
+META_INPUT_MODE: pixel_embed
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: false
+COLLECT_SPARSE_ONLY: true
+AVOID_SPARSE_ONLY: true
+EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_PSI_ANGLE_BINS: 8
+alg:
+  SKILL_INPUT_MODE: ego
+  META_INPUT_MODE: pixel_embed
+  HEURISTIC_MODE: env_specific
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: false
+  COLLECT_SPARSE_ONLY: true
+  AVOID_SPARSE_ONLY: true
+  USE_EGO_SHOT_FEATURES: false
+  EGO_DISTANCE_CLIP_MAX_PX: null
+  EGO_PSI_ANGLE_BINS: 8
+SEED: 44
+EVAL_SEED: 10044
+EVAL_NUM_SEEDS: 3

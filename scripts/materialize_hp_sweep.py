@@ -83,8 +83,10 @@ MOD_KEYS: tuple[str, ...] = (
     "shift_lanes",
     "lane_scramble",
     "dynamic_lane_drift",
+    "random_spawns",
     "change_background_color",
     "no_enemies",
+    "swap_diver_enemy_labels",
     "gravity",
     "faster_enemies",
 )

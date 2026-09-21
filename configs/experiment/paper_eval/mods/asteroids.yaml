@@ -1,11 +1,27 @@
-# Minimal allowlist for asteroids — base only until mods workshop.
+# Asteroids short strip: S / Dₚ / Dₜ / A (paper showcase).
 env: asteroids
-status: draft
+status: ready
 
 eval_mods:
   - key: base
     mods: []
     category: control
+  - key: x_dominant_rocks
+    mods: [x_dominant_rocks]
+    category: layout
+  - key: no_momentum
+    mods: [no_momentum]
+    category: dynamics
+  - key: faster_asteroids
+    mods: [faster_asteroids]
+    category: dynamics
+  - key: frozen_asteroids
+    mods: [frozen_asteroids]
+    category: semantic
 
 paper_core:
   - base
+  - x_dominant_rocks
+  - no_momentum
+  - faster_asteroids
+  - frozen_asteroids

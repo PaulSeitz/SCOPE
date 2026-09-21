@@ -1263,6 +1263,16 @@ HP_SWEEP_TANDEM_CKPT16_SUITE = "hp_sweep_tandem_ckpt16"
 TANDEM_E01_SCALE_SUITE = "tandem_e01_scale"
 # Same e01 HPs; three OC metas at 20M (farming / robustness probe).
 TANDEM_E01_OC_SCALE_SUITE = "tandem_e01_oc_scale"
+# NEXUS-mainline outer loop sanity (tandem first → skills); see materialize_nexus_parity.py.
+NEXUS_PARITY_SUITE = "nexus_parity"
+# Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
+FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
+# Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
+FINAL_10M_PQN_PIXEL_GPU0_SUITE = "final_10m_pqn_pixel_gpu0"
+FINAL_10M_PQN_PIXEL_GPU1_SUITE = "final_10m_pqn_pixel_gpu1"
+# One-command overnight chains (2 GPUs only).
+FINAL_10M_OVERNIGHT_GPU0_SUITE = "final_10m_overnight_gpu0"
+FINAL_10M_OVERNIGHT_GPU1_SUITE = "final_10m_overnight_gpu1"
 
 
 def _hp_sweep_stems() -> tuple[
@@ -1305,6 +1315,43 @@ def _hp_sweep_stems() -> tuple[
     TANDEM_E01_SCALE_STEMS,
     TANDEM_E01_OC_SCALE_STEMS,
 ) = _hp_sweep_stems()
+
+
+def _final_eval_suite_stems() -> tuple[
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from materialize_final_10m import (  # type: ignore
+        final_10m_base_skills_stems,
+        final_10m_pqn_pixel_gpu0_stems,
+        final_10m_pqn_pixel_gpu1_stems,
+    )
+    from materialize_nexus_parity import nexus_parity_stems  # type: ignore
+
+    base = final_10m_base_skills_stems()
+    nexus = nexus_parity_stems()
+    pqn0 = final_10m_pqn_pixel_gpu0_stems()
+    pqn1 = final_10m_pqn_pixel_gpu1_stems()
+    return base, nexus, pqn0, pqn1, nexus + pqn0, base + pqn1
+
+
+(
+    FINAL_10M_BASE_SKILLS_STEMS,
+    NEXUS_PARITY_STEMS,
+    FINAL_10M_PQN_PIXEL_GPU0_STEMS,
+    FINAL_10M_PQN_PIXEL_GPU1_STEMS,
+    FINAL_10M_OVERNIGHT_GPU0_STEMS,
+    FINAL_10M_OVERNIGHT_GPU1_STEMS,
+) = _final_eval_suite_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
 # Uneven pipelines → per-GPU suites (do not use --gpus round-robin on the union).
@@ -1975,6 +2022,12 @@ SUITE_STEMS = {
     HP_SWEEP_TANDEM_CKPT16_SUITE: HP_SWEEP_TANDEM_CKPT16_STEMS,
     TANDEM_E01_SCALE_SUITE: TANDEM_E01_SCALE_STEMS,
     TANDEM_E01_OC_SCALE_SUITE: TANDEM_E01_OC_SCALE_STEMS,
+    NEXUS_PARITY_SUITE: NEXUS_PARITY_STEMS,
+    FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
+    FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
+    FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
+    FINAL_10M_OVERNIGHT_GPU0_SUITE: FINAL_10M_OVERNIGHT_GPU0_STEMS,
+    FINAL_10M_OVERNIGHT_GPU1_SUITE: FINAL_10M_OVERNIGHT_GPU1_STEMS,
     SPARSE_CDA_CLEAN_SUITE: SPARSE_CDA_CLEAN_STEMS,
     SPARSE_CDA_CLEAN_GPU0_SUITE: SPARSE_CDA_CLEAN_GPU0_STEMS,
     SPARSE_CDA_CLEAN_GPU1_SUITE: SPARSE_CDA_CLEAN_GPU1_STEMS,
@@ -3682,6 +3735,23 @@ def main() -> None:
             "home mod eval — farming / robustness vs skill-only; "
             "python scripts/materialize_hp_sweep.py --stage tandem_e01_oc then "
             "--suite tandem_e01_oc_scale --gpus … --wait-deps --skip-rq-gate. "
+            f"{NEXUS_PARITY_SUITE}: sanity — our locked HPs at NEXUS outer loop "
+            "(50M / 1024 envs / 128 steps → 381 updates); tandem pixel first "
+            "(OOM-fast) then skills + home evals; "
+            "python scripts/materialize_nexus_parity.py then "
+            "--suite nexus_parity --gpus 0 --wait-deps --skip-rq-gate --lean. "
+            f"{FINAL_10M_BASE_SKILLS_SUITE}: ours-only ego skills @ 10M on paper "
+            "bases (seaquest, phoenix, namethisgame, asteroids) + home paper_core "
+            "evals; Time Pilot is a transfer (not included); "
+            "python scripts/materialize_final_10m.py then "
+            "--suite final_10m_base_skills --gpus 0 --wait-deps --skip-rq-gate "
+            "--lean. "
+            f"{FINAL_10M_PQN_PIXEL_GPU0_SUITE} / {FINAL_10M_PQN_PIXEL_GPU1_SUITE}: "
+            "flat PQN pixel @ 10M + home evals (SQ+PH / NTG+AS). "
+            f"{FINAL_10M_OVERNIGHT_GPU0_SUITE}: nexus_parity then "
+            f"{FINAL_10M_PQN_PIXEL_GPU0_SUITE}; "
+            f"{FINAL_10M_OVERNIGHT_GPU1_SUITE}: final_10m_base_skills then "
+            f"{FINAL_10M_PQN_PIXEL_GPU1_SUITE} — two-GPU overnight. "
             f"{HP_SWEEP_TANDEM_CKPT16_SUITE}: archival eval-only for abandoned "
             "hp_sweep_tandem [16, 32] ckpts (not the overnight restart). "
             f"{SEAQUEST_META_OC_SPARSE_SUITE}: SQ tandem meta-OC input modes "

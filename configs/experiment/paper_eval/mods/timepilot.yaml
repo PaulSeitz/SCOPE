@@ -1,11 +1,27 @@
-# Minimal allowlist for timepilot — base only until mods workshop.
+# Time Pilot short strip: S / Dₚ / Dₜ / A (paper showcase).
 env: timepilot
-status: draft
+status: ready
 
 eval_mods:
   - key: base
     mods: []
     category: control
+  - key: spawn_axis_bias
+    mods: [spawn_axis_bias]
+    category: layout
+  - key: plane_inertia
+    mods: [plane_inertia]
+    category: dynamics
+  - key: faster_enemies
+    mods: [faster_enemies]
+    category: dynamics
+  - key: frozen_bait
+    mods: [frozen_bait]
+    category: semantic
 
 paper_core:
   - base
+  - spawn_axis_bias
+  - plane_inertia
+  - faster_enemies
+  - frozen_bait

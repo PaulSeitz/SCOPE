@@ -60,12 +60,6 @@ eval_mods:
     mods: [swap_diver_enemy_labels]
     category: semantic
     relabel: true
-  # Multi-object attention fail (replaces only_submarines as failure showcase).
-  # Fork: MicroSwarmMod — pack enemy slots with tiny clones so nearest-slot
-  # DESTROY thrashing dominates (not subtype-difficulty or schedule failure).
-  - key: micro_swarm
-    mods: [micro_swarm]
-    category: semantic
   # dynamics (expect ego to struggle more here)
   - key: gravity
     mods: [gravity]
@@ -101,6 +95,11 @@ eval_mods:
   - key: dynamic_lane_drift
     mods: [dynamic_lane_drift]
     category: layout
+  # Hard layout: spawn still uses lane slots, but Y is rolled on spawn and held
+  # → no effective lanes for sharks / subs / divers.
+  - key: random_spawns
+    mods: [random_spawns]
+    category: layout
   # visual / appearance (geometry & dynamics unchanged)
   - key: inverted_colors
     mods: [inverted_colors]
@@ -123,3 +122,17 @@ planned:
   - collectable_sharks
   - extra_enemy_type
   - penalize_diver_shooting
+
+# Home depth strip (S / layout / visual / A / D / multi-object fail).
+paper_core:
+  - base
+  - shift_lanes
+  - lane_scramble
+  - dynamic_lane_drift
+  - random_spawns
+  - change_background_color
+  - no_enemies
+  - swap_diver_enemy_labels
+  - gravity
+  - faster_enemies
+

@@ -1,4 +1,5 @@
-# Beamrider mod allowlists for paper_eval RQ2.
+# Beamrider short strip: S / Dₚ / Dₜ / A (paper showcase).
+# Older fork entries kept below paper_core for opportunistic evals.
 env: beamrider
 status: ready
 
@@ -6,14 +7,22 @@ eval_mods:
   - key: base
     mods: []
     category: control
+  - key: three_lanes
+    mods: [three_lanes]
+    category: layout
+  - key: slow_strafe
+    mods: [slow_strafe]
+    category: dynamics
   - key: double_enemy_speed
     mods: [double_enemy_speed]
     category: dynamics
-    skip_eval: true  # JAXAtari API drift vs base beamrider (occupied_lanes)
-  - key: fog_of_war
-    mods: [fog_of_war]
-    category: dynamics
-    skip_eval: true  # fog palette missing under native downscale
+  - key: idle_at_range
+    mods: [idle_at_range]
+    category: semantic
+  - key: top_idle_no_shoot
+    mods: [idle_at_range]
+    category: semantic
+  # legacy / opportunistic (not in paper_core)
   - key: hardcore
     mods: [hardcore]
     category: dynamics
@@ -26,18 +35,17 @@ eval_mods:
   - key: teleport_ufos
     mods: [teleport_ufos]
     category: dynamics
-  - key: three_lanes
-    mods: [three_lanes]
-    category: dynamics
   - key: toaster
     mods: [toaster]
     category: visual
+  - key: fog_of_war
+    mods: [fog_of_war]
+    category: dynamics
+    skip_eval: true  # fog palette missing under native downscale
 
 paper_core:
   - base
-  # double_enemy_speed / fog_of_war skipped — see skip_eval on those entries
-  - hardcore
-  - mothership_laser
-  - teleport_ufos
   - three_lanes
-  - toaster  # one visual
+  - slow_strafe
+  - double_enemy_speed
+  - idle_at_range

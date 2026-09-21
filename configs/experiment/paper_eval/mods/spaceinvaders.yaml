@@ -1,11 +1,31 @@
-# Minimal allowlist for spaceinvaders — base only until mods workshop.
+# Space Invaders short strip: S (×2) / Dₚ / Dₜ / A (paper showcase).
 env: spaceinvaders
-status: draft
+status: ready
 
 eval_mods:
   - key: base
     mods: []
     category: control
+  - key: shift_shields
+    mods: [shift_shields]
+    category: layout
+  - key: shift_formation
+    mods: [shift_formation]
+    category: layout
+  - key: slow_tank
+    mods: [slow_tank]
+    category: dynamics
+  - key: faster_aliens
+    mods: [faster_aliens]
+    category: dynamics
+  - key: saucer_only
+    mods: [saucer_only]
+    category: semantic
 
 paper_core:
   - base
+  - shift_shields
+  - shift_formation
+  - slow_tank
+  - faster_aliens
+  - saucer_only

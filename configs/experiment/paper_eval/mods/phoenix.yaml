@@ -1,4 +1,4 @@
-# Phoenix mod allowlist for paper_eval RQ2 transfer probes.
+# Phoenix short strip: S / Dₚ / Dₜ / A (paper showcase).
 env: phoenix
 status: ready
 
@@ -6,3 +6,26 @@ eval_mods:
   - key: base
     mods: []
     category: control
+  # S — layout / formation
+  - key: formation_reshuffle
+    mods: [formation_reshuffle]
+    category: layout
+  # Dₚ — player dynamical
+  - key: player_drift
+    mods: [player_drift]
+    category: dynamics
+  # Dₜ — target dynamical
+  - key: fast_enemy_bullets
+    mods: [fast_enemy_bullets]
+    category: dynamics
+  # A — alignment / point-farm bait
+  - key: static_score_bait
+    mods: [static_score_bait]
+    category: semantic
+
+paper_core:
+  - base
+  - formation_reshuffle
+  - player_drift
+  - fast_enemy_bullets
+  - static_score_bait

@@ -1,0 +1,17 @@
+# nexus_parity inventory (not runnable).
+suite: nexus_parity
+budget_tag: 50m_nexus
+total_timesteps: 49938432
+num_envs: 1024
+num_steps: 128
+num_updates: 381
+source: floor(5e7/(1024*128))*1024*128 == NEXUS sea3 NUM_UPDATES
+keeps: CBL locked skill/tandem learning HPs
+skills_train: nexus_parity_skills_ego
+skills_eval: nexus_parity_skills_ego_eval
+tandem_train: nexus_parity_tandem_pixel_ego
+tandem_eval: nexus_parity_tandem_pixel_ego_eval
+outputs_root: ./outputs/models/paper_eval/nexus_parity
+hard_caps: none on NUM_ENVS/TOTAL_TIMESTEPS
+constraint: (NUM_STEPS*NUM_ENVS) % NUM_MINIBATCHES == 0
+compare: final_10m @128 envs has 610 updates (> 381 here)
