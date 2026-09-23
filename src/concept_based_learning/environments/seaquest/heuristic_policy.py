@@ -14,10 +14,10 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   > 0 and any lane-clear diver has centre x in ``[margin, 160-margin]``,
   edge divers are skipped so COLLECT is not trained on edge-suicide rushes.
   If no midfield diver is available, edge divers remain selectable.
-- Surface sub (slot 29) is ignored for *nearest* targeting unless the player
+- Surface sub (slot 28) is ignored for *nearest* targeting unless the player
   is near the surface and within ``SURFACE_SUB_NEAR_RANGE``. It still
   interrupts as AVOID from any depth inside ``SURFACE_SUB_AVOID_RANGE_{X,Y}``.
-- Surface waypoint (slot 34) when oxygen is low *underwater*, while refilling
+- Surface waypoint (slot 33) when oxygen is low *underwater*, while refilling
   at the surface with divers on board, or when divers ≥ 6 — but only if the
   surface sub is inactive / left of the player, or oxygen is low.
   While forced to surface, a danger within ``SURFACE_DANGER_CLOSE_RANGE``
@@ -33,9 +33,9 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   When oxygen is low, those enemy interrupt radii shrink (and go to 0 at
   critical O₂) so the surface waypoint stays selected and the player goes up.
 
-Object slots after meta-NOOP:
-  divers 1–4, sharks 5–16, subs 17–28, surface sub 29,
-  missiles 30–33, surface waypoint 34.
+Object slots (meta-NOOP appended last; see ``meta_object_layout``):
+  divers 0–3, sharks 4–15, subs 16–27, surface sub 28,
+  missiles 29–32, surface waypoint 33, meta-NOOP 34.
 """
 
 from __future__ import annotations
@@ -58,10 +58,10 @@ from concept_based_learning.observations.egocentric import (
     aabb_surface_gap_px,
 )
 
-# Last game-object slot (index 0 is reserved meta NOOP).
-SURFACE_DUMMY_IDX = 34
-# Real surface submarine in the flattened object list (after meta NOOP).
-SURFACE_SUB_IDX = 29
+# Surface waypoint: last *game* slot before trailing meta-NOOP (max_objects=35).
+SURFACE_DUMMY_IDX = 33
+# Real surface submarine in the flattened game list (append-NOOP layout).
+SURFACE_SUB_IDX = 28
 
 OXYGEN_LOW_THRESHOLD = 15.0
 CRITICAL_OXYGEN_THRESHOLD = 5.0
@@ -429,6 +429,8 @@ def _select_target(
     nearest_dist = jnp.where(selectable_nearest, distances, jnp.inf)
     best_idx = jnp.argmin(nearest_dist).astype(jnp.int32)
     any_selectable = jnp.any(selectable_nearest)
+    # Empty scene → trailing meta-NOOP (appended last; never game slot 0).
+    idle_noop_idx = jnp.asarray(active_mask.shape[0] - 1, dtype=jnp.int32)
 
     # Nearby sharks/subs steal COLLECT (and other nearer non-DESTROY) so
     # FRAME_SKIP cannot ram a shark the heuristic has not yet selected.
@@ -499,7 +501,7 @@ def _select_target(
     target_idx = jnp.where(
         any_selectable,
         best_idx,
-        jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
+        idle_noop_idx,
     )
     target_idx = jnp.where(any_destroy_close, best_destroy_idx, target_idx)
     target_idx = jnp.where(any_avoid_interrupt, best_avoid_idx, target_idx)
@@ -534,7 +536,7 @@ def _select_target(
     # an object on those frames trains a target/action pair on ignored actions.
     target_idx = jnp.where(
         _oxygen_rising_from_raw(raw_observation),
-        jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
+        idle_noop_idx,
         target_idx,
     )
     return target_idx.astype(jnp.int32)

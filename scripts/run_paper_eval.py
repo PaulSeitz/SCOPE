@@ -1270,6 +1270,8 @@ NEXUS_PARITY_SUITE = "nexus_parity"
 OPTIM_SCALE_SQ_SUITE = "optim_scale_sq"
 # Skills-only seed-1 HP probes on the same outer (ε / LR ablations).
 OPTIM_SCALE_PROBE_SUITE = "optim_scale_probe"
+# Post-surface-index fix: 1:1 then εB skills (train→eval interleaved).
+OPTIM_SCALE_SKILLS_RERUN_SUITE = "optim_scale_skills_rerun"
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -1331,6 +1333,7 @@ def _final_eval_suite_stems() -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1345,6 +1348,7 @@ def _final_eval_suite_stems() -> tuple[
     from materialize_nexus_parity import nexus_parity_stems  # type: ignore
     from materialize_optim_scale import (  # type: ignore
         optim_scale_probe_stems,
+        optim_scale_skills_rerun_stems,
         optim_scale_sq_stems,
     )
 
@@ -1354,7 +1358,8 @@ def _final_eval_suite_stems() -> tuple[
     pqn1 = final_10m_pqn_pixel_gpu1_stems()
     optim = optim_scale_sq_stems()
     probe = optim_scale_probe_stems()
-    return base, nexus, pqn0, pqn1, nexus + pqn0, base + pqn1, optim, probe
+    rerun = optim_scale_skills_rerun_stems()
+    return base, nexus, pqn0, pqn1, nexus + pqn0, base + pqn1, optim, probe, rerun
 
 
 (
@@ -1366,6 +1371,7 @@ def _final_eval_suite_stems() -> tuple[
     FINAL_10M_OVERNIGHT_GPU1_STEMS,
     OPTIM_SCALE_SQ_STEMS,
     OPTIM_SCALE_PROBE_STEMS,
+    OPTIM_SCALE_SKILLS_RERUN_STEMS,
 ) = _final_eval_suite_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -2040,6 +2046,7 @@ SUITE_STEMS = {
     NEXUS_PARITY_SUITE: NEXUS_PARITY_STEMS,
     OPTIM_SCALE_SQ_SUITE: OPTIM_SCALE_SQ_STEMS,
     OPTIM_SCALE_PROBE_SUITE: OPTIM_SCALE_PROBE_STEMS,
+    OPTIM_SCALE_SKILLS_RERUN_SUITE: OPTIM_SCALE_SKILLS_RERUN_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -3767,6 +3774,11 @@ def main() -> None:
             "outer — full 1:1 vs ε B vs SKILL_LR=5e-4+ε B (no LR decay); "
             "run before the full suite to see what breaks; "
             "--suite optim_scale_probe --gpus … --wait-deps --skip-rq-gate --lean. "
+            f"{OPTIM_SCALE_SKILLS_RERUN_SUITE}: after surface-NOOP index fix — "
+            "skills 1:1 train→eval then εB train→eval (seed=1 probes); "
+            "stash old ckpts first so --resume does not skip; "
+            "--suite optim_scale_skills_rerun --gpus … --wait-deps --skip-rq-gate "
+            "--lean. "
             f"{FINAL_10M_BASE_SKILLS_SUITE}: ours-only ego skills @ 10M on paper "
             "bases (seaquest, phoenix, namethisgame, asteroids) + home paper_core "
             "evals; Time Pilot is a transfer (not included); "

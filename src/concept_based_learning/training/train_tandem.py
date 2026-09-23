@@ -29,6 +29,7 @@ from concept_based_learning.environments.datatypes import (
 )
 from concept_based_learning.environments.meta_target_mask import (
     build_meta_target_mask,
+    coerce_inactive_targets_to_meta_noop,
     is_meta_fire_target,
     is_meta_noop_target,
     meta_fire_game_action,
@@ -527,7 +528,6 @@ def make_tandem_train(
                     objs, raw, config, hook=meta_mask_hook
                 )
             )(last_obs.objects, last_obs.raw_observation)
-            active_any = jnp.any(active_masks, axis=-1)
 
             eps_meta = jnp.full(
                 config["NUM_ENVS"],
@@ -547,17 +547,21 @@ def make_tandem_train(
                 last_targets,
                 policy_rngs,
             )
+            # Warmup: prefer heuristic when it picked a real object; idle/NOOP
+            # heuristic targets stay with the (masked) meta head.
+            if meta_noop_enabled:
+                heuristic_is_live = jnp.logical_and(
+                    heuristic_targets != no_target_idx,
+                    heuristic_targets != meta_noop_idx,
+                )
+            else:
+                heuristic_is_live = heuristic_targets != no_target_idx
             target_obj_idxs = jnp.where(
-                use_heuristic_warmup & (heuristic_targets != no_target_idx),
+                use_heuristic_warmup & heuristic_is_live,
                 heuristic_targets,
                 target_obj_idxs,
             )
             target_obj_idxs = target_obj_idxs.astype(jnp.int32)
-            target_obj_idxs = jnp.where(
-                active_any,
-                target_obj_idxs,
-                jnp.full_like(target_obj_idxs, no_target_idx, dtype=jnp.int32),
-            )
             target_obj_idxs = jax.lax.cond(
                 use_heuristic_warmup,
                 lambda x: x,
@@ -593,8 +597,20 @@ def make_tandem_train(
                     _apply_meta_target_overrides,
                     target_obj_idxs,
                 )
+            # Inactive / sentinel → meta-NOOP (never fall back to index 0).
+            target_obj_idxs = coerce_inactive_targets_to_meta_noop(
+                target_obj_idxs,
+                active_masks,
+                config,
+                no_target_idx=no_target_idx,
+                noop_idx=meta_noop_idx if meta_noop_enabled else None,
+            )
             safe_target_idxs = jnp.where(
-                target_obj_idxs == no_target_idx, 0, target_obj_idxs
+                target_obj_idxs == no_target_idx,
+                jnp.asarray(
+                    meta_noop_idx if meta_noop_enabled else 0, dtype=jnp.int32
+                ),
+                target_obj_idxs,
             )
 
             raw_labels = jax.vmap(lambda labels, idx: labels[-1, idx])(

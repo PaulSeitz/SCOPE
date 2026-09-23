@@ -42,6 +42,8 @@ from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.observations.target_conditioning import build_oc_psi_features
 from concept_based_learning.environments.meta_target_mask import (
+    apply_meta_noop_target_mask,
+    coerce_inactive_targets_to_meta_noop,
     is_meta_fire_target,
     is_meta_noop_target,
     meta_fire_game_action,
@@ -51,6 +53,8 @@ from concept_based_learning.environments.meta_target_mask import (
     meta_noop_target_idx,
 )
 from concept_based_learning.environments.datatypes import (
+    LABEL_BLOCKER,
+    LABEL_NOOP,
     label_to_skill_idx as _label_to_skill_idx,
     project_skill_outcomes,
 )
@@ -549,10 +553,18 @@ def make_train(
                         config,
                         objects=last_obs.objects,
                     )
+                    # Drop LABEL_NOOP / blockers via label if present; always
+                    # re-enable the trailing learnable NOOP slot when configured.
+                    if hasattr(last_obs.objects, "semantic_label"):
+                        labels = jax.vmap(lambda obj: obj.semantic_label[-1])(
+                            last_obs.objects
+                        )
+                        targetable = jnp.logical_and(
+                            labels != LABEL_NOOP, labels != LABEL_BLOCKER
+                        )
+                        active_masks = jnp.logical_and(active_masks, targetable)
+                    active_masks = apply_meta_noop_target_mask(active_masks, config)
 
-                    any_active = jnp.any(active_masks, axis=-1)
-                    fallback_mask = jnp.zeros_like(active_masks).at[:, 0].set(True)
-                    safe_masks = jnp.where(any_active[:, None], active_masks, fallback_mask)
                     meta_q_vals = jax.vmap(
                         lambda obs, objs, pix: meta_network.apply(
                             {"params": frozen_meta_params},
@@ -573,7 +585,7 @@ def make_train(
                         meta_eps_scheduler(_skill_counter(train_states, "n_updates")),
                     )
                     target_obj_idxs = jax.vmap(eps_greedy_exploration)(
-                        policy_rngs, meta_q_vals, meta_eps, safe_masks
+                        policy_rngs, meta_q_vals, meta_eps, active_masks
                     )
                     target_obj_idxs = forced_target_hook(
                         last_obs.raw_observation,
@@ -581,10 +593,12 @@ def make_train(
                         config,
                         rng_policy,
                     )
-                    target_obj_idxs = jnp.where(
-                        any_active,
+                    target_obj_idxs = coerce_inactive_targets_to_meta_noop(
                         target_obj_idxs.astype(jnp.int32),
-                        jnp.full_like(target_obj_idxs, no_target_idx, dtype=jnp.int32),
+                        active_masks,
+                        config,
+                        no_target_idx=no_target_idx,
+                        noop_idx=meta_noop_idx if meta_noop_enabled else None,
                     )
                 else:
                     if fixed_target_idx is not None:
@@ -613,8 +627,12 @@ def make_train(
                             )
                             policy_states = last_policy_states
 
+                # Heuristic may return trailing meta-NOOP; never map sentinel → 0.
+                trailing_noop = jnp.int32(config["MAX_OBJECTS"] - 1)
                 safe_target_idxs = jnp.where(
-                    target_obj_idxs == no_target_idx, 0, target_obj_idxs
+                    target_obj_idxs == no_target_idx,
+                    trailing_noop if meta_noop_enabled else jnp.int32(0),
+                    target_obj_idxs,
                 )
                 no_target = target_obj_idxs == no_target_idx
                 meta_noop = is_meta_noop_target(
@@ -623,13 +641,18 @@ def make_train(
                     noop_idx=meta_noop_idx,
                     enabled=meta_noop_enabled,
                 )
+                # Skills-only often omits META_USE_NOOP_TARGET; still idle on
+                # the trailing LABEL_NOOP / append-NOOP slot the heuristic uses.
+                trailing_noop_sel = target_obj_idxs == trailing_noop
                 meta_fire = is_meta_fire_target(
                     target_obj_idxs,
                     config,
                     fire_idx=meta_fire_idx,
                     enabled=meta_fire_enabled,
                 )
-                force_noop = jnp.logical_or(no_target, meta_noop)
+                force_noop = jnp.logical_or(
+                    no_target, jnp.logical_or(meta_noop, trailing_noop_sel)
+                )
                 idle_action = jnp.int32(
                     int(
                         config["NO_TARGET_GAME_ACTION"]

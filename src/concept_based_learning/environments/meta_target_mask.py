@@ -147,6 +147,60 @@ def is_meta_fire_target(
     return target_idxs == jnp.asarray(idx, dtype=target_idxs.dtype)
 
 
+def coerce_inactive_targets_to_meta_noop(
+    target_idxs: jnp.ndarray,
+    active_masks: jnp.ndarray,
+    config: Optional[dict],
+    *,
+    no_target_idx: int = -1,
+    noop_idx: Optional[int] = None,
+) -> jnp.ndarray:
+    """
+    Remap sentinel / inactive meta selections onto the learnable NOOP slot.
+
+    ``active_masks`` should come from ``build_meta_target_mask`` (NOOP slot
+    already marked selectable when ``META_USE_NOOP_TARGET`` is on). If that
+    slot is not selectable, inactive targets fall back to ``no_target_idx``.
+    """
+    idxs = jnp.asarray(target_idxs, dtype=jnp.int32)
+    n_obj = active_masks.shape[-1]
+    if noop_idx is not None:
+        dest = int(noop_idx)
+    elif meta_noop_target_enabled(config):
+        dest = int(meta_noop_target_idx(config))
+    else:
+        dest = int(n_obj) - 1
+    dest = max(int(dest), 0)
+
+    dest_arr = jnp.asarray(dest, dtype=jnp.int32)
+    sentinel = jnp.asarray(no_target_idx, dtype=jnp.int32)
+    last = jnp.maximum(jnp.asarray(n_obj, dtype=jnp.int32) - 1, 0)
+    safe = jnp.clip(idxs, 0, last)
+    dest_safe = jnp.clip(dest_arr, 0, last)
+
+    if active_masks.ndim == 1:
+        selected_ok = active_masks[safe]
+        dest_ok = active_masks[dest_safe]
+        fallback = jnp.where(dest_ok, dest_arr, sentinel)
+    else:
+        selected_ok = jnp.take_along_axis(
+            active_masks, safe[:, None], axis=-1
+        ).squeeze(-1)
+        dest_ok = jnp.take_along_axis(
+            active_masks, jnp.broadcast_to(dest_safe, (active_masks.shape[0],))[:, None],
+            axis=-1,
+        ).squeeze(-1)
+        fallback = jnp.where(dest_ok, dest_arr, sentinel)
+
+    is_sentinel = idxs == sentinel
+    is_dest = idxs == dest_arr
+    keep = jnp.logical_or(
+        is_dest,
+        jnp.logical_and(selected_ok, jnp.logical_not(is_sentinel)),
+    )
+    return jnp.where(keep, idxs, fallback)
+
+
 def build_meta_target_mask(
     objects: Any,
     raw_obs: Any = None,

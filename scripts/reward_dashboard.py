@@ -79,7 +79,7 @@ LABEL_NAMES = {
     LABEL_JUMP_OVER: "JumpOver",
 }
 
-# Seaquest slot names — index 0 is the meta-NOOP dummy added by the wrapper.
+# Seaquest slot names — index 0 is the first game entity; meta-NOOP is last.
 SEAQUEST_OBJECT_NAMES = (
     ["[NOOP]"]
     + [f"Diver {i}"   for i in range(4)]        # slots 1-4

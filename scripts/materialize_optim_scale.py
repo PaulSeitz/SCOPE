@@ -138,10 +138,24 @@ def optim_scale_sq_stems() -> tuple[str, ...]:
 
 
 def optim_scale_probe_stems() -> tuple[str, ...]:
-    """Skills-only seed-1 HP probes (trains then home evals; no tandem)."""
+    """Skills-only seed-1 HP probes (all trains, then all evals)."""
     trains = tuple(probe_skills_stem(arm) for arm, _ in PROBE_ARMS)
     evals = tuple(f"{s}_eval" for s in trains)
     return trains + evals
+
+
+def optim_scale_skills_rerun_stems() -> tuple[str, ...]:
+    """Post-NOOP-fix skill re-runs: 1:1 → eval → εB → eval (interleaved).
+
+    Skips ``lr5e4_epsB``; that arm is optional once εB is diagnosed.
+    """
+    arms = ("1to1", "epsB")
+    out: list[str] = []
+    for arm in arms:
+        stem = probe_skills_stem(arm)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
 
 
 def _sub_alg_key(body: str, key: str, value: str) -> str:
@@ -558,6 +572,12 @@ def materialize(*, dry: bool) -> None:
         "\nLaunch probes first (skills-only):\n"
         f"  python scripts/run_paper_eval.py --suite {PROBE_SUITE} "
         f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
+        "Post-NOOP-fix skill re-run (1:1→eval→εB→eval):\n"
+        "  # stash collapsed ckpts so train actually restarts\n"
+        "  mv outputs/models/paper_eval/optim_scale/optim_scale_probe_skills_1to1_seed1{,_pre_noopfix}\n"
+        "  mv outputs/models/paper_eval/optim_scale/optim_scale_probe_skills_epsB_seed1{,_pre_noopfix}\n"
+        "  python scripts/run_paper_eval.py --suite optim_scale_skills_rerun "
+        "--gpus 0 --wait-deps --skip-rq-gate --lean\n"
         "Full 1:1 suite (tandem-first):\n"
         f"  python scripts/run_paper_eval.py --suite {SUITE} "
         f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"

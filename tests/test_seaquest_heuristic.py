@@ -90,7 +90,9 @@ def _make_objects(
     stack_len=1,
     n_slots=35,
 ):
-    """Build stacked objects with meta-NOOP at 0 (caller uses game slots 1..)."""
+    """Build stacked objects: game slots 0..33, trailing meta-NOOP at 34."""
+    from concept_based_learning.environments.datatypes import LABEL_NOOP
+
     x = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
     y = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
     w = jnp.full((stack_len, n_slots), 8.0, dtype=jnp.float32)
@@ -98,46 +100,48 @@ def _make_objects(
     active = jnp.zeros((stack_len, n_slots), dtype=jnp.float32)
     labels = jnp.full((stack_len, n_slots), -1, dtype=jnp.int32)
 
-    labels = labels.at[:, 1:5].set(LABEL_COLLECT)
-    labels = labels.at[:, 5:17].set(LABEL_DESTROY)
-    labels = labels.at[:, 17:29].set(LABEL_DESTROY)
+    # Append-NOOP layout (matches SeaquestSemanticWrapper + append_meta_reserved_slots).
+    labels = labels.at[:, 0:4].set(LABEL_COLLECT)       # divers
+    labels = labels.at[:, 4:16].set(LABEL_DESTROY)      # sharks
+    labels = labels.at[:, 16:28].set(LABEL_DESTROY)     # subs
     labels = labels.at[:, SURFACE_SUB_IDX].set(LABEL_AVOID)
-    labels = labels.at[:, 30:34].set(LABEL_AVOID)
+    labels = labels.at[:, 29:33].set(LABEL_AVOID)       # missiles
     labels = labels.at[:, SURFACE_DUMMY_IDX].set(SEAQUEST_SURFACE_LABEL)
+    labels = labels.at[:, n_slots - 1].set(LABEL_NOOP)
     active = active.at[:, SURFACE_DUMMY_IDX].set(1.0)
     y = y.at[:, SURFACE_DUMMY_IDX].set(44.0)
 
     if diver_xy is not None:
         dx, dy = diver_xy
-        x = x.at[:, 1].set(dx)
-        y = y.at[:, 1].set(dy)
-        active = active.at[:, 1].set(1.0)
+        x = x.at[:, 0].set(dx)
+        y = y.at[:, 0].set(dy)
+        active = active.at[:, 0].set(1.0)
 
     if shark_xy is not None:
         sx, sy = shark_xy
+        x = x.at[:, 4].set(sx)
+        y = y.at[:, 4].set(sy)
+        active = active.at[:, 4].set(1.0)
+
+    if shark2_xy is not None:
+        sx, sy = shark2_xy
         x = x.at[:, 5].set(sx)
         y = y.at[:, 5].set(sy)
         active = active.at[:, 5].set(1.0)
 
-    if shark2_xy is not None:
-        sx, sy = shark2_xy
-        x = x.at[:, 6].set(sx)
-        y = y.at[:, 6].set(sy)
-        active = active.at[:, 6].set(1.0)
-
     if sub_xy is not None:
         sx, sy = sub_xy
-        x = x.at[:, 17].set(sx)
-        y = y.at[:, 17].set(sy)
-        active = active.at[:, 17].set(1.0)
+        x = x.at[:, 16].set(sx)
+        y = y.at[:, 16].set(sy)
+        active = active.at[:, 16].set(1.0)
 
     if missile_xy is not None:
         mx, my = missile_xy
-        x = x.at[:, 30].set(mx)
-        y = y.at[:, 30].set(my)
-        w = w.at[:, 30].set(4.0)
-        h = h.at[:, 30].set(2.0)
-        active = active.at[:, 30].set(1.0)
+        x = x.at[:, 29].set(mx)
+        y = y.at[:, 29].set(my)
+        w = w.at[:, 29].set(4.0)
+        h = h.at[:, 29].set(2.0)
+        active = active.at[:, 29].set(1.0)
 
     if surface_sub_xy is not None:
         ssx, ssy = surface_sub_xy
@@ -227,7 +231,7 @@ def test_always_nearest_object():
     # Shark closer than diver → shark.
     objs = _make_objects(diver_xy=(140.0, 100.0), shark_xy=(100.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_destroy_interrupt_beats_nearer_diver():
@@ -242,7 +246,7 @@ def test_destroy_interrupt_beats_nearer_diver():
     assert gap_shark <= DESTROY_INTERRUPT_RANGE
 
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_avoid_interrupt_steals_destroy_when_torpedo_is_in_band():
@@ -256,7 +260,7 @@ def test_avoid_interrupt_steals_destroy_when_torpedo_is_in_band():
     )
     assert DESTROY_INTERRUPT_RANGE < gap_missile <= AVOID_INTERRUPT_RANGE
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 30
+    assert int(target) == 29
 
 
 def test_far_avoid_does_not_steal_nearest_destroy():
@@ -270,7 +274,7 @@ def test_far_avoid_does_not_steal_nearest_destroy():
     )
     assert gap_missile > AVOID_INTERRUPT_RANGE
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_other_lane_missile_does_not_steal_destroy():
@@ -287,7 +291,7 @@ def test_other_lane_missile_does_not_steal_destroy():
     ) ** 2
     assert radius > 1.0
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_same_lane_far_shark_blocks_diver():
@@ -295,7 +299,7 @@ def test_same_lane_far_shark_blocks_diver():
     raw = _make_raw(px=80.0, py=100.0)
     objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_other_lane_shark_allows_diver():
@@ -303,7 +307,7 @@ def test_other_lane_shark_allows_diver():
     raw = _make_raw(px=80.0, py=100.0)
     objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 160.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+    assert int(target) == 0
 
 
 def test_collect_requires_no_destroy_steals_other_lane_diver():
@@ -317,7 +321,7 @@ def test_collect_requires_no_destroy_steals_other_lane_diver():
         None,
         collect_requires_no_destroy=True,
     )
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_collect_requires_no_destroy_does_not_steal_surface_wp():
@@ -354,7 +358,7 @@ def test_nearest_among_multiple_sharks():
         shark2_xy=(100.0, 100.0),
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 6
+    assert int(target) == 5  # nearer shark2 slot (append layout)
 
 
 def test_edge_gap_prefers_nose_shark_over_center_nearer_diver():
@@ -387,7 +391,7 @@ def test_edge_gap_prefers_nose_shark_over_center_nearer_diver():
     assert gap_shark < gap_diver
 
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_surface_sub_ignored_when_deep():
@@ -398,7 +402,7 @@ def test_surface_sub_ignored_when_deep():
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+    assert int(target) == 0
 
 
 def test_surface_sub_avoids_when_close_even_if_deep():
@@ -440,7 +444,7 @@ def test_surface_sub_does_not_steal_from_a_lane_away():
     ) ** 2
     assert radius > 1.0
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_surface_sub_selectable_near_surface_and_close():
@@ -463,7 +467,7 @@ def test_surface_refill_selects_nothing():
         missile_xy=(90.0, 90.0),
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == NO_TARGET_IDX
+    assert int(target) == 34
 
 
 def test_breathing_band_with_low_oxygen_still_targets():
@@ -471,21 +475,21 @@ def test_breathing_band_with_low_oxygen_still_targets():
     raw = _make_raw(px=80.0, py=50.0, oxygen=(32.0, 32.0), divers=2)
     objs = _make_objects(diver_xy=(100.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+    assert int(target) == 0
 
 
 def test_oxygen_falling_still_targets():
     raw = _make_raw(px=80.0, py=46.0, oxygen=(40.0, 39.0), divers=2)
     objs = _make_objects(diver_xy=(100.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+    assert int(target) == 0
 
 
 def test_surface_full_oxygen_resumes_targeting():
     raw = _make_raw(px=80.0, py=46.0, oxygen=64.0, divers=2)
     objs = _make_objects(diver_xy=(100.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1
+    assert int(target) == 0
 
 
 def test_surface_wp_when_full_divers_and_sub_left():
@@ -521,7 +525,7 @@ def test_surface_wp_blocked_when_sub_on_right_unless_oxygen_low():
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 1  # stay on nearest diver; wait for clear approach
+    assert int(target) == 0  # stay on nearest diver; wait for clear approach
 
     raw_low = _make_raw(
         px=80.0,
@@ -563,7 +567,7 @@ def test_surface_danger_close_overrides_waypoint():
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_surface_danger_close_range_knob_disables_override():
@@ -655,7 +659,7 @@ def test_low_oxygen_still_interrupts_nose_shark():
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 5
+    assert int(target) == 4
 
 
 def test_critical_oxygen_forces_waypoint_even_with_nose_shark():
@@ -727,7 +731,7 @@ def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
             collect_edge_margin_px=24.0,
         )
     )
-    assert without == 1  # nearer edge diver
+    assert without == 0  # nearer edge diver
     assert with_mid == 2  # midfield preference
 
 
@@ -743,7 +747,7 @@ def test_midfield_margin_falls_back_to_edge_when_no_mid_diver():
             collect_edge_margin_px=24.0,
         )
     )
-    assert target == 1
+    assert target == 0
 
 
 def test_midfield_margin_zero_keeps_nearest_edge_diver():
@@ -761,4 +765,4 @@ def test_midfield_margin_zero_keeps_nearest_edge_diver():
             collect_edge_margin_px=0.0,
         )
     )
-    assert target == 1
+    assert target == 0
