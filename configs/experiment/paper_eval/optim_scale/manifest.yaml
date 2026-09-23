@@ -1,17 +1,21 @@
 # optim_scale_sq inventory (not runnable).
 suite: optim_scale_sq
 budget_tag: 50m_optim
-total_timesteps: 49938432
+total_timesteps: 50000000
+total_timesteps_decay: 50000000
 num_envs: 1024
-num_steps: 128
-num_updates: 381
+num_steps: 32
+num_updates: 1525
 num_epochs: 2
 num_minibatches: 256
-skill_lr: 0.0005
+lr: 0.00025
+lr_linear_decay: true
+max_grad_norm: 10.0
+eps: 1.0 -> 0.001 (decay=0.1)
 seeds: [44, 45, 46]
-ref: pqn_jaxatari_pixel_optimal_scaling.yaml (outer scale)
-skills: ε B + SKILL_LR=5e-4 (smoke recipe; not 1e-3)
-tandem: e01 lock (META_LR=5e-4, switch=-0.05) + same SKILL_LR
+ref: pqn_jaxatari_pixel_optimal_scaling.yaml (1:1 shared HPs)
+skills: SKILL_LR + LR_LINEAR_DECAY + YAML ε
+tandem: META_LR=SKILL_LR + same decay + YAML ε on skill+meta
 outputs_root: ./outputs/models/paper_eval/optim_scale
 stems:
   - optim_scale_tandem_pixel_ego_seed44

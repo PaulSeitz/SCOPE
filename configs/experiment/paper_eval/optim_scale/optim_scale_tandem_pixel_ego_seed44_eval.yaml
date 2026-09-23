@@ -1,4 +1,4 @@
-# Home mod eval — optim_scale tandem pixel seed44.
+# Home mod eval — optim_scale 1:1 tandem pixel seed44.
 PAPER_EVAL_RQ: 3
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: tandem
@@ -24,7 +24,7 @@ ALG_NAME: hierarchical_pqn
 TRAIN_MODE: tandem
 ENV_NAME: seaquest
 SAVE_PATH: ./outputs/models/paper_eval/optim_scale/optim_scale_tandem_pixel_ego_seed44
-WANDB_RUN_NAME: sq_optim_scale_sq_eval_tandem_pixel_seed44_50m_optim
+WANDB_RUN_NAME: sq_optim_scale_sq_eval_tandem_pixel_seed44_50m_optim_1to1
 WANDB_TAGS:
 - suite:optim_scale_sq
 - rq:3
@@ -36,12 +36,16 @@ WANDB_TAGS:
 - mapper:pov_facing
 - ego:phi_bins8
 - budget:50m_optim
-- scale:pqn_optim
+- scale:pqn_optim_1to1
 - num_envs:1024
-- num_updates:381
+- num_steps:32
+- num_updates:1525
 - num_epochs:2
 - num_minibatches:256
-- lock:tandem_e01
+- lr:0.00025
+- lr_decay:linear
+- max_grad_norm:10
+- eps:1to0.001
 - cell:pixel
 SKILL_INPUT_MODE: ego
 META_INPUT_MODE: pixel_embed

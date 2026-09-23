@@ -48,6 +48,8 @@ from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_FINISH,
     DEFAULT_SKILL_EPS_START,
     eps_decay_transition_steps,
+    meta_learning_rate_schedule,
+    num_updates_decay,
     skill_learning_rate_schedule,
 )
 from concept_based_learning.training.trajectory_cuts import (
@@ -202,7 +204,7 @@ def make_tandem_train(
 
     def make_linear_schedule(start, finish, decay_cfg):
         return optax.linear_schedule(
-            start, finish, eps_decay_transition_steps(decay_cfg, config["NUM_UPDATES"])
+            start, finish, eps_decay_transition_steps(decay_cfg, num_updates_decay(config))
         )
 
     skill_eps_schedule = make_linear_schedule(
@@ -354,7 +356,7 @@ def make_tandem_train(
     def init_runner(rng, init_meta_params=None, init_skill_params=None):
         """R0 — initialize meta/skill train states and env carry for one seed."""
         lr_skill = skill_learning_rate_schedule(config, config["NUM_UPDATES"])
-        lr_meta = config.get("META_LR", config["LR"] * 0.1)
+        lr_meta = meta_learning_rate_schedule(config, config["NUM_UPDATES"])
 
         tx_skill = optax.chain(
             optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),

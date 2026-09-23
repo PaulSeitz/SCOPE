@@ -1,4 +1,4 @@
-# Home mod eval — optim_scale skills seed45.
+# Home mod eval — optim_scale 1:1 skills seed45.
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: skills
@@ -45,7 +45,7 @@ USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
 USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
 USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
 SAVE_PATH: ./outputs/models/paper_eval/optim_scale/optim_scale_skills_ego_seed45
-WANDB_RUN_NAME: sq_optim_scale_sq_eval_skills_ego_seed45_50m_optim
+WANDB_RUN_NAME: sq_optim_scale_sq_eval_skills_ego_seed45_50m_optim_1to1
 WANDB_TAGS:
 - suite:optim_scale_sq
 - rq:1
@@ -55,12 +55,16 @@ WANDB_TAGS:
 - mapper:pov_facing
 - ego:phi_bins8
 - budget:50m_optim
-- scale:pqn_optim
+- scale:pqn_optim_1to1
 - num_envs:1024
-- num_updates:381
+- num_steps:32
+- num_updates:1525
 - num_epochs:2
 - num_minibatches:256
-- lock:skills_lr5e4
+- lr:0.00025
+- lr_decay:linear
+- max_grad_norm:10
+- eps:1to0.001
 SKILL_INPUT_MODE: ego
 HEURISTIC_MODE: env_specific
 SKILL_DEATH_PENALIZE_COLLECT: true

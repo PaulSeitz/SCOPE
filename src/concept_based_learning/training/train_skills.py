@@ -76,6 +76,7 @@ from concept_based_learning.training.schedules import (
     DEFAULT_SKILL_EPS_FINISH,
     DEFAULT_SKILL_EPS_START,
     eps_decay_transition_steps,
+    num_updates_decay,
     skill_learning_rate_schedule,
 )
 from concept_based_learning.training.trajectory_cuts import (
@@ -366,19 +367,20 @@ def make_train(
         )
 
     def train(rng, params, batch_stats):
+        n_upd_decay = num_updates_decay(config)
         eps_scheduler = optax.linear_schedule(
             float(config.get("EPS_START", DEFAULT_SKILL_EPS_START)),
             float(config.get("EPS_FINISH", DEFAULT_SKILL_EPS_FINISH)),
             eps_decay_transition_steps(
                 config.get("EPS_DECAY", DEFAULT_SKILL_EPS_DECAY),
-                config["NUM_UPDATES"],
+                n_upd_decay,
             ),
         )
         if use_learned_meta_policy:
             meta_eps_scheduler = optax.linear_schedule(
                 meta_eps_start,
                 meta_eps_finish,
-                eps_decay_transition_steps(meta_eps_decay_cfg, config["NUM_UPDATES"]),
+                eps_decay_transition_steps(meta_eps_decay_cfg, n_upd_decay),
             )
         # Prefer SKILL_LR (same as tandem); optional linear decay via SKILL_LR_FINISH.
         lr = skill_learning_rate_schedule(config, config["NUM_UPDATES"])
