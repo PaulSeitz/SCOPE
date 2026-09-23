@@ -20,14 +20,17 @@ CBL mapping (true 1:1 on shared HPs)
 * Probe suite ``optim_scale_probe``: skills-only seed=1 arms that keep the
   YAML outer (32/1024/50M/grad10) but ablate LR/ε — run these before/alongside
   the full tandem-first suite to see what breaks.
+* Flat PQN baselines (pixel + OC), same 1:1 HPs × seeds 44/45/46 + full mod eval:
+  GPU0 = ``optim_scale_pqn_oc``, GPU1 = ``optim_scale_pqn_pixel`` (train→eval
+  sequential per seed).
 
     python scripts/materialize_optim_scale.py
     python scripts/materialize_optim_scale.py --dry-run
 
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
-      --suite optim_scale_probe --wait-deps --lean --skip-rq-gate
-    CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
-      --suite optim_scale_sq --wait-deps --lean --skip-rq-gate
+      --suite optim_scale_pqn_oc --wait-deps --lean --skip-rq-gate
+    CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
+      --suite optim_scale_pqn_pixel --wait-deps --lean --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -45,6 +48,8 @@ _REF_SRC = Path("/home/paul/Downloads/pqn_jaxatari_pixel_optimal_scaling.yaml")
 
 SUITE = "optim_scale_sq"
 PROBE_SUITE = "optim_scale_probe"
+PQN_OC_SUITE = "optim_scale_pqn_oc"
+PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
 BUDGET_TAG = "50m_optim"
 # Match YAML literally; NUM_UPDATES = TOTAL // (NUM_ENVS * NUM_STEPS).
 TIMESTEPS = 50_000_000
@@ -128,6 +133,11 @@ def probe_skills_stem(arm: str) -> str:
     return f"optim_scale_probe_skills_{arm}_seed{PROBE_SEED}"
 
 
+def pqn_stem(variant: str, seed: int) -> str:
+    """variant in {pixel, oc}."""
+    return f"optim_scale_pqn_{variant}_seed{seed}"
+
+
 def optim_scale_sq_stems() -> tuple[str, ...]:
     """Tandem trains first (OOM-fast), then skills, then home evals."""
     tandem_trains = tuple(tandem_stem(s) for s in SEEDS)
@@ -145,10 +155,7 @@ def optim_scale_probe_stems() -> tuple[str, ...]:
 
 
 def optim_scale_skills_rerun_stems() -> tuple[str, ...]:
-    """Post-NOOP-fix skill re-runs: 1:1 → eval → εB → eval (interleaved).
-
-    Skips ``lr5e4_epsB``; that arm is optional once εB is diagnosed.
-    """
+    """Post-NOOP-fix skill re-runs: 1:1 → eval → εB → eval (interleaved)."""
     arms = ("1to1", "epsB")
     out: list[str] = []
     for arm in arms:
@@ -158,10 +165,39 @@ def optim_scale_skills_rerun_stems() -> tuple[str, ...]:
     return tuple(out)
 
 
+def optim_scale_pqn_oc_stems() -> tuple[str, ...]:
+    """GPU0: OC flat PQN — seed train→eval sequential (3 seeds)."""
+    out: list[str] = []
+    for seed in SEEDS:
+        stem = pqn_stem("oc", seed)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
+
+
+def optim_scale_pqn_pixel_stems() -> tuple[str, ...]:
+    """GPU1: pixel flat PQN — seed train→eval sequential (3 seeds)."""
+    out: list[str] = []
+    for seed in SEEDS:
+        stem = pqn_stem("pixel", seed)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
+
+
 def _sub_alg_key(body: str, key: str, value: str) -> str:
     """Replace ``  KEY: ...`` under alg (2-space indent) if present; else no-op."""
     pat = re.compile(rf"(?m)^  {re.escape(key)}:.*$")
     repl = f"  {key}: {value}"
+    if pat.search(body):
+        return pat.sub(repl, body, count=1)
+    return body
+
+
+def _sub_top_key(body: str, key: str, value: str) -> str:
+    """Replace top-level ``KEY: ...`` (no indent) if present; else no-op."""
+    pat = re.compile(rf"(?m)^{re.escape(key)}:.*$")
+    repl = f"{key}: {value}"
     if pat.search(body):
         return pat.sub(repl, body, count=1)
     return body
@@ -218,32 +254,46 @@ def _patch_1to1(
             f"SAVE_PATH: {f10.OUT_MODELS}/{f10.STEM_TANDEM_PIXEL}",
             "SAVE_PATH: PLACEHOLDER",
         ),
+        (
+            f"SAVE_PATH: {f10.OUT_MODELS}/{f10.STEM_PQN_OC}",
+            "SAVE_PATH: PLACEHOLDER",
+        ),
+        (
+            f"SAVE_PATH: {f10.OUT_MODELS}/{f10.STEM_PQN_PIXEL}",
+            "SAVE_PATH: PLACEHOLDER",
+        ),
     ]
     for old, new in reps:
         body = body.replace(old, new)
 
-    # Shared outer HPs.
-    body = _sub_alg_key(body, "NUM_STEPS", str(NUM_STEPS))
-    body = _sub_alg_key(body, "NUM_ENVS", str(NUM_ENVS))
-    body = _sub_alg_key(body, "NUM_EPOCHS", str(NUM_EPOCHS))
-    body = _sub_alg_key(body, "NUM_MINIBATCHES", str(NUM_MINIBATCHES))
-    body = _sub_alg_key(body, "TOTAL_TIMESTEPS", str(TIMESTEPS))
-    body = _ensure_alg_key_after(
-        body, "TOTAL_TIMESTEPS", "TOTAL_TIMESTEPS_DECAY", str(TIMESTEPS_DECAY)
-    )
-    body = _sub_alg_key(body, "LR", str(skill_lr))
-    body = _sub_alg_key(body, "SKILL_LR", str(skill_lr))
-    body = _sub_alg_key(body, "MAX_GRAD_NORM", str(MAX_GRAD_NORM))
-    body = _ensure_alg_key_after(
-        body,
-        "MAX_GRAD_NORM",
-        "LR_LINEAR_DECAY",
-        "true" if lr_linear_decay else "false",
-    )
+    # Shared outer HPs. Skills/tandem nest under ``alg:`` (2-space); flat PQN is top-level.
+    sub = _sub_top_key if kind == "flat_pqn" else _sub_alg_key
+    body = sub(body, "NUM_STEPS", str(NUM_STEPS))
+    body = sub(body, "NUM_ENVS", str(NUM_ENVS))
+    body = sub(body, "NUM_EPOCHS", str(NUM_EPOCHS))
+    body = sub(body, "NUM_MINIBATCHES", str(NUM_MINIBATCHES))
+    body = sub(body, "TOTAL_TIMESTEPS", str(TIMESTEPS))
+    body = sub(body, "TOTAL_TIMESTEPS_DECAY", str(TIMESTEPS_DECAY))
+    if kind != "flat_pqn":
+        body = _ensure_alg_key_after(
+            body, "TOTAL_TIMESTEPS", "TOTAL_TIMESTEPS_DECAY", str(TIMESTEPS_DECAY)
+        )
+    body = sub(body, "LR", str(skill_lr))
+    if kind != "flat_pqn":
+        body = _sub_alg_key(body, "SKILL_LR", str(skill_lr))
+    body = sub(body, "MAX_GRAD_NORM", str(MAX_GRAD_NORM))
+    body = sub(body, "LR_LINEAR_DECAY", "true" if lr_linear_decay else "false")
+    if kind != "flat_pqn":
+        body = _ensure_alg_key_after(
+            body,
+            "MAX_GRAD_NORM",
+            "LR_LINEAR_DECAY",
+            "true" if lr_linear_decay else "false",
+        )
 
-    body = _sub_alg_key(body, "EPS_START", str(eps_start))
-    body = _sub_alg_key(body, "EPS_FINISH", str(eps_finish))
-    body = _sub_alg_key(body, "EPS_DECAY", str(eps_decay))
+    body = sub(body, "EPS_START", str(eps_start))
+    body = sub(body, "EPS_FINISH", str(eps_finish))
+    body = sub(body, "EPS_DECAY", str(eps_decay))
 
     if kind == "tandem":
         body = _sub_alg_key(body, "META_LR", str(skill_lr))
@@ -347,14 +397,62 @@ def _retarget(
                 f"hierarchical_pqn_seaquest_seed{seed}_meta.safetensors"
             )
             out.append(f"PAPER_EVAL_META_CKPT: {ckpt}")
+        elif line.startswith("PAPER_EVAL_FLAT_PQN_CKPT:"):
+            variant = "oc" if "pqn_oc" in stem else "pixel"
+            ckpt = (
+                f"{OUT_MODELS}/{stem}/seaquest/"
+                f"flat_pqn_seaquest_{variant}_seed{seed}_vmap0.safetensors"
+            )
+            out.append(f"PAPER_EVAL_FLAT_PQN_CKPT: {ckpt}")
         else:
             out.append(line)
     body = "\n".join(out) + "\n"
     body = body.replace(f"- {f10.STEM_SKILLS}\n", f"- {stem}\n")
     body = body.replace(f"- {f10.STEM_TANDEM_PIXEL}\n", f"- {stem}\n")
+    body = body.replace(f"- {f10.STEM_PQN_OC}\n", f"- {stem}\n")
+    body = body.replace(f"- {f10.STEM_PQN_PIXEL}\n", f"- {stem}\n")
     body = body.replace(f"{f10.OUT_MODELS}/", f"{OUT_MODELS}/")
     body = body.replace("PLACEHOLDER", f"{OUT_MODELS}/{stem}")
     return body
+
+
+def _pqn_train(*, variant: str, seed: int) -> str:
+    object_centric = variant == "oc"
+    stem = pqn_stem(variant, seed)
+    suite = PQN_OC_SUITE if object_centric else PQN_PIXEL_SUITE
+    base = f10._pqn_train(env="seaquest", object_centric=object_centric)
+    return _retarget(
+        base,
+        stem=stem,
+        seed=seed,
+        suite=suite,
+        header=(
+            f"# Flat PQN {variant} — Seaquest optim_scale 1:1 "
+            f"({NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}; LR={LR}+linear decay; "
+            f"MAX_GRAD_NORM={MAX_GRAD_NORM:g}; ε {EPS_START}→{EPS_FINISH}); "
+            f"seed={seed}."
+        ),
+        run_name=f"sq_{suite}_seed{seed}_{BUDGET_TAG}_1to1",
+        kind="flat_pqn",
+    )
+
+
+def _pqn_eval(*, variant: str, seed: int) -> str:
+    object_centric = variant == "oc"
+    stem = pqn_stem(variant, seed)
+    suite = PQN_OC_SUITE if object_centric else PQN_PIXEL_SUITE
+    base = f10._pqn_eval(env="seaquest", object_centric=object_centric)
+    return _retarget(
+        base,
+        stem=stem,
+        seed=seed,
+        suite=suite,
+        header=(
+            f"# Home mod eval — optim_scale 1:1 flat PQN {variant} seed{seed}."
+        ),
+        run_name=f"sq_{suite}_eval_seed{seed}_{BUDGET_TAG}_1to1",
+        kind="flat_pqn",
+    )
 
 
 def _skills_train(seed: int) -> str:
@@ -533,6 +631,32 @@ def _probe_manifest() -> str:
     return f10._lines(lines)
 
 
+def _pqn_manifest() -> str:
+    return f10._lines(
+        [
+            "# optim_scale flat PQN inventory (not runnable).",
+            f"suites: [{PQN_OC_SUITE}, {PQN_PIXEL_SUITE}]",
+            f"budget_tag: {BUDGET_TAG}",
+            f"total_timesteps: {TIMESTEPS}",
+            f"num_envs: {NUM_ENVS}",
+            f"num_steps: {NUM_STEPS}",
+            f"num_updates: {NUM_UPDATES}",
+            f"num_epochs: {NUM_EPOCHS}",
+            f"num_minibatches: {NUM_MINIBATCHES}",
+            f"lr: {LR}",
+            "lr_linear_decay: true",
+            f"max_grad_norm: {MAX_GRAD_NORM}",
+            f"eps: {EPS_START} -> {EPS_FINISH} (decay={EPS_DECAY})",
+            f"seeds: {list(SEEDS)}",
+            "order: train→eval per seed (sequential)",
+            f"gpu0_oc_stems:",
+            *[f"  - {s}" for s in optim_scale_pqn_oc_stems()],
+            f"gpu1_pixel_stems:",
+            *[f"  - {s}" for s in optim_scale_pqn_pixel_stems()],
+        ]
+    )
+
+
 def materialize(*, dry: bool) -> None:
     _OUT.mkdir(parents=True, exist_ok=True)
     print(
@@ -558,6 +682,19 @@ def materialize(*, dry: bool) -> None:
         pairs.append((_OUT / f"{stem}_eval.yaml", _probe_skills_eval(arm, hp)))
     pairs.append((_OUT / "probe_manifest.yaml", _probe_manifest()))
 
+    print(
+        f"optim_scale_pqn → pixel+OC × seeds={SEEDS} "
+        f"(suites {PQN_OC_SUITE} / {PQN_PIXEL_SUITE})"
+    )
+    for variant in ("oc", "pixel"):
+        for seed in SEEDS:
+            stem = pqn_stem(variant, seed)
+            pairs.append((_OUT / f"{stem}.yaml", _pqn_train(variant=variant, seed=seed)))
+            pairs.append(
+                (_OUT / f"{stem}_eval.yaml", _pqn_eval(variant=variant, seed=seed))
+            )
+    pairs.append((_OUT / "pqn_manifest.yaml", _pqn_manifest()))
+
     for path, body in pairs:
         f10._write(path, body, dry=dry)
 
@@ -581,6 +718,11 @@ def materialize(*, dry: bool) -> None:
         "Full 1:1 suite (tandem-first):\n"
         f"  python scripts/run_paper_eval.py --suite {SUITE} "
         f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
+        "Flat PQN baselines (2 GPUs, OC vs pixel, train→eval × 3 seeds):\n"
+        f"  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py "
+        f"--suite {PQN_OC_SUITE} --gpus 0 --wait-deps --skip-rq-gate --lean &\n"
+        f"  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py "
+        f"--suite {PQN_PIXEL_SUITE} --gpus 0 --wait-deps --skip-rq-gate --lean &\n"
     )
 
 

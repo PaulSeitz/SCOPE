@@ -1,0 +1,29 @@
+# optim_scale flat PQN inventory (not runnable).
+suites: [optim_scale_pqn_oc, optim_scale_pqn_pixel]
+budget_tag: 50m_optim
+total_timesteps: 50000000
+num_envs: 1024
+num_steps: 32
+num_updates: 1525
+num_epochs: 2
+num_minibatches: 256
+lr: 0.00025
+lr_linear_decay: true
+max_grad_norm: 10.0
+eps: 1.0 -> 0.001 (decay=0.1)
+seeds: [44, 45, 46]
+order: train→eval per seed (sequential)
+gpu0_oc_stems:
+  - optim_scale_pqn_oc_seed44
+  - optim_scale_pqn_oc_seed44_eval
+  - optim_scale_pqn_oc_seed45
+  - optim_scale_pqn_oc_seed45_eval
+  - optim_scale_pqn_oc_seed46
+  - optim_scale_pqn_oc_seed46_eval
+gpu1_pixel_stems:
+  - optim_scale_pqn_pixel_seed44
+  - optim_scale_pqn_pixel_seed44_eval
+  - optim_scale_pqn_pixel_seed45
+  - optim_scale_pqn_pixel_seed45_eval
+  - optim_scale_pqn_pixel_seed46
+  - optim_scale_pqn_pixel_seed46_eval
