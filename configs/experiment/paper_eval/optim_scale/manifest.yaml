@@ -16,6 +16,7 @@ seeds: [44, 45, 46]
 ref: pqn_jaxatari_pixel_optimal_scaling.yaml (1:1 shared HPs)
 skills: SKILL_LR + LR_LINEAR_DECAY + YAML ε
 tandem: META_LR=SKILL_LR + same decay + YAML ε on skill+meta
+note: suite order is tandem-first (OOM-fast); use optim_scale_probe for skills-first HP checks
 outputs_root: ./outputs/models/paper_eval/optim_scale
 stems:
   - optim_scale_tandem_pixel_ego_seed44

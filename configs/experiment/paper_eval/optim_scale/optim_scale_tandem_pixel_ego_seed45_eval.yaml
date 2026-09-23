@@ -45,7 +45,7 @@ WANDB_TAGS:
 - lr:0.00025
 - lr_decay:linear
 - max_grad_norm:10
-- eps:1to0.001
+- eps:1.0to0.001
 - cell:pixel
 SKILL_INPUT_MODE: ego
 META_INPUT_MODE: pixel_embed

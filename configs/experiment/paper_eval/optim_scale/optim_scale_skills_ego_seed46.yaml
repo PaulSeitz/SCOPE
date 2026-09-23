@@ -51,7 +51,7 @@ WANDB_TAGS:
 - lr:0.00025
 - lr_decay:linear
 - max_grad_norm:10
-- eps:1to0.001
+- eps:1.0to0.001
 - phase:skills_only
 - skill_input:ego
 - mapper:pov_facing
