@@ -1265,6 +1265,9 @@ TANDEM_E01_SCALE_SUITE = "tandem_e01_scale"
 TANDEM_E01_OC_SCALE_SUITE = "tandem_e01_oc_scale"
 # NEXUS-mainline outer loop sanity (tandem first → skills); see materialize_nexus_parity.py.
 NEXUS_PARITY_SUITE = "nexus_parity"
+# PQN optimal-scaling outer (50M / 1024 envs) × skills+tandem × seeds 44/45/46.
+# See materialize_optim_scale.py (SKILL_LR=5e-4).
+OPTIM_SCALE_SQ_SUITE = "optim_scale_sq"
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -1324,6 +1327,7 @@ def _final_eval_suite_stems() -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1336,12 +1340,14 @@ def _final_eval_suite_stems() -> tuple[
         final_10m_pqn_pixel_gpu1_stems,
     )
     from materialize_nexus_parity import nexus_parity_stems  # type: ignore
+    from materialize_optim_scale import optim_scale_sq_stems  # type: ignore
 
     base = final_10m_base_skills_stems()
     nexus = nexus_parity_stems()
     pqn0 = final_10m_pqn_pixel_gpu0_stems()
     pqn1 = final_10m_pqn_pixel_gpu1_stems()
-    return base, nexus, pqn0, pqn1, nexus + pqn0, base + pqn1
+    optim = optim_scale_sq_stems()
+    return base, nexus, pqn0, pqn1, nexus + pqn0, base + pqn1, optim
 
 
 (
@@ -1351,6 +1357,7 @@ def _final_eval_suite_stems() -> tuple[
     FINAL_10M_PQN_PIXEL_GPU1_STEMS,
     FINAL_10M_OVERNIGHT_GPU0_STEMS,
     FINAL_10M_OVERNIGHT_GPU1_STEMS,
+    OPTIM_SCALE_SQ_STEMS,
 ) = _final_eval_suite_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
@@ -2023,6 +2030,7 @@ SUITE_STEMS = {
     TANDEM_E01_SCALE_SUITE: TANDEM_E01_SCALE_STEMS,
     TANDEM_E01_OC_SCALE_SUITE: TANDEM_E01_OC_SCALE_STEMS,
     NEXUS_PARITY_SUITE: NEXUS_PARITY_STEMS,
+    OPTIM_SCALE_SQ_SUITE: OPTIM_SCALE_SQ_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -3740,6 +3748,12 @@ def main() -> None:
             "(OOM-fast) then skills + home evals; "
             "python scripts/materialize_nexus_parity.py then "
             "--suite nexus_parity --gpus 0 --wait-deps --skip-rq-gate --lean. "
+            f"{OPTIM_SCALE_SQ_SUITE}: PQN optimal-scaling outer (50M / 1024 envs) "
+            "× Seaquest ego-skills + tandem-pixel × seeds 44/45/46; "
+            "SKILL_LR=5e-4 (smoke recipe), tandem e01, NUM_EPOCHS=2 / "
+            "NUM_MINIBATCHES=256 from pqn_jaxatari_pixel_optimal_scaling.yaml; "
+            "python scripts/materialize_optim_scale.py then "
+            "--suite optim_scale_sq --gpus … --wait-deps --skip-rq-gate --lean. "
             f"{FINAL_10M_BASE_SKILLS_SUITE}: ours-only ego skills @ 10M on paper "
             "bases (seaquest, phoenix, namethisgame, asteroids) + home paper_core "
             "evals; Time Pilot is a transfer (not included); "

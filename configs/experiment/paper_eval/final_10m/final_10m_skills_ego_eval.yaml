@@ -55,7 +55,7 @@ WANDB_TAGS:
 - mapper:pov_facing
 - ego:phi_bins8
 - budget:10m
-- lock:skills_lr1e3
+- lock:skills_lr5e4
 SKILL_INPUT_MODE: ego
 HEURISTIC_MODE: env_specific
 SKILL_DEATH_PENALIZE_COLLECT: true

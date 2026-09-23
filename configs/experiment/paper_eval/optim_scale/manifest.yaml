@@ -1,0 +1,28 @@
+# optim_scale_sq inventory (not runnable).
+suite: optim_scale_sq
+budget_tag: 50m_optim
+total_timesteps: 49938432
+num_envs: 1024
+num_steps: 128
+num_updates: 381
+num_epochs: 2
+num_minibatches: 256
+skill_lr: 0.0005
+seeds: [44, 45, 46]
+ref: pqn_jaxatari_pixel_optimal_scaling.yaml (outer scale)
+skills: ε B + SKILL_LR=5e-4 (smoke recipe; not 1e-3)
+tandem: e01 lock (META_LR=5e-4, switch=-0.05) + same SKILL_LR
+outputs_root: ./outputs/models/paper_eval/optim_scale
+stems:
+  - optim_scale_tandem_pixel_ego_seed44
+  - optim_scale_tandem_pixel_ego_seed45
+  - optim_scale_tandem_pixel_ego_seed46
+  - optim_scale_skills_ego_seed44
+  - optim_scale_skills_ego_seed45
+  - optim_scale_skills_ego_seed46
+  - optim_scale_tandem_pixel_ego_seed44_eval
+  - optim_scale_tandem_pixel_ego_seed45_eval
+  - optim_scale_tandem_pixel_ego_seed46_eval
+  - optim_scale_skills_ego_seed44_eval
+  - optim_scale_skills_ego_seed45_eval
+  - optim_scale_skills_ego_seed46_eval

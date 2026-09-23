@@ -1,4 +1,4 @@
-# phoenix ego skills — final_10m (locked lr1e3 + ε B, matched 10M).
+# phoenix ego skills — final_10m (SKILL_LR=5e-4 + ε B, matched 10M; smoke recipe re-run).
 PAPER_EVAL_RQ: 2
 PAPER_EVAL_PHASE: train
 PAPER_EVAL_KIND: skills
@@ -44,7 +44,7 @@ WANDB_TAGS:
 - mapper:pov_facing
 - ego:phi_bins8
 - lr:constant
-- lock:skills_lr1e3
+- lock:skills_lr5e4
 GAME_MODS: null
 EVAL_GAME_MODS: null
 SKILL_INPUT_MODE: ego
@@ -68,7 +68,7 @@ alg:
   HIDDEN_SIZE: 128
   NUM_LAYERS: 3
   SKILL_EMBED_DIM: 256
-  SKILL_LR: 0.001
+  SKILL_LR: 0.0005
   SKILL_REWARD_LAMBDA: 0.0
   CLIP_REWARD: true
   RESTRICT_FIRE_FOR_NON_DESTROY: false
