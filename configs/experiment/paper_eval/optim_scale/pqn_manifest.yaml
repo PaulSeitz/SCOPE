@@ -1,5 +1,5 @@
 # optim_scale flat PQN inventory (not runnable).
-suites: [optim_scale_pqn_oc, optim_scale_pqn_pixel]
+suites: [optim_scale_pqn_oc, optim_scale_pqn_pixel, optim_scale_pqn_oc_builds]
 budget_tag: 50m_optim
 total_timesteps: 50000000
 num_envs: 1024
@@ -27,3 +27,13 @@ gpu1_pixel_stems:
   - optim_scale_pqn_pixel_seed45_eval
   - optim_scale_pqn_pixel_seed46
   - optim_scale_pqn_pixel_seed46_eval
+oc_builds_suite: optim_scale_pqn_oc_builds
+  seed: 44
+  modes: ['oc_simple_rel_role', 'oc_simple_role', 'oc_embed']
+  stems:
+    - optim_scale_pqn_oc_build_rel_role_seed44
+    - optim_scale_pqn_oc_build_rel_role_seed44_eval
+    - optim_scale_pqn_oc_build_role_seed44
+    - optim_scale_pqn_oc_build_role_seed44_eval
+    - optim_scale_pqn_oc_build_embed_seed44
+    - optim_scale_pqn_oc_build_embed_seed44_eval

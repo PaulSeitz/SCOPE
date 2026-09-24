@@ -24,11 +24,15 @@ CBL mapping (true 1:1 on shared HPs)
   - ``optim_scale_skills_bases``: phoenix / namethisgame / asteroids (done)
   - ``optim_scale_skills_transfers``: remaining EVAL_PLAN transfer scratch envs
     (spaceinvaders, beamrider, timepilot, pong, breakout, freeway)
+  - ``optim_scale_pqn_oc_builds``: flat PQN on tandem OC feature builds
+    (oc_simple_rel_role / oc_simple_role / oc_embed) × seed 44 + home eval
   - ``optim_scale_skills_lr`` / ``optim_scale_skills_old_eps``: Seaquest HP probes
 
     python scripts/materialize_optim_scale.py
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
       --suite optim_scale_skills_transfers --wait-deps --lean --skip-rq-gate
+    CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
+      --suite optim_scale_pqn_oc_builds --wait-deps --lean --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ LR_SUITE = "optim_scale_skills_lr"
 OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 PQN_OC_SUITE = "optim_scale_pqn_oc"
 PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
+# Flat PQN on tandem-candidate OC feature builds (overnight format probe).
+PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
 BUDGET_TAG = "50m_optim"
 # Match YAML literally; NUM_UPDATES = TOTAL // (NUM_ENVS * NUM_STEPS).
 TIMESTEPS = 50_000_000
@@ -91,7 +97,24 @@ TRANSFER_ENV_META: dict[str, dict] = {
 }
 TRANSFER_ENVS: tuple[str, ...] = tuple(TRANSFER_ENV_META)
 
+# Tandem-candidate OC feature builds for flat PQN (same META_INPUT_MODE builders).
+OC_BUILD_MODES: tuple[str, ...] = (
+    "oc_simple_rel_role",
+    "oc_simple_role",
+    "oc_embed",
+)
+OC_BUILD_SEED = BASE_SEED
+SEAQUEST_MAX_OBJECTS = 35
+
 MOD_KEYS = f10.MOD_KEYS
+
+
+def _oc_build_token(mode: str) -> str:
+    return {
+        "oc_simple_rel_role": "rel_role",
+        "oc_simple_role": "role",
+        "oc_embed": "embed",
+    }[mode]
 
 # Skills-only seed-1 probes: same outer as 1:1, ablate LR / ε.
 # Order: control (full YAML) → isolate ε → isolate ε+old LR.
@@ -248,6 +271,10 @@ def pqn_stem(variant: str, seed: int) -> str:
     return f"optim_scale_pqn_{variant}_seed{seed}"
 
 
+def pqn_oc_build_stem(mode: str, seed: int = OC_BUILD_SEED) -> str:
+    return f"optim_scale_pqn_oc_build_{_oc_build_token(mode)}_seed{seed}"
+
+
 def optim_scale_sq_stems() -> tuple[str, ...]:
     """Tandem trains first (OOM-fast), then skills, then home evals."""
     tandem_trains = tuple(tandem_stem(s) for s in SEEDS)
@@ -326,6 +353,16 @@ def optim_scale_pqn_pixel_stems() -> tuple[str, ...]:
     out: list[str] = []
     for seed in SEEDS:
         stem = pqn_stem("pixel", seed)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
+
+
+def optim_scale_pqn_oc_builds_stems() -> tuple[str, ...]:
+    """Overnight: one seed × locked tandem OC builds (train→eval interleaved)."""
+    out: list[str] = []
+    for mode in OC_BUILD_MODES:
+        stem = pqn_oc_build_stem(mode)
         out.append(stem)
         out.append(f"{stem}_eval")
     return tuple(out)
@@ -607,6 +644,127 @@ def _pqn_eval(*, variant: str, seed: int) -> str:
         run_name=f"sq_{suite}_eval_seed{seed}_{BUDGET_TAG}_1to1",
         kind="flat_pqn",
     )
+
+
+def _pqn_oc_build_train(mode: str, *, seed: int = OC_BUILD_SEED) -> str:
+    tok = _oc_build_token(mode)
+    stem = pqn_oc_build_stem(mode, seed)
+    tag_block = (
+        f"- suite:{PQN_OC_BUILDS_SUITE}\n"
+        f"- rq:1\n"
+        f"- env:seaquest\n"
+        f"- role:base\n"
+        f"- train_mode:flat_pqn\n"
+        f"- variant:pqn_oc_build\n"
+        f"- oc_input:{mode}\n"
+        f"- budget:{BUDGET_TAG}\n"
+        f"- scale:pqn_optim_1to1\n"
+        f"- num_envs:{NUM_ENVS}\n"
+        f"- num_steps:{NUM_STEPS}\n"
+        f"- num_updates:{NUM_UPDATES}\n"
+        f"- num_epochs:{NUM_EPOCHS}\n"
+        f"- num_minibatches:{NUM_MINIBATCHES}\n"
+        f"- lr:{LR}\n"
+        f"- lr_decay:linear\n"
+        f"- max_grad_norm:{int(MAX_GRAD_NORM)}\n"
+        f"- eps:{EPS_START}to{EPS_FINISH}\n"
+    )
+    return f10._lines(
+        [
+            f"# Flat PQN OC build={mode} — Seaquest optim_scale 1:1 "
+            f"({NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}; LR={LR}+linear; "
+            f"MAX_GRAD_NORM={MAX_GRAD_NORM:g}; ε {EPS_START}→{EPS_FINISH}); "
+            f"seed={seed}. Same feature builders as tandem META_INPUT_MODE.",
+            "PAPER_EVAL_RQ: 1",
+            "PAPER_EVAL_PHASE: train",
+            "PAPER_EVAL_KIND: flat_pqn",
+            "PAPER_EVAL_MODS: seaquest",
+            "PAPER_EVAL_REQUIRES_RQ1: []",
+            "NUM_SEEDS: 1",
+            "ALG_NAME: flat_pqn",
+            "ENV_NAME: seaquest",
+            "TRAIN_MODE: flat_pqn",
+            "OBJECT_CENTRIC: true",
+            f"OC_INPUT_MODE: {mode}",
+            f"MAX_OBJECTS: {SEAQUEST_MAX_OBJECTS}",
+            "NORM_TYPE: layer_norm",
+            "NORM_INPUT: false",
+            "LR_LINEAR_DECAY: true",
+            f"SAVE_PATH: {OUT_MODELS}/{stem}",
+            f"WANDB_RUN_NAME: sq_{PQN_OC_BUILDS_SUITE}_{tok}_seed{seed}_{BUDGET_TAG}",
+            "WANDB_TAGS:",
+            *[line for line in tag_block.strip().splitlines()],
+            f"TOTAL_TIMESTEPS: {TIMESTEPS}",
+            f"TOTAL_TIMESTEPS_DECAY: {TIMESTEPS_DECAY}",
+            f"NUM_ENVS: {NUM_ENVS}",
+            f"NUM_STEPS: {NUM_STEPS}",
+            f"NUM_EPOCHS: {NUM_EPOCHS}",
+            f"NUM_MINIBATCHES: {NUM_MINIBATCHES}",
+            "FRAME_SKIP: 4",
+            "FRAME_STACK_SIZE: 4",
+            "FIRST_FIRE: true",
+            "STICKY_ACTIONS: false",
+            "EPISODIC_LIFE: true",
+            "CLIP_REWARD: true",
+            "GAMMA: 0.99",
+            "LAMBDA: 0.65",
+            f"LR: {LR}",
+            f"MAX_GRAD_NORM: {MAX_GRAD_NORM}",
+            "HIDDEN_SIZE: 128",
+            "NUM_LAYERS: 2",
+            f"EPS_START: {EPS_START}",
+            f"EPS_FINISH: {EPS_FINISH}",
+            f"EPS_DECAY: {EPS_DECAY}",
+            "GAME_MODS: null",
+            "EVAL_GAME_MODS: null",
+            f"SEED: {seed}",
+        ]
+    )
+
+
+def _pqn_oc_build_eval(mode: str, *, seed: int = OC_BUILD_SEED) -> str:
+    tok = _oc_build_token(mode)
+    stem = pqn_oc_build_stem(mode, seed)
+    ckpt = (
+        f"{OUT_MODELS}/{stem}/seaquest/"
+        f"flat_pqn_seaquest_oc_{tok}_seed{seed}_vmap0.safetensors"
+    )
+    lines = [
+        f"# Home mod eval — optim_scale flat PQN OC build={mode} seed{seed}.",
+        "PAPER_EVAL_RQ: 1",
+        "PAPER_EVAL_PHASE: eval",
+        "PAPER_EVAL_KIND: flat_pqn",
+        "PAPER_EVAL_MODS: seaquest",
+    ]
+    lines += f10._mod_keys_yaml(MOD_KEYS)
+    lines += [
+        "PAPER_EVAL_REQUIRES_RQ1:",
+        f"- {stem}",
+        f"PAPER_EVAL_FLAT_PQN_CKPT: {ckpt}",
+        "PAPER_EVAL_OBJECT_CENTRIC: true",
+        f"PAPER_EVAL_ARCHITECTURE_OF: {stem}",
+        "NUM_SEEDS: 1",
+        "ALG_NAME: flat_pqn",
+        "ENV_NAME: seaquest",
+        "OBJECT_CENTRIC: true",
+        f"OC_INPUT_MODE: {mode}",
+        f"MAX_OBJECTS: {SEAQUEST_MAX_OBJECTS}",
+        f"SAVE_PATH: {OUT_MODELS}/{stem}",
+        f"WANDB_RUN_NAME: sq_{PQN_OC_BUILDS_SUITE}_eval_{tok}_seed{seed}_{BUDGET_TAG}",
+        "WANDB_TAGS:",
+        f"- suite:{PQN_OC_BUILDS_SUITE}",
+        "- rq:1",
+        "- env:seaquest",
+        "- phase:mod_eval",
+        "- train_mode:flat_pqn",
+        "- variant:pqn_oc_build",
+        f"- oc_input:{mode}",
+        f"- budget:{BUDGET_TAG}",
+        f"SEED: {seed}",
+        f"EVAL_SEED: {seed + 10_000}",
+        "EVAL_NUM_SEEDS: 3",
+    ]
+    return f10._lines(lines)
 
 
 def _skills_train(seed: int) -> str:
@@ -1193,7 +1351,7 @@ def _pqn_manifest() -> str:
     return f10._lines(
         [
             "# optim_scale flat PQN inventory (not runnable).",
-            f"suites: [{PQN_OC_SUITE}, {PQN_PIXEL_SUITE}]",
+            f"suites: [{PQN_OC_SUITE}, {PQN_PIXEL_SUITE}, {PQN_OC_BUILDS_SUITE}]",
             f"budget_tag: {BUDGET_TAG}",
             f"total_timesteps: {TIMESTEPS}",
             f"num_envs: {NUM_ENVS}",
@@ -1211,6 +1369,11 @@ def _pqn_manifest() -> str:
             *[f"  - {s}" for s in optim_scale_pqn_oc_stems()],
             f"gpu1_pixel_stems:",
             *[f"  - {s}" for s in optim_scale_pqn_pixel_stems()],
+            f"oc_builds_suite: {PQN_OC_BUILDS_SUITE}",
+            f"  seed: {OC_BUILD_SEED}",
+            f"  modes: {list(OC_BUILD_MODES)}",
+            "  stems:",
+            *[f"    - {s}" for s in optim_scale_pqn_oc_builds_stems()],
         ]
     )
 
@@ -1288,6 +1451,15 @@ def materialize(*, dry: bool) -> None:
             )
     pairs.append((_OUT / "pqn_manifest.yaml", _pqn_manifest()))
 
+    print(
+        f"optim_scale_pqn_oc_builds → modes={list(OC_BUILD_MODES)} "
+        f"seed={OC_BUILD_SEED}"
+    )
+    for mode in OC_BUILD_MODES:
+        stem = pqn_oc_build_stem(mode)
+        pairs.append((_OUT / f"{stem}.yaml", _pqn_oc_build_train(mode)))
+        pairs.append((_OUT / f"{stem}_eval.yaml", _pqn_oc_build_eval(mode)))
+
     for path, body in pairs:
         f10._write(path, body, dry=dry)
 
@@ -1304,6 +1476,9 @@ def materialize(*, dry: bool) -> None:
         f"  # remaining transfer scratch envs + home evals\n"
         f"  python scripts/run_paper_eval.py --suite {TRANSFERS_SUITE} "
         f"--gpus 0,1 --wait-deps --skip-rq-gate --lean\n"
+        f"  # overnight free GPU: tandem OC feature builds as flat PQN\n"
+        f"  python scripts/run_paper_eval.py --suite {PQN_OC_BUILDS_SUITE} "
+        f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
         "Flat PQN baselines (2 GPUs):\n"
         f"  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py "
         f"--suite {PQN_OC_SUITE} --gpus 0 --wait-deps --skip-rq-gate --lean &\n"

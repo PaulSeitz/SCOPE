@@ -1281,6 +1281,7 @@ OPTIM_SCALE_SKILLS_OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 # Run on two GPUs: GPU0=OC, GPU1=pixel (train→eval sequential per seed).
 OPTIM_SCALE_PQN_OC_SUITE = "optim_scale_pqn_oc"
 OPTIM_SCALE_PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
+OPTIM_SCALE_PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -1349,6 +1350,7 @@ def _final_eval_suite_stems() -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1362,6 +1364,7 @@ def _final_eval_suite_stems() -> tuple[
     )
     from materialize_nexus_parity import nexus_parity_stems  # type: ignore
     from materialize_optim_scale import (  # type: ignore
+        optim_scale_pqn_oc_builds_stems,
         optim_scale_pqn_oc_stems,
         optim_scale_pqn_pixel_stems,
         optim_scale_probe_stems,
@@ -1382,6 +1385,7 @@ def _final_eval_suite_stems() -> tuple[
     rerun = optim_scale_skills_rerun_stems()
     pqn_oc = optim_scale_pqn_oc_stems()
     pqn_px = optim_scale_pqn_pixel_stems()
+    pqn_oc_builds = optim_scale_pqn_oc_builds_stems()
     bases = optim_scale_skills_bases_stems()
     transfers = optim_scale_skills_transfers_stems()
     lr = optim_scale_skills_lr_stems()
@@ -1398,6 +1402,7 @@ def _final_eval_suite_stems() -> tuple[
         rerun,
         pqn_oc,
         pqn_px,
+        pqn_oc_builds,
         bases,
         transfers,
         lr,
@@ -1417,6 +1422,7 @@ def _final_eval_suite_stems() -> tuple[
     OPTIM_SCALE_SKILLS_RERUN_STEMS,
     OPTIM_SCALE_PQN_OC_STEMS,
     OPTIM_SCALE_PQN_PIXEL_STEMS,
+    OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
     OPTIM_SCALE_SKILLS_BASES_STEMS,
     OPTIM_SCALE_SKILLS_TRANSFERS_STEMS,
     OPTIM_SCALE_SKILLS_LR_STEMS,
@@ -2102,6 +2108,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_SKILLS_OLD_EPS_SUITE: OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
     OPTIM_SCALE_PQN_OC_SUITE: OPTIM_SCALE_PQN_OC_STEMS,
     OPTIM_SCALE_PQN_PIXEL_SUITE: OPTIM_SCALE_PQN_PIXEL_STEMS,
+    OPTIM_SCALE_PQN_OC_BUILDS_SUITE: OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -2566,6 +2573,7 @@ def _flat_pqn_ckpt_from_cfg(cfg: dict[str, Any], *, seed: int) -> Path:
         seed=int(cfg.get("SEED", seed)),
         save_root=cfg.get("SAVE_PATH"),
         vmap_index=0,
+        oc_input_mode=str(cfg.get("OC_INPUT_MODE") or "").strip() or None,
     )
 
 
@@ -3852,6 +3860,11 @@ def main() -> None:
             "python scripts/materialize_optim_scale.py then "
             "CUDA_VISIBLE_DEVICES=0 … --suite optim_scale_pqn_oc and "
             "CUDA_VISIBLE_DEVICES=1 … --suite optim_scale_pqn_pixel. "
+            f"{OPTIM_SCALE_PQN_OC_BUILDS_SUITE}: flat PQN on tandem OC feature "
+            "builds (oc_simple_rel_role / oc_simple_role / oc_embed) × seed 44 "
+            "+ home mod eval — overnight format probe; "
+            "--suite optim_scale_pqn_oc_builds --gpus … --wait-deps "
+            "--skip-rq-gate --lean. "
             f"{FINAL_10M_BASE_SKILLS_SUITE}: ours-only ego skills @ 10M on paper "
             "bases (seaquest, phoenix, namethisgame, asteroids) + home paper_core "
             "evals; Time Pilot is a transfer (not included); "

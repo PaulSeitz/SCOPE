@@ -32,15 +32,22 @@ def resolve_flat_pqn_checkpoint(
     seed: int = 44,
     save_root: str | Path | None = None,
     vmap_index: int = 0,
+    oc_input_mode: str | None = None,
 ) -> Path:
     """
     Flat PQN save layout from ``baselines.flat_pqn_train``:
-    ``{SAVE_PATH}/{env}/flat_pqn_{env}_{oc|pixel}_seed{N}_vmap{i}.safetensors``
+    ``{SAVE_PATH}/{env}/flat_pqn_{env}_{oc|pixel|oc_<build>}_seed{N}_vmap{i}.safetensors``
     """
     root = Path(save_root) if save_root else PAPER_EVAL_ROOT / "rq1" / "seaquest_pqn"
     if not root.is_absolute():
         root = PROJECT_ROOT / root
-    oc = "oc" if object_centric else "pixel"
+    mode = str(oc_input_mode or "").strip()
+    if mode:
+        from concept_based_learning.baselines.flat_oc_features import flat_oc_mode_token
+
+        oc = f"oc_{flat_oc_mode_token(mode)}"
+    else:
+        oc = "oc" if object_centric else "pixel"
     return (
         root
         / env_name

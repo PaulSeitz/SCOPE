@@ -291,8 +291,26 @@ def make_flat_pqn_eval_env(
     cfg = normalize_flat_pqn_config(config)
     mods = list(game_mods) if game_mods else None
     game = str(env_name or cfg.get("ENV_NAME", "seaquest")).lower()
+    oc_input_mode = str(cfg.get("OC_INPUT_MODE") or "").strip()
 
     def _build(full: bool):
+        if oc_input_mode:
+            from concept_based_learning.baselines.flat_oc_features import (
+                make_flat_oc_build_env,
+            )
+
+            # full_action_space is unused for Seaquest home evals; OC builds
+            # always use the EnvManager Atari defaults.
+            del full
+            return make_flat_oc_build_env(
+                mode=oc_input_mode,
+                max_objects=int(cfg.get("MAX_OBJECTS", 35)),
+                env_name=game,
+                config=cfg,
+                train=False,
+                game_mods=mods,
+            )
+
         env = jaxatari.make(game, mods=mods)
         env = AtariWrapper(
             env,

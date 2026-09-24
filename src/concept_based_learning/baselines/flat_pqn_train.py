@@ -76,6 +76,7 @@ def make_train(config: dict[str, Any]):
     frame_skip = int(cfg.get("FRAME_SKIP", 4))
     frame_stack = int(cfg.get("FRAME_STACK_SIZE", 4))
     object_centric = bool(cfg.get("OBJECT_CENTRIC", True))
+    oc_input_mode = str(cfg.get("OC_INPUT_MODE") or "").strip()
 
     cfg["NUM_UPDATES"] = total // num_steps // num_envs
     decay_total = int(cfg.get("TOTAL_TIMESTEPS_DECAY", total))
@@ -92,6 +93,21 @@ def make_train(config: dict[str, Any]):
         train_mods = None
 
     def apply_wrappers(base_env):
+        if oc_input_mode:
+            from concept_based_learning.baselines.flat_oc_features import (
+                make_flat_oc_build_env,
+            )
+
+            max_objects = int(cfg.get("MAX_OBJECTS", 35))
+            return make_flat_oc_build_env(
+                mode=oc_input_mode,
+                max_objects=max_objects,
+                env_name=env_name,
+                config=cfg,
+                train=True,
+                game_mods=train_mods,
+            )
+
         wrapped = AtariWrapper(
             base_env,
             sticky_actions=0.0 if not cfg.get("STICKY_ACTIONS", False) else 0.25,
@@ -127,8 +143,13 @@ def make_train(config: dict[str, Any]):
             )
         return LogWrapper(wrapped)
 
-    env = apply_wrappers(jaxatari.make(env_name, mods=train_mods))
+    if oc_input_mode:
+        env = apply_wrappers(None)
+    else:
+        env = apply_wrappers(jaxatari.make(env_name, mods=train_mods))
 
+    # OC build path uses the object-centric MLP trunk (not the pixel CNN).
+    network_object_centric = bool(object_centric or oc_input_mode)
     def eps_greedy_exploration(rng, q_vals, eps):
         rng_a, rng_e = jax.random.split(rng)
         greedy = jnp.argmax(q_vals, axis=-1)
@@ -169,7 +190,7 @@ def make_train(config: dict[str, Any]):
             num_layers=int(cfg.get("NUM_LAYERS", 2)),
             norm_type=str(cfg.get("NORM_TYPE", "layer_norm")),
             norm_input=bool(cfg.get("NORM_INPUT", False)),
-            object_centric=object_centric,
+            object_centric=network_object_centric,
         )
 
         def create_agent(key):
@@ -392,7 +413,13 @@ def train_flat_pqn(config: dict[str, Any]) -> Path:
 
     alg_name = str(cfg.get("ALG_NAME", "flat_pqn"))
     env_name = str(cfg["ENV_NAME"]).lower()
-    oc_tag = "oc" if cfg.get("OBJECT_CENTRIC", True) else "pixel"
+    oc_input = str(cfg.get("OC_INPUT_MODE") or "").strip()
+    if oc_input:
+        from concept_based_learning.baselines.flat_oc_features import flat_oc_mode_token
+
+        oc_tag = f"oc_{flat_oc_mode_token(oc_input)}"
+    else:
+        oc_tag = "oc" if cfg.get("OBJECT_CENTRIC", True) else "pixel"
     run_name = cfg.get("WANDB_RUN_NAME") or cfg.get("NAME") or f"{alg_name}_{env_name}_{oc_tag}"
 
     wandb.init(
