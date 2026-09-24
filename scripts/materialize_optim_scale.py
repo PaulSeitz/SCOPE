@@ -20,17 +20,15 @@ CBL mapping (true 1:1 on shared HPs)
 * Probe suite ``optim_scale_probe``: skills-only seed=1 arms that keep the
   YAML outer (32/1024/50M/grad10) but ablate LR/ε — run these before/alongside
   the full tandem-first suite to see what breaks.
-* Skills final (post-NOOP):
-  - ``optim_scale_skills_bases``: locked ε B + LR 2.5e-4+linear on other paper
-    bases (phoenix / namethisgame / asteroids), seed=44, home mod eval
-  - ``optim_scale_skills_lr``: short LR probe (seed=1, ε B fixed, Seaquest)
-  - ``optim_scale_skills_old_eps``: single YAML-ε Seaquest arm (seed=44)
+* Skills final (post-NOOP), locked recipe = ε B + LR 2.5e-4+linear:
+  - ``optim_scale_skills_bases``: phoenix / namethisgame / asteroids (done)
+  - ``optim_scale_skills_transfers``: remaining EVAL_PLAN transfer scratch envs
+    (spaceinvaders, beamrider, timepilot, pong, breakout, freeway)
+  - ``optim_scale_skills_lr`` / ``optim_scale_skills_old_eps``: Seaquest HP probes
 
     python scripts/materialize_optim_scale.py
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
-      --suite optim_scale_skills_bases --wait-deps --lean --skip-rq-gate
-    CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
-      --suite optim_scale_skills_lr --wait-deps --lean --skip-rq-gate
+      --suite optim_scale_skills_transfers --wait-deps --lean --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -49,6 +47,7 @@ _REF_SRC = Path("/home/paul/Downloads/pqn_jaxatari_pixel_optimal_scaling.yaml")
 SUITE = "optim_scale_sq"
 PROBE_SUITE = "optim_scale_probe"
 BASES_SUITE = "optim_scale_skills_bases"
+TRANSFERS_SUITE = "optim_scale_skills_transfers"
 LR_SUITE = "optim_scale_skills_lr"
 OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 PQN_OC_SUITE = "optim_scale_pqn_oc"
@@ -81,6 +80,16 @@ OLD_EPS_SEED = 44  # single YAML-ε comparison arm (Seaquest)
 BASE_SEED = 44
 # Paper bases excluding Seaquest (already covered by post-NOOP probes).
 BASE_OTHER_ENVS: tuple[str, ...] = ("phoenix", "namethisgame", "asteroids")
+# EVAL_PLAN transfer scratch envs not yet run at optim_scale lock.
+TRANSFER_ENV_META: dict[str, dict] = {
+    "spaceinvaders": {"max_objects": 41, "heu": "env_specific", "prefix": "si", "rq": 2},
+    "beamrider": {"max_objects": 31, "heu": "env_specific", "prefix": "br", "rq": 2},
+    "timepilot": {"max_objects": 7, "heu": "env_specific", "prefix": "tp", "rq": 2},
+    "pong": {"max_objects": 2, "heu": "nearest", "prefix": "po", "rq": 2},
+    "breakout": {"max_objects": 3, "heu": "nearest", "prefix": "bo", "rq": 2},
+    "freeway": {"max_objects": 12, "heu": "env_specific", "prefix": "fw", "rq": 2},
+}
+TRANSFER_ENVS: tuple[str, ...] = tuple(TRANSFER_ENV_META)
 
 MOD_KEYS = f10.MOD_KEYS
 
@@ -230,6 +239,10 @@ def skills_base_stem(env: str) -> str:
     return f"optim_scale_skills_bases_{env}"
 
 
+def skills_transfer_stem(env: str) -> str:
+    return f"optim_scale_skills_transfers_{env}"
+
+
 def pqn_stem(variant: str, seed: int) -> str:
     """variant in {pixel, oc}."""
     return f"optim_scale_pqn_{variant}_seed{seed}"
@@ -267,6 +280,16 @@ def optim_scale_skills_bases_stems() -> tuple[str, ...]:
     out: list[str] = []
     for env in BASE_OTHER_ENVS:
         stem = skills_base_stem(env)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
+
+
+def optim_scale_skills_transfers_stems() -> tuple[str, ...]:
+    """Locked recipe on remaining transfer scratch envs (train→eval per env)."""
+    out: list[str] = []
+    for env in TRANSFER_ENVS:
+        stem = skills_transfer_stem(env)
         out.append(stem)
         out.append(f"{stem}_eval")
     return tuple(out)
@@ -436,7 +459,7 @@ def _patch_1to1(
         body = body.replace(drop, "")
     # Drop any prior scale tag block so re-materialize is idempotent.
     body = re.sub(
-        r"(?m)^- scale:pqn_optim(?:_1to1)?\n"
+        r"(?m)^- scale:pqn_optim[^\n]*\n"
         r"(?:- num_envs:\d+\n)?"
         r"(?:- num_steps:\d+\n)?"
         r"(?:- num_updates:\d+\n)?"
@@ -497,6 +520,8 @@ def _retarget(
             out.append(f"EVAL_SEED: {seed + 10_000}")
         elif "PAPER_EVAL_REQUIRES_RQ1:" in line:
             out.append(line)
+        elif line.strip() in ("- PLACEHOLDER_STEM", "- PLACEHOLDER"):
+            out.append(f"- {stem}")
         elif line.strip().startswith("- final_10m_") or line.strip().startswith(
             "- optim_scale_"
         ):
@@ -539,7 +564,9 @@ def _retarget(
         body = body.replace(f"- {f10.skills_stem(e)}\n", f"- {stem}\n")
         body = body.replace(f"- {f10.pqn_pixel_stem(e)}\n", f"- {stem}\n")
     body = body.replace(f"{f10.OUT_MODELS}/", f"{OUT_MODELS}/")
-    body = body.replace("PLACEHOLDER", f"{OUT_MODELS}/{stem}")
+    # Path-only placeholder (never PLACEHOLDER_STEM — that is handled above).
+    body = body.replace("/PLACEHOLDER/", f"/{stem}/")
+    body = body.replace(": PLACEHOLDER\n", f": {OUT_MODELS}/{stem}\n")
     return body
 
 
@@ -720,7 +747,7 @@ def _skills_hp_train(
     scale_tag: str,
     env: str = "seaquest",
 ) -> str:
-    base = f10._skills_train(env)
+    base = _skills_train_body(env)
     return _retarget(
         base,
         stem=stem,
@@ -755,7 +782,7 @@ def _skills_hp_eval(
     scale_tag: str,
     env: str = "seaquest",
 ) -> str:
-    base = f10._skills_eval(env)
+    base = _skills_eval_body(env)
     return _retarget(
         base,
         stem=stem,
@@ -779,9 +806,173 @@ def _skills_hp_eval(
     )
 
 
+def _env_meta(env: str) -> dict:
+    if env in f10.BASE_SKILL_ENVS:
+        return f10.BASE_SKILL_ENVS[env]
+    if env in TRANSFER_ENV_META:
+        return TRANSFER_ENV_META[env]
+    raise KeyError(f"unknown env for optim_scale skills: {env}")
+
+
+def _skills_train_body(env: str) -> str:
+    """final_10m-shaped skills train YAML for base or transfer envs."""
+    if env in f10.BASE_SKILL_ENVS:
+        return f10._skills_train(env)
+    meta = TRANSFER_ENV_META[env]
+    rq = int(meta["rq"])
+    lines = [
+        f"# {env} ego skills — final_10m template (retargeted to optim_scale).",
+        f"PAPER_EVAL_RQ: {rq}",
+        "PAPER_EVAL_PHASE: train",
+        "PAPER_EVAL_KIND: skills",
+        f"PAPER_EVAL_MODS: {env}",
+        "PAPER_EVAL_REQUIRES_RQ1: []",
+        "NUM_SEEDS: 1",
+        "ALG_NAME: hierarchical_pqn",
+        "TRAIN_MODE: skills_only",
+        f"ENV_NAME: {env}",
+    ]
+    lines += f10._ego_lines(seaquest_legacy=False)
+    lines += [
+        f"SAVE_PATH: {f10.OUT_MODELS}/PLACEHOLDER_STEM",
+        f"WANDB_RUN_NAME: {meta['prefix']}_placeholder",
+        "WANDB_TAGS:",
+        f"- suite:{f10.SUITE}",
+        f"- rq:{rq}",
+        f"- env:{env}",
+        "- role:transfer",
+        "- ego:noblocking",
+        "- ego:noweapon",
+        "- ego:noclip",
+        "- ablation:sparse_cda",
+        f"- budget:{f10.BUDGET_TAG}",
+        "- phase:from_scratch",
+        "- skill_input:ego",
+    ]
+    lines += f10._mapper_tags(env)
+    lines += [
+        "- lr:constant",
+        "- lock:skills_lr1e3",
+        "GAME_MODS: null",
+        "EVAL_GAME_MODS: null",
+        "SKILL_INPUT_MODE: ego",
+        f"HEURISTIC_MODE: {meta['heu']}",
+        "SKILL_DEATH_PENALIZE_COLLECT: true",
+        "RECORD_VIDEO: false",
+        "VIDEO_AT_END: false",
+    ]
+    lines += f10._sparse_top()
+    lines += [
+        "alg:",
+        "  NUM_SKILLS: 4",
+        "  SKILL_NAMES:",
+        "  - DESTROY",
+        "  - COLLECT",
+        "  - AVOID",
+        "  - NAVIGATE",
+        f"  MAX_OBJECTS: {meta['max_objects']}",
+        "  EGO_ACTION_DIM: 18",
+        "  HIDDEN_SIZE: 128",
+        "  NUM_LAYERS: 3",
+        "  SKILL_EMBED_DIM: 256",
+        f"  SKILL_LR: {f10.LOCKED_SKILL_LR}",
+        "  SKILL_REWARD_LAMBDA: 0.0",
+        "  CLIP_REWARD: true",
+        "  RESTRICT_FIRE_FOR_NON_DESTROY: false",
+        "  FIRST_FIRE: true",
+        "  STICKY_ACTIONS: false",
+        "  EPISODIC_LIFE: true",
+        "  FRAME_STACK_SIZE: 4",
+        "  FRAME_SKIP: 4",
+        f"  TOTAL_TIMESTEPS: {f10.TIMESTEPS_10M}",
+        "  NUM_ENVS: 128",
+        "  NUM_STEPS: 128",
+        "  NUM_EPOCHS: 4",
+        "  NUM_MINIBATCHES: 64",
+        "  GAMMA: 0.99",
+        "  SKILL_GAMMA: 0.99",
+        "  LAMBDA: 0.65",
+        "  SKILL_LAMBDA: 0.65",
+        "  LR: 0.0001",
+        "  MAX_GRAD_NORM: 0.8",
+        "  OFF_POLICY: true",
+        "  RELABEL_ALL_OBJECTS: false",
+        "  RELABEL_K_OBJECTS: null",
+        "  SKILL_BOOTSTRAP: q_lambda",
+        f"  EPS_START: {f10.LOCKED_EPS_START}",
+        f"  EPS_FINISH: {f10.LOCKED_EPS_FINISH}",
+        f"  EPS_DECAY: {f10.LOCKED_EPS_DECAY}",
+        f"  HEURISTIC_MODE: {meta['heu']}",
+        "  SKILL_INPUT_MODE: ego",
+        "  SKILL_DEATH_PENALIZE_COLLECT: true",
+    ]
+    lines += f10._sparse_alg()
+    lines += [
+        "  USE_EGO_SHOT_FEATURES: false",
+        "SEED: 44",
+    ]
+    return f10._lines(lines)
+
+
+def _skills_eval_body(env: str) -> str:
+    if env in f10.BASE_SKILL_ENVS:
+        return f10._skills_eval(env)
+    meta = TRANSFER_ENV_META[env]
+    rq = int(meta["rq"])
+    mod_keys = f10._paper_core_keys(env)
+    ckpt = (
+        f"{f10.OUT_MODELS}/PLACEHOLDER_STEM/{env}/"
+        f"hierarchical_pqn_{env}_seed44.safetensors"
+    )
+    lines = [
+        f"# Home mod eval for {env} skills.",
+        f"PAPER_EVAL_RQ: {rq}",
+        "PAPER_EVAL_PHASE: eval",
+        "PAPER_EVAL_KIND: skills",
+        f"PAPER_EVAL_MODS: {env}",
+    ]
+    lines += f10._mod_keys_yaml(mod_keys)
+    lines += [
+        "PAPER_EVAL_REQUIRES_RQ1:",
+        "- PLACEHOLDER_STEM",
+        f"PAPER_EVAL_SKILLS_CKPT: {ckpt}",
+        "PAPER_EVAL_ARCHITECTURE_OF: PLACEHOLDER_STEM",
+        "NUM_SEEDS: 1",
+        "ALG_NAME: hierarchical_pqn",
+        "TRAIN_MODE: skills_only",
+        f"ENV_NAME: {env}",
+    ]
+    lines += f10._ego_lines(seaquest_legacy=False)
+    lines += [
+        f"SAVE_PATH: {f10.OUT_MODELS}/PLACEHOLDER_STEM",
+        f"WANDB_RUN_NAME: {meta['prefix']}_placeholder_eval",
+        "WANDB_TAGS:",
+        f"- suite:{f10.SUITE}",
+        f"- rq:{rq}",
+        f"- env:{env}",
+        "- phase:mod_eval",
+        "- skill_input:ego",
+    ]
+    lines += f10._mapper_tags(env)
+    lines += [
+        f"- budget:{f10.BUDGET_TAG}",
+        "- lock:skills_lr1e3",
+        "SKILL_INPUT_MODE: ego",
+        f"HEURISTIC_MODE: {meta['heu']}",
+        "SKILL_DEATH_PENALIZE_COLLECT: true",
+    ]
+    lines += f10._sparse_top()
+    lines += [
+        "SEED: 44",
+        "EVAL_SEED: 10044",
+        "EVAL_NUM_SEEDS: 3",
+    ]
+    return f10._lines(lines)
+
+
 def _base_env_train(env: str) -> str:
     stem = skills_base_stem(env)
-    prefix = f10.BASE_SKILL_ENVS[env]["prefix"]
+    prefix = _env_meta(env)["prefix"]
     return _skills_hp_train(
         stem=stem,
         seed=BASE_SEED,
@@ -789,7 +980,7 @@ def _base_env_train(env: str) -> str:
         hp=EPSB_HP,
         env=env,
         header=(
-            f"# {env} ego skills — optim_scale locked recipe "
+            f"# {env} ego skills — optim_scale LOCKED recipe "
             f"(ε B + LR={LR}+linear; {NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}); "
             f"seed={BASE_SEED}."
         ),
@@ -800,15 +991,52 @@ def _base_env_train(env: str) -> str:
 
 def _base_env_eval(env: str) -> str:
     stem = skills_base_stem(env)
-    prefix = f10.BASE_SKILL_ENVS[env]["prefix"]
+    prefix = _env_meta(env)["prefix"]
     return _skills_hp_eval(
         stem=stem,
         seed=BASE_SEED,
         suite=BASES_SUITE,
         hp=EPSB_HP,
         env=env,
-        header=f"# Home mod eval — optim_scale skills bases {env} seed{BASE_SEED}.",
+        header=f"# Home mod eval — optim_scale locked skills {env} seed{BASE_SEED}.",
         run_name=f"{prefix}_{BASES_SUITE}_eval_{BUDGET_TAG}",
+        scale_tag="pqn_optim_epsB",
+    )
+
+
+def _transfer_env_train(env: str) -> str:
+    stem = skills_transfer_stem(env)
+    prefix = _env_meta(env)["prefix"]
+    return _skills_hp_train(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=TRANSFERS_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# {env} ego skills — optim_scale LOCKED recipe "
+            f"(ε B + LR={LR}+linear; {NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}); "
+            f"seed={BASE_SEED}."
+        ),
+        run_name=f"{prefix}_{TRANSFERS_SUITE}_{BUDGET_TAG}",
+        scale_tag="pqn_optim_epsB",
+    )
+
+
+def _transfer_env_eval(env: str) -> str:
+    stem = skills_transfer_stem(env)
+    prefix = _env_meta(env)["prefix"]
+    return _skills_hp_eval(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=TRANSFERS_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# Home mod eval — optim_scale locked skills transfer "
+            f"{env} seed{BASE_SEED}."
+        ),
+        run_name=f"{prefix}_{TRANSFERS_SUITE}_eval_{BUDGET_TAG}",
         scale_tag="pqn_optim_epsB",
     )
 
@@ -928,13 +1156,18 @@ def _probe_manifest() -> str:
 def _skills_final_manifest() -> str:
     lines = [
         "# optim_scale skills final inventory (not runnable).",
-        f"bases_suite: {BASES_SUITE}",
-        f"  recipe: ε B ({EPS_B_START}->{EPS_B_FINISH}/{EPS_B_DECAY}) "
+        f"locked_recipe: ε B ({EPS_B_START}->{EPS_B_FINISH}/{EPS_B_DECAY}) "
         f"+ LR={LR}+linear + MAX_GRAD_NORM={MAX_GRAD_NORM}",
+        f"bases_suite: {BASES_SUITE}",
         f"  seed: {BASE_SEED}",
         f"  envs: {list(BASE_OTHER_ENVS)}",
         "  stems:",
         *[f"    - {s}" for s in optim_scale_skills_bases_stems()],
+        f"transfers_suite: {TRANSFERS_SUITE}",
+        f"  seed: {BASE_SEED}",
+        f"  envs: {list(TRANSFER_ENVS)}",
+        "  stems:",
+        *[f"    - {s}" for s in optim_scale_skills_transfers_stems()],
         f"lr_suite: {LR_SUITE}",
         f"  seed: {PROBE_SEED}",
         "  fixed_eps: B",
@@ -1017,6 +1250,15 @@ def materialize(*, dry: bool) -> None:
         pairs.append((_OUT / f"{stem}_eval.yaml", _base_env_eval(env)))
 
     print(
+        f"optim_scale_skills_transfers → εB recipe × envs={TRANSFER_ENVS} "
+        f"seed={BASE_SEED}"
+    )
+    for env in TRANSFER_ENVS:
+        stem = skills_transfer_stem(env)
+        pairs.append((_OUT / f"{stem}.yaml", _transfer_env_train(env)))
+        pairs.append((_OUT / f"{stem}_eval.yaml", _transfer_env_eval(env)))
+
+    print(
         f"optim_scale_skills_lr → seed={PROBE_SEED} arms="
         f"{[a for a, _ in LR_ARMS]}"
     )
@@ -1057,16 +1299,11 @@ def materialize(*, dry: bool) -> None:
         print(f"would copy ref → {ref_dst.relative_to(_ROOT)}")
 
     print(
-        "\nThesis skills (post-NOOP):\n"
-        f"  # locked recipe on other paper bases\n"
-        f"  python scripts/run_paper_eval.py --suite {BASES_SUITE} "
-        f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
-        f"  # short LR probe (ε B, Seaquest)\n"
-        f"  python scripts/run_paper_eval.py --suite {LR_SUITE} "
-        f"--gpus 1 --wait-deps --skip-rq-gate --lean\n"
-        f"  # single old YAML-ε arm (Seaquest)\n"
-        f"  python scripts/run_paper_eval.py --suite {OLD_EPS_SUITE} "
-        f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
+        "\nThesis skills (post-NOOP, locked εB):\n"
+        f"  # already done: bases={list(BASE_OTHER_ENVS)} + Seaquest epsB probe\n"
+        f"  # remaining transfer scratch envs + home evals\n"
+        f"  python scripts/run_paper_eval.py --suite {TRANSFERS_SUITE} "
+        f"--gpus 0,1 --wait-deps --skip-rq-gate --lean\n"
         "Flat PQN baselines (2 GPUs):\n"
         f"  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py "
         f"--suite {PQN_OC_SUITE} --gpus 0 --wait-deps --skip-rq-gate --lean &\n"

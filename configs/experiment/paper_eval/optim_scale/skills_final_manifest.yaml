@@ -1,6 +1,6 @@
 # optim_scale skills final inventory (not runnable).
+locked_recipe: ε B (0.2->0.01/0.2) + LR=0.00025+linear + MAX_GRAD_NORM=10.0
 bases_suite: optim_scale_skills_bases
-  recipe: ε B (0.2->0.01/0.2) + LR=0.00025+linear + MAX_GRAD_NORM=10.0
   seed: 44
   envs: ['phoenix', 'namethisgame', 'asteroids']
   stems:
@@ -10,6 +10,22 @@ bases_suite: optim_scale_skills_bases
     - optim_scale_skills_bases_namethisgame_eval
     - optim_scale_skills_bases_asteroids
     - optim_scale_skills_bases_asteroids_eval
+transfers_suite: optim_scale_skills_transfers
+  seed: 44
+  envs: ['spaceinvaders', 'beamrider', 'timepilot', 'pong', 'breakout', 'freeway']
+  stems:
+    - optim_scale_skills_transfers_spaceinvaders
+    - optim_scale_skills_transfers_spaceinvaders_eval
+    - optim_scale_skills_transfers_beamrider
+    - optim_scale_skills_transfers_beamrider_eval
+    - optim_scale_skills_transfers_timepilot
+    - optim_scale_skills_transfers_timepilot_eval
+    - optim_scale_skills_transfers_pong
+    - optim_scale_skills_transfers_pong_eval
+    - optim_scale_skills_transfers_breakout
+    - optim_scale_skills_transfers_breakout_eval
+    - optim_scale_skills_transfers_freeway
+    - optim_scale_skills_transfers_freeway_eval
 lr_suite: optim_scale_skills_lr
   seed: 1
   fixed_eps: B

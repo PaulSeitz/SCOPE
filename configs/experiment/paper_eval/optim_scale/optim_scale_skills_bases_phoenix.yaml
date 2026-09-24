@@ -1,4 +1,4 @@
-# phoenix ego skills — optim_scale locked recipe (ε B + LR=0.00025+linear; 1024×32×1525); seed=44.
+# phoenix ego skills — optim_scale LOCKED recipe (ε B + LR=0.00025+linear; 1024×32×1525); seed=44.
 PAPER_EVAL_RQ: 2
 PAPER_EVAL_PHASE: train
 PAPER_EVAL_KIND: skills

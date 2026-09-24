@@ -1274,6 +1274,7 @@ OPTIM_SCALE_PROBE_SUITE = "optim_scale_probe"
 OPTIM_SCALE_SKILLS_RERUN_SUITE = "optim_scale_skills_rerun"
 # Post-NOOP thesis skills: other bases @ εB; short LR probe; single old YAML-ε.
 OPTIM_SCALE_SKILLS_BASES_SUITE = "optim_scale_skills_bases"
+OPTIM_SCALE_SKILLS_TRANSFERS_SUITE = "optim_scale_skills_transfers"
 OPTIM_SCALE_SKILLS_LR_SUITE = "optim_scale_skills_lr"
 OPTIM_SCALE_SKILLS_OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 # Flat PQN @ optim_scale 1:1 HPs (50M/1024/32) × 3 seeds + full Seaquest mod eval.
@@ -1347,6 +1348,7 @@ def _final_eval_suite_stems() -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1367,6 +1369,7 @@ def _final_eval_suite_stems() -> tuple[
         optim_scale_skills_lr_stems,
         optim_scale_skills_old_eps_stems,
         optim_scale_skills_rerun_stems,
+        optim_scale_skills_transfers_stems,
         optim_scale_sq_stems,
     )
 
@@ -1380,6 +1383,7 @@ def _final_eval_suite_stems() -> tuple[
     pqn_oc = optim_scale_pqn_oc_stems()
     pqn_px = optim_scale_pqn_pixel_stems()
     bases = optim_scale_skills_bases_stems()
+    transfers = optim_scale_skills_transfers_stems()
     lr = optim_scale_skills_lr_stems()
     old_eps = optim_scale_skills_old_eps_stems()
     return (
@@ -1395,6 +1399,7 @@ def _final_eval_suite_stems() -> tuple[
         pqn_oc,
         pqn_px,
         bases,
+        transfers,
         lr,
         old_eps,
     )
@@ -1413,6 +1418,7 @@ def _final_eval_suite_stems() -> tuple[
     OPTIM_SCALE_PQN_OC_STEMS,
     OPTIM_SCALE_PQN_PIXEL_STEMS,
     OPTIM_SCALE_SKILLS_BASES_STEMS,
+    OPTIM_SCALE_SKILLS_TRANSFERS_STEMS,
     OPTIM_SCALE_SKILLS_LR_STEMS,
     OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
 ) = _final_eval_suite_stems()
@@ -2091,6 +2097,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_PROBE_SUITE: OPTIM_SCALE_PROBE_STEMS,
     OPTIM_SCALE_SKILLS_RERUN_SUITE: OPTIM_SCALE_SKILLS_RERUN_STEMS,
     OPTIM_SCALE_SKILLS_BASES_SUITE: OPTIM_SCALE_SKILLS_BASES_STEMS,
+    OPTIM_SCALE_SKILLS_TRANSFERS_SUITE: OPTIM_SCALE_SKILLS_TRANSFERS_STEMS,
     OPTIM_SCALE_SKILLS_LR_SUITE: OPTIM_SCALE_SKILLS_LR_STEMS,
     OPTIM_SCALE_SKILLS_OLD_EPS_SUITE: OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
     OPTIM_SCALE_PQN_OC_SUITE: OPTIM_SCALE_PQN_OC_STEMS,
@@ -3830,6 +3837,12 @@ def main() -> None:
             f"{OPTIM_SCALE_SKILLS_BASES_SUITE}: post-NOOP locked skills "
             "(ε B + LR 2.5e-4+linear) on phoenix / namethisgame / asteroids "
             "(seed=44) + home mod eval. "
+            f"{OPTIM_SCALE_SKILLS_TRANSFERS_SUITE}: same locked recipe on remaining "
+            "transfer scratch envs (spaceinvaders, beamrider, timepilot, pong, "
+            "breakout, freeway) + home mod evals; "
+            "python scripts/materialize_optim_scale.py then "
+            "--suite optim_scale_skills_transfers --gpus … --wait-deps "
+            "--skip-rq-gate --lean. "
             f"{OPTIM_SCALE_SKILLS_LR_SUITE}: short LR probe seed=1 (ε B fixed) — "
             "lr1e4_lin / lr2p5e4_const / lr5e4_lin. "
             f"{OPTIM_SCALE_SKILLS_OLD_EPS_SUITE}: single YAML-ε arm (seed=44). "

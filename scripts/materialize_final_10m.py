@@ -135,7 +135,7 @@ def _paper_core_keys(env: str) -> tuple[str, ...]:
             continue
         if in_core:
             if line.startswith("  - "):
-                keys.append(line[4:].strip())
+                keys.append(line[4:].split("#", 1)[0].strip())
             elif line.strip() and not line.startswith(" "):
                 break
     return tuple(keys) if keys else ("base",)
