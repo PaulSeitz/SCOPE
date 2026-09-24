@@ -292,44 +292,32 @@ def optim_scale_probe_stems() -> tuple[str, ...]:
 
 
 def optim_scale_skills_rerun_stems() -> tuple[str, ...]:
-    """Post-NOOP-fix skill re-runs: 1:1 → eval → εB → eval (interleaved)."""
+    """Post-NOOP-fix skill re-runs: trains first (GPU-shard friendly), then evals."""
     arms = ("1to1", "epsB")
-    out: list[str] = []
-    for arm in arms:
-        stem = probe_skills_stem(arm)
-        out.append(stem)
-        out.append(f"{stem}_eval")
-    return tuple(out)
+    trains = tuple(probe_skills_stem(arm) for arm in arms)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def optim_scale_skills_bases_stems() -> tuple[str, ...]:
-    """Locked recipe on other paper bases (train→eval per env)."""
-    out: list[str] = []
-    for env in BASE_OTHER_ENVS:
-        stem = skills_base_stem(env)
-        out.append(stem)
-        out.append(f"{stem}_eval")
-    return tuple(out)
+    """Locked recipe on other paper bases — trains first for --gpus sharding."""
+    trains = tuple(skills_base_stem(env) for env in BASE_OTHER_ENVS)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def optim_scale_skills_transfers_stems() -> tuple[str, ...]:
-    """Locked recipe on remaining transfer scratch envs (train→eval per env)."""
-    out: list[str] = []
-    for env in TRANSFER_ENVS:
-        stem = skills_transfer_stem(env)
-        out.append(stem)
-        out.append(f"{stem}_eval")
-    return tuple(out)
+    """Locked recipe on remaining transfer scratch envs — trains first for --gpus."""
+    trains = tuple(skills_transfer_stem(env) for env in TRANSFER_ENVS)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def optim_scale_skills_lr_stems() -> tuple[str, ...]:
-    """Short LR probe seed=1 (ε B fixed), train→eval interleaved."""
-    out: list[str] = []
-    for arm, _ in LR_ARMS:
-        stem = skills_lr_stem(arm)
-        out.append(stem)
-        out.append(f"{stem}_eval")
-    return tuple(out)
+    """Short LR probe seed=1 (ε B fixed) — trains first for --gpus sharding."""
+    trains = tuple(skills_lr_stem(arm) for arm, _ in LR_ARMS)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def optim_scale_skills_old_eps_stems() -> tuple[str, ...]:
@@ -359,13 +347,10 @@ def optim_scale_pqn_pixel_stems() -> tuple[str, ...]:
 
 
 def optim_scale_pqn_oc_builds_stems() -> tuple[str, ...]:
-    """Overnight: one seed × locked tandem OC builds (train→eval interleaved)."""
-    out: list[str] = []
-    for mode in OC_BUILD_MODES:
-        stem = pqn_oc_build_stem(mode)
-        out.append(stem)
-        out.append(f"{stem}_eval")
-    return tuple(out)
+    """Overnight: OC builds — trains first for --gpus sharding, then evals."""
+    trains = tuple(pqn_oc_build_stem(mode) for mode in OC_BUILD_MODES)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def _sub_alg_key(body: str, key: str, value: str) -> str:
