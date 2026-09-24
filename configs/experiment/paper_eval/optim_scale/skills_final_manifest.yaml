@@ -1,0 +1,33 @@
+# optim_scale skills final inventory (not runnable).
+bases_suite: optim_scale_skills_bases
+  recipe: ε B (0.2->0.01/0.2) + LR=0.00025+linear + MAX_GRAD_NORM=10.0
+  seed: 44
+  envs: ['phoenix', 'namethisgame', 'asteroids']
+  stems:
+    - optim_scale_skills_bases_phoenix
+    - optim_scale_skills_bases_phoenix_eval
+    - optim_scale_skills_bases_namethisgame
+    - optim_scale_skills_bases_namethisgame_eval
+    - optim_scale_skills_bases_asteroids
+    - optim_scale_skills_bases_asteroids_eval
+lr_suite: optim_scale_skills_lr
+  seed: 1
+  fixed_eps: B
+  arms:
+    - lr1e4_lin: lr=0.0001 (linear)
+    - lr2p5e4_const: lr=0.00025 (const)
+    - lr5e4_lin: lr=0.0005 (linear)
+  stems:
+    - optim_scale_skills_lr_lr1e4_lin_seed1
+    - optim_scale_skills_lr_lr1e4_lin_seed1_eval
+    - optim_scale_skills_lr_lr2p5e4_const_seed1
+    - optim_scale_skills_lr_lr2p5e4_const_seed1_eval
+    - optim_scale_skills_lr_lr5e4_lin_seed1
+    - optim_scale_skills_lr_lr5e4_lin_seed1_eval
+old_eps_suite: optim_scale_skills_old_eps
+  seed: 44
+  eps: 1.0->0.001/0.1
+  lr: 0.00025+linear
+  stems:
+    - optim_scale_skills_old_eps_seed44
+    - optim_scale_skills_old_eps_seed44_eval

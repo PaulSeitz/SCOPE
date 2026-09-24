@@ -20,17 +20,17 @@ CBL mapping (true 1:1 on shared HPs)
 * Probe suite ``optim_scale_probe``: skills-only seed=1 arms that keep the
   YAML outer (32/1024/50M/grad10) but ablate LR/ε — run these before/alongside
   the full tandem-first suite to see what breaks.
-* Flat PQN baselines (pixel + OC), same 1:1 HPs × seeds 44/45/46 + full mod eval:
-  GPU0 = ``optim_scale_pqn_oc``, GPU1 = ``optim_scale_pqn_pixel`` (train→eval
-  sequential per seed).
+* Skills final (post-NOOP):
+  - ``optim_scale_skills_bases``: locked ε B + LR 2.5e-4+linear on other paper
+    bases (phoenix / namethisgame / asteroids), seed=44, home mod eval
+  - ``optim_scale_skills_lr``: short LR probe (seed=1, ε B fixed, Seaquest)
+  - ``optim_scale_skills_old_eps``: single YAML-ε Seaquest arm (seed=44)
 
     python scripts/materialize_optim_scale.py
-    python scripts/materialize_optim_scale.py --dry-run
-
     CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
-      --suite optim_scale_pqn_oc --wait-deps --lean --skip-rq-gate
+      --suite optim_scale_skills_bases --wait-deps --lean --skip-rq-gate
     CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
-      --suite optim_scale_pqn_pixel --wait-deps --lean --skip-rq-gate
+      --suite optim_scale_skills_lr --wait-deps --lean --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -48,6 +48,9 @@ _REF_SRC = Path("/home/paul/Downloads/pqn_jaxatari_pixel_optimal_scaling.yaml")
 
 SUITE = "optim_scale_sq"
 PROBE_SUITE = "optim_scale_probe"
+BASES_SUITE = "optim_scale_skills_bases"
+LR_SUITE = "optim_scale_skills_lr"
+OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 PQN_OC_SUITE = "optim_scale_pqn_oc"
 PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
 BUDGET_TAG = "50m_optim"
@@ -61,6 +64,7 @@ NUM_EPOCHS = 2
 NUM_MINIBATCHES = 256
 LR = 0.00025
 SKILL_LR_SMOKE = 0.0005  # old healthy constant LR
+SKILL_LR_LOW = 0.0001
 MAX_GRAD_NORM = 10.0
 EPS_START = 1.0
 EPS_FINISH = 0.001
@@ -73,6 +77,10 @@ OUT_MODELS = "./outputs/models/paper_eval/optim_scale"
 
 SEEDS = (44, 45, 46)
 PROBE_SEED = 1
+OLD_EPS_SEED = 44  # single YAML-ε comparison arm (Seaquest)
+BASE_SEED = 44
+# Paper bases excluding Seaquest (already covered by post-NOOP probes).
+BASE_OTHER_ENVS: tuple[str, ...] = ("phoenix", "namethisgame", "asteroids")
 
 MOD_KEYS = f10.MOD_KEYS
 
@@ -121,6 +129,83 @@ PROBE_ARMS: tuple[tuple[str, dict], ...] = (
 )
 
 
+def _skill_hp(
+    *,
+    skill_lr: float,
+    lr_linear_decay: bool,
+    eps_start: float,
+    eps_finish: float,
+    eps_decay: float,
+    tag_eps: str,
+) -> dict:
+    return {
+        "skill_lr": skill_lr,
+        "lr_linear_decay": lr_linear_decay,
+        "eps_start": eps_start,
+        "eps_finish": eps_finish,
+        "eps_decay": eps_decay,
+        "tag_lr": f"lr:{skill_lr}",
+        "tag_lr_decay": "lr_decay:linear" if lr_linear_decay else "lr_decay:none",
+        "tag_eps": tag_eps,
+    }
+
+
+# Short LR probe (seed=1, ε B fixed). Skips lr2p5e4_lin (→ epsB multi-seed)
+# and lr5e4_const (→ already probe lr5e4_epsB).
+LR_ARMS: tuple[tuple[str, dict], ...] = (
+    (
+        "lr1e4_lin",
+        _skill_hp(
+            skill_lr=SKILL_LR_LOW,
+            lr_linear_decay=True,
+            eps_start=EPS_B_START,
+            eps_finish=EPS_B_FINISH,
+            eps_decay=EPS_B_DECAY,
+            tag_eps="eps:B",
+        ),
+    ),
+    (
+        "lr2p5e4_const",
+        _skill_hp(
+            skill_lr=LR,
+            lr_linear_decay=False,
+            eps_start=EPS_B_START,
+            eps_finish=EPS_B_FINISH,
+            eps_decay=EPS_B_DECAY,
+            tag_eps="eps:B",
+        ),
+    ),
+    (
+        "lr5e4_lin",
+        _skill_hp(
+            skill_lr=SKILL_LR_SMOKE,
+            lr_linear_decay=True,
+            eps_start=EPS_B_START,
+            eps_finish=EPS_B_FINISH,
+            eps_decay=EPS_B_DECAY,
+            tag_eps="eps:B",
+        ),
+    ),
+)
+
+EPSB_HP = _skill_hp(
+    skill_lr=LR,
+    lr_linear_decay=True,
+    eps_start=EPS_B_START,
+    eps_finish=EPS_B_FINISH,
+    eps_decay=EPS_B_DECAY,
+    tag_eps="eps:B",
+)
+OLD_EPS_HP = _skill_hp(
+    skill_lr=LR,
+    lr_linear_decay=True,
+    eps_start=EPS_START,
+    eps_finish=EPS_FINISH,
+    eps_decay=EPS_DECAY,
+    tag_eps="eps:1to0.001",
+)
+
+
 def skills_stem(seed: int) -> str:
     return f"optim_scale_skills_ego_seed{seed}"
 
@@ -131,6 +216,18 @@ def tandem_stem(seed: int) -> str:
 
 def probe_skills_stem(arm: str) -> str:
     return f"optim_scale_probe_skills_{arm}_seed{PROBE_SEED}"
+
+
+def skills_lr_stem(arm: str) -> str:
+    return f"optim_scale_skills_lr_{arm}_seed{PROBE_SEED}"
+
+
+def skills_old_eps_stem() -> str:
+    return f"optim_scale_skills_old_eps_seed{OLD_EPS_SEED}"
+
+
+def skills_base_stem(env: str) -> str:
+    return f"optim_scale_skills_bases_{env}"
 
 
 def pqn_stem(variant: str, seed: int) -> str:
@@ -163,6 +260,32 @@ def optim_scale_skills_rerun_stems() -> tuple[str, ...]:
         out.append(stem)
         out.append(f"{stem}_eval")
     return tuple(out)
+
+
+def optim_scale_skills_bases_stems() -> tuple[str, ...]:
+    """Locked recipe on other paper bases (train→eval per env)."""
+    out: list[str] = []
+    for env in BASE_OTHER_ENVS:
+        stem = skills_base_stem(env)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
+
+
+def optim_scale_skills_lr_stems() -> tuple[str, ...]:
+    """Short LR probe seed=1 (ε B fixed), train→eval interleaved."""
+    out: list[str] = []
+    for arm, _ in LR_ARMS:
+        stem = skills_lr_stem(arm)
+        out.append(stem)
+        out.append(f"{stem}_eval")
+    return tuple(out)
+
+
+def optim_scale_skills_old_eps_stems() -> tuple[str, ...]:
+    """Single YAML-ε comparison arm (seed=44)."""
+    stem = skills_old_eps_stem()
+    return (stem, f"{stem}_eval")
 
 
 def optim_scale_pqn_oc_stems() -> tuple[str, ...]:
@@ -355,6 +478,7 @@ def _retarget(
     run_name: str,
     kind: str,
     suite: str = SUITE,
+    env: str = "seaquest",
     patch_kwargs: dict | None = None,
 ) -> str:
     body = _patch_1to1(body, kind=kind, suite=suite, **(patch_kwargs or {}))
@@ -376,32 +500,32 @@ def _retarget(
         elif line.strip().startswith("- final_10m_") or line.strip().startswith(
             "- optim_scale_"
         ):
-            out.append(line)
+            out.append(f"- {stem}")
         elif line.startswith("PAPER_EVAL_ARCHITECTURE_OF:"):
             out.append(f"PAPER_EVAL_ARCHITECTURE_OF: {stem}")
         elif line.startswith("PAPER_EVAL_SKILLS_CKPT:"):
             if kind == "skills":
                 ckpt = (
-                    f"{OUT_MODELS}/{stem}/seaquest/"
-                    f"hierarchical_pqn_seaquest_seed{seed}.safetensors"
+                    f"{OUT_MODELS}/{stem}/{env}/"
+                    f"hierarchical_pqn_{env}_seed{seed}.safetensors"
                 )
             else:
                 ckpt = (
-                    f"{OUT_MODELS}/{stem}/seaquest/"
-                    f"hierarchical_pqn_seaquest_seed{seed}_skills.safetensors"
+                    f"{OUT_MODELS}/{stem}/{env}/"
+                    f"hierarchical_pqn_{env}_seed{seed}_skills.safetensors"
                 )
             out.append(f"PAPER_EVAL_SKILLS_CKPT: {ckpt}")
         elif line.startswith("PAPER_EVAL_META_CKPT:"):
             ckpt = (
-                f"{OUT_MODELS}/{stem}/seaquest/"
-                f"hierarchical_pqn_seaquest_seed{seed}_meta.safetensors"
+                f"{OUT_MODELS}/{stem}/{env}/"
+                f"hierarchical_pqn_{env}_seed{seed}_meta.safetensors"
             )
             out.append(f"PAPER_EVAL_META_CKPT: {ckpt}")
         elif line.startswith("PAPER_EVAL_FLAT_PQN_CKPT:"):
             variant = "oc" if "pqn_oc" in stem else "pixel"
             ckpt = (
-                f"{OUT_MODELS}/{stem}/seaquest/"
-                f"flat_pqn_seaquest_{variant}_seed{seed}_vmap0.safetensors"
+                f"{OUT_MODELS}/{stem}/{env}/"
+                f"flat_pqn_{env}_{variant}_seed{seed}_vmap0.safetensors"
             )
             out.append(f"PAPER_EVAL_FLAT_PQN_CKPT: {ckpt}")
         else:
@@ -411,6 +535,9 @@ def _retarget(
     body = body.replace(f"- {f10.STEM_TANDEM_PIXEL}\n", f"- {stem}\n")
     body = body.replace(f"- {f10.STEM_PQN_OC}\n", f"- {stem}\n")
     body = body.replace(f"- {f10.STEM_PQN_PIXEL}\n", f"- {stem}\n")
+    for e in f10.BASE_SKILL_ENVS:
+        body = body.replace(f"- {f10.skills_stem(e)}\n", f"- {stem}\n")
+        body = body.replace(f"- {f10.pqn_pixel_stem(e)}\n", f"- {stem}\n")
     body = body.replace(f"{f10.OUT_MODELS}/", f"{OUT_MODELS}/")
     body = body.replace("PLACEHOLDER", f"{OUT_MODELS}/{stem}")
     return body
@@ -582,6 +709,173 @@ def _probe_skills_eval(arm: str, hp: dict) -> str:
     )
 
 
+def _skills_hp_train(
+    *,
+    stem: str,
+    seed: int,
+    suite: str,
+    hp: dict,
+    header: str,
+    run_name: str,
+    scale_tag: str,
+    env: str = "seaquest",
+) -> str:
+    base = f10._skills_train(env)
+    return _retarget(
+        base,
+        stem=stem,
+        seed=seed,
+        suite=suite,
+        env=env,
+        patch_kwargs={
+            "skill_lr": hp["skill_lr"],
+            "lr_linear_decay": hp["lr_linear_decay"],
+            "eps_start": hp["eps_start"],
+            "eps_finish": hp["eps_finish"],
+            "eps_decay": hp["eps_decay"],
+            "tag_lr": hp["tag_lr"],
+            "tag_lr_decay": hp["tag_lr_decay"],
+            "tag_eps": hp["tag_eps"],
+            "scale_tag": scale_tag,
+        },
+        header=header,
+        run_name=run_name,
+        kind="skills",
+    )
+
+
+def _skills_hp_eval(
+    *,
+    stem: str,
+    seed: int,
+    suite: str,
+    hp: dict,
+    header: str,
+    run_name: str,
+    scale_tag: str,
+    env: str = "seaquest",
+) -> str:
+    base = f10._skills_eval(env)
+    return _retarget(
+        base,
+        stem=stem,
+        seed=seed,
+        suite=suite,
+        env=env,
+        patch_kwargs={
+            "skill_lr": hp["skill_lr"],
+            "lr_linear_decay": hp["lr_linear_decay"],
+            "eps_start": hp["eps_start"],
+            "eps_finish": hp["eps_finish"],
+            "eps_decay": hp["eps_decay"],
+            "tag_lr": hp["tag_lr"],
+            "tag_lr_decay": hp["tag_lr_decay"],
+            "tag_eps": hp["tag_eps"],
+            "scale_tag": scale_tag,
+        },
+        header=header,
+        run_name=run_name,
+        kind="skills",
+    )
+
+
+def _base_env_train(env: str) -> str:
+    stem = skills_base_stem(env)
+    prefix = f10.BASE_SKILL_ENVS[env]["prefix"]
+    return _skills_hp_train(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=BASES_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# {env} ego skills — optim_scale locked recipe "
+            f"(ε B + LR={LR}+linear; {NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}); "
+            f"seed={BASE_SEED}."
+        ),
+        run_name=f"{prefix}_{BASES_SUITE}_{BUDGET_TAG}",
+        scale_tag="pqn_optim_epsB",
+    )
+
+
+def _base_env_eval(env: str) -> str:
+    stem = skills_base_stem(env)
+    prefix = f10.BASE_SKILL_ENVS[env]["prefix"]
+    return _skills_hp_eval(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=BASES_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=f"# Home mod eval — optim_scale skills bases {env} seed{BASE_SEED}.",
+        run_name=f"{prefix}_{BASES_SUITE}_eval_{BUDGET_TAG}",
+        scale_tag="pqn_optim_epsB",
+    )
+
+
+def _lr_train(arm: str, hp: dict) -> str:
+    stem = skills_lr_stem(arm)
+    decay = "linear" if hp["lr_linear_decay"] else "const"
+    return _skills_hp_train(
+        stem=stem,
+        seed=PROBE_SEED,
+        suite=LR_SUITE,
+        hp=hp,
+        header=(
+            f"# Seaquest ego skills LR probe seed={PROBE_SEED} arm={arm}: "
+            f"SKILL_LR={hp['skill_lr']} ({decay}); ε B; "
+            f"outer 1:1 ({NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES})."
+        ),
+        run_name=f"sq_{LR_SUITE}_{arm}_seed{PROBE_SEED}_{BUDGET_TAG}",
+        scale_tag=f"pqn_optim_lr_{arm}",
+    )
+
+
+def _lr_eval(arm: str, hp: dict) -> str:
+    stem = skills_lr_stem(arm)
+    return _skills_hp_eval(
+        stem=stem,
+        seed=PROBE_SEED,
+        suite=LR_SUITE,
+        hp=hp,
+        header=f"# Home mod eval — optim_scale skills LR probe {arm} seed{PROBE_SEED}.",
+        run_name=f"sq_{LR_SUITE}_eval_{arm}_seed{PROBE_SEED}_{BUDGET_TAG}",
+        scale_tag=f"pqn_optim_lr_{arm}",
+    )
+
+
+def _old_eps_train() -> str:
+    stem = skills_old_eps_stem()
+    return _skills_hp_train(
+        stem=stem,
+        seed=OLD_EPS_SEED,
+        suite=OLD_EPS_SUITE,
+        hp=OLD_EPS_HP,
+        header=(
+            f"# Seaquest ego skills — single YAML-ε arm "
+            f"(ε {EPS_START}→{EPS_FINISH}/d={EPS_DECAY}; LR={LR}+linear); "
+            f"seed={OLD_EPS_SEED}."
+        ),
+        run_name=f"sq_{OLD_EPS_SUITE}_seed{OLD_EPS_SEED}_{BUDGET_TAG}",
+        scale_tag="pqn_optim_old_eps",
+    )
+
+
+def _old_eps_eval() -> str:
+    stem = skills_old_eps_stem()
+    return _skills_hp_eval(
+        stem=stem,
+        seed=OLD_EPS_SEED,
+        suite=OLD_EPS_SUITE,
+        hp=OLD_EPS_HP,
+        header=(
+            f"# Home mod eval — optim_scale skills old-ε seed{OLD_EPS_SEED}."
+        ),
+        run_name=f"sq_{OLD_EPS_SUITE}_eval_seed{OLD_EPS_SEED}_{BUDGET_TAG}",
+        scale_tag="pqn_optim_old_eps",
+    )
+
+
 def _manifest() -> str:
     return f10._lines(
         [
@@ -628,6 +922,37 @@ def _probe_manifest() -> str:
         )
     lines.append("stems:")
     lines.extend(f"  - {s}" for s in optim_scale_probe_stems())
+    return f10._lines(lines)
+
+
+def _skills_final_manifest() -> str:
+    lines = [
+        "# optim_scale skills final inventory (not runnable).",
+        f"bases_suite: {BASES_SUITE}",
+        f"  recipe: ε B ({EPS_B_START}->{EPS_B_FINISH}/{EPS_B_DECAY}) "
+        f"+ LR={LR}+linear + MAX_GRAD_NORM={MAX_GRAD_NORM}",
+        f"  seed: {BASE_SEED}",
+        f"  envs: {list(BASE_OTHER_ENVS)}",
+        "  stems:",
+        *[f"    - {s}" for s in optim_scale_skills_bases_stems()],
+        f"lr_suite: {LR_SUITE}",
+        f"  seed: {PROBE_SEED}",
+        "  fixed_eps: B",
+        "  arms:",
+    ]
+    for arm, hp in LR_ARMS:
+        decay = "linear" if hp["lr_linear_decay"] else "const"
+        lines.append(f"    - {arm}: lr={hp['skill_lr']} ({decay})")
+    lines.append("  stems:")
+    lines.extend(f"    - {s}" for s in optim_scale_skills_lr_stems())
+    lines += [
+        f"old_eps_suite: {OLD_EPS_SUITE}",
+        f"  seed: {OLD_EPS_SEED}",
+        f"  eps: {EPS_START}->{EPS_FINISH}/{EPS_DECAY}",
+        f"  lr: {LR}+linear",
+        "  stems:",
+        *[f"    - {s}" for s in optim_scale_skills_old_eps_stems()],
+    ]
     return f10._lines(lines)
 
 
@@ -683,6 +1008,32 @@ def materialize(*, dry: bool) -> None:
     pairs.append((_OUT / "probe_manifest.yaml", _probe_manifest()))
 
     print(
+        f"optim_scale_skills_bases → εB recipe × envs={BASE_OTHER_ENVS} "
+        f"seed={BASE_SEED}"
+    )
+    for env in BASE_OTHER_ENVS:
+        stem = skills_base_stem(env)
+        pairs.append((_OUT / f"{stem}.yaml", _base_env_train(env)))
+        pairs.append((_OUT / f"{stem}_eval.yaml", _base_env_eval(env)))
+
+    print(
+        f"optim_scale_skills_lr → seed={PROBE_SEED} arms="
+        f"{[a for a, _ in LR_ARMS]}"
+    )
+    for arm, hp in LR_ARMS:
+        stem = skills_lr_stem(arm)
+        pairs.append((_OUT / f"{stem}.yaml", _lr_train(arm, hp)))
+        pairs.append((_OUT / f"{stem}_eval.yaml", _lr_eval(arm, hp)))
+
+    print(
+        f"optim_scale_skills_old_eps → single YAML-ε seed={OLD_EPS_SEED}"
+    )
+    old_stem = skills_old_eps_stem()
+    pairs.append((_OUT / f"{old_stem}.yaml", _old_eps_train()))
+    pairs.append((_OUT / f"{old_stem}_eval.yaml", _old_eps_eval()))
+    pairs.append((_OUT / "skills_final_manifest.yaml", _skills_final_manifest()))
+
+    print(
         f"optim_scale_pqn → pixel+OC × seeds={SEEDS} "
         f"(suites {PQN_OC_SUITE} / {PQN_PIXEL_SUITE})"
     )
@@ -706,19 +1057,17 @@ def materialize(*, dry: bool) -> None:
         print(f"would copy ref → {ref_dst.relative_to(_ROOT)}")
 
     print(
-        "\nLaunch probes first (skills-only):\n"
-        f"  python scripts/run_paper_eval.py --suite {PROBE_SUITE} "
+        "\nThesis skills (post-NOOP):\n"
+        f"  # locked recipe on other paper bases\n"
+        f"  python scripts/run_paper_eval.py --suite {BASES_SUITE} "
         f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
-        "Post-NOOP-fix skill re-run (1:1→eval→εB→eval):\n"
-        "  # stash collapsed ckpts so train actually restarts\n"
-        "  mv outputs/models/paper_eval/optim_scale/optim_scale_probe_skills_1to1_seed1{,_pre_noopfix}\n"
-        "  mv outputs/models/paper_eval/optim_scale/optim_scale_probe_skills_epsB_seed1{,_pre_noopfix}\n"
-        "  python scripts/run_paper_eval.py --suite optim_scale_skills_rerun "
-        "--gpus 0 --wait-deps --skip-rq-gate --lean\n"
-        "Full 1:1 suite (tandem-first):\n"
-        f"  python scripts/run_paper_eval.py --suite {SUITE} "
+        f"  # short LR probe (ε B, Seaquest)\n"
+        f"  python scripts/run_paper_eval.py --suite {LR_SUITE} "
+        f"--gpus 1 --wait-deps --skip-rq-gate --lean\n"
+        f"  # single old YAML-ε arm (Seaquest)\n"
+        f"  python scripts/run_paper_eval.py --suite {OLD_EPS_SUITE} "
         f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
-        "Flat PQN baselines (2 GPUs, OC vs pixel, train→eval × 3 seeds):\n"
+        "Flat PQN baselines (2 GPUs):\n"
         f"  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py "
         f"--suite {PQN_OC_SUITE} --gpus 0 --wait-deps --skip-rq-gate --lean &\n"
         f"  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py "
