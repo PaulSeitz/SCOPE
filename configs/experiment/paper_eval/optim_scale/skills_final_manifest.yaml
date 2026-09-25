@@ -5,26 +5,26 @@ bases_suite: optim_scale_skills_bases
   envs: ['phoenix', 'namethisgame', 'asteroids']
   stems:
     - optim_scale_skills_bases_phoenix
-    - optim_scale_skills_bases_phoenix_eval
     - optim_scale_skills_bases_namethisgame
-    - optim_scale_skills_bases_namethisgame_eval
     - optim_scale_skills_bases_asteroids
+    - optim_scale_skills_bases_phoenix_eval
+    - optim_scale_skills_bases_namethisgame_eval
     - optim_scale_skills_bases_asteroids_eval
 transfers_suite: optim_scale_skills_transfers
   seed: 44
   envs: ['spaceinvaders', 'beamrider', 'timepilot', 'pong', 'breakout', 'freeway']
   stems:
     - optim_scale_skills_transfers_spaceinvaders
-    - optim_scale_skills_transfers_spaceinvaders_eval
     - optim_scale_skills_transfers_beamrider
-    - optim_scale_skills_transfers_beamrider_eval
     - optim_scale_skills_transfers_timepilot
-    - optim_scale_skills_transfers_timepilot_eval
     - optim_scale_skills_transfers_pong
-    - optim_scale_skills_transfers_pong_eval
     - optim_scale_skills_transfers_breakout
-    - optim_scale_skills_transfers_breakout_eval
     - optim_scale_skills_transfers_freeway
+    - optim_scale_skills_transfers_spaceinvaders_eval
+    - optim_scale_skills_transfers_beamrider_eval
+    - optim_scale_skills_transfers_timepilot_eval
+    - optim_scale_skills_transfers_pong_eval
+    - optim_scale_skills_transfers_breakout_eval
     - optim_scale_skills_transfers_freeway_eval
 lr_suite: optim_scale_skills_lr
   seed: 1
@@ -35,10 +35,10 @@ lr_suite: optim_scale_skills_lr
     - lr5e4_lin: lr=0.0005 (linear)
   stems:
     - optim_scale_skills_lr_lr1e4_lin_seed1
-    - optim_scale_skills_lr_lr1e4_lin_seed1_eval
     - optim_scale_skills_lr_lr2p5e4_const_seed1
-    - optim_scale_skills_lr_lr2p5e4_const_seed1_eval
     - optim_scale_skills_lr_lr5e4_lin_seed1
+    - optim_scale_skills_lr_lr1e4_lin_seed1_eval
+    - optim_scale_skills_lr_lr2p5e4_const_seed1_eval
     - optim_scale_skills_lr_lr5e4_lin_seed1_eval
 old_eps_suite: optim_scale_skills_old_eps
   seed: 44

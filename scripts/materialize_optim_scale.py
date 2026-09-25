@@ -24,15 +24,16 @@ CBL mapping (true 1:1 on shared HPs)
   - ``optim_scale_skills_bases``: phoenix / namethisgame / asteroids (done)
   - ``optim_scale_skills_transfers``: remaining EVAL_PLAN transfer scratch envs
     (spaceinvaders, beamrider, timepilot, pong, breakout, freeway)
+  - ``optim_scale_pqn_pixel_envs``: flat PQN pixel @ 1:1 HPs × seeds 44/45/46
+    on bases (phoenix/namethisgame/asteroids) + transfers (same paper_core mods)
   - ``optim_scale_pqn_oc_builds``: flat PQN on tandem OC feature builds
     (oc_simple_rel_role / oc_simple_role / oc_embed) × seed 44 + home eval
   - ``optim_scale_skills_lr`` / ``optim_scale_skills_old_eps``: Seaquest HP probes
 
     python scripts/materialize_optim_scale.py
-    CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py \\
-      --suite optim_scale_skills_transfers --wait-deps --lean --skip-rq-gate
-    CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py \\
-      --suite optim_scale_pqn_oc_builds --wait-deps --lean --skip-rq-gate
+    python scripts/run_paper_eval.py \\
+      --suite optim_scale_pqn_pixel_envs --gpus 0,1,2,3,4,5,6,7 \\
+      --wait-deps --lean --skip-rq-gate
 """
 
 from __future__ import annotations
@@ -56,6 +57,8 @@ LR_SUITE = "optim_scale_skills_lr"
 OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 PQN_OC_SUITE = "optim_scale_pqn_oc"
 PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
+# Flat PQN pixel on non-Seaquest bases + transfer envs (matched vs skills).
+PQN_PIXEL_ENVS_SUITE = "optim_scale_pqn_pixel_envs"
 # Flat PQN on tandem-candidate OC feature builds (overnight format probe).
 PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
 BUDGET_TAG = "50m_optim"
@@ -96,6 +99,8 @@ TRANSFER_ENV_META: dict[str, dict] = {
     "freeway": {"max_objects": 12, "heu": "env_specific", "prefix": "fw", "rq": 2},
 }
 TRANSFER_ENVS: tuple[str, ...] = tuple(TRANSFER_ENV_META)
+# Non-Seaquest envs that need matched flat PQN pixel baselines (3 seeds).
+PQN_PIXEL_ENVS: tuple[str, ...] = BASE_OTHER_ENVS + TRANSFER_ENVS
 
 # Tandem-candidate OC feature builds for flat PQN (same META_INPUT_MODE builders).
 OC_BUILD_MODES: tuple[str, ...] = (
@@ -271,6 +276,11 @@ def pqn_stem(variant: str, seed: int) -> str:
     return f"optim_scale_pqn_{variant}_seed{seed}"
 
 
+def pqn_pixel_env_stem(env: str, seed: int) -> str:
+    """Flat PQN pixel on a non-Seaquest env (bases or transfers)."""
+    return f"optim_scale_pqn_pixel_{env}_seed{seed}"
+
+
 def pqn_oc_build_stem(mode: str, seed: int = OC_BUILD_SEED) -> str:
     return f"optim_scale_pqn_oc_build_{_oc_build_token(mode)}_seed{seed}"
 
@@ -344,6 +354,15 @@ def optim_scale_pqn_pixel_stems() -> tuple[str, ...]:
         out.append(stem)
         out.append(f"{stem}_eval")
     return tuple(out)
+
+
+def optim_scale_pqn_pixel_envs_stems() -> tuple[str, ...]:
+    """Bases+transfers flat PQN pixel — trains first for --gpus sharding."""
+    trains = tuple(
+        pqn_pixel_env_stem(env, seed) for env in PQN_PIXEL_ENVS for seed in SEEDS
+    )
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def optim_scale_pqn_oc_builds_stems() -> tuple[str, ...]:
@@ -629,6 +648,141 @@ def _pqn_eval(*, variant: str, seed: int) -> str:
         run_name=f"sq_{suite}_eval_seed{seed}_{BUDGET_TAG}_1to1",
         kind="flat_pqn",
     )
+
+
+def _pqn_pixel_env_train(env: str, seed: int) -> str:
+    """Flat PQN pixel train for a non-Seaquest base/transfer env."""
+    meta = _env_meta(env)
+    stem = pqn_pixel_env_stem(env, seed)
+    role = "base" if env in BASE_OTHER_ENVS else "transfer"
+    rq = int(meta["rq"])
+    prefix = meta["prefix"]
+    return f10._lines(
+        [
+            f"# Flat PQN pixel — {env} optim_scale 1:1 "
+            f"({NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}; LR={LR}+linear decay; "
+            f"MAX_GRAD_NORM={MAX_GRAD_NORM:g}; ε {EPS_START}→{EPS_FINISH}); "
+            f"seed={seed}.",
+            f"PAPER_EVAL_RQ: {rq}",
+            "PAPER_EVAL_PHASE: train",
+            "PAPER_EVAL_KIND: flat_pqn",
+            f"PAPER_EVAL_MODS: {env}",
+            "PAPER_EVAL_REQUIRES_RQ1: []",
+            "NUM_SEEDS: 1",
+            "ALG_NAME: flat_pqn",
+            f"ENV_NAME: {env}",
+            "TRAIN_MODE: flat_pqn",
+            "OBJECT_CENTRIC: false",
+            "PIXEL_RESIZE: true",
+            "PIXEL_RESIZE_SHAPE:",
+            "- 84",
+            "- 84",
+            "PIXEL_GRAYSCALE: true",
+            "USE_NATIVE_DOWNSCALING: true",
+            "NORM_TYPE: layer_norm",
+            "NORM_INPUT: false",
+            "LR_LINEAR_DECAY: true",
+            f"SAVE_PATH: {OUT_MODELS}/{stem}",
+            f"WANDB_RUN_NAME: {prefix}_{PQN_PIXEL_ENVS_SUITE}_seed{seed}_{BUDGET_TAG}",
+            "WANDB_TAGS:",
+            f"- suite:{PQN_PIXEL_ENVS_SUITE}",
+            f"- rq:{rq}",
+            f"- env:{env}",
+            f"- role:{role}",
+            "- train_mode:flat_pqn",
+            "- variant:pqn_pixel_paper_hps",
+            f"- budget:{BUDGET_TAG}",
+            "- scale:pqn_optim_1to1",
+            f"- num_envs:{NUM_ENVS}",
+            f"- num_steps:{NUM_STEPS}",
+            f"- num_updates:{NUM_UPDATES}",
+            f"- num_epochs:{NUM_EPOCHS}",
+            f"- num_minibatches:{NUM_MINIBATCHES}",
+            f"- lr:{LR}",
+            "- lr_decay:linear",
+            f"- max_grad_norm:{int(MAX_GRAD_NORM)}",
+            f"- eps:{EPS_START}to{EPS_FINISH}",
+            f"TOTAL_TIMESTEPS: {TIMESTEPS}",
+            f"TOTAL_TIMESTEPS_DECAY: {TIMESTEPS_DECAY}",
+            f"NUM_ENVS: {NUM_ENVS}",
+            f"NUM_STEPS: {NUM_STEPS}",
+            f"NUM_EPOCHS: {NUM_EPOCHS}",
+            f"NUM_MINIBATCHES: {NUM_MINIBATCHES}",
+            "FRAME_SKIP: 4",
+            "FRAME_STACK_SIZE: 4",
+            "FIRST_FIRE: true",
+            "STICKY_ACTIONS: false",
+            "EPISODIC_LIFE: true",
+            "CLIP_REWARD: true",
+            "GAMMA: 0.99",
+            "LAMBDA: 0.65",
+            f"LR: {LR}",
+            f"MAX_GRAD_NORM: {MAX_GRAD_NORM}",
+            "HIDDEN_SIZE: 128",
+            "NUM_LAYERS: 2",
+            f"EPS_START: {EPS_START}",
+            f"EPS_FINISH: {EPS_FINISH}",
+            f"EPS_DECAY: {EPS_DECAY}",
+            "GAME_MODS: null",
+            "EVAL_GAME_MODS: null",
+            f"SEED: {seed}",
+        ]
+    )
+
+
+def _pqn_pixel_env_eval(env: str, seed: int) -> str:
+    """Home paper_core mod eval for non-Seaquest flat PQN pixel."""
+    meta = _env_meta(env)
+    stem = pqn_pixel_env_stem(env, seed)
+    role = "base" if env in BASE_OTHER_ENVS else "transfer"
+    rq = int(meta["rq"])
+    prefix = meta["prefix"]
+    mod_keys = f10._paper_core_keys(env)
+    ckpt = (
+        f"{OUT_MODELS}/{stem}/{env}/"
+        f"flat_pqn_{env}_pixel_seed{seed}_vmap0.safetensors"
+    )
+    lines = [
+        f"# Home mod eval — optim_scale 1:1 flat PQN pixel {env} seed{seed}.",
+        f"PAPER_EVAL_RQ: {rq}",
+        "PAPER_EVAL_PHASE: eval",
+        "PAPER_EVAL_KIND: flat_pqn",
+        f"PAPER_EVAL_MODS: {env}",
+    ]
+    lines += f10._mod_keys_yaml(mod_keys)
+    lines += [
+        "PAPER_EVAL_REQUIRES_RQ1:",
+        f"- {stem}",
+        f"PAPER_EVAL_FLAT_PQN_CKPT: {ckpt}",
+        "PAPER_EVAL_OBJECT_CENTRIC: false",
+        f"PAPER_EVAL_ARCHITECTURE_OF: {stem}",
+        "NUM_SEEDS: 1",
+        "ALG_NAME: flat_pqn",
+        f"ENV_NAME: {env}",
+        "OBJECT_CENTRIC: false",
+        "PIXEL_RESIZE: true",
+        "PIXEL_RESIZE_SHAPE:",
+        "- 84",
+        "- 84",
+        "PIXEL_GRAYSCALE: true",
+        "USE_NATIVE_DOWNSCALING: true",
+        f"SAVE_PATH: {OUT_MODELS}/{stem}",
+        f"WANDB_RUN_NAME: {prefix}_{PQN_PIXEL_ENVS_SUITE}_eval_seed{seed}_{BUDGET_TAG}",
+        "WANDB_TAGS:",
+        f"- suite:{PQN_PIXEL_ENVS_SUITE}",
+        f"- rq:{rq}",
+        f"- env:{env}",
+        f"- role:{role}",
+        "- phase:mod_eval",
+        "- train_mode:flat_pqn",
+        "- variant:pqn_pixel",
+        f"- budget:{BUDGET_TAG}",
+        "- scale:pqn_optim_1to1",
+        f"SEED: {seed}",
+        f"EVAL_SEED: {seed + 10_000}",
+        "EVAL_NUM_SEEDS: 3",
+    ]
+    return f10._lines(lines)
 
 
 def _pqn_oc_build_train(mode: str, *, seed: int = OC_BUILD_SEED) -> str:
@@ -1336,7 +1490,8 @@ def _pqn_manifest() -> str:
     return f10._lines(
         [
             "# optim_scale flat PQN inventory (not runnable).",
-            f"suites: [{PQN_OC_SUITE}, {PQN_PIXEL_SUITE}, {PQN_OC_BUILDS_SUITE}]",
+            f"suites: [{PQN_OC_SUITE}, {PQN_PIXEL_SUITE}, {PQN_PIXEL_ENVS_SUITE}, "
+            f"{PQN_OC_BUILDS_SUITE}]",
             f"budget_tag: {BUDGET_TAG}",
             f"total_timesteps: {TIMESTEPS}",
             f"num_envs: {NUM_ENVS}",
@@ -1354,6 +1509,11 @@ def _pqn_manifest() -> str:
             *[f"  - {s}" for s in optim_scale_pqn_oc_stems()],
             f"gpu1_pixel_stems:",
             *[f"  - {s}" for s in optim_scale_pqn_pixel_stems()],
+            f"pixel_envs_suite: {PQN_PIXEL_ENVS_SUITE}",
+            f"  envs: {list(PQN_PIXEL_ENVS)}",
+            f"  seeds: {list(SEEDS)}",
+            "  stems:",
+            *[f"    - {s}" for s in optim_scale_pqn_pixel_envs_stems()],
             f"oc_builds_suite: {PQN_OC_BUILDS_SUITE}",
             f"  seed: {OC_BUILD_SEED}",
             f"  modes: {list(OC_BUILD_MODES)}",
@@ -1437,6 +1597,18 @@ def materialize(*, dry: bool) -> None:
     pairs.append((_OUT / "pqn_manifest.yaml", _pqn_manifest()))
 
     print(
+        f"optim_scale_pqn_pixel_envs → envs={PQN_PIXEL_ENVS} × seeds={SEEDS} "
+        f"(suite {PQN_PIXEL_ENVS_SUITE})"
+    )
+    for env in PQN_PIXEL_ENVS:
+        for seed in SEEDS:
+            stem = pqn_pixel_env_stem(env, seed)
+            pairs.append((_OUT / f"{stem}.yaml", _pqn_pixel_env_train(env, seed)))
+            pairs.append(
+                (_OUT / f"{stem}_eval.yaml", _pqn_pixel_env_eval(env, seed))
+            )
+
+    print(
         f"optim_scale_pqn_oc_builds → modes={list(OC_BUILD_MODES)} "
         f"seed={OC_BUILD_SEED}"
     )
@@ -1461,10 +1633,13 @@ def materialize(*, dry: bool) -> None:
         f"  # remaining transfer scratch envs + home evals\n"
         f"  python scripts/run_paper_eval.py --suite {TRANSFERS_SUITE} "
         f"--gpus 0,1 --wait-deps --skip-rq-gate --lean\n"
+        f"  # matched flat PQN pixel on bases+transfers (3 seeds, same mods)\n"
+        f"  python scripts/run_paper_eval.py --suite {PQN_PIXEL_ENVS_SUITE} "
+        f"--gpus 0,1,2,3,4,5,6,7 --wait-deps --skip-rq-gate --lean\n"
         f"  # overnight free GPU: tandem OC feature builds as flat PQN\n"
         f"  python scripts/run_paper_eval.py --suite {PQN_OC_BUILDS_SUITE} "
         f"--gpus 0 --wait-deps --skip-rq-gate --lean\n"
-        "Flat PQN baselines (2 GPUs):\n"
+        "Flat PQN Seaquest baselines (2 GPUs):\n"
         f"  CUDA_VISIBLE_DEVICES=0 python scripts/run_paper_eval.py "
         f"--suite {PQN_OC_SUITE} --gpus 0 --wait-deps --skip-rq-gate --lean &\n"
         f"  CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py "

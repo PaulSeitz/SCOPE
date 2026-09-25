@@ -1281,6 +1281,8 @@ OPTIM_SCALE_SKILLS_OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 # Run on two GPUs: GPU0=OC, GPU1=pixel (train→eval sequential per seed).
 OPTIM_SCALE_PQN_OC_SUITE = "optim_scale_pqn_oc"
 OPTIM_SCALE_PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
+# Flat PQN pixel @ 1:1 HPs × 3 seeds on bases+transfers (matched vs skills mods).
+OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE = "optim_scale_pqn_pixel_envs"
 OPTIM_SCALE_PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
@@ -1351,6 +1353,7 @@ def _final_eval_suite_stems() -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1366,6 +1369,7 @@ def _final_eval_suite_stems() -> tuple[
     from materialize_optim_scale import (  # type: ignore
         optim_scale_pqn_oc_builds_stems,
         optim_scale_pqn_oc_stems,
+        optim_scale_pqn_pixel_envs_stems,
         optim_scale_pqn_pixel_stems,
         optim_scale_probe_stems,
         optim_scale_skills_bases_stems,
@@ -1385,6 +1389,7 @@ def _final_eval_suite_stems() -> tuple[
     rerun = optim_scale_skills_rerun_stems()
     pqn_oc = optim_scale_pqn_oc_stems()
     pqn_px = optim_scale_pqn_pixel_stems()
+    pqn_px_envs = optim_scale_pqn_pixel_envs_stems()
     pqn_oc_builds = optim_scale_pqn_oc_builds_stems()
     bases = optim_scale_skills_bases_stems()
     transfers = optim_scale_skills_transfers_stems()
@@ -1402,6 +1407,7 @@ def _final_eval_suite_stems() -> tuple[
         rerun,
         pqn_oc,
         pqn_px,
+        pqn_px_envs,
         pqn_oc_builds,
         bases,
         transfers,
@@ -1422,6 +1428,7 @@ def _final_eval_suite_stems() -> tuple[
     OPTIM_SCALE_SKILLS_RERUN_STEMS,
     OPTIM_SCALE_PQN_OC_STEMS,
     OPTIM_SCALE_PQN_PIXEL_STEMS,
+    OPTIM_SCALE_PQN_PIXEL_ENVS_STEMS,
     OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
     OPTIM_SCALE_SKILLS_BASES_STEMS,
     OPTIM_SCALE_SKILLS_TRANSFERS_STEMS,
@@ -2108,6 +2115,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_SKILLS_OLD_EPS_SUITE: OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
     OPTIM_SCALE_PQN_OC_SUITE: OPTIM_SCALE_PQN_OC_STEMS,
     OPTIM_SCALE_PQN_PIXEL_SUITE: OPTIM_SCALE_PQN_PIXEL_STEMS,
+    OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE: OPTIM_SCALE_PQN_PIXEL_ENVS_STEMS,
     OPTIM_SCALE_PQN_OC_BUILDS_SUITE: OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
@@ -3860,6 +3868,13 @@ def main() -> None:
             "python scripts/materialize_optim_scale.py then "
             "CUDA_VISIBLE_DEVICES=0 … --suite optim_scale_pqn_oc and "
             "CUDA_VISIBLE_DEVICES=1 … --suite optim_scale_pqn_pixel. "
+            f"{OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE}: flat PQN pixel @ 1:1 HPs × "
+            "seeds 44/45/46 on phoenix/namethisgame/asteroids + transfer envs "
+            "(SI/BR/TP/Pong/Breakout/Freeway) + same paper_core mod evals as "
+            "skills — matched skills-vs-PQN robustness; trains-first for "
+            "--gpus sharding; "
+            "--suite optim_scale_pqn_pixel_envs --gpus … --wait-deps "
+            "--skip-rq-gate --lean. "
             f"{OPTIM_SCALE_PQN_OC_BUILDS_SUITE}: flat PQN on tandem OC feature "
             "builds (oc_simple_rel_role / oc_simple_role / oc_embed) × seed 44 "
             "+ home mod eval — overnight format probe; "
