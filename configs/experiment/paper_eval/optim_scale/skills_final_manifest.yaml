@@ -26,6 +26,39 @@ transfers_suite: optim_scale_skills_transfers
     - optim_scale_skills_transfers_pong_eval
     - optim_scale_skills_transfers_breakout_eval
     - optim_scale_skills_transfers_freeway_eval
+clip_foils_suite: optim_scale_skills_clip_foils
+  seed: 44
+  clips: [10, 50]
+  envs: ['seaquest', 'phoenix', 'asteroids', 'spaceinvaders', 'beamrider', 'timepilot', 'pong']
+  stems:
+    - optim_scale_skills_clip10_seaquest
+    - optim_scale_skills_clip10_phoenix
+    - optim_scale_skills_clip10_asteroids
+    - optim_scale_skills_clip10_spaceinvaders
+    - optim_scale_skills_clip10_beamrider
+    - optim_scale_skills_clip10_timepilot
+    - optim_scale_skills_clip10_pong
+    - optim_scale_skills_clip50_seaquest
+    - optim_scale_skills_clip50_phoenix
+    - optim_scale_skills_clip50_asteroids
+    - optim_scale_skills_clip50_spaceinvaders
+    - optim_scale_skills_clip50_beamrider
+    - optim_scale_skills_clip50_timepilot
+    - optim_scale_skills_clip50_pong
+    - optim_scale_skills_clip10_seaquest_eval
+    - optim_scale_skills_clip10_phoenix_eval
+    - optim_scale_skills_clip10_asteroids_eval
+    - optim_scale_skills_clip10_spaceinvaders_eval
+    - optim_scale_skills_clip10_beamrider_eval
+    - optim_scale_skills_clip10_timepilot_eval
+    - optim_scale_skills_clip10_pong_eval
+    - optim_scale_skills_clip50_seaquest_eval
+    - optim_scale_skills_clip50_phoenix_eval
+    - optim_scale_skills_clip50_asteroids_eval
+    - optim_scale_skills_clip50_spaceinvaders_eval
+    - optim_scale_skills_clip50_beamrider_eval
+    - optim_scale_skills_clip50_timepilot_eval
+    - optim_scale_skills_clip50_pong_eval
 lr_suite: optim_scale_skills_lr
   seed: 1
   fixed_eps: B

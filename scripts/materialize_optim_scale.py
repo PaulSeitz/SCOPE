@@ -26,13 +26,15 @@ CBL mapping (true 1:1 on shared HPs)
     (spaceinvaders, beamrider, timepilot, pong, breakout, freeway)
   - ``optim_scale_pqn_pixel_envs``: flat PQN pixel @ 1:1 HPs × seeds 44/45/46
     on bases (phoenix/namethisgame/asteroids) + transfers (same paper_core mods)
+  - ``optim_scale_skills_clip_foils``: locked εB × clip10/clip50 on Seaquest +
+    robustness-fail envs (phoenix/asteroids/SI/BR/TP/Pong) — distance regime probe
   - ``optim_scale_pqn_oc_builds``: flat PQN on tandem OC feature builds
     (oc_simple_rel_role / oc_simple_role / oc_embed) × seed 44 + home eval
   - ``optim_scale_skills_lr`` / ``optim_scale_skills_old_eps``: Seaquest HP probes
 
     python scripts/materialize_optim_scale.py
     python scripts/run_paper_eval.py \\
-      --suite optim_scale_pqn_pixel_envs --gpus 0,1,2,3,4,5,6,7 \\
+      --suite optim_scale_skills_clip_foils --gpus 0,1 \\
       --wait-deps --lean --skip-rq-gate
 """
 
@@ -55,6 +57,7 @@ BASES_SUITE = "optim_scale_skills_bases"
 TRANSFERS_SUITE = "optim_scale_skills_transfers"
 LR_SUITE = "optim_scale_skills_lr"
 OLD_EPS_SUITE = "optim_scale_skills_old_eps"
+CLIP_FOILS_SUITE = "optim_scale_skills_clip_foils"
 PQN_OC_SUITE = "optim_scale_pqn_oc"
 PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
 # Flat PQN pixel on non-Seaquest bases + transfer envs (matched vs skills).
@@ -101,6 +104,17 @@ TRANSFER_ENV_META: dict[str, dict] = {
 TRANSFER_ENVS: tuple[str, ...] = tuple(TRANSFER_ENV_META)
 # Non-Seaquest envs that need matched flat PQN pixel baselines (3 seeds).
 PQN_PIXEL_ENVS: tuple[str, ...] = BASE_OTHER_ENVS + TRANSFER_ENVS
+# Distance-clip probe on Seaquest + envs where noclip skills flopped on foils.
+CLIP_FOIL_CLIPS: tuple[int, ...] = (10, 50)
+CLIP_FOIL_ENVS: tuple[str, ...] = (
+    "seaquest",
+    "phoenix",
+    "asteroids",
+    "spaceinvaders",
+    "beamrider",
+    "timepilot",
+    "pong",
+)
 
 # Tandem-candidate OC feature builds for flat PQN (same META_INPUT_MODE builders).
 OC_BUILD_MODES: tuple[str, ...] = (
@@ -271,6 +285,10 @@ def skills_transfer_stem(env: str) -> str:
     return f"optim_scale_skills_transfers_{env}"
 
 
+def skills_clip_foil_stem(env: str, clip_px: int) -> str:
+    return f"optim_scale_skills_clip{int(clip_px)}_{env}"
+
+
 def pqn_stem(variant: str, seed: int) -> str:
     """variant in {pixel, oc}."""
     return f"optim_scale_pqn_{variant}_seed{seed}"
@@ -319,6 +337,17 @@ def optim_scale_skills_bases_stems() -> tuple[str, ...]:
 def optim_scale_skills_transfers_stems() -> tuple[str, ...]:
     """Locked recipe on remaining transfer scratch envs — trains first for --gpus."""
     trains = tuple(skills_transfer_stem(env) for env in TRANSFER_ENVS)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
+
+
+def optim_scale_skills_clip_foils_stems() -> tuple[str, ...]:
+    """clip10/clip50 × foil envs — trains first (clip major) for --gpus sharding."""
+    trains = tuple(
+        skills_clip_foil_stem(env, clip)
+        for clip in CLIP_FOIL_CLIPS
+        for env in CLIP_FOIL_ENVS
+    )
     evals = tuple(f"{s}_eval" for s in trains)
     return trains + evals
 
@@ -1103,6 +1132,63 @@ def _skills_hp_eval(
     )
 
 
+def _apply_distance_clip(body: str, clip_px: int) -> str:
+    """Set EGO_DISTANCE_CLIP_MAX_PX and swap ego:noclip tag → ego:clipN."""
+    clip = int(clip_px)
+    body = re.sub(
+        r"(?m)^EGO_DISTANCE_CLIP_MAX_PX:.*$",
+        f"EGO_DISTANCE_CLIP_MAX_PX: {clip}",
+        body,
+    )
+    body = body.replace("- ego:noclip\n", f"- ego:clip{clip}\n")
+    if f"- ego:clip{clip}\n" not in body:
+        # Insert after budget/scale block if noclip tag was absent.
+        needle = f"- scale:pqn_optim_epsB_clip{clip}\n"
+        if needle in body and f"- ego:clip{clip}\n" not in body:
+            body = body.replace(needle, f"{needle}- ego:clip{clip}\n", 1)
+    return body
+
+
+def _clip_foil_train(env: str, clip_px: int) -> str:
+    stem = skills_clip_foil_stem(env, clip_px)
+    prefix = _env_meta(env)["prefix"]
+    clip = int(clip_px)
+    body = _skills_hp_train(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=CLIP_FOILS_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# {env} ego skills — optim_scale εB + clip{clip} "
+            f"(LR={LR}+linear; {NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}); "
+            f"seed={BASE_SEED}. Foil / distance-regime probe."
+        ),
+        run_name=f"{prefix}_{CLIP_FOILS_SUITE}_clip{clip}_{BUDGET_TAG}",
+        scale_tag=f"pqn_optim_epsB_clip{clip}",
+    )
+    return _apply_distance_clip(body, clip)
+
+
+def _clip_foil_eval(env: str, clip_px: int) -> str:
+    stem = skills_clip_foil_stem(env, clip_px)
+    prefix = _env_meta(env)["prefix"]
+    clip = int(clip_px)
+    body = _skills_hp_eval(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=CLIP_FOILS_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# Home mod eval — optim_scale εB clip{clip} {env} seed{BASE_SEED}."
+        ),
+        run_name=f"{prefix}_{CLIP_FOILS_SUITE}_eval_clip{clip}_{BUDGET_TAG}",
+        scale_tag=f"pqn_optim_epsB_clip{clip}",
+    )
+    return _apply_distance_clip(body, clip)
+
+
 def _env_meta(env: str) -> dict:
     if env in f10.BASE_SKILL_ENVS:
         return f10.BASE_SKILL_ENVS[env]
@@ -1465,6 +1551,12 @@ def _skills_final_manifest() -> str:
         f"  envs: {list(TRANSFER_ENVS)}",
         "  stems:",
         *[f"    - {s}" for s in optim_scale_skills_transfers_stems()],
+        f"clip_foils_suite: {CLIP_FOILS_SUITE}",
+        f"  seed: {BASE_SEED}",
+        f"  clips: {list(CLIP_FOIL_CLIPS)}",
+        f"  envs: {list(CLIP_FOIL_ENVS)}",
+        "  stems:",
+        *[f"    - {s}" for s in optim_scale_skills_clip_foils_stems()],
         f"lr_suite: {LR_SUITE}",
         f"  seed: {PROBE_SEED}",
         "  fixed_eps: B",
@@ -1567,6 +1659,16 @@ def materialize(*, dry: bool) -> None:
         pairs.append((_OUT / f"{stem}_eval.yaml", _transfer_env_eval(env)))
 
     print(
+        f"optim_scale_skills_clip_foils → clips={CLIP_FOIL_CLIPS} "
+        f"× envs={CLIP_FOIL_ENVS} seed={BASE_SEED}"
+    )
+    for clip in CLIP_FOIL_CLIPS:
+        for env in CLIP_FOIL_ENVS:
+            stem = skills_clip_foil_stem(env, clip)
+            pairs.append((_OUT / f"{stem}.yaml", _clip_foil_train(env, clip)))
+            pairs.append((_OUT / f"{stem}_eval.yaml", _clip_foil_eval(env, clip)))
+
+    print(
         f"optim_scale_skills_lr → seed={PROBE_SEED} arms="
         f"{[a for a, _ in LR_ARMS]}"
     )
@@ -1632,6 +1734,9 @@ def materialize(*, dry: bool) -> None:
         f"  # already done: bases={list(BASE_OTHER_ENVS)} + Seaquest epsB probe\n"
         f"  # remaining transfer scratch envs + home evals\n"
         f"  python scripts/run_paper_eval.py --suite {TRANSFERS_SUITE} "
+        f"--gpus 0,1 --wait-deps --skip-rq-gate --lean\n"
+        f"  # distance-clip probe on Seaquest + foil envs (clip10/50)\n"
+        f"  python scripts/run_paper_eval.py --suite {CLIP_FOILS_SUITE} "
         f"--gpus 0,1 --wait-deps --skip-rq-gate --lean\n"
         f"  # matched flat PQN pixel on bases+transfers (3 seeds, same mods)\n"
         f"  python scripts/run_paper_eval.py --suite {PQN_PIXEL_ENVS_SUITE} "
