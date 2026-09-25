@@ -28,13 +28,15 @@ CBL mapping (true 1:1 on shared HPs)
     on bases (phoenix/namethisgame/asteroids) + transfers (same paper_core mods)
   - ``optim_scale_skills_clip_foils``: locked εB × clip10/clip50 on Seaquest +
     robustness-fail envs (phoenix/asteroids/SI/BR/TP/Pong) — distance regime probe
+  - ``optim_scale_skills_living_urgency``: same envs, noclip εB, but COLLECT +
+    DESTROY living tax on (discourage idle/spam-until-kill)
   - ``optim_scale_pqn_oc_builds``: flat PQN on tandem OC feature builds
     (oc_simple_rel_role / oc_simple_role / oc_embed) × seed 44 + home eval
   - ``optim_scale_skills_lr`` / ``optim_scale_skills_old_eps``: Seaquest HP probes
 
     python scripts/materialize_optim_scale.py
     python scripts/run_paper_eval.py \\
-      --suite optim_scale_skills_clip_foils --gpus 0,1 \\
+      --suite optim_scale_skills_living_urgency --gpus 0,1,2 \\
       --wait-deps --lean --skip-rq-gate
 """
 
@@ -58,6 +60,7 @@ TRANSFERS_SUITE = "optim_scale_skills_transfers"
 LR_SUITE = "optim_scale_skills_lr"
 OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 CLIP_FOILS_SUITE = "optim_scale_skills_clip_foils"
+LIVING_URGENCY_SUITE = "optim_scale_skills_living_urgency"
 PQN_OC_SUITE = "optim_scale_pqn_oc"
 PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
 # Flat PQN pixel on non-Seaquest bases + transfer envs (matched vs skills).
@@ -115,6 +118,8 @@ CLIP_FOIL_ENVS: tuple[str, ...] = (
     "timepilot",
     "pong",
 )
+# Same env set as clip foils — urgency clock on COLLECT + DESTROY (noclip εB).
+LIVING_URGENCY_ENVS: tuple[str, ...] = CLIP_FOIL_ENVS
 
 # Tandem-candidate OC feature builds for flat PQN (same META_INPUT_MODE builders).
 OC_BUILD_MODES: tuple[str, ...] = (
@@ -289,6 +294,10 @@ def skills_clip_foil_stem(env: str, clip_px: int) -> str:
     return f"optim_scale_skills_clip{int(clip_px)}_{env}"
 
 
+def skills_living_urgency_stem(env: str) -> str:
+    return f"optim_scale_skills_living_urgency_{env}"
+
+
 def pqn_stem(variant: str, seed: int) -> str:
     """variant in {pixel, oc}."""
     return f"optim_scale_pqn_{variant}_seed{seed}"
@@ -348,6 +357,13 @@ def optim_scale_skills_clip_foils_stems() -> tuple[str, ...]:
         for clip in CLIP_FOIL_CLIPS
         for env in CLIP_FOIL_ENVS
     )
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
+
+
+def optim_scale_skills_living_urgency_stems() -> tuple[str, ...]:
+    """COLLECT+DESTROY living tax on foil envs — trains first for --gpus."""
+    trains = tuple(skills_living_urgency_stem(env) for env in LIVING_URGENCY_ENVS)
     evals = tuple(f"{s}_eval" for s in trains)
     return trains + evals
 
@@ -1189,6 +1205,109 @@ def _clip_foil_eval(env: str, clip_px: int) -> str:
     return _apply_distance_clip(body, clip)
 
 
+def _apply_living_urgency(body: str) -> str:
+    """COLLECT + DESTROY living tax; turn off COLLECT_SPARSE_ONLY so tax applies.
+
+    Keeps AVOID_SPARSE_ONLY and DESTROY_CONTACT_FAIL from the sparse lock.
+    """
+    body = re.sub(
+        r"(?m)^DESTROY_LIVING_PENALTY:.*$",
+        "DESTROY_LIVING_PENALTY: true",
+        body,
+    )
+    body = re.sub(
+        r"(?m)^  DESTROY_LIVING_PENALTY:.*$",
+        "  DESTROY_LIVING_PENALTY: true",
+        body,
+    )
+    body = re.sub(
+        r"(?m)^COLLECT_SPARSE_ONLY:.*$",
+        "COLLECT_SPARSE_ONLY: false",
+        body,
+    )
+    body = re.sub(
+        r"(?m)^  COLLECT_SPARSE_ONLY:.*$",
+        "  COLLECT_SPARSE_ONLY: false",
+        body,
+    )
+    # Insert COLLECT_LIVING_PENALTY after COLLECT_SPARSE_ONLY if missing.
+    if not re.search(r"(?m)^COLLECT_LIVING_PENALTY:", body):
+        body = re.sub(
+            r"(?m)^(COLLECT_SPARSE_ONLY:.*)$",
+            r"\1\nCOLLECT_LIVING_PENALTY: true",
+            body,
+            count=1,
+        )
+    else:
+        body = re.sub(
+            r"(?m)^COLLECT_LIVING_PENALTY:.*$",
+            "COLLECT_LIVING_PENALTY: true",
+            body,
+        )
+    if not re.search(r"(?m)^  COLLECT_LIVING_PENALTY:", body):
+        body = re.sub(
+            r"(?m)^(  COLLECT_SPARSE_ONLY:.*)$",
+            r"\1\n  COLLECT_LIVING_PENALTY: true",
+            body,
+            count=1,
+        )
+    else:
+        body = re.sub(
+            r"(?m)^  COLLECT_LIVING_PENALTY:.*$",
+            "  COLLECT_LIVING_PENALTY: true",
+            body,
+        )
+    body = body.replace(
+        "- ablation:sparse_cda\n",
+        "- ablation:living_urgency\n",
+    )
+    if "- reward:living_urgency\n" not in body:
+        body = body.replace(
+            "- ablation:living_urgency\n",
+            "- ablation:living_urgency\n- reward:living_urgency\n",
+        )
+    return body
+
+
+def _living_urgency_train(env: str) -> str:
+    stem = skills_living_urgency_stem(env)
+    prefix = _env_meta(env)["prefix"]
+    body = _skills_hp_train(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=LIVING_URGENCY_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# {env} ego skills — optim_scale εB + COLLECT/DESTROY living tax "
+            f"(noclip; {NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}); seed={BASE_SEED}. "
+            f"Discourage idle/spam-until-kill."
+        ),
+        run_name=f"{prefix}_{LIVING_URGENCY_SUITE}_{BUDGET_TAG}",
+        scale_tag="pqn_optim_epsB_living",
+    )
+    return _apply_living_urgency(body)
+
+
+def _living_urgency_eval(env: str) -> str:
+    stem = skills_living_urgency_stem(env)
+    prefix = _env_meta(env)["prefix"]
+    body = _skills_hp_eval(
+        stem=stem,
+        seed=BASE_SEED,
+        suite=LIVING_URGENCY_SUITE,
+        hp=EPSB_HP,
+        env=env,
+        header=(
+            f"# Home mod eval — optim_scale εB living-urgency {env} "
+            f"seed{BASE_SEED}."
+        ),
+        run_name=f"{prefix}_{LIVING_URGENCY_SUITE}_eval_{BUDGET_TAG}",
+        scale_tag="pqn_optim_epsB_living",
+    )
+    return _apply_living_urgency(body)
+
+
 def _env_meta(env: str) -> dict:
     if env in f10.BASE_SKILL_ENVS:
         return f10.BASE_SKILL_ENVS[env]
@@ -1557,6 +1676,13 @@ def _skills_final_manifest() -> str:
         f"  envs: {list(CLIP_FOIL_ENVS)}",
         "  stems:",
         *[f"    - {s}" for s in optim_scale_skills_clip_foils_stems()],
+        f"living_urgency_suite: {LIVING_URGENCY_SUITE}",
+        f"  seed: {BASE_SEED}",
+        "  flags: DESTROY_LIVING_PENALTY + COLLECT_LIVING_PENALTY "
+        "(COLLECT_SPARSE_ONLY off; AVOID_SPARSE_ONLY on)",
+        f"  envs: {list(LIVING_URGENCY_ENVS)}",
+        "  stems:",
+        *[f"    - {s}" for s in optim_scale_skills_living_urgency_stems()],
         f"lr_suite: {LR_SUITE}",
         f"  seed: {PROBE_SEED}",
         "  fixed_eps: B",
@@ -1669,6 +1795,15 @@ def materialize(*, dry: bool) -> None:
             pairs.append((_OUT / f"{stem}_eval.yaml", _clip_foil_eval(env, clip)))
 
     print(
+        f"optim_scale_skills_living_urgency → envs={LIVING_URGENCY_ENVS} "
+        f"seed={BASE_SEED} (COLLECT+DESTROY living tax)"
+    )
+    for env in LIVING_URGENCY_ENVS:
+        stem = skills_living_urgency_stem(env)
+        pairs.append((_OUT / f"{stem}.yaml", _living_urgency_train(env)))
+        pairs.append((_OUT / f"{stem}_eval.yaml", _living_urgency_eval(env)))
+
+    print(
         f"optim_scale_skills_lr → seed={PROBE_SEED} arms="
         f"{[a for a, _ in LR_ARMS]}"
     )
@@ -1738,6 +1873,9 @@ def materialize(*, dry: bool) -> None:
         f"  # distance-clip probe on Seaquest + foil envs (clip10/50)\n"
         f"  python scripts/run_paper_eval.py --suite {CLIP_FOILS_SUITE} "
         f"--gpus 0,1 --wait-deps --skip-rq-gate --lean\n"
+        f"  # COLLECT+DESTROY living tax (discourage idle/spam) on same envs\n"
+        f"  python scripts/run_paper_eval.py --suite {LIVING_URGENCY_SUITE} "
+        f"--gpus 0,1,2 --wait-deps --skip-rq-gate --lean\n"
         f"  # matched flat PQN pixel on bases+transfers (3 seeds, same mods)\n"
         f"  python scripts/run_paper_eval.py --suite {PQN_PIXEL_ENVS_SUITE} "
         f"--gpus 0,1,2,3,4,5,6,7 --wait-deps --skip-rq-gate --lean\n"

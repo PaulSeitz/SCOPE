@@ -59,6 +59,25 @@ clip_foils_suite: optim_scale_skills_clip_foils
     - optim_scale_skills_clip50_beamrider_eval
     - optim_scale_skills_clip50_timepilot_eval
     - optim_scale_skills_clip50_pong_eval
+living_urgency_suite: optim_scale_skills_living_urgency
+  seed: 44
+  flags: DESTROY_LIVING_PENALTY + COLLECT_LIVING_PENALTY (COLLECT_SPARSE_ONLY off; AVOID_SPARSE_ONLY on)
+  envs: ['seaquest', 'phoenix', 'asteroids', 'spaceinvaders', 'beamrider', 'timepilot', 'pong']
+  stems:
+    - optim_scale_skills_living_urgency_seaquest
+    - optim_scale_skills_living_urgency_phoenix
+    - optim_scale_skills_living_urgency_asteroids
+    - optim_scale_skills_living_urgency_spaceinvaders
+    - optim_scale_skills_living_urgency_beamrider
+    - optim_scale_skills_living_urgency_timepilot
+    - optim_scale_skills_living_urgency_pong
+    - optim_scale_skills_living_urgency_seaquest_eval
+    - optim_scale_skills_living_urgency_phoenix_eval
+    - optim_scale_skills_living_urgency_asteroids_eval
+    - optim_scale_skills_living_urgency_spaceinvaders_eval
+    - optim_scale_skills_living_urgency_beamrider_eval
+    - optim_scale_skills_living_urgency_timepilot_eval
+    - optim_scale_skills_living_urgency_pong_eval
 lr_suite: optim_scale_skills_lr
   seed: 1
   fixed_eps: B

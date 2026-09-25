@@ -1276,6 +1276,7 @@ OPTIM_SCALE_SKILLS_RERUN_SUITE = "optim_scale_skills_rerun"
 OPTIM_SCALE_SKILLS_BASES_SUITE = "optim_scale_skills_bases"
 OPTIM_SCALE_SKILLS_TRANSFERS_SUITE = "optim_scale_skills_transfers"
 OPTIM_SCALE_SKILLS_CLIP_FOILS_SUITE = "optim_scale_skills_clip_foils"
+OPTIM_SCALE_SKILLS_LIVING_URGENCY_SUITE = "optim_scale_skills_living_urgency"
 OPTIM_SCALE_SKILLS_LR_SUITE = "optim_scale_skills_lr"
 OPTIM_SCALE_SKILLS_OLD_EPS_SUITE = "optim_scale_skills_old_eps"
 # Flat PQN @ optim_scale 1:1 HPs (50M/1024/32) × 3 seeds + full Seaquest mod eval.
@@ -1356,6 +1357,7 @@ def _final_eval_suite_stems() -> tuple[
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
     import sys
 
@@ -1376,6 +1378,7 @@ def _final_eval_suite_stems() -> tuple[
         optim_scale_probe_stems,
         optim_scale_skills_bases_stems,
         optim_scale_skills_clip_foils_stems,
+        optim_scale_skills_living_urgency_stems,
         optim_scale_skills_lr_stems,
         optim_scale_skills_old_eps_stems,
         optim_scale_skills_rerun_stems,
@@ -1397,6 +1400,7 @@ def _final_eval_suite_stems() -> tuple[
     bases = optim_scale_skills_bases_stems()
     transfers = optim_scale_skills_transfers_stems()
     clip_foils = optim_scale_skills_clip_foils_stems()
+    living = optim_scale_skills_living_urgency_stems()
     lr = optim_scale_skills_lr_stems()
     old_eps = optim_scale_skills_old_eps_stems()
     return (
@@ -1416,6 +1420,7 @@ def _final_eval_suite_stems() -> tuple[
         bases,
         transfers,
         clip_foils,
+        living,
         lr,
         old_eps,
     )
@@ -1438,6 +1443,7 @@ def _final_eval_suite_stems() -> tuple[
     OPTIM_SCALE_SKILLS_BASES_STEMS,
     OPTIM_SCALE_SKILLS_TRANSFERS_STEMS,
     OPTIM_SCALE_SKILLS_CLIP_FOILS_STEMS,
+    OPTIM_SCALE_SKILLS_LIVING_URGENCY_STEMS,
     OPTIM_SCALE_SKILLS_LR_STEMS,
     OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
 ) = _final_eval_suite_stems()
@@ -2118,6 +2124,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_SKILLS_BASES_SUITE: OPTIM_SCALE_SKILLS_BASES_STEMS,
     OPTIM_SCALE_SKILLS_TRANSFERS_SUITE: OPTIM_SCALE_SKILLS_TRANSFERS_STEMS,
     OPTIM_SCALE_SKILLS_CLIP_FOILS_SUITE: OPTIM_SCALE_SKILLS_CLIP_FOILS_STEMS,
+    OPTIM_SCALE_SKILLS_LIVING_URGENCY_SUITE: OPTIM_SCALE_SKILLS_LIVING_URGENCY_STEMS,
     OPTIM_SCALE_SKILLS_LR_SUITE: OPTIM_SCALE_SKILLS_LR_STEMS,
     OPTIM_SCALE_SKILLS_OLD_EPS_SUITE: OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
     OPTIM_SCALE_PQN_OC_SUITE: OPTIM_SCALE_PQN_OC_STEMS,
@@ -3871,6 +3878,11 @@ def main() -> None:
             "distance-regime probe vs noclip lock; trains-first for --gpus; "
             "--suite optim_scale_skills_clip_foils --gpus 0,1 --wait-deps "
             "--skip-rq-gate --lean. "
+            f"{OPTIM_SCALE_SKILLS_LIVING_URGENCY_SUITE}: same envs, noclip εB, "
+            "but COLLECT_LIVING_PENALTY + DESTROY_LIVING_PENALTY on "
+            "(COLLECT_SPARSE_ONLY off) — discourage idle/spam-until-kill; "
+            "--suite optim_scale_skills_living_urgency --gpus 0,1,2 "
+            "--wait-deps --skip-rq-gate --lean. "
             f"{OPTIM_SCALE_SKILLS_LR_SUITE}: short LR probe seed=1 (ε B fixed) — "
             "lr1e4_lin / lr2p5e4_const / lr5e4_lin. "
             f"{OPTIM_SCALE_SKILLS_OLD_EPS_SUITE}: single YAML-ε arm (seed=44). "
