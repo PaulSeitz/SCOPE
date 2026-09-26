@@ -783,6 +783,31 @@ def label_to_skill_idx(label, num_skills: int):
     return _shared(label, num_skills)
 
 
+def _is_idle_meta_target(
+    target_obj_idx: int,
+    *,
+    no_target_idx: int,
+    meta_noop_idx: int,
+    meta_use_noop: bool,
+    max_objects: int,
+) -> bool:
+    """True for sentinel / trailing meta-NOOP (empty-scene idle).
+
+    Skills-only configs often omit ``META_USE_NOOP_TARGET`` while the heuristic
+    still returns the last slot as idle (synthetic xy=(0,0)). Treat that like
+    ``NO_TARGET`` so we do not aim / outline at the top-left corner.
+    """
+    t = int(target_obj_idx)
+    if t == int(no_target_idx):
+        return True
+    if meta_use_noop and t == int(meta_noop_idx):
+        return True
+    mo = int(max_objects)
+    if mo > 0 and t == mo - 1:
+        return True
+    return False
+
+
 def _hud_target_distance_px(raw_obs, objects, target_obj_idx: int, last_frame_ego) -> float:
     """True AABB surface-gap px for overlays (bins/flags make ego[0] non-invertible)."""
     if ego_distance_bins() is not None or ego_distance_flag_thresholds_px():
@@ -1660,18 +1685,25 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             target_obj_idx = int(target_obj_idx)
         prev_target_idx = target_obj_idx
 
-        is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+        is_idle = _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
         chosen_ego = 0
-        if is_meta_noop:
-            global_action = 0
-            active_skill_idx = 0
-            combined_q = np.zeros(num_skills, dtype=np.float32)
-            distance = np.nan
-            angle = np.nan
-        elif target_obj_idx == no_target_idx:
-            global_action = resolve_no_target_game_action(config, components)
-            active_skill_idx = 0
+        if is_idle:
+            # Trailing meta-NOOP → game NOOP; sentinel → env idle action.
+            global_action = (
+                0
+                if int(target_obj_idx) == int(meta_noop_target_idx)
+                or int(target_obj_idx)
+                == int(config.get("MAX_OBJECTS", 35)) - 1
+                else resolve_no_target_game_action(config, components)
+            )
+            active_skill_idx = -1  # HUD: idle, not DESTROY
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan
             angle = np.nan
@@ -1846,7 +1878,13 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 )
             )
             t_xy = None
-            if target_obj_idx != no_target_idx:
+            if not _is_idle_meta_target(
+                target_obj_idx,
+                no_target_idx=no_target_idx,
+                meta_noop_idx=meta_noop_target_idx,
+                meta_use_noop=meta_use_noop_target,
+                max_objects=int(config.get("MAX_OBJECTS", 35)),
+            ):
                 t_xy = (
                     float(
                         obs.objects.x[-1, target_obj_idx]
@@ -2394,15 +2432,25 @@ def run_live_visualization(
 
     def _policy_action(target_obj_idx):
         nonlocal policy_state
-        is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
+        is_idle = _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
         is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
-        if target_obj_idx == no_target_idx or is_meta_noop:
-            # Beamrider empty-screen advance: FIRE via NO_TARGET_GAME_ACTION /
-            # EnvComponents.no_target_game_action (not hardcoded NOOP).
-            idle = 0 if is_meta_noop else resolve_no_target_game_action(config, components)
-            return idle, 0, 0, np.nan, np.nan, None, None
+        if is_idle:
+            # Trailing meta-NOOP → game NOOP; sentinel → env idle action.
+            trailing = int(config.get("MAX_OBJECTS", 35)) - 1
+            idle = (
+                0
+                if int(target_obj_idx) in (int(meta_noop_target_idx), trailing)
+                else resolve_no_target_game_action(config, components)
+            )
+            return idle, -1, 0, np.nan, np.nan, None, None
         if is_meta_fire:
-            return meta_fire_game_action, 0, 1, np.nan, np.nan, None, None
+            return meta_fire_game_action, -1, 1, np.nan, np.nan, None, None
 
         raw_label = obs.objects.semantic_label[-1, target_obj_idx]
         active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
@@ -2554,7 +2602,13 @@ def run_live_visualization(
             )
         )
         target_xy = None
-        if target_obj_idx != no_target_idx:
+        if not _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        ):
             t_cx = float(
                 obs.objects.x[-1, target_obj_idx]
                 + obs.objects.width[-1, target_obj_idx] / 2.0
@@ -2726,7 +2780,14 @@ def run_live_visualization(
             frame = np.stack([frame] * 3, axis=-1)
 
         draw_viz_outline = bool(config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True))
-        if draw_viz_outline and target_obj_idx != no_target_idx:
+        idle_target = _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+        if draw_viz_outline and not idle_target:
             ox = np.array(obs.objects.x[-1])
             oy = np.array(obs.objects.y[-1])
             ow = np.array(obs.objects.width[-1])
@@ -2753,6 +2814,15 @@ def run_live_visualization(
             )
             frame = np.transpose(frame_chw, (1, 2, 0))
 
+        skill_name = (
+            "NOOP"
+            if idle_target or active_skill_idx < 0
+            else (
+                skill_names[active_skill_idx]
+                if 0 <= active_skill_idx < len(skill_names)
+                else str(active_skill_idx)
+            )
+        )
         overlay_base = f"{skill_name} ego={ego_name} game={global_action}"
         if not np.isnan(distance):
             overlay_base = f"{overlay_base} d={distance:.1f}px a={angle:.2f}"

@@ -23,13 +23,12 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   While forced to surface, a danger within ``SURFACE_DANGER_CLOSE_RANGE``
   overrides the waypoint (nearest AVOID, or DESTROY within the larger
   ``DESTROY_INTERRUPT_RANGE``). Anytime, a DESTROY within
-  ``DESTROY_INTERRUPT_RANGE`` beats a nearer COLLECT so sharks interrupt
-  dives before frameskip closes the gap.   AVOID (missiles) inside a wide-X / tight-Y ellipse
-  (``AVOID_INTERRUPT_RANGE`` × ``AVOID_INTERRUPT_RANGE_Y``) then steals
-  DESTROY/COLLECT so a same-lane torpedo is selected before it rams, without
-  locking AVOID on a shot in another row. The surface sub also interrupts
-  anytime it is inside ``SURFACE_SUB_AVOID_RANGE_{X,Y}`` (not only while
-  already in the surface band).
+  ``DESTROY_INTERRUPT_RANGE`` *or* a missile inside the AVOID ellipse
+  (``AVOID_INTERRUPT_RANGE`` × ``AVOID_INTERRUPT_RANGE_Y``) can interrupt
+  COLLECT / nearer non-combat targets; when **both** are valid, pick the
+  **nearest** (no fixed AVOID-over-DESTROY or DESTROY-over-AVOID priority).
+  The surface sub still interrupts anytime it is inside
+  ``SURFACE_SUB_AVOID_RANGE_{X,Y}`` (contact dodge).
   When oxygen is low, those enemy interrupt radii shrink (and go to 0 at
   critical O₂) so the surface waypoint stays selected and the player goes up.
 
@@ -73,10 +72,12 @@ SURFACE_DANGER_CLOSE_RANGE = 25.0
 # AABB gap so FRAME_SKIP=4 cannot close a shark before the heuristic retargets.
 # Overridable via ``DESTROY_INTERRUPT_RANGE``.
 DESTROY_INTERRUPT_RANGE = 40.0
-# AVOID (torpedoes) steal DESTROY/COLLECT inside a wide-X / tight-Y ellipse of
-# AABB edge-gaps. X matches the old 55px same-lane steal; Y is a corridor so a
-# missile in another row does not lock AVOID. Overridable via
-# ``AVOID_INTERRUPT_RANGE`` / ``AVOID_INTERRUPT_RANGE_Y``. ``<=0`` disables.
+# AVOID (torpedoes) compete with DESTROY interrupts inside a wide-X / tight-Y
+# ellipse of AABB edge-gaps. When both a shark/sub and a missile are in-band,
+# pick the nearer — do not always prefer AVOID. X matches the old 55px
+# same-lane band; Y is a corridor so a missile in another row does not lock
+# AVOID. Overridable via ``AVOID_INTERRUPT_RANGE`` /
+# ``AVOID_INTERRUPT_RANGE_Y``. ``<=0`` disables.
 AVOID_INTERRUPT_RANGE = 55.0
 AVOID_INTERRUPT_RANGE_Y = 18.0
 # Surface sub: AVOID interrupt from any depth when this close (edge-gap ellipse).
@@ -444,13 +445,9 @@ def _select_target(
             ),
         ),
     )
-    destroy_dist = jnp.where(destroy_close, distances, jnp.inf)
-    best_destroy_idx = jnp.argmin(destroy_dist).astype(jnp.int32)
-    any_destroy_close = jnp.any(destroy_close)
 
-    # Torpedoes: same-lane corridor (wide X, tight Y). Surface sub: close
-    # ellipse at any depth so an ascent does not ram it. Far AVOID still
-    # loses to nearest combat/collect.
+    # Torpedoes: same-lane corridor. Surface sub: close ellipse at any depth.
+    # DESTROY-in-band and missile-in-band compete by nearest gap (no label bias).
     is_missile_avoid = jnp.logical_and(is_avoid, jnp.logical_not(is_surface_sub))
     missile_interrupt = jnp.logical_and(
         selectable,
@@ -473,10 +470,15 @@ def _select_target(
             ),
         ),
     )
+    combat_interrupt = jnp.logical_or(destroy_close, missile_interrupt)
+    combat_interrupt_dist = jnp.where(combat_interrupt, distances, jnp.inf)
+    best_combat_idx = jnp.argmin(combat_interrupt_dist).astype(jnp.int32)
+    any_combat_interrupt = jnp.any(combat_interrupt)
+    surface_sub_interrupt_dist = jnp.where(surface_sub_interrupt, distances, jnp.inf)
+    best_surface_sub_idx = jnp.argmin(surface_sub_interrupt_dist).astype(jnp.int32)
+    any_surface_sub_interrupt = jnp.any(surface_sub_interrupt)
+    # Surfacing override still considers both missile + surface-sub AVOID.
     avoid_interrupt = jnp.logical_or(missile_interrupt, surface_sub_interrupt)
-    avoid_interrupt_dist = jnp.where(avoid_interrupt, distances, jnp.inf)
-    best_avoid_idx = jnp.argmin(avoid_interrupt_dist).astype(jnp.int32)
-    any_avoid_interrupt = jnp.any(avoid_interrupt)
 
     # Surfacing: AVOID at the tight range, DESTROY at the (larger) interrupt
     # range. The anytime AVOID band also interrupts WP so a 50px torpedo is
@@ -503,8 +505,12 @@ def _select_target(
         best_idx,
         idle_noop_idx,
     )
-    target_idx = jnp.where(any_destroy_close, best_destroy_idx, target_idx)
-    target_idx = jnp.where(any_avoid_interrupt, best_avoid_idx, target_idx)
+    # Combat interrupt: nearest among in-band DESTROY and in-band missiles.
+    target_idx = jnp.where(any_combat_interrupt, best_combat_idx, target_idx)
+    # Surface-sub contact dodge may still override (ram risk).
+    target_idx = jnp.where(
+        any_surface_sub_interrupt, best_surface_sub_idx, target_idx
+    )
     if collect_requires_no_destroy:
         # Any live shark/sub beats COLLECT so the collector is never the fighter.
         # Does not steal the surface waypoint: that is re-forced by index below.

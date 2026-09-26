@@ -249,16 +249,49 @@ def test_destroy_interrupt_beats_nearer_diver():
     assert int(target) == 4
 
 
-def test_avoid_interrupt_steals_destroy_when_torpedo_is_in_band():
-    """A fired torpedo inside AVOID_INTERRUPT_RANGE beats a closer shark/sub."""
+def test_nearer_destroy_beats_farther_missile_in_band():
+    """When shark and missile are both in-band, pick the nearer (shark here)."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(shark_xy=(95.0, 100.0), missile_xy=(145.0, 100.0))
     from concept_based_learning.observations.egocentric import aabb_surface_gap_px
 
+    gap_shark = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 95.0, 100.0, 8.0, 8.0)
+    )
     gap_missile = float(
         aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 145.0, 100.0, 4.0, 2.0)
     )
+    assert gap_shark < gap_missile
+    assert gap_shark <= DESTROY_INTERRUPT_RANGE
     assert DESTROY_INTERRUPT_RANGE < gap_missile <= AVOID_INTERRUPT_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 4
+
+
+def test_nearer_missile_beats_farther_destroy_in_band():
+    """When shark and missile are both in-band, pick the nearer (missile here)."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    # Shark near the edge of DESTROY band; missile closer in the AVOID corridor.
+    objs = _make_objects(shark_xy=(125.0, 100.0), missile_xy=(105.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap_shark = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 125.0, 100.0, 8.0, 8.0)
+    )
+    gap_missile = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 105.0, 100.0, 4.0, 2.0)
+    )
+    assert gap_missile < gap_shark
+    assert gap_shark <= DESTROY_INTERRUPT_RANGE
+    assert gap_missile <= AVOID_INTERRUPT_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 29
+
+
+def test_missile_still_steals_collect():
+    """Same-lane torpedo may still interrupt COLLECT / nearest non-combat."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(100.0, 100.0), missile_xy=(145.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 29
 

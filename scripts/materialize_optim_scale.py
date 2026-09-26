@@ -270,8 +270,8 @@ def tandem_stem(seed: int) -> str:
     return f"optim_scale_tandem_pixel_ego_seed{seed}"
 
 
-def probe_skills_stem(arm: str) -> str:
-    return f"optim_scale_probe_skills_{arm}_seed{PROBE_SEED}"
+def probe_skills_stem(arm: str, seed: int = PROBE_SEED) -> str:
+    return f"optim_scale_probe_skills_{arm}_seed{seed}"
 
 
 def skills_lr_stem(arm: str) -> str:
@@ -329,9 +329,8 @@ def optim_scale_probe_stems() -> tuple[str, ...]:
 
 
 def optim_scale_skills_rerun_stems() -> tuple[str, ...]:
-    """Post-NOOP-fix skill re-runs: trains first (GPU-shard friendly), then evals."""
-    arms = ("1to1", "epsB")
-    trains = tuple(probe_skills_stem(arm) for arm in arms)
+    """εB skills re-run × seeds 44/45/46 (nearest-combat heuristic); trains then evals."""
+    trains = tuple(probe_skills_stem("epsB", seed) for seed in SEEDS)
     evals = tuple(f"{s}_eval" for s in trains)
     return trains + evals
 
@@ -1021,15 +1020,15 @@ def _tandem_eval(seed: int) -> str:
     )
 
 
-def _probe_skills_train(arm: str, hp: dict) -> str:
-    stem = probe_skills_stem(arm)
+def _probe_skills_train(arm: str, hp: dict, *, seed: int = PROBE_SEED) -> str:
+    stem = probe_skills_stem(arm, seed)
     base = f10._skills_train("seaquest")
     lr = hp["skill_lr"]
     decay = "linear" if hp["lr_linear_decay"] else "const"
     return _retarget(
         base,
         stem=stem,
-        seed=PROBE_SEED,
+        seed=seed,
         suite=PROBE_SUITE,
         patch_kwargs={
             "skill_lr": hp["skill_lr"],
@@ -1043,23 +1042,23 @@ def _probe_skills_train(arm: str, hp: dict) -> str:
             "scale_tag": f"pqn_optim_probe_{arm}",
         },
         header=(
-            f"# Seaquest ego skills PROBE seed={PROBE_SEED} arm={arm}: "
+            f"# Seaquest ego skills PROBE seed={seed} arm={arm}: "
             f"outer 1:1 ({NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}, grad={MAX_GRAD_NORM:g}); "
             f"SKILL_LR={lr} ({decay}); "
             f"ε {hp['eps_start']}→{hp['eps_finish']}/decay={hp['eps_decay']}."
         ),
-        run_name=f"sq_{PROBE_SUITE}_skills_{arm}_seed{PROBE_SEED}_{BUDGET_TAG}",
+        run_name=f"sq_{PROBE_SUITE}_skills_{arm}_seed{seed}_{BUDGET_TAG}",
         kind="skills",
     )
 
 
-def _probe_skills_eval(arm: str, hp: dict) -> str:
-    stem = probe_skills_stem(arm)
+def _probe_skills_eval(arm: str, hp: dict, *, seed: int = PROBE_SEED) -> str:
+    stem = probe_skills_stem(arm, seed)
     base = f10._skills_eval("seaquest")
     return _retarget(
         base,
         stem=stem,
-        seed=PROBE_SEED,
+        seed=seed,
         suite=PROBE_SUITE,
         patch_kwargs={
             "skill_lr": hp["skill_lr"],
@@ -1072,8 +1071,8 @@ def _probe_skills_eval(arm: str, hp: dict) -> str:
             "tag_eps": hp["tag_eps"],
             "scale_tag": f"pqn_optim_probe_{arm}",
         },
-        header=f"# Home mod eval — optim_scale probe skills {arm} seed{PROBE_SEED}.",
-        run_name=f"sq_{PROBE_SUITE}_eval_skills_{arm}_seed{PROBE_SEED}_{BUDGET_TAG}",
+        header=f"# Home mod eval — optim_scale probe skills {arm} seed{seed}.",
+        run_name=f"sq_{PROBE_SUITE}_eval_skills_{arm}_seed{seed}_{BUDGET_TAG}",
         kind="skills",
     )
 
@@ -1764,6 +1763,22 @@ def materialize(*, dry: bool) -> None:
         stem = probe_skills_stem(arm)
         pairs.append((_OUT / f"{stem}.yaml", _probe_skills_train(arm, hp)))
         pairs.append((_OUT / f"{stem}_eval.yaml", _probe_skills_eval(arm, hp)))
+    # εB multi-seed re-run (suite optim_scale_skills_rerun)
+    epsb_hp = dict(PROBE_ARMS)["epsB"]
+    print(
+        f"optim_scale_skills_rerun → εB skills × seeds={list(SEEDS)}"
+    )
+    for seed in SEEDS:
+        stem = probe_skills_stem("epsB", seed)
+        pairs.append(
+            (_OUT / f"{stem}.yaml", _probe_skills_train("epsB", epsb_hp, seed=seed))
+        )
+        pairs.append(
+            (
+                _OUT / f"{stem}_eval.yaml",
+                _probe_skills_eval("epsB", epsb_hp, seed=seed),
+            )
+        )
     pairs.append((_OUT / "probe_manifest.yaml", _probe_manifest()))
 
     print(
