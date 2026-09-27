@@ -1290,6 +1290,8 @@ OPTIM_SCALE_PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
 # flat PQN pixel + matched skills εB × seeds 44/45/46 + home evals.
 # See materialize_pqn_paper_table5.py (Seaquest paper ref ≈15899).
 PQN_PAPER_T5_SUITE = "pqn_paper_t5"
+# PQN pixel trains + evals only (native_downscale=false re-run; skip skills).
+PQN_PAPER_T5_PQN_SUITE = "pqn_paper_t5_pqn"
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -1462,7 +1464,17 @@ def _pqn_paper_t5_stems() -> tuple[str, ...]:
     return pqn_paper_t5_stems()
 
 
+def _pqn_paper_t5_pqn_stems() -> tuple[str, ...]:
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from materialize_pqn_paper_table5 import pqn_paper_t5_pqn_stems  # type: ignore
+
+    return pqn_paper_t5_pqn_stems()
+
+
 PQN_PAPER_T5_STEMS = _pqn_paper_t5_stems()
+PQN_PAPER_T5_PQN_STEMS = _pqn_paper_t5_pqn_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
 # Uneven pipelines → per-GPU suites (do not use --gpus round-robin on the union).
@@ -2148,6 +2160,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE: OPTIM_SCALE_PQN_PIXEL_ENVS_STEMS,
     OPTIM_SCALE_PQN_OC_BUILDS_SUITE: OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
     PQN_PAPER_T5_SUITE: PQN_PAPER_T5_STEMS,
+    PQN_PAPER_T5_PQN_SUITE: PQN_PAPER_T5_PQN_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -3522,8 +3535,93 @@ def _run_mod_eval(
             },
             wandb_mode=wandb_mode,
         )
+        # Optional Gallici-style greedy-8 (flat PQN only) → JSON + wandb summary.
+        if kind == "flat_pqn" and bool(raw.get("PAPER_EVAL_PAPER_GREEDY8", False)):
+            _run_paper_greedy8_after_mod_eval(
+                raw,
+                path=path,
+                flat_path=flat_path,
+                train_seed=train_seed,
+                wandb_mode=wandb_mode,
+            )
     finally:
         _release(label=f"eval:{path.stem}")
+
+
+def _run_paper_greedy8_after_mod_eval(
+    raw: dict[str, Any],
+    *,
+    path: Path,
+    flat_path: str | None,
+    train_seed: int,
+    wandb_mode: str | None,
+) -> None:
+    """Run paper greedy-8 after CSV mod eval; never fail the suite on wandb I/O."""
+    from concept_based_learning.paper_eval.paper_greedy8 import (
+        DEFAULT_PAPER_GREEDY_MAX_FRAMES,
+        DEFAULT_PAPER_GREEDY_SEEDS,
+        publish_paper_greedy8_to_wandb,
+        run_paper_greedy8_eval,
+    )
+
+    if not flat_path:
+        print("  SKIP paper greedy-8: no PAPER_EVAL_FLAT_PQN_CKPT", flush=True)
+        return
+    ckpt = Path(str(flat_path))
+    if not ckpt.is_file():
+        # Allow relative paths from project root.
+        alt = PROJECT_ROOT / flat_path
+        ckpt = alt if alt.is_file() else ckpt
+    if not ckpt.is_file():
+        print(f"  SKIP paper greedy-8: missing ckpt {flat_path}", flush=True)
+        return
+
+    seeds_raw = raw.get("PAPER_EVAL_PAPER_GREEDY8_SEEDS")
+    if isinstance(seeds_raw, (list, tuple)) and seeds_raw:
+        eval_seeds = tuple(int(s) for s in seeds_raw)
+    else:
+        eval_seeds = DEFAULT_PAPER_GREEDY_SEEDS
+    max_frames = int(
+        raw.get("PAPER_EVAL_PAPER_GREEDY8_MAX_FRAMES", DEFAULT_PAPER_GREEDY_MAX_FRAMES)
+    )
+    out_json = (
+        PROJECT_ROOT
+        / "outputs"
+        / "models"
+        / "paper_eval"
+        / "eval"
+        / f"{path.stem}_paper_greedy8.json"
+    )
+    print(
+        f"\n{'=' * 70}\n  PAPER greedy-8: {path.stem} "
+        f"(seeds={list(eval_seeds)}, max_frames={max_frames})\n{'=' * 70}",
+        flush=True,
+    )
+    summary = run_paper_greedy8_eval(
+        ckpt,
+        eval_seeds=eval_seeds,
+        max_frames=max_frames,
+        env_name=str(raw.get("ENV_NAME", "seaquest")),
+        progress=True,
+        output_json=out_json,
+    )
+    try:
+        publish_paper_greedy8_to_wandb(
+            summary,
+            ckpt_dir=ckpt.parent,
+            run_name=str(raw.get("WANDB_RUN_NAME", path.stem)),
+            wandb_mode=wandb_mode,
+            tags=list(raw.get("WANDB_TAGS") or []),
+            entity=str(raw.get("ENTITY", "paul-seitz-tu-darmstadt")),
+            project=str(raw.get("PROJECT", "concept_based_learning")),
+        )
+        print(
+            f"  paper greedy-8 wandb: mean={summary['mean']:.1f} "
+            f"(train_seed={train_seed})",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARN: paper greedy-8 wandb publish failed: {exc}", flush=True)
 
 
 def _run_experiment(
@@ -3911,11 +4009,15 @@ def main() -> None:
             "CUDA_VISIBLE_DEVICES=0 … --suite optim_scale_pqn_oc and "
             "CUDA_VISIBLE_DEVICES=1 … --suite optim_scale_pqn_pixel. "
             f"{PQN_PAPER_T5_SUITE}: PQN paper Table 5 outer (128 envs / 32 steps / "
-            "100M agent = 400M frames; LR 2.5e-4 no decay) × flat PQN pixel + "
+            "100M agent = 400M frames; LR 2.5e-4 no decay; "
+            "USE_NATIVE_DOWNSCALING=false) × flat PQN pixel + "
             "matched skills εB × seeds 44/45/46 + home paper_core evals; "
+            "PQN evals also run paper greedy-8 → wandb; "
             "Seaquest paper ref ≈15899; "
             "python scripts/materialize_pqn_paper_table5.py then "
             "--suite pqn_paper_t5 --gpus … --wait-deps --skip-rq-gate --lean. "
+            f"{PQN_PAPER_T5_PQN_SUITE}: PQN pixel trains+evals only "
+            "(native_downscale=false re-run; no skills). "
             f"{OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE}: flat PQN pixel @ 1:1 HPs × "
             "seeds 44/45/46 on phoenix/namethisgame/asteroids + transfer envs "
             "(SI/BR/TP/Pong/Breakout/Freeway) + same paper_core mod evals as "

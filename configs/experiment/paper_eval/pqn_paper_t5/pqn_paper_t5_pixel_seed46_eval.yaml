@@ -1,4 +1,4 @@
-# Home mod eval — PQN paper Table 5 pixel seed46.
+# Home mod eval + paper greedy-8 — PQN Table 5 pixel seed46 (native_downscale=false).
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: eval
 PAPER_EVAL_KIND: flat_pqn
@@ -18,10 +18,22 @@ PAPER_EVAL_REQUIRES_RQ1:
 - pqn_paper_t5_pixel_seed46
 PAPER_EVAL_FLAT_PQN_CKPT: ./outputs/models/paper_eval/pqn_paper_t5/pqn_paper_t5_pixel_seed46/seaquest/flat_pqn_seaquest_pixel_seed46_vmap0.safetensors
 PAPER_EVAL_OBJECT_CENTRIC: false
+PAPER_EVAL_PAPER_GREEDY8: true
+PAPER_EVAL_PAPER_GREEDY8_MAX_FRAMES: 27000
+PAPER_EVAL_PAPER_GREEDY8_SEEDS:
+- 7
+- 11
+- 13
+- 17
+- 19
+- 23
+- 29
+- 31
 NUM_SEEDS: 1
 ALG_NAME: flat_pqn
 ENV_NAME: seaquest
 OBJECT_CENTRIC: false
+USE_NATIVE_DOWNSCALING: false
 SAVE_PATH: ./outputs/models/paper_eval/pqn_paper_t5/pqn_paper_t5_pixel_seed46
 WANDB_RUN_NAME: sq_pqn_paper_t5_eval_pqn_pixel_seed46_400m_frames
 WANDB_TAGS:
@@ -31,6 +43,7 @@ WANDB_TAGS:
 - phase:mod_eval
 - train_mode:flat_pqn
 - variant:pqn_pixel_paper_table5
+- native_downscale:false
 - budget:400m_frames
 - scale:pqn_paper_t5
 SEED: 46

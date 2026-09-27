@@ -10,11 +10,16 @@ frames. With FRAME_SKIP=4 that is 100M agent steps.
 
 Suite ``pqn_paper_t5`` (trains-first for --gpus sharding)::
 
-    flat PQN pixel × seeds 44/45/46
+    flat PQN pixel × seeds 44/45/46  (USE_NATIVE_DOWNSCALING=false)
     skills εB (locked skill HPs) × same seeds + same outer
     then home paper_core evals for each
+    (+ paper greedy-8 on flat PQN evals → wandb)
 
     python scripts/materialize_pqn_paper_table5.py
+    # PQN-only re-run (no skills retrain):
+    python scripts/run_paper_eval.py --suite pqn_paper_t5_pqn \\
+      --gpus 0,1,2 --wait-deps --lean --skip-rq-gate
+    # Full suite (skills + PQN):
     python scripts/run_paper_eval.py --suite pqn_paper_t5 \\
       --gpus 0,1,2 --wait-deps --lean --skip-rq-gate
 """
@@ -52,6 +57,10 @@ EPS_B_FINISH = 0.01
 EPS_B_DECAY = 0.2
 SKILL_LR = LR
 
+# Paper greedy-8 (Gallici-style long episodes); not training seeds.
+PAPER_GREEDY_SEEDS = (7, 11, 13, 17, 19, 23, 29, 31)
+PAPER_GREEDY_MAX_FRAMES = 27_000
+
 MOD_KEYS = f10.MOD_KEYS
 
 
@@ -61,6 +70,13 @@ def pqn_stem(seed: int) -> str:
 
 def skills_stem(seed: int) -> str:
     return f"pqn_paper_t5_skills_epsB_seed{seed}"
+
+
+def pqn_paper_t5_pqn_stems() -> tuple[str, ...]:
+    """PQN pixel trains + home mod evals only (re-run without skills)."""
+    trains = tuple(pqn_stem(s) for s in SEEDS)
+    evals = tuple(f"{s}_eval" for s in trains)
+    return trains + evals
 
 
 def pqn_paper_t5_stems() -> tuple[str, ...]:
@@ -79,6 +95,7 @@ def _pqn_train(seed: int) -> str:
             f"({NUM_ENVS}×{NUM_STEPS}×{NUM_UPDATES}; 100M agent / 400M frames; "
             f"LR={LR} no decay; MAX_GRAD_NORM={MAX_GRAD_NORM:g}; "
             f"ε {EPS_START}→{EPS_FINISH}); seed={seed}. "
+            f"USE_NATIVE_DOWNSCALING=false (ALE-style 84×84 resize). "
             f"Paper Seaquest ref ≈15899 @ 400M frames.",
             "PAPER_EVAL_RQ: 1",
             "PAPER_EVAL_PHASE: train",
@@ -95,7 +112,7 @@ def _pqn_train(seed: int) -> str:
             "- 84",
             "- 84",
             "PIXEL_GRAYSCALE: true",
-            "USE_NATIVE_DOWNSCALING: true",
+            "USE_NATIVE_DOWNSCALING: false",
             "NORM_TYPE: layer_norm",
             "NORM_INPUT: false",
             "LR_LINEAR_DECAY: false",
@@ -108,6 +125,7 @@ def _pqn_train(seed: int) -> str:
             "- role:base",
             "- train_mode:flat_pqn",
             "- variant:pqn_pixel_paper_table5",
+            "- native_downscale:false",
             f"- budget:{BUDGET_TAG}",
             "- scale:pqn_paper_t5",
             f"- num_envs:{NUM_ENVS}",
@@ -154,7 +172,8 @@ def _pqn_eval(seed: int) -> str:
         f"flat_pqn_seaquest_pixel_seed{seed}_vmap0.safetensors"
     )
     lines = [
-        f"# Home mod eval — PQN paper Table 5 pixel seed{seed}.",
+        f"# Home mod eval + paper greedy-8 — PQN Table 5 pixel seed{seed} "
+        f"(native_downscale=false).",
         "PAPER_EVAL_RQ: 1",
         "PAPER_EVAL_PHASE: eval",
         "PAPER_EVAL_KIND: flat_pqn",
@@ -166,10 +185,17 @@ def _pqn_eval(seed: int) -> str:
         f"- {stem}",
         f"PAPER_EVAL_FLAT_PQN_CKPT: {ckpt}",
         "PAPER_EVAL_OBJECT_CENTRIC: false",
+        # After CSV mod eval, also run Gallici-style greedy-8 → wandb.
+        "PAPER_EVAL_PAPER_GREEDY8: true",
+        "PAPER_EVAL_PAPER_GREEDY8_MAX_FRAMES: "
+        f"{PAPER_GREEDY_MAX_FRAMES}",
+        "PAPER_EVAL_PAPER_GREEDY8_SEEDS:",
+        *[f"- {s}" for s in PAPER_GREEDY_SEEDS],
         "NUM_SEEDS: 1",
         "ALG_NAME: flat_pqn",
         "ENV_NAME: seaquest",
         "OBJECT_CENTRIC: false",
+        "USE_NATIVE_DOWNSCALING: false",
         f"SAVE_PATH: {OUT_MODELS}/{stem}",
         f"WANDB_RUN_NAME: sq_{SUITE}_eval_pqn_pixel_seed{seed}_{BUDGET_TAG}",
         "WANDB_TAGS:",
@@ -179,6 +205,7 @@ def _pqn_eval(seed: int) -> str:
         "- phase:mod_eval",
         "- train_mode:flat_pqn",
         "- variant:pqn_pixel_paper_table5",
+        "- native_downscale:false",
         f"- budget:{BUDGET_TAG}",
         "- scale:pqn_paper_t5",
         f"SEED: {seed}",

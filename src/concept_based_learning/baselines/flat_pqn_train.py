@@ -457,5 +457,12 @@ def train_flat_pqn(config: dict[str, Any]) -> Path:
         ckpt_paths.append(ckpt)
         print(f"Flat PQN checkpoint: {ckpt}")
 
+    try:
+        from concept_based_learning.paper_eval.wandb_run_meta import persist_wandb_run_meta
+
+        persist_wandb_run_meta(save_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARN: flat PQN wandb_run.json not written: {exc}")
+
     wandb.finish()
     return save_dir

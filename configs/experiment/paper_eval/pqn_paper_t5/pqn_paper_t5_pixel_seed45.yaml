@@ -1,4 +1,4 @@
-# Flat PQN pixel — Seaquest PQN-paper Table 5 (128×32×24414; 100M agent / 400M frames; LR=0.00025 no decay; MAX_GRAD_NORM=10; ε 1.0→0.001); seed=45. Paper Seaquest ref ≈15899 @ 400M frames.
+# Flat PQN pixel — Seaquest PQN-paper Table 5 (128×32×24414; 100M agent / 400M frames; LR=0.00025 no decay; MAX_GRAD_NORM=10; ε 1.0→0.001); seed=45. USE_NATIVE_DOWNSCALING=false (ALE-style 84×84 resize). Paper Seaquest ref ≈15899 @ 400M frames.
 PAPER_EVAL_RQ: 1
 PAPER_EVAL_PHASE: train
 PAPER_EVAL_KIND: flat_pqn
@@ -14,7 +14,7 @@ PIXEL_RESIZE_SHAPE:
 - 84
 - 84
 PIXEL_GRAYSCALE: true
-USE_NATIVE_DOWNSCALING: true
+USE_NATIVE_DOWNSCALING: false
 NORM_TYPE: layer_norm
 NORM_INPUT: false
 LR_LINEAR_DECAY: false
@@ -27,6 +27,7 @@ WANDB_TAGS:
 - role:base
 - train_mode:flat_pqn
 - variant:pqn_pixel_paper_table5
+- native_downscale:false
 - budget:400m_frames
 - scale:pqn_paper_t5
 - num_envs:128
