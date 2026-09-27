@@ -1286,6 +1286,10 @@ OPTIM_SCALE_PQN_PIXEL_SUITE = "optim_scale_pqn_pixel"
 # Flat PQN pixel @ 1:1 HPs × 3 seeds on bases+transfers (matched vs skills mods).
 OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE = "optim_scale_pqn_pixel_envs"
 OPTIM_SCALE_PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
+# PQN paper Table 5 outer (128 envs / 32 steps / 100M agent = 400M frames) ×
+# flat PQN pixel + matched skills εB × seeds 44/45/46 + home evals.
+# See materialize_pqn_paper_table5.py (Seaquest paper ref ≈15899).
+PQN_PAPER_T5_SUITE = "pqn_paper_t5"
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -1447,6 +1451,18 @@ def _final_eval_suite_stems() -> tuple[
     OPTIM_SCALE_SKILLS_LR_STEMS,
     OPTIM_SCALE_SKILLS_OLD_EPS_STEMS,
 ) = _final_eval_suite_stems()
+
+
+def _pqn_paper_t5_stems() -> tuple[str, ...]:
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from materialize_pqn_paper_table5 import pqn_paper_t5_stems  # type: ignore
+
+    return pqn_paper_t5_stems()
+
+
+PQN_PAPER_T5_STEMS = _pqn_paper_t5_stems()
 
 # Sparse C/D/A clean story (newSeaquest 25M + full eval/ZS; BR+MZ 10M; SQ tandem 20M).
 # Uneven pipelines → per-GPU suites (do not use --gpus round-robin on the union).
@@ -2131,6 +2147,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_PQN_PIXEL_SUITE: OPTIM_SCALE_PQN_PIXEL_STEMS,
     OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE: OPTIM_SCALE_PQN_PIXEL_ENVS_STEMS,
     OPTIM_SCALE_PQN_OC_BUILDS_SUITE: OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
+    PQN_PAPER_T5_SUITE: PQN_PAPER_T5_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -3893,6 +3910,12 @@ def main() -> None:
             "python scripts/materialize_optim_scale.py then "
             "CUDA_VISIBLE_DEVICES=0 … --suite optim_scale_pqn_oc and "
             "CUDA_VISIBLE_DEVICES=1 … --suite optim_scale_pqn_pixel. "
+            f"{PQN_PAPER_T5_SUITE}: PQN paper Table 5 outer (128 envs / 32 steps / "
+            "100M agent = 400M frames; LR 2.5e-4 no decay) × flat PQN pixel + "
+            "matched skills εB × seeds 44/45/46 + home paper_core evals; "
+            "Seaquest paper ref ≈15899; "
+            "python scripts/materialize_pqn_paper_table5.py then "
+            "--suite pqn_paper_t5 --gpus … --wait-deps --skip-rq-gate --lean. "
             f"{OPTIM_SCALE_PQN_PIXEL_ENVS_SUITE}: flat PQN pixel @ 1:1 HPs × "
             "seeds 44/45/46 on phoenix/namethisgame/asteroids + transfer envs "
             "(SI/BR/TP/Pong/Breakout/Freeway) + same paper_core mod evals as "
