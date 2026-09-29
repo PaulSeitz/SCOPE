@@ -257,7 +257,7 @@ def test_kangaroo_l1_starts_at_first_ladder_not_fruit():
         _L0_BOT,
     )
 
-    _FRUIT0 = 41  # first collectible slot after 40 ladder waypoints
+    _FRUIT0 = 40  # first collectible slot after 40 ladder waypoints
     tail = [
         (119, 108, 4, 4, 1, LABEL_COLLECT),
         (39, 84, 4, 4, 1, LABEL_COLLECT),
@@ -315,10 +315,13 @@ def _kangaroo_policy_slots(
     l2_top=None,
     collect_tail=None,
 ):
-    """Minimal 55-slot Kangaroo layout: 40 waypoints + 5 collectibles + 4 destroy + 5 avoid."""
+    """Minimal 55-slot Kangaroo layout: 40 WPs + 5 collect + 4 destroy + 5 avoid + meta-NOOP.
+
+    Meta-NOOP is trailing (index 54), matching ``append_meta_reserved_slots``.
+    """
     bottom_overrides = {0: l0_bot, 1: l1_bot, 2: l2_bot}
     top_overrides = {0: l0_top, 1: l1_top, 2: l2_top}
-    slots = [(0, 0, 1, 1, 0, 0)]
+    slots = []
     for i in range(20):
         if i in bottom_overrides and bottom_overrides[i] is not None:
             slots.append((*bottom_overrides[i], 1, LABEL_COLLECT))
@@ -343,7 +346,6 @@ def _kangaroo_policy_slots(
         (0, 0, 1, 1, 0, LABEL_DESTROY),
         (0, 0, 1, 1, 0, LABEL_DESTROY),
         (0, 0, 1, 1, 0, LABEL_DESTROY),
-        (0, 0, 1, 1, 0, LABEL_DESTROY),
         (0, 0, 1, 1, 0, LABEL_AVOID),
         (0, 0, 1, 1, 0, LABEL_AVOID),
         (0, 0, 1, 1, 0, LABEL_AVOID),
@@ -351,6 +353,7 @@ def _kangaroo_policy_slots(
         (0, 0, 1, 1, 0, LABEL_AVOID),
     ]
     slots.extend(tail)
+    slots.append((0, 0, 1, 1, 0, 0))  # trailing meta-NOOP
     return slots
 
 
@@ -368,7 +371,7 @@ def test_destroy_path_blocking_monkey_interrupt():
         (0, 0, 1, 1, 0, LABEL_COLLECT),
         (0, 0, 1, 1, 0, LABEL_COLLECT),
         (0, 0, 1, 1, 0, LABEL_COLLECT),
-        (90, 160, 8, 16, 1, LABEL_DESTROY),  # monkey on path (slot 46)
+        (90, 160, 8, 16, 1, LABEL_DESTROY),  # monkey on path (slot 45)
         (0, 0, 1, 1, 0, LABEL_DESTROY),
         (0, 0, 1, 1, 0, LABEL_DESTROY),
         (0, 0, 1, 1, 0, LABEL_DESTROY),
@@ -1214,8 +1217,8 @@ def test_kangaroo_plan_includes_fruits_between_climbs():
     assert slots[5] == _FRUIT1
     assert slots[-2] == _L2_TOP
     assert slots[-1] == _FRUIT2
-    assert 44 not in slots  # no bell
-    assert 45 not in slots  # no child
+    assert 43 not in slots  # no bell
+    assert 44 not in slots  # no child
 
 
 def test_fruit0_skipped_when_player_on_floor_above():

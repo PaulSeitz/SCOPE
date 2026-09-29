@@ -3,8 +3,9 @@
 #   /home/paul/Documents/JAXAtari-seaquest-robustness
 #
 # Train on base (GAME_MODS: null). Eval harness iterates `eval_mods`.
-# Label remaps use YAML `relabel: true` → SEAQUEST_SWAP_DIVER_ENEMY_LABELS on
-# the eval config only (never inferred from GAME_MODS; forced off when train=True).
+# Label remaps use YAML `relabel: true` → SEAQUEST_SWAP_DIVER_ENEMY_LABELS or
+# SEAQUEST_SWAP_DIVER_SHARK_ROLES (by mod key) on the eval config only
+# (never inferred from GAME_MODS; forced off when train=True).
 
 env: seaquest
 status: ready  # registry present on robustness-mods fork
@@ -58,6 +59,11 @@ eval_mods:
   # E2 versatility: fork swaps sprites + OC channels; CBL remaps labels eval-only.
   - key: swap_diver_enemy_labels
     mods: [swap_diver_enemy_labels]
+    category: semantic
+    relabel: true
+  # Stronger E2: physics/scoring swap (lethal divers, collectable sharks) + label remap.
+  - key: swap_diver_shark_roles
+    mods: [swap_diver_shark_roles]
     category: semantic
     relabel: true
   # dynamics (expect ego to struggle more here)
@@ -133,6 +139,7 @@ paper_core:
   - change_background_color
   - no_enemies
   - swap_diver_enemy_labels
+  - swap_diver_shark_roles
   - gravity
   - faster_enemies
 

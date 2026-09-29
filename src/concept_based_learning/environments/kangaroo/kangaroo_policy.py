@@ -14,12 +14,12 @@ Interrupt priority (lowest first, later overrides earlier):
   3. Falling coconut AVOID — only while actively dropping onto the player
      (``objects.state[falling]=1``); highest reactive priority; climbing-suppressed.
 
-Level-1 slots after meta-NOOP:
-  ladder waypoints      = 1..40  (COLLECT; plan uses L0–L2 pairs)
-  fruits / bell / child = 41..45 (COLLECT; plan uses fruits 41..43)
-  monkeys               = 46..49 (DESTROY)
-  falling coconut       = 50     (AVOID)
-  thrown cocos          = 51..54 (AVOID)
+Level-1 slots (meta-NOOP is last = 54):
+  ladder waypoints      = 0..39  (COLLECT; plan uses L0–L2 pairs)
+  fruits / bell / child = 40..44 (COLLECT; plan uses fruits 40..42)
+  monkeys               = 45..48 (DESTROY)
+  falling coconut       = 49     (AVOID)
+  thrown cocos          = 50..53 (AVOID)
 
 ``EnvComponents.reset_policy_on_life_lost=True`` — visualizer / training must
 clear ``PolicyState`` on life loss (Kangaroo ``done`` is only true at game over).
@@ -45,21 +45,21 @@ from concept_based_learning.environments.manual_policy import (
 )
 from concept_based_learning.environments.manual_policy.state import NO_TARGET_IDX, PolicyState
 
-# Ladder bottoms / tops (paired i → 20+i).
-_L0_BOT, _L0_TOP = 1, 21
-_L1_BOT, _L1_TOP = 2, 22
-_L2_BOT, _L2_TOP = 3, 23
+# Ladder bottoms / tops (paired i → 20+i). Meta-NOOP is trailing, not slot 0.
+_L0_BOT, _L0_TOP = 0, 20
+_L1_BOT, _L1_TOP = 1, 21
+_L2_BOT, _L2_TOP = 2, 22
 
 # Fruits (COLLECT) between climbs; bell/child stay labeled but off-plan.
-_FRUIT0, _FRUIT1, _FRUIT2 = 41, 42, 43
-_BELL, _CHILD = 44, 45
+_FRUIT0, _FRUIT1, _FRUIT2 = 40, 41, 42
+_BELL, _CHILD = 43, 44
 
-# collect(45) | destroy(4) | avoid(5)
-_MONKEY_SLOT0 = 46
-_MONKEY_SLOT1 = 49
-_FALLING_COCO_SLOT = 50
-_THROWN_COCO_SLOT0 = 51
-_THROWN_COCO_SLOT1 = 54
+# collect(45) | destroy(4) | avoid(5) | meta-NOOP(1)
+_MONKEY_SLOT0 = 45
+_MONKEY_SLOT1 = 48
+_FALLING_COCO_SLOT = 49
+_THROWN_COCO_SLOT0 = 50
+_THROWN_COCO_SLOT1 = 53
 
 DESTROY_PATH_RANGE = 90.0
 DESTROY_RELEASE = 110.0
@@ -101,10 +101,10 @@ THROWN_COCO_MELEE_RANGE = 28.0
 # Player centre must lie in the climb shaft ± slack to count as climbing.
 _ON_LADDER_Y_SLACK_PX = 6.0
 _ON_LADDER_X_SLACK_PX = 14.0
-# Bottom/top COLLECT slots are paired: ladder index i → object slots (i+1, i+21).
+# Bottom/top COLLECT slots are paired: ladder index i → object slots (i, i+20).
 _N_LADDER_WAYPOINT_PAIRS = 20
-_LADDER_BOT_SLOT_OFFSET = 1
-_LADDER_TOP_SLOT_OFFSET = 21
+_LADDER_BOT_SLOT_OFFSET = 0
+_LADDER_TOP_SLOT_OFFSET = 20
 # Bottom: require AABB overlap with the narrow shaft WP (see kangaroo_label).
 # arrive_dist=6 on a 16px WP completed the stage ~10px short of the ladder.
 LADDER_ARRIVE = 0.0
@@ -234,8 +234,8 @@ def _player_on_any_ladder(raw, objects, ctx) -> jnp.ndarray:
 
     # Ladder sprites are shorter than the climb: extend the shaft to bot/top waypoints.
     n_lads = lx.shape[0]
-    # Waypoints sit at object indices (ladder_i + 1) bottom, (ladder_i + 21) top;
-    # index 0 is the meta NOOP slot in labeled observations.
+    # Waypoints sit at object indices ladder_i (bottom) and ladder_i+20 (top);
+    # meta-NOOP is the trailing slot (54), not index 0.
     idx = jnp.arange(n_lads, dtype=jnp.int32)
     bot_i = jnp.clip(idx + _LADDER_BOT_SLOT_OFFSET, 0, max(ctx.n - 1, 0))
     top_i = jnp.clip(idx + _LADDER_TOP_SLOT_OFFSET, 0, max(ctx.n - 1, 0))
@@ -258,12 +258,17 @@ def _player_last_scalar(arr) -> jnp.ndarray:
 
 
 def _player_is_climbing(raw, objects, ctx) -> jnp.ndarray:
-    """True when JAX-Atari reports active climb (stamped on ``player.state``)."""
+    """True when JAX-Atari reports climb, or geometry says we are in a shaft.
+
+    Stamped ``player.state`` alone misses several mid-ladder poses (punch /
+    brief air frames) where ground monkeys would otherwise yank the plan via
+    same-floor melee. Geometry keeps DESTROY suppressed through those gaps.
+    """
+    stamped = jnp.bool_(False)
     player = getattr(raw, "player", None)
     if player is not None and hasattr(player, "state"):
-        return _player_last_scalar(player.state) == jnp.int32(PLAYER_STATE_CLIMBING)
-    # Unit tests without stamped state: fall back to shaft geometry.
-    return _player_on_any_ladder(raw, objects, ctx)
+        stamped = _player_last_scalar(player.state) == jnp.int32(PLAYER_STATE_CLIMBING)
+    return jnp.logical_or(stamped, _player_on_any_ladder(raw, objects, ctx))
 
 
 def _player_is_crashing(raw, objects=None, ctx=None) -> jnp.ndarray:
@@ -321,14 +326,17 @@ def _object_blocks_ladder_shaft(ctx, plan_target: jnp.ndarray) -> jnp.ndarray:
 
 
 def _kangaroo_destroy_threat_mask(raw, objects, ctx, plan_target):
-    """Monkeys: horizontal path block, ladder-shaft block, same-floor melee, or emergency."""
-    del objects, raw
+    """Monkeys: horizontal path block, ladder-shaft block, same-floor melee, or emergency.
+
+    While climbing, ignore ground-floor path/melee so monkeys on the departure
+    platform cannot yank the plan off the ladder; shaft blockers + emergency
+    contact still interrupt.
+    """
     idxs = jnp.arange(ctx.n, dtype=jnp.int32)
     is_monkey = jnp.logical_and(idxs >= _MONKEY_SLOT0, idxs <= _MONKEY_SLOT1)
-    blocks = jnp.logical_or(
-        _object_blocks_path(ctx, plan_target, y_slack=DESTROY_PATH_Y_SLACK),
-        _object_blocks_ladder_shaft(ctx, plan_target),
-    )
+    climbing = _player_is_climbing(raw, objects, ctx)
+    path = _object_blocks_path(ctx, plan_target, y_slack=DESTROY_PATH_Y_SLACK)
+    shaft = _object_blocks_ladder_shaft(ctx, plan_target)
     same_floor = jnp.abs(ctx.oy - ctx.py) <= float(DESTROY_PATH_Y_SLACK)
     in_melee = jnp.logical_and(
         is_monkey,
@@ -338,7 +346,15 @@ def _kangaroo_destroy_threat_mask(raw, objects, ctx, plan_target):
         is_monkey,
         ctx.distances <= float(DESTROY_EMERGENCY_RANGE),
     )
-    return jnp.logical_or(blocks, jnp.logical_or(in_melee, emergency))
+    ground = jnp.logical_or(
+        jnp.logical_and(is_monkey, jnp.logical_or(path, shaft)),
+        jnp.logical_or(in_melee, emergency),
+    )
+    on_ladder = jnp.logical_or(
+        jnp.logical_and(is_monkey, shaft),
+        emergency,
+    )
+    return jnp.where(climbing, on_ladder, ground)
 
 
 def _kangaroo_falling_coco_threat_mask(raw, objects, ctx, plan_target):

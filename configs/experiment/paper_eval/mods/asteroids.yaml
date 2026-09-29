@@ -1,4 +1,5 @@
-# Asteroids short strip: S / Dₚ / Dₜ / A (paper showcase).
+# Asteroids short strip: Dₚ / Dₜ / A (paper showcase).
+# x_dominant_rocks dropped: it rewrites rock motion (mechanics change → skill crash).
 env: asteroids
 status: ready
 
@@ -6,9 +7,6 @@ eval_mods:
   - key: base
     mods: []
     category: control
-  - key: x_dominant_rocks
-    mods: [x_dominant_rocks]
-    category: layout
   - key: no_momentum
     mods: [no_momentum]
     category: dynamics
@@ -21,7 +19,6 @@ eval_mods:
 
 paper_core:
   - base
-  - x_dominant_rocks
   - no_momentum
   - faster_asteroids
   - frozen_asteroids

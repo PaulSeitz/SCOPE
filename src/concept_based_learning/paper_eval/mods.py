@@ -17,8 +17,10 @@ class ModSpec:
     key: str
     mods: tuple[str, ...]
     category: str
-    # When True, eval harness sets SEAQUEST_SWAP_DIVER_ENEMY_LABELS for this
-    # condition only (architecture E2). Never inferred from GAME_MODS.
+    # When True, eval harness enables an E2 label remap for this condition only
+    # (architecture adaptability). Key selects which remap:
+    # ``swap_diver_shark_roles`` → SEAQUEST_SWAP_DIVER_SHARK_ROLES; otherwise
+    # SEAQUEST_SWAP_DIVER_ENEMY_LABELS. Never inferred from GAME_MODS.
     relabel: bool = False
 
 

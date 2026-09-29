@@ -29,7 +29,9 @@ from concept_based_learning.environments.montezumarevenge.montezuma_policy impor
     _L0_TOP,
     _L1_BOT,
     _L1_TOP,
+    _L2_BOT,
     _L2_TOP,
+    _LEFT_DOOR_SLOT,
     _ROPE_GRAB_SLOT,
     _SHAFT_BEAD_SLOT,
     room4_path_stamps,
@@ -110,9 +112,9 @@ def _room4_objects(*, skull_xy=None, skull_active=0):
         objs[slot] = (x, y, w, h, 1, lab)
     objs[_ROPE_GRAB_SLOT] = (107, 98, 8, 8, 1, LABEL_COLLECT)
     objs[_KEY_SLOT] = (13, 99, 6, 8, 1, LABEL_COLLECT)
-    objs[15] = (16, 54, 4, 38, 1, LABEL_COLLECT)
+    objs[_LEFT_DOOR_SLOT] = (16, 54, 4, 38, 1, LABEL_COLLECT)
     if skull_xy is not None:
-        objs[1] = (skull_xy[0], skull_xy[1], 6, 14, skull_active, LABEL_AVOID)
+        objs[0] = (skull_xy[0], skull_xy[1], 6, 14, skull_active, LABEL_AVOID)
     return objs
 
 
@@ -126,7 +128,7 @@ def test_montezuma_avoids_close_enemy():
     target = get_heuristic_target(
         raw, objs, jnp.int32(NO_TARGET_IDX), jax.random.PRNGKey(0)
     )
-    assert int(target) == 1
+    assert int(target) == 0
     assert CLOSE_AVOID_RANGE > 0
 
 
@@ -285,13 +287,13 @@ def test_montezuma_player_shape_and_orientation():
     assert int(act[_L0_BOT]) == 1
     assert int(act[_L0_TOP]) == 0
     assert int(obs.objects.semantic_label[-1][_L0_TOP]) == LABEL_COLLECT
-    assert int(act[5]) == 1 and int(act[6]) == 1
-    assert int(act[9]) == 1 and int(act[10]) == 1
+    assert int(act[_L1_BOT]) == 1 and int(act[_L2_BOT]) == 1
+    assert int(act[_L1_TOP]) == 1 and int(act[_L2_TOP]) == 1
     assert int(act[_SHAFT_BEAD_SLOT]) == 1
     assert int(act[_EDGE_COLLECT_SLOT]) == 1
     assert int(act[_ROPE_GRAB_SLOT]) == 1
     assert int(obs.objects.semantic_label[-1][_ROPE_GRAB_SLOT]) == LABEL_COLLECT
-    assert int(obs.objects.semantic_label[-1][15]) == LABEL_COLLECT
+    assert int(obs.objects.semantic_label[-1][_LEFT_DOOR_SLOT]) == LABEL_COLLECT
     # Stamped centres match policy WP* constants.
     shaft_cx = float(obs.objects.x[-1][_SHAFT_BEAD_SLOT]) + float(
         obs.objects.width[-1][_SHAFT_BEAD_SLOT]

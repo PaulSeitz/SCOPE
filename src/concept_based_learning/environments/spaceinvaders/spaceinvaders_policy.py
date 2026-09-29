@@ -14,21 +14,33 @@ NO_TARGET_IDX = -1
 CLOSE_DANGER_RANGE = 20.0
 
 NUM_ENEMIES = 36
+NUM_ENEMY_BULLETS = 3
 ENEMY_COLS = 6
 FIRST_ENEMY_SLOT = 1  # slot 0 = reserved meta NOOP
+# Layout after meta NOOP: [36 enemies | 3 bullets | 1 UFO]
+UFO_SLOT = FIRST_ENEMY_SLOT + NUM_ENEMIES + NUM_ENEMY_BULLETS  # 40
 
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
-    Space Invaders targeting heuristic with persistent DESTROY selection.
+    Legacy Space Invaders targeting: uniform-random sticky DESTROY on the
+    bottom formation row.
+
+    Prefer ``HEURISTIC_MODE: sweep`` / ``env_specific`` (resolved to the
+    bottom-row L→R sweep with mission stickiness). Keep this available via
+    ``HEURISTIC_MODE: random_bottom``.
 
     - When choosing a new DESTROY target, pick uniformly at random among
       enemies on the current bottom formation row.
-    - Keep that target until it is destroyed / goes inactive.
+    - If no formation DESTROY remains, select the saucer (UFO) when it is
+      an active DESTROY (needed for ``saucer_only`` and end-of-wave).
+    - Keep that target until it is destroyed / goes inactive (sticky also
+      covers the UFO).
     - If a bullet (AVOID) enters CLOSE_DANGER_RANGE (AABB surface gap),
       temporarily override the target to that bullet.  After the dodge,
       stickiness resumes only if ``prev_target_idx`` is still an active
-      DESTROY object; otherwise a new random bottom-row enemy is chosen.
+      DESTROY object; otherwise a new random bottom-row enemy (or UFO) is
+      chosen.
     """
     distances, _, _, _, _ = player_object_aabb_gaps(raw_observation, objects)
     active_mask = objects.active[-1] > 0.5
@@ -37,7 +49,7 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     idxs = jnp.arange(n, dtype=jnp.int32)
 
     # ------------------------------------------------------------------
-    # Bottom-row DESTROY candidates (formation enemies only; not UFO)
+    # Bottom-row DESTROY candidates (formation enemies); UFO is fallback
     # ------------------------------------------------------------------
     enemy_slot_mask = jnp.logical_and(
         idxs >= FIRST_ENEMY_SLOT,
@@ -47,7 +59,17 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
         jnp.logical_and(active_mask, labels == LABEL_DESTROY),
         enemy_slot_mask,
     )
-    any_destroy = jnp.any(destroy_enemy_mask)
+    any_formation_destroy = jnp.any(destroy_enemy_mask)
+
+    ufo_in_range = jnp.logical_and(UFO_SLOT >= 0, UFO_SLOT < n)
+    ufo_destroy = jnp.logical_and(
+        ufo_in_range,
+        jnp.logical_and(
+            active_mask[UFO_SLOT],
+            labels[UFO_SLOT] == LABEL_DESTROY,
+        ),
+    )
+    ufo_idx = jnp.array(UFO_SLOT, dtype=jnp.int32)
 
     enemy_rows = (idxs - FIRST_ENEMY_SLOT) // ENEMY_COLS
     enemy_rows_for_bottom = jnp.where(destroy_enemy_mask, enemy_rows, -1)
@@ -60,7 +82,8 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     )
     random_bottom_idx = jnp.argmax(scores).astype(jnp.int32)
 
-    # Sticky: keep prev_target_idx if it is still an active DESTROY object.
+    # Sticky: keep prev_target_idx if it is still an active DESTROY object
+    # (formation enemy or saucer).
     prev_valid = jnp.logical_and(
         prev_target_idx >= 0,
         prev_target_idx < n,
@@ -71,7 +94,13 @@ def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     )
     keep_prev_destroy = jnp.logical_and(prev_active, prev_is_destroy)
 
-    base_destroy_idx = jnp.where(keep_prev_destroy, prev_target_idx, random_bottom_idx)
+    formation_or_ufo = jnp.where(
+        any_formation_destroy,
+        random_bottom_idx,
+        jnp.where(ufo_destroy, ufo_idx, jnp.array(NO_TARGET_IDX, dtype=jnp.int32)),
+    )
+    base_destroy_idx = jnp.where(keep_prev_destroy, prev_target_idx, formation_or_ufo)
+    any_destroy = jnp.logical_or(any_formation_destroy, ufo_destroy)
     base_destroy_idx = jnp.where(
         any_destroy,
         base_destroy_idx,

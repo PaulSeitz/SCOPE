@@ -47,13 +47,20 @@ def _apply_eval_mod_label_overrides(
     """Eval-only semantic label overrides for architecture adaptability (E2).
 
     Driven solely by ``mod.relabel`` from the allowlist YAML — never by whether
-    ``swap_diver_enemy_labels`` (or any other key) appears in merged GAME_MODS.
-    Sets ``_PAPER_EVAL_MOD_RELABEL`` so env_manager will not apply the remap on
-    train-time ``test_env`` builds that lack this sentinel.
+    ``swap_diver_enemy_labels`` / ``swap_diver_shark_roles`` appear in merged
+    GAME_MODS. Sets ``_PAPER_EVAL_MOD_RELABEL`` so env_manager will not apply
+    remaps on train-time ``test_env`` builds that lack this sentinel.
     """
     eval_cfg["_PAPER_EVAL_MOD_RELABEL"] = True
     # Explicit False on every condition so a prior True cannot stick via shared dicts.
-    eval_cfg["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] = bool(mod.relabel)
+    eval_cfg["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] = False
+    eval_cfg["SEAQUEST_SWAP_DIVER_SHARK_ROLES"] = False
+    if mod.relabel:
+        if mod.key == "swap_diver_shark_roles":
+            eval_cfg["SEAQUEST_SWAP_DIVER_SHARK_ROLES"] = True
+        else:
+            # OC/sprite swap path (swap_diver_enemy_labels and any future relabel keys).
+            eval_cfg["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] = True
     return eval_cfg
 
 

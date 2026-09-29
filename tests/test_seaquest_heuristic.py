@@ -421,6 +421,23 @@ def test_close_diver_beats_far_other_lane_shark():
     assert int(target) == 0
 
 
+def test_divers_only_hunts_far_diver():
+    """No DESTROY on screen → hunt far divers (no_enemies / empty combat)."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(130.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+    from concept_based_learning.environments.seaquest.heuristic_policy import (
+        COLLECT_NEAR_RANGE,
+    )
+
+    gap = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 130.0, 100.0, 8.0, 8.0)
+    )
+    assert gap > COLLECT_NEAR_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 0
+
+
 def test_no_diver_falls_back_to_far_on_screen_shark():
     """With no COLLECT eligible, nearest falls back to on-screen DESTROY (even far)."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0, divers=0, oxygen=64.0)
@@ -1070,7 +1087,7 @@ def test_midfield_margin_zero_keeps_nearest_edge_diver():
 
 
 def test_enemy_offscreen_not_selected_for_nearest():
-    """Spawning shark with centre off-screen is ignored until roughly visible."""
+    """Spawning / half-spawned sharks are ignored until AABB is fully on-screen."""
     raw = _make_raw(px=80.0, py=100.0)
     # Shark mostly off left: x=-6,w=8 → centre=-2 (off-screen), other lane so
     # it does not lane-block the midfield diver.
@@ -1081,7 +1098,13 @@ def test_enemy_offscreen_not_selected_for_nearest():
     target = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
     assert target == 0  # diver, not the off-screen shark
 
-    # Only off-screen shark → meta-NOOP (no early DESTROY pull).
+    # Half-spawned: centre ON screen (x=-2,w=8 → centre=2) but AABB past edge —
+    # old centre gate would select this; fully-on-screen must reject it.
+    objs_half = _make_objects(shark_xy=(-2.0, 100.0))
+    half = int(get_heuristic_target(raw, objs_half, jnp.int32(NO_TARGET_IDX), None))
+    assert half == 34
+
+    # Only fully off-screen shark → meta-NOOP (no early DESTROY pull).
     objs_only = _make_objects(shark_xy=(-6.0, 100.0))
     only = int(get_heuristic_target(raw, objs_only, jnp.int32(NO_TARGET_IDX), None))
     assert only == 34

@@ -48,7 +48,8 @@ kangaroo_action_mapper, kangaroo_inverse_action_mapper = make_target_aligned_act
 #
 # Total objects: 20 bottom + 20 top + 3 fruits + 1 bell + 1 child
 #              + 4 monkeys + 1 falling_coconut + 4 thrown_coconuts = 54
-_KANGAROO_MAX_OBJECTS = 55  # 54 + 1 meta NOOP
+#              + 1 trailing meta-NOOP = 55
+_KANGAROO_MAX_OBJECTS = 55  # 54 game + 1 meta NOOP
 _N_WAYPOINTS = 40  # 20 bottom + 20 top (COLLECT)
 _N_COLLECTIBLE = 5  # 3 fruits + bell + child (COLLECT)
 _N_DESTROY = 4  # monkeys only
@@ -204,15 +205,15 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         """Stamp climb/crash on player.state and falling-coco dropping on objects.state.
 
         ``falling_coco_dropping`` lives on the Atari level state (not ObjectObservation),
-        so we copy it onto the labeled falling-coco slot after meta-NOOP prepend.
+        so we copy it onto the labeled falling-coco slot (meta-NOOP is trailing).
         """
         raw = stamp_player_status_on_raw(
             semantic_obs.raw_observation,
             env_state.player.is_climbing,
             env_state.player.is_crashing,
         )
-        # Layout after meta NOOP: collect(45) | destroy(4) | falling(1) | thrown(4)
-        fc_slot = 1 + _N_WAYPOINTS + _N_COLLECTIBLE + _N_DESTROY  # 50
+        # Layout: collect(45) | destroy(4) | falling(1) | thrown(4) | meta-NOOP
+        fc_slot = _N_WAYPOINTS + _N_COLLECTIBLE + _N_DESTROY  # 49
         dropping = jnp.asarray(env_state.level.falling_coco_dropping).astype(jnp.int32)
         dropping = jnp.where(
             dropping > 0, jnp.int32(FALLING_COCO_STATE_DROPPING), jnp.int32(0)

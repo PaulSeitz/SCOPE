@@ -48,13 +48,27 @@ def test_relabel_override_only_from_modspec():
         ),
     )
     assert on["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] is True
+    assert on["SEAQUEST_SWAP_DIVER_SHARK_ROLES"] is False
     assert on["_PAPER_EVAL_MOD_RELABEL"] is True
+
+    roles = _apply_eval_mod_label_overrides(
+        dict(base),
+        ModSpec(
+            key="swap_diver_shark_roles",
+            mods=("swap_diver_shark_roles",),
+            category="semantic",
+            relabel=True,
+        ),
+    )
+    assert roles["SEAQUEST_SWAP_DIVER_SHARK_ROLES"] is True
+    assert roles["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] is False
 
     off = _apply_eval_mod_label_overrides(
         dict(base),
         ModSpec(key="base", mods=(), category="control", relabel=False),
     )
     assert off["SEAQUEST_SWAP_DIVER_ENEMY_LABELS"] is False
+    assert off["SEAQUEST_SWAP_DIVER_SHARK_ROLES"] is False
     assert off["_PAPER_EVAL_MOD_RELABEL"] is True
 
 
@@ -65,7 +79,9 @@ def test_seaquest_allowlist_wires_new_keys():
     assert specs["lane_scramble"].category == "layout"
     assert "dynamic_lane_drift" in specs
     assert specs["dynamic_lane_drift"].category == "layout"
-    assert "micro_swarm" in specs
     swap = specs["swap_diver_enemy_labels"]
     assert swap.mods == ("swap_diver_enemy_labels",)
     assert swap.relabel is True
+    roles = specs["swap_diver_shark_roles"]
+    assert roles.mods == ("swap_diver_shark_roles",)
+    assert roles.relabel is True

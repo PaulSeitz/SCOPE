@@ -56,6 +56,12 @@ SEAQUEST_SURFACE_LABEL = LABEL_COLLECT
 # this off when ``train=True``.
 SEAQUEST_SWAP_DIVER_ENEMY_LABELS = False
 
+# Eval-only E2 remap for ``swap_diver_shark_roles`` (physics/scoring swap).
+# Divers stay in diver slots but are lethal → DESTROY; sharks stay in enemy[:12]
+# but are collectable → COLLECT. Subs/surface unchanged. Mutually exclusive with
+# SEAQUEST_SWAP_DIVER_ENEMY_LABELS in the eval harness.
+SEAQUEST_SWAP_DIVER_SHARK_ROLES = False
+
 _SURFACE_LABEL_ALIASES = {
     "collect": LABEL_COLLECT,
     "label_collect": LABEL_COLLECT,
@@ -85,6 +91,12 @@ def set_seaquest_swap_diver_enemy_labels(enabled) -> None:
     """Eval-only: remap diver↔enemy skill labels after fork OC channel swap."""
     global SEAQUEST_SWAP_DIVER_ENEMY_LABELS
     SEAQUEST_SWAP_DIVER_ENEMY_LABELS = bool(enabled)
+
+
+def set_seaquest_swap_diver_shark_roles(enabled) -> None:
+    """Eval-only: remap labels after fork physics swap (lethal divers / collect sharks)."""
+    global SEAQUEST_SWAP_DIVER_SHARK_ROLES
+    SEAQUEST_SWAP_DIVER_SHARK_ROLES = bool(enabled)
 
 
 def select_surface_waypoint_x(
@@ -325,7 +337,16 @@ class SeaquestSemanticWrapper(JaxatariSemanticBaseWrapper):
         # Labels (standard: divers COLLECT, sharks/subs DESTROY, surface sub AVOID).
         # With SEAQUEST_SWAP_DIVER_ENEMY_LABELS (eval E2): fork SwapDiverEnemyLabelsMod
         # puts enemies in diver slots and divers in enemy[:4], so remap those slots.
-        if SEAQUEST_SWAP_DIVER_ENEMY_LABELS:
+        # With SEAQUEST_SWAP_DIVER_SHARK_ROLES: physics swap — divers lethal, sharks
+        # collectable; slots stay put so remaps follow entity type (12 sharks COLLECT).
+        if SEAQUEST_SWAP_DIVER_SHARK_ROLES:
+            diver_labels = jnp.full(4, LABEL_DESTROY, dtype=jnp.int32)
+            enemy_labels = jnp.concatenate([
+                jnp.full(12, LABEL_COLLECT, dtype=jnp.int32),  # sharks
+                jnp.full(12, LABEL_DESTROY, dtype=jnp.int32),  # subs
+                jnp.array([LABEL_AVOID], dtype=jnp.int32),     # surface sub
+            ])
+        elif SEAQUEST_SWAP_DIVER_ENEMY_LABELS:
             diver_labels = jnp.full(4, LABEL_DESTROY, dtype=jnp.int32)
             enemy_labels = jnp.concatenate([
                 jnp.full(4, LABEL_COLLECT, dtype=jnp.int32),   # divers in enemy[:4]

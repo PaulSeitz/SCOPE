@@ -29,7 +29,8 @@ Room-4 path scaffolding (obs coords; see ``montezuma_policy.WP*``):
   platform / ladder slots stamped from numbered waypoint centres so the
   policy file is the single place to retune trigger positions.
 
-With meta-NOOP prepended, planner slots are +1 (enemies start at 1).
+With meta-NOOP appended last, planner slots match the game layout
+(enemies start at 0; NOOP is index 31).
 """
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ _TOP_WP_ALREADY_THERE_PX = 16.0
 # same offset so overlays / ego match the rendered frame.
 MONTEZUMA_RENDER_Y_OFFSET = 47
 
-# Game-layout indices (before meta-NOOP). Policy slots = these + 1.
+# Game-layout indices (meta-NOOP is trailing). Policy slots match these.
 WP_BOT0 = _N_ENEMIES  # 3
 WP_TOP0 = _N_ENEMIES + _N_LADDERS  # 7
 ITEM0 = _N_ENEMIES + _N_WAYPOINTS  # 11

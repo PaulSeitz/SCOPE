@@ -5,10 +5,10 @@ Player sits on the bottom beams (y≈164) and shoots upward. Targeting priority:
   1. AVOID (shots / chasing meteoroids / falling rocks / lane blockers /
      bouncer / shot rejuvenator debris) when in our lane or within
      CLOSE_AVOID_RANGE (AABB surface gap).
-  2. DESTROY (UFOs / kamikaze / mothership) when on our beam ahead and within
-     DESTROY_SHOOT_RANGE.
-  3. COLLECT (coins / intact rejuvenator life) when no DESTROY sits in front
-     of it on the same lane.
+  2. DESTROY (UFOs / kamikaze / mothership / coins) when on our beam ahead and
+     within DESTROY_SHOOT_RANGE.
+  3. COLLECT (intact rejuvenator) when no DESTROY sits in front of it on the
+     same lane.
   4. Else nearest active DESTROY on a reachable beam (lanes 1–5; outer
      diagonals 0/6 are approach-only and ignored), else NO_TARGET.
 

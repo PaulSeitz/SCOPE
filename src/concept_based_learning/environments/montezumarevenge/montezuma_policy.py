@@ -83,19 +83,19 @@ WP12 = (80.0, 129.0)  # L0 bot
 WP13 = (80.0, 78.0)   # L0 top
 WP14 = (18.0, 73.0)   # door (informational; completion = arrive/inactive)
 
-# Object slots (meta-NOOP prepended). Keep in sync with montezuma_label layout.
-_SLOT_SHAFT = 20
-_SLOT_EDGE = 23
-_SLOT_GAP_L = 21
-_SLOT_GAP_R = 22
-_SLOT_L0_BOT, _SLOT_L0_TOP = 4, 8
-_SLOT_L1_BOT, _SLOT_L1_TOP = 5, 9
-_SLOT_L2_BOT, _SLOT_L2_TOP = 6, 10
-_SLOT_KEY = 12
-_SLOT_DOOR = 15
-_SLOT_ROPE = 17
-_ENEMY_SLOT0 = 1
-_ENEMY_SLOT1 = 3
+# Object slots (meta-NOOP trailing). Keep in sync with montezuma_label layout.
+_SLOT_SHAFT = 19
+_SLOT_EDGE = 22
+_SLOT_GAP_L = 20
+_SLOT_GAP_R = 21
+_SLOT_L0_BOT, _SLOT_L0_TOP = 3, 7
+_SLOT_L1_BOT, _SLOT_L1_TOP = 4, 8
+_SLOT_L2_BOT, _SLOT_L2_TOP = 5, 9
+_SLOT_KEY = 11
+_SLOT_DOOR = 14
+_SLOT_ROPE = 16
+_ENEMY_SLOT0 = 0
+_ENEMY_SLOT1 = 2
 
 # Trigger box stamped around each WP centre. Overlap == stage complete
 # (same contact rule as COLLECT skill success).

@@ -19,9 +19,9 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   AABB is not fully inside ``[0, 160]`` horizontally — spawning edge divers
   are not selectable until they are completely on-screen.
 - ``ENEMY_REQUIRE_ON_SCREEN`` (default True): sharks/subs (DESTROY) are only
-  nearest-/interrupt-selectable once their centre x is on-screen
-  (``[0, 160]``). Spawning off-screen enemies no longer pull targeting early.
-  Lane-blocking only uses on-screen DESTROY inside ``DIVER_LANE_BLOCK_RANGE``.
+  nearest-/interrupt-selectable once their AABB is fully inside ``[0, 160]``
+  horizontally — same hard gate as divers. Spawning edge enemies no longer
+  pull targeting early. Lane-blocking still uses centre-on-screen DESTROY.
 - ``DESTROY_NEAREST_IN_DANGER_ONLY`` (default False): when True, DESTROY only
   enters nearest scoring inside ``DESTROY_INTERRUPT_RANGE`` (far sharks lose
   to distant divers). Default False keeps DESTROY in the general nearest
@@ -36,9 +36,11 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
   clear; when it is not, pick combat / meta-NOOP instead of another COLLECT
   so the skill is not trained on "collect a 7th diver".
 - ``COLLECT_NEAREST_IN_RANGE_ONLY`` (default True): COLLECT only enters
-  nearest scoring inside ``COLLECT_NEAR_RANGE`` (default 20px AABB gap).
-  Far divers are ignored so DESTROY stays the default target — stops the
-  spawn-frame dive toward a mid-screen diver. Close free divers still win.
+  nearest scoring inside ``COLLECT_NEAR_RANGE`` (default 20px AABB gap)
+  *when any DESTROY is on screen*. Far divers are ignored so DESTROY stays
+  the default — stops spawn-frame dives at mid-screen divers. If the scene
+  has **no** selectable DESTROY (e.g. ``no_enemies``), hunt divers of any
+  distance (still subject to midfield / fully-on-screen / full-tank gates).
 - Surface sub (slot 28) is ignored for *nearest* targeting unless the player
   is near the surface and within ``SURFACE_SUB_NEAR_RANGE``. It still
   interrupts as AVOID from any depth inside ``SURFACE_SUB_AVOID_RANGE_{X,Y}``.
@@ -137,13 +139,15 @@ COLLECT_EDGE_HARD = True
 # Hard COLLECT / DESTROY visibility gates (on by default).
 COLLECT_REQUIRE_FULLY_ON_SCREEN = True
 COLLECT_SKIP_WHEN_FULL = True
-# COLLECT only joins *nearest* inside this AABB gap (default on). Far divers
-# are dropped so DESTROY remains the default — avoids spawn-frame rushes at
-# mid-screen divers. Same scale as ``DIVER_LANE_BLOCK_RANGE``.
+# COLLECT only joins *nearest* inside this AABB gap when DESTROY is present
+# (default on). Far divers are dropped so DESTROY remains the default — avoids
+# spawn-frame rushes at mid-screen divers. If no DESTROY is selectable, the
+# near-range gate is skipped so divers-only scenes (no_enemies) still hunt.
 COLLECT_NEAREST_IN_RANGE_ONLY = True
 COLLECT_NEAR_RANGE = 20.0
-# DESTROY nearest/interrupt only once centre x is on-screen (spawning enemies
-# no longer steal targeting). Lane-blocking ignores this gate.
+# DESTROY nearest/interrupt only once AABB is fully on-screen (same hard gate
+# as divers). Centre-only was too weak — half-spawned edge sharks still won
+# nearest. Lane-blocking still uses centre-on-screen below.
 ENEMY_REQUIRE_ON_SCREEN = True
 # When True, DESTROY only joins *nearest* scoring inside
 # ``DESTROY_INTERRUPT_RANGE`` (far sharks lose to distant divers; lane-block
@@ -475,9 +479,9 @@ def _select_target(
     ow_f = ow.astype(jnp.float32)
     screen_w = jnp.float32(SEAQUEST_SCREEN_W)
     cx = ox_f + ow_f / 2.0
-    # Fully on-screen AABB (divers).
+    # Fully on-screen AABB (divers + DESTROY selection).
     fully_on_screen = jnp.logical_and(ox_f >= 0.0, (ox_f + ow_f) <= screen_w)
-    # Roughly on-screen: centre inside the playfield (enemies).
+    # Roughly on-screen: centre inside the playfield (lane-block threats).
     centre_on_screen = jnp.logical_and(cx >= 0.0, cx <= screen_w)
 
     # Hard: divers must be fully on-screen before COLLECT.
@@ -516,13 +520,13 @@ def _select_target(
     )
     selectable = jnp.logical_and(selectable, jnp.logical_not(collect_hard_drop))
 
-    # DESTROY nearest/interrupt: require roughly on-screen. Lane-blocking
-    # still sees all active sharks/subs (see destroy_j_lane below).
+    # DESTROY nearest/interrupt: require fully on-screen AABB. Lane-blocking
+    # still uses centre-on-screen so a spawning same-lane shark can veto COLLECT.
     destroy_offscreen = jnp.logical_and(
         is_destroy,
         jnp.logical_and(
             enemy_require_on_screen,
-            jnp.logical_not(centre_on_screen),
+            jnp.logical_not(fully_on_screen),
         ),
     )
     selectable = jnp.logical_and(selectable, jnp.logical_not(destroy_offscreen))
@@ -571,15 +575,22 @@ def _select_target(
     )
     selectable_nearest = jnp.logical_and(selectable_nearest, destroy_nearest_ok)
 
-    # COLLECT nearest only when really close — far divers must not win over
-    # DESTROY (spawn-frame dive deaths). DESTROY stays in the general pool.
+    # COLLECT nearest only when really close *if* DESTROY is on screen —
+    # far divers must not win over combat (spawn-frame dive deaths). When
+    # the scene is divers-only (no selectable DESTROY), hunt any eligible
+    # diver so no_enemies / empty combat still trains COLLECT.
+    any_destroy_selectable = jnp.any(jnp.logical_and(is_destroy, selectable))
+    collect_in_near_band = jnp.logical_and(
+        collect_near_range > 0.0,
+        distances <= collect_near_range,
+    )
     collect_near_ok = jnp.logical_or(
         jnp.logical_not(is_collect),
         jnp.logical_or(
             jnp.logical_not(collect_nearest_in_range_only),
-            jnp.logical_and(
-                collect_near_range > 0.0,
-                distances <= collect_near_range,
+            jnp.logical_or(
+                jnp.logical_not(any_destroy_selectable),
+                collect_in_near_band,
             ),
         ),
     )

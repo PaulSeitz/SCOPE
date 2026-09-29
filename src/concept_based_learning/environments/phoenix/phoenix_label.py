@@ -150,6 +150,18 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         boss_h = extract_single_field(boss.height)
         boss_active = extract_single_field(boss.active)
 
+        # DESTROY aims at an enemy-sized AABB centered on the boss sprite so the
+        # skill tunnels into the body (same 6×5 as formation enemies) instead of
+        # hugging the large 32×16 boss box.
+        enemy_w0 = enemies.width.reshape(-1)[0].astype(boss_w.dtype)
+        enemy_h0 = enemies.height.reshape(-1)[0].astype(boss_h.dtype)
+        boss_cx = boss_x + boss_w // 2
+        boss_cy = boss_y + boss_h // 2
+        boss_w = jnp.full_like(boss_w, enemy_w0)
+        boss_h = jnp.full_like(boss_h, enemy_h0)
+        boss_x = boss_cx - boss_w // 2
+        boss_y = boss_cy - boss_h // 2
+
         # Mark enemy active=0 the moment the death animation starts (state >= 4)
         # so the meta-policy stops selecting dying enemies before sprite removal.
         enemy_alive = (enemies.state < DYING_STATE_THRESHOLD).astype(enemies.active.dtype)

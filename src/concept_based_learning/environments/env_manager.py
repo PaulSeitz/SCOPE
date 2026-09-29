@@ -44,6 +44,7 @@ from concept_based_learning.environments.seaquest.label import (
     set_seaquest_surface_label,
     set_seaquest_surfacing_death_guard,
     set_seaquest_swap_diver_enemy_labels,
+    set_seaquest_swap_diver_shark_roles,
 )
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     get_heuristic_target,
@@ -887,15 +888,19 @@ class EnvManager:
             )
             # Always apply (default collect) so multi-job workers reset between stems.
             set_seaquest_surface_label(config.get("SEAQUEST_SURFACE_LABEL", "collect"))
-            # E2 diver↔enemy label remap is eval-only.
-            # Dual gate: ModSpec.relabel → harness sets SEAQUEST_SWAP_DIVER_ENEMY_LABELS
-            # and _PAPER_EVAL_MOD_RELABEL. Never inferred from GAME_MODS. Forced off
+            # E2 label remaps are eval-only.
+            # Dual gate: ModSpec.relabel → harness sets SEAQUEST_SWAP_* and
+            # _PAPER_EVAL_MOD_RELABEL. Never inferred from GAME_MODS. Forced off
             # on train=True and on any train-time test_env (no harness sentinel).
             if train or not bool(config.get("_PAPER_EVAL_MOD_RELABEL", False)):
                 set_seaquest_swap_diver_enemy_labels(False)
+                set_seaquest_swap_diver_shark_roles(False)
             else:
                 set_seaquest_swap_diver_enemy_labels(
                     bool(config.get("SEAQUEST_SWAP_DIVER_ENEMY_LABELS", False))
+                )
+                set_seaquest_swap_diver_shark_roles(
+                    bool(config.get("SEAQUEST_SWAP_DIVER_SHARK_ROLES", False))
                 )
         if components.jax_game_id == "freeway":
             set_freeway_heuristic_params(
@@ -916,7 +921,8 @@ class EnvManager:
         # Must match frozen skill checkpoints: ego MLP length = EGO_OBS_CHANNELS_PER_FRAME * frame_stack_size.
         frame_stack_size = int(config.get("FRAME_STACK_SIZE", 4))
         frame_skip = int(config.get("FRAME_SKIP", 4))
-        clip_reward = bool(config.get("CLIP_REWARD", False))
+        # Default True matches flat_pqn_train / train_skills / purejaxql reward_clip.
+        clip_reward = bool(config.get("CLIP_REWARD", True))
         meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
         skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
 

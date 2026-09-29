@@ -118,6 +118,7 @@ class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
         enemies = obs.enemies                 # n=36
         enemy_bullets = obs.enemy_bullets     # n=3
         ufo = obs.ufo                         # n=1
+        player = obs.player
 
         # Note: We skip `player_bullet` because we don't want the agent to target its own bullet
 
@@ -139,6 +140,20 @@ class SpaceInvadersSemanticWrapper(JaxatariSemanticBaseWrapper):
         all_w = jnp.concatenate([enemies.width, enemy_bullets.width, ufo_w])
         all_h = jnp.concatenate([enemies.height, enemy_bullets.height, ufo_h])
         all_active = jnp.concatenate([enemies.active, enemy_bullets.active, ufo_active])
+
+        # Jaxatari keeps enemy bullets alive until y >= HEIGHT, so they remain
+        # "active" while sitting in the green ground / HUD band under the cannon.
+        # Those sprites are not visible on the playfield but the AVOID heuristic
+        # still prioritizes them. Same for invaders that have marched into that
+        # band. Gate selectability to objects whose top edge is still above the
+        # ground line (player feet == HEIGHT - BACKGROUND).
+        # Single-frame obs under vmap: coerce possible 0-d / length-1 leaves.
+        player_y = jnp.asarray(player.y).reshape(-1)[-1]
+        player_h = jnp.asarray(player.height).reshape(-1)[-1]
+        playfield_bottom = player_y + player_h
+        in_playfield = all_y < playfield_bottom
+        all_active = jnp.logical_and(all_active > 0, in_playfield).astype(jnp.int32)
+
         all_labels = jnp.concatenate([enemy_labels, enemy_bullet_labels, ufo_label])
         all_offscreen = jnp.ones(all_x.shape[0], dtype=jnp.int32)
 

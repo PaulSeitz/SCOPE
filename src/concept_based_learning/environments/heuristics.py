@@ -157,7 +157,7 @@ def _seaquest_collect_near_range(config) -> float:
 
 
 def _seaquest_enemy_require_on_screen(config) -> bool:
-    """DESTROY nearest/interrupt only once centre x is on-screen."""
+    """DESTROY nearest/interrupt only once AABB is fully on-screen."""
     return bool(
         config.get("ENEMY_REQUIRE_ON_SCREEN", SEAQUEST_ENEMY_REQUIRE_ON_SCREEN)
     )
@@ -202,6 +202,19 @@ def _seaquest_heuristic_kwargs(config) -> dict:
     }
 
 
+def _spaceinvaders_heuristic_mode(config) -> str:
+    return str(config.get("HEURISTIC_MODE", "env_specific")).lower().strip()
+
+
+def uses_spaceinvaders_sweep(config, env_name: str) -> bool:
+    """Bottom-row L→R sweep is the default SI heuristic (env_specific / sweep)."""
+    if str(env_name).lower() != "spaceinvaders":
+        return False
+    mode = _spaceinvaders_heuristic_mode(config)
+    # Legacy uniform-random bottom-row: HEURISTIC_MODE=random_bottom
+    return mode not in {"nearest", "avoid_only", "avoid", "random_bottom"}
+
+
 def resolve_heuristic_target_fn(config, env_name: str, components):
     """Pick heuristic meta-policy from HEURISTIC_MODE and environment."""
     heuristic_mode = str(config.get("HEURISTIC_MODE", "env_specific")).lower().strip()
@@ -213,7 +226,7 @@ def resolve_heuristic_target_fn(config, env_name: str, components):
         return functools.partial(
             get_avoid_only_target, no_target_idx=components.no_target_idx
         )
-    if heuristic_mode == "sweep" and str(env_name).lower() == "spaceinvaders":
+    if uses_spaceinvaders_sweep(config, env_name):
         return spaceinvaders_sweep_heuristic_target
     fn = components.get_heuristic_target
     if str(env_name).lower() == "seaquest":
@@ -222,10 +235,7 @@ def resolve_heuristic_target_fn(config, env_name: str, components):
 
 
 def uses_sweep_mission_state(config, env_name: str) -> bool:
-    return (
-        str(config.get("HEURISTIC_MODE", "")).lower() == "sweep"
-        and str(env_name).lower() == "spaceinvaders"
-    )
+    return uses_spaceinvaders_sweep(config, env_name)
 
 
 def resolve_heuristic_with_mission_fn(config, env_name: str):
