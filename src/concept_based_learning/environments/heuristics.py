@@ -6,9 +6,14 @@ from concept_based_learning.environments.manual_policy.state import PolicyState
 from concept_based_learning.environments.seaquest.heuristic_policy import (
     AVOID_INTERRUPT_RANGE as SEAQUEST_AVOID_INTERRUPT_RANGE,
     AVOID_INTERRUPT_RANGE_Y as SEAQUEST_AVOID_INTERRUPT_RANGE_Y,
+    COLLECT_EDGE_HARD as SEAQUEST_COLLECT_EDGE_HARD,
     COLLECT_EDGE_MARGIN_PX as SEAQUEST_COLLECT_EDGE_MARGIN_PX,
+    COLLECT_REQUIRE_FULLY_ON_SCREEN as SEAQUEST_COLLECT_REQUIRE_FULLY_ON_SCREEN,
+    COLLECT_SKIP_WHEN_FULL as SEAQUEST_COLLECT_SKIP_WHEN_FULL,
     DESTROY_INTERRUPT_RANGE as SEAQUEST_DESTROY_INTERRUPT_RANGE,
+    DESTROY_NEAREST_IN_DANGER_ONLY as SEAQUEST_DESTROY_NEAREST_IN_DANGER_ONLY,
     DIVER_LANE_Y_PX as SEAQUEST_DIVER_LANE_Y_PX,
+    ENEMY_REQUIRE_ON_SCREEN as SEAQUEST_ENEMY_REQUIRE_ON_SCREEN,
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
     SURFACE_SUB_AVOID_RANGE_X as SEAQUEST_SURFACE_SUB_AVOID_RANGE_X,
     SURFACE_SUB_AVOID_RANGE_Y as SEAQUEST_SURFACE_SUB_AVOID_RANGE_Y,
@@ -102,8 +107,45 @@ def _seaquest_collect_requires_no_destroy(config) -> bool:
 
 
 def _seaquest_collect_edge_margin_px(config) -> float:
-    """Soft midfield COLLECT preference; ``<=0`` disables (allow edge divers)."""
+    """Midfield COLLECT margin; ``<=0`` disables (allow edge divers)."""
     return float(config.get("COLLECT_EDGE_MARGIN_PX", SEAQUEST_COLLECT_EDGE_MARGIN_PX))
+
+
+def _seaquest_collect_edge_hard(config) -> bool:
+    """If True, edge divers are never COLLECT targets (no soft fall-back)."""
+    return bool(config.get("COLLECT_EDGE_HARD", SEAQUEST_COLLECT_EDGE_HARD))
+
+
+def _seaquest_collect_require_fully_on_screen(config) -> bool:
+    """Hard-drop divers whose AABB is not fully inside the screen horizontally."""
+    return bool(
+        config.get(
+            "COLLECT_REQUIRE_FULLY_ON_SCREEN",
+            SEAQUEST_COLLECT_REQUIRE_FULLY_ON_SCREEN,
+        )
+    )
+
+
+def _seaquest_collect_skip_when_full(config) -> bool:
+    """Never COLLECT a diver when ``collected_divers >= 6``."""
+    return bool(config.get("COLLECT_SKIP_WHEN_FULL", SEAQUEST_COLLECT_SKIP_WHEN_FULL))
+
+
+def _seaquest_enemy_require_on_screen(config) -> bool:
+    """DESTROY nearest/interrupt only once centre x is on-screen."""
+    return bool(
+        config.get("ENEMY_REQUIRE_ON_SCREEN", SEAQUEST_ENEMY_REQUIRE_ON_SCREEN)
+    )
+
+
+def _seaquest_destroy_nearest_in_danger_only(config) -> bool:
+    """DESTROY nearest scoring only inside DESTROY_INTERRUPT_RANGE."""
+    return bool(
+        config.get(
+            "DESTROY_NEAREST_IN_DANGER_ONLY",
+            SEAQUEST_DESTROY_NEAREST_IN_DANGER_ONLY,
+        )
+    )
 
 
 def _seaquest_heuristic_kwargs(config) -> dict:
@@ -118,6 +160,15 @@ def _seaquest_heuristic_kwargs(config) -> dict:
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
         "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
         "collect_edge_margin_px": _seaquest_collect_edge_margin_px(config),
+        "collect_edge_hard": _seaquest_collect_edge_hard(config),
+        "collect_require_fully_on_screen": _seaquest_collect_require_fully_on_screen(
+            config
+        ),
+        "collect_skip_when_full": _seaquest_collect_skip_when_full(config),
+        "enemy_require_on_screen": _seaquest_enemy_require_on_screen(config),
+        "destroy_nearest_in_danger_only": _seaquest_destroy_nearest_in_danger_only(
+            config
+        ),
     }
 
 

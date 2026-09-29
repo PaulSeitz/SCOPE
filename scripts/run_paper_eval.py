@@ -1292,6 +1292,17 @@ OPTIM_SCALE_PQN_OC_BUILDS_SUITE = "optim_scale_pqn_oc_builds"
 PQN_PAPER_T5_SUITE = "pqn_paper_t5"
 # PQN pixel trains + evals only (native_downscale=false re-run; skip skills).
 PQN_PAPER_T5_PQN_SUITE = "pqn_paper_t5_pqn"
+# Heu retrain A/B: seed45 εB skills, noweapon vs can_fire-only (facing off).
+# New heuristic (O₂~10%, no-diver→nearest DESTROY) + fixed home mods.
+#   python scripts/run_paper_eval.py --suite skills_heu_canfire_ab \
+#     --gpus 0 --wait-deps --skip-rq-gate --lean
+SKILLS_HEU_CANFIRE_AB_SUITE = "skills_heu_canfire_ab"
+SKILLS_HEU_CANFIRE_AB_STEMS = (
+    "optim_scale_skills_heu_noweapon_seed45",
+    "optim_scale_skills_heu_canfire_seed45",
+    "optim_scale_skills_heu_noweapon_seed45_eval",
+    "optim_scale_skills_heu_canfire_seed45_eval",
+)
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -2161,6 +2172,7 @@ SUITE_STEMS = {
     OPTIM_SCALE_PQN_OC_BUILDS_SUITE: OPTIM_SCALE_PQN_OC_BUILDS_STEMS,
     PQN_PAPER_T5_SUITE: PQN_PAPER_T5_STEMS,
     PQN_PAPER_T5_PQN_SUITE: PQN_PAPER_T5_PQN_STEMS,
+    SKILLS_HEU_CANFIRE_AB_SUITE: SKILLS_HEU_CANFIRE_AB_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -3286,6 +3298,11 @@ _EVAL_OVERRIDE_KEYS = (
     "DIVER_LANE_Y_PX",
     "COLLECT_REQUIRES_NO_DESTROY",
     "COLLECT_EDGE_MARGIN_PX",
+    "COLLECT_EDGE_HARD",
+    "COLLECT_REQUIRE_FULLY_ON_SCREEN",
+    "COLLECT_SKIP_WHEN_FULL",
+    "ENEMY_REQUIRE_ON_SCREEN",
+    "DESTROY_NEAREST_IN_DANGER_ONLY",
     # Ego layout must follow the transfer YAML / ckpt (scalar snap flags included).
     "USE_LEGACY_EGO_OBS",
     "USE_EGO_SIZE_FEATURES",
@@ -4002,6 +4019,11 @@ def main() -> None:
             f"{OPTIM_SCALE_SKILLS_LR_SUITE}: short LR probe seed=1 (ε B fixed) — "
             "lr1e4_lin / lr2p5e4_const / lr5e4_lin. "
             f"{OPTIM_SCALE_SKILLS_OLD_EPS_SUITE}: single YAML-ε arm (seed=44). "
+            f"{SKILLS_HEU_CANFIRE_AB_SUITE}: seed45 εB skills A/B — noweapon vs "
+            "can_fire-only (facing_enemy off), new heu (O₂~10%, no-diver→DESTROY) "
+            "+ fixed home mods; "
+            "--suite skills_heu_canfire_ab --gpus 0 --wait-deps --skip-rq-gate "
+            "--lean. "
             f"{OPTIM_SCALE_PQN_OC_SUITE} / {OPTIM_SCALE_PQN_PIXEL_SUITE}: flat PQN "
             "OC vs pixel @ same 1:1 HPs × seeds 44/45/46 + full Seaquest mod eval; "
             "train→eval sequential per seed — run one suite per GPU; "

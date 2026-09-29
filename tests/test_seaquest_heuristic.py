@@ -328,11 +328,85 @@ def test_other_lane_missile_does_not_steal_destroy():
 
 
 def test_same_lane_far_shark_blocks_diver():
-    """Same-row shark (beyond DESTROY_INTERRUPT_RANGE) still beats the diver."""
+    """Far same-lane shark no longer NOOPs divers when danger-only DESTROY is on."""
     raw = _make_raw(px=80.0, py=100.0)
     objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 100.0))
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    # Far shark is outside danger → does not lane-block → diver wins.
+    assert int(target) == 0
+
+    # Legacy: far shark may still win nearest when danger-only is off.
+    legacy = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            destroy_nearest_in_danger_only=False,
+        )
+    )
+    assert legacy == 4
+
+
+def test_same_lane_near_shark_still_blocks_diver():
+    """In-danger same-lane shark blocks COLLECT (and is selected)."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(110.0, 100.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 4
+
+
+def test_far_diver_beats_far_on_screen_shark():
+    """Distant diver wins over a far on-screen shark (sharks only in danger zone)."""
+    raw = _make_raw(px=80.0, py=100.0)
+    objs = _make_objects(diver_xy=(130.0, 100.0), shark_xy=(140.0, 160.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 0
+
+
+def test_no_diver_falls_back_to_far_on_screen_shark():
+    """With no COLLECT eligible, nearest falls back to on-screen DESTROY (even far)."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0, divers=0, oxygen=64.0)
+    objs = _make_objects(shark_xy=(140.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 140.0, 100.0, 8.0, 8.0)
+    )
+    assert gap > DESTROY_INTERRUPT_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 4
+
+
+def test_oxygen_at_10pct_forces_surface_but_above_does_not():
+    """Low O₂ ~10% of max (6.4): surface when O₂=5; do not when O₂=10 with no divers."""
+    objs = _make_objects(
+        shark_xy=(140.0, 100.0),
+        surface_sub_xy=(20.0, 46.0),
+        surface_sub_active=True,
+    )
+    raw_ok = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=0,
+        oxygen=10.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    # Above threshold → no force-surface; fallback to far shark.
+    assert int(get_heuristic_target(raw_ok, objs, jnp.int32(NO_TARGET_IDX), None)) == 4
+
+    raw_low = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=0,
+        oxygen=5.0,
+        surface_sub_x=20.0,
+        surface_sub_active=1,
+    )
+    assert int(
+        get_heuristic_target(raw_low, objs, jnp.int32(NO_TARGET_IDX), None)
+    ) == SURFACE_DUMMY_IDX
 
 
 def test_other_lane_shark_allows_diver():
@@ -558,13 +632,14 @@ def test_surface_wp_blocked_when_sub_on_right_unless_oxygen_low():
         surface_sub_active=True,
     )
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    assert int(target) == 0  # stay on nearest diver; wait for clear approach
+    # Full tank + blocked approach: do not chase another diver (meta-NOOP).
+    assert int(target) == 34
 
     raw_low = _make_raw(
         px=80.0,
         py=100.0,
         divers=6,
-        oxygen=10.0,
+        oxygen=5.0,
         surface_sub_x=120.0,
         surface_sub_active=1,
     )
@@ -575,12 +650,98 @@ def test_surface_wp_blocked_when_sub_on_right_unless_oxygen_low():
         px=80.0,
         py=100.0,
         divers=6,
-        oxygen=4.0,
+        oxygen=2.0,
         surface_sub_x=120.0,
         surface_sub_active=1,
     )
     target_crit = get_heuristic_target(raw_crit, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target_crit) == SURFACE_DUMMY_IDX
+
+
+def test_full_tank_skips_diver_even_when_surface_blocked():
+    raw = _make_raw(
+        px=80.0,
+        py=100.0,
+        divers=6,
+        oxygen=64.0,
+        surface_sub_x=120.0,
+        surface_sub_active=1,
+    )
+    # Close other-lane shark (in DESTROY danger) → selected when COLLECT is skipped.
+    objs_close = _make_objects(
+        diver_xy=(100.0, 100.0),
+        shark_xy=(100.0, 140.0),
+        surface_sub_xy=(120.0, 46.0),
+        surface_sub_active=True,
+    )
+    target = get_heuristic_target(raw, objs_close, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 4  # shark, not the diver
+
+    # Far other-lane shark: with skip-when-full off, wait on the diver again.
+    objs_far = _make_objects(
+        diver_xy=(100.0, 100.0),
+        shark_xy=(150.0, 140.0),
+        surface_sub_xy=(120.0, 46.0),
+        surface_sub_active=True,
+    )
+    legacy = int(
+        get_heuristic_target(
+            raw,
+            objs_far,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_skip_when_full=False,
+        )
+    )
+    assert legacy == 0
+
+
+def test_partial_offscreen_diver_not_selectable():
+    """Spawning diver with AABB past the left edge is ignored (hard gate)."""
+    raw = _make_raw(px=40.0, py=100.0)
+    # x=-2, w=8 → spans [-2, 6], not fully on screen.
+    objs = _make_objects(diver_xy=(-2.0, 100.0))
+    objs.x = objs.x.at[:, 2].set(110.0)  # fully on-screen mid diver
+    objs.y = objs.y.at[:, 2].set(100.0)
+    objs.active = objs.active.at[:, 2].set(1.0)
+
+    target = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
+    assert target == 2
+
+    # Only the off-screen diver → meta-NOOP (no fall-back to edge spawn).
+    objs_only = _make_objects(diver_xy=(-2.0, 100.0))
+    only = int(get_heuristic_target(raw, objs_only, jnp.int32(NO_TARGET_IDX), None))
+    assert only == 34
+
+    # Opt-out allows the old nearest-edge behaviour.
+    legacy = int(
+        get_heuristic_target(
+            raw,
+            objs_only,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_require_fully_on_screen=False,
+            collect_edge_margin_px=0.0,
+        )
+    )
+    assert legacy == 0
+
+
+def test_fully_on_screen_edge_diver_still_selectable():
+    """x=0,w=8 is fully on-screen — hard AABB gate passes; midfield may still drop."""
+    raw = _make_raw(px=40.0, py=100.0)
+    objs = _make_objects(diver_xy=(0.0, 100.0))
+    # Disable midfield so we only exercise the fully-on-screen gate.
+    target = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_edge_margin_px=0.0,
+        )
+    )
+    assert target == 0
 
 
 def test_surface_danger_close_overrides_waypoint():
@@ -655,7 +816,7 @@ def test_low_oxygen_forces_waypoint_over_midrange_shark():
         px=80.0,
         py=100.0,
         divers=0,
-        oxygen=10.0,
+        oxygen=5.0,
         surface_sub_x=20.0,
         surface_sub_active=1,
     )
@@ -681,7 +842,7 @@ def test_low_oxygen_still_interrupts_nose_shark():
         px=80.0,
         py=100.0,
         divers=0,
-        oxygen=10.0,
+        oxygen=5.0,
         surface_sub_x=20.0,
         surface_sub_active=1,
     )
@@ -700,7 +861,7 @@ def test_critical_oxygen_forces_waypoint_even_with_nose_shark():
         px=80.0,
         py=100.0,
         divers=0,
-        oxygen=4.0,
+        oxygen=2.0,
         surface_sub_x=20.0,
         surface_sub_active=1,
     )
@@ -746,7 +907,7 @@ def test_meta_mask_overrides_batched_objects_surface_gate():
 
 
 def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
-    """With margin>0, a farther midfield diver beats a nearer edge diver."""
+    """With soft margin, a farther midfield diver beats a nearer edge diver."""
     # Player near left; edge diver just outside the sub; mid diver farther right.
     raw = _make_raw(px=40.0, py=100.0)
     objs = _make_objects(diver_xy=(2.0, 100.0))  # centre ~6, outside margin=24
@@ -754,7 +915,15 @@ def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
     objs.y = objs.y.at[:, 2].set(100.0)
     objs.active = objs.active.at[:, 2].set(1.0)
 
-    without = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
+    without = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_edge_margin_px=0.0,
+        )
+    )
     with_mid = int(
         get_heuristic_target(
             raw,
@@ -762,6 +931,7 @@ def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
             jnp.int32(NO_TARGET_IDX),
             None,
             collect_edge_margin_px=24.0,
+            collect_edge_hard=False,
         )
     )
     assert without == 0  # nearer edge diver
@@ -778,9 +948,17 @@ def test_midfield_margin_falls_back_to_edge_when_no_mid_diver():
             jnp.int32(NO_TARGET_IDX),
             None,
             collect_edge_margin_px=24.0,
+            collect_edge_hard=False,
         )
     )
     assert target == 0
+
+
+def test_midfield_hard_drops_edge_even_without_mid_diver():
+    raw = _make_raw(px=40.0, py=100.0)
+    objs = _make_objects(diver_xy=(2.0, 100.0))  # centre ~6, outside default 10
+    target = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
+    assert target == 34  # meta-NOOP — hard midfield, no fall-back
 
 
 def test_midfield_margin_zero_keeps_nearest_edge_diver():
@@ -799,3 +977,35 @@ def test_midfield_margin_zero_keeps_nearest_edge_diver():
         )
     )
     assert target == 0
+
+
+def test_enemy_offscreen_not_selected_for_nearest():
+    """Spawning shark with centre off-screen is ignored until roughly visible."""
+    raw = _make_raw(px=80.0, py=100.0)
+    # Shark mostly off left: x=-6,w=8 → centre=-2 (off-screen), other lane so
+    # it does not lane-block the midfield diver.
+    objs = _make_objects(shark_xy=(-6.0, 140.0))
+    objs.x = objs.x.at[:, 0].set(80.0)
+    objs.y = objs.y.at[:, 0].set(100.0)
+    objs.active = objs.active.at[:, 0].set(1.0)
+    target = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
+    assert target == 0  # diver, not the off-screen shark
+
+    # Only off-screen shark → meta-NOOP (no early DESTROY pull).
+    objs_only = _make_objects(shark_xy=(-6.0, 100.0))
+    only = int(get_heuristic_target(raw, objs_only, jnp.int32(NO_TARGET_IDX), None))
+    assert only == 34
+
+    # Opt-out restores selecting the spawning shark.
+    legacy = int(
+        get_heuristic_target(
+            raw,
+            objs_only,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            enemy_require_on_screen=False,
+            destroy_nearest_in_danger_only=False,
+            collect_edge_margin_px=0.0,
+        )
+    )
+    assert legacy == 4
