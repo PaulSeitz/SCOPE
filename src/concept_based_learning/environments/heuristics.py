@@ -10,9 +10,12 @@ from concept_based_learning.environments.seaquest.heuristic_policy import (
     COLLECT_EDGE_MARGIN_PX as SEAQUEST_COLLECT_EDGE_MARGIN_PX,
     COLLECT_REQUIRE_FULLY_ON_SCREEN as SEAQUEST_COLLECT_REQUIRE_FULLY_ON_SCREEN,
     COLLECT_SKIP_WHEN_FULL as SEAQUEST_COLLECT_SKIP_WHEN_FULL,
+    COLLECT_NEAREST_IN_RANGE_ONLY as SEAQUEST_COLLECT_NEAREST_IN_RANGE_ONLY,
+    COLLECT_NEAR_RANGE as SEAQUEST_COLLECT_NEAR_RANGE,
     DESTROY_INTERRUPT_RANGE as SEAQUEST_DESTROY_INTERRUPT_RANGE,
     DESTROY_NEAREST_IN_DANGER_ONLY as SEAQUEST_DESTROY_NEAREST_IN_DANGER_ONLY,
     DIVER_LANE_Y_PX as SEAQUEST_DIVER_LANE_Y_PX,
+    DIVER_LANE_BLOCK_RANGE as SEAQUEST_DIVER_LANE_BLOCK_RANGE,
     ENEMY_REQUIRE_ON_SCREEN as SEAQUEST_ENEMY_REQUIRE_ON_SCREEN,
     SURFACE_DANGER_CLOSE_RANGE as SEAQUEST_SURFACE_DANGER_CLOSE_RANGE,
     SURFACE_SUB_AVOID_RANGE_X as SEAQUEST_SURFACE_SUB_AVOID_RANGE_X,
@@ -101,6 +104,13 @@ def _seaquest_diver_lane_y_px(config) -> float:
     return float(config.get("DIVER_LANE_Y_PX", SEAQUEST_DIVER_LANE_Y_PX))
 
 
+def _seaquest_diver_lane_block_range(config) -> float:
+    """AABB gap for same-lane DESTROY to block COLLECT; ``<=0`` = any distance."""
+    return float(
+        config.get("DIVER_LANE_BLOCK_RANGE", SEAQUEST_DIVER_LANE_BLOCK_RANGE)
+    )
+
+
 def _seaquest_collect_requires_no_destroy(config) -> bool:
     """If True, any live DESTROY beats COLLECT (COLLECT never fights)."""
     return bool(config.get("COLLECT_REQUIRES_NO_DESTROY", False))
@@ -131,6 +141,21 @@ def _seaquest_collect_skip_when_full(config) -> bool:
     return bool(config.get("COLLECT_SKIP_WHEN_FULL", SEAQUEST_COLLECT_SKIP_WHEN_FULL))
 
 
+def _seaquest_collect_nearest_in_range_only(config) -> bool:
+    """COLLECT nearest only inside COLLECT_NEAR_RANGE (DESTROY otherwise)."""
+    return bool(
+        config.get(
+            "COLLECT_NEAREST_IN_RANGE_ONLY",
+            SEAQUEST_COLLECT_NEAREST_IN_RANGE_ONLY,
+        )
+    )
+
+
+def _seaquest_collect_near_range(config) -> float:
+    """AABB gap for COLLECT nearest eligibility; ``<=0`` disables the gate."""
+    return float(config.get("COLLECT_NEAR_RANGE", SEAQUEST_COLLECT_NEAR_RANGE))
+
+
 def _seaquest_enemy_require_on_screen(config) -> bool:
     """DESTROY nearest/interrupt only once centre x is on-screen."""
     return bool(
@@ -158,6 +183,7 @@ def _seaquest_heuristic_kwargs(config) -> dict:
         "surface_sub_avoid_range_y": _seaquest_surface_sub_avoid_range_y(config),
         "surface_sub_near_range": _seaquest_surface_sub_near_range(config),
         "diver_lane_y_px": _seaquest_diver_lane_y_px(config),
+        "diver_lane_block_range": _seaquest_diver_lane_block_range(config),
         "collect_requires_no_destroy": _seaquest_collect_requires_no_destroy(config),
         "collect_edge_margin_px": _seaquest_collect_edge_margin_px(config),
         "collect_edge_hard": _seaquest_collect_edge_hard(config),
@@ -165,6 +191,10 @@ def _seaquest_heuristic_kwargs(config) -> dict:
             config
         ),
         "collect_skip_when_full": _seaquest_collect_skip_when_full(config),
+        "collect_nearest_in_range_only": _seaquest_collect_nearest_in_range_only(
+            config
+        ),
+        "collect_near_range": _seaquest_collect_near_range(config),
         "enemy_require_on_screen": _seaquest_enemy_require_on_screen(config),
         "destroy_nearest_in_danger_only": _seaquest_destroy_nearest_in_danger_only(
             config

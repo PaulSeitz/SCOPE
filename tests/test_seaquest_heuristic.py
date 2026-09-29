@@ -235,15 +235,18 @@ def test_always_nearest_object():
 
 
 def test_destroy_interrupt_beats_nearer_diver():
-    """Shark within DESTROY_INTERRUPT_RANGE wins even if a diver is closer."""
+    """Shark within DIVER_LANE_BLOCK_RANGE (20) steals even if a diver is closer."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
-    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(120.0, 100.0))
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(110.0, 100.0))
     from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+    from concept_based_learning.environments.seaquest.heuristic_policy import (
+        DIVER_LANE_BLOCK_RANGE,
+    )
 
     gap_diver = float(aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 95.0, 100.0, 8.0, 8.0))
-    gap_shark = float(aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 120.0, 100.0, 8.0, 8.0))
+    gap_shark = float(aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 110.0, 100.0, 8.0, 8.0))
     assert gap_diver < gap_shark
-    assert gap_shark <= DESTROY_INTERRUPT_RANGE
+    assert gap_shark <= DIVER_LANE_BLOCK_RANGE
 
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 4
@@ -328,38 +331,92 @@ def test_other_lane_missile_does_not_steal_destroy():
 
 
 def test_same_lane_far_shark_blocks_diver():
-    """Far same-lane shark no longer NOOPs divers when danger-only DESTROY is on."""
-    raw = _make_raw(px=80.0, py=100.0)
+    """Far same-lane shark (>20px) does not block; nearer free diver wins."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 140.0, 100.0, 8.0, 8.0)
+    )
+    assert gap > 20.0
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
-    # Far shark is outside danger → does not lane-block → diver wins.
     assert int(target) == 0
 
-    # Legacy: far shark may still win nearest when danger-only is off.
+    # Legacy any-distance lane-block: far shark still vetoes COLLECT.
     legacy = int(
         get_heuristic_target(
             raw,
             objs,
             jnp.int32(NO_TARGET_IDX),
             None,
-            destroy_nearest_in_danger_only=False,
+            diver_lane_block_range=0.0,
         )
     )
     assert legacy == 4
 
 
 def test_same_lane_near_shark_still_blocks_diver():
-    """In-danger same-lane shark blocks COLLECT (and is selected)."""
+    """Same-lane shark inside DIVER_LANE_BLOCK_RANGE (20) blocks COLLECT."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(110.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 110.0, 100.0, 8.0, 8.0)
+    )
+    assert gap < 20.0
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 4
 
 
-def test_far_diver_beats_far_on_screen_shark():
-    """Distant diver wins over a far on-screen shark (sharks only in danger zone)."""
+def test_same_lane_shark_just_outside_block_range_allows_diver():
+    """Shark at ~24px AABB gap (outside 20) leaves free diver selectable."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(120.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+
+    gap = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 120.0, 100.0, 8.0, 8.0)
+    )
+    assert gap > 20.0
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 0
+
+
+def test_other_lane_far_diver_loses_to_far_shark():
+    """Far divers are not nearest-eligible; DESTROY wins (anti spawn-rush)."""
     raw = _make_raw(px=80.0, py=100.0)
     objs = _make_objects(diver_xy=(130.0, 100.0), shark_xy=(140.0, 160.0))
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    assert int(target) == 4
+
+    # Opt-out: without the near-range gate, nearer far diver can still win.
+    legacy = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_nearest_in_range_only=False,
+        )
+    )
+    assert legacy == 0
+
+
+def test_close_diver_beats_far_other_lane_shark():
+    """Really-close free diver still wins over a distant other-lane shark."""
+    raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
+    objs = _make_objects(diver_xy=(95.0, 100.0), shark_xy=(140.0, 160.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+    from concept_based_learning.environments.seaquest.heuristic_policy import (
+        COLLECT_NEAR_RANGE,
+    )
+
+    gap = float(
+        aabb_surface_gap_px(80.0, 100.0, 16.0, 11.0, 95.0, 100.0, 8.0, 8.0)
+    )
+    assert gap <= COLLECT_NEAR_RANGE
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 0
 
@@ -581,21 +638,39 @@ def test_breathing_band_with_low_oxygen_still_targets():
     """Frozen/draining O₂ is not refill — keep targeting in the breathing band."""
     raw = _make_raw(px=80.0, py=50.0, oxygen=(32.0, 32.0), divers=2)
     objs = _make_objects(diver_xy=(100.0, 100.0))
-    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    target = get_heuristic_target(
+        raw,
+        objs,
+        jnp.int32(NO_TARGET_IDX),
+        None,
+        collect_nearest_in_range_only=False,
+    )
     assert int(target) == 0
 
 
 def test_oxygen_falling_still_targets():
     raw = _make_raw(px=80.0, py=46.0, oxygen=(40.0, 39.0), divers=2)
     objs = _make_objects(diver_xy=(100.0, 100.0))
-    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    target = get_heuristic_target(
+        raw,
+        objs,
+        jnp.int32(NO_TARGET_IDX),
+        None,
+        collect_nearest_in_range_only=False,
+    )
     assert int(target) == 0
 
 
 def test_surface_full_oxygen_resumes_targeting():
     raw = _make_raw(px=80.0, py=46.0, oxygen=64.0, divers=2)
     objs = _make_objects(diver_xy=(100.0, 100.0))
-    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    target = get_heuristic_target(
+        raw,
+        objs,
+        jnp.int32(NO_TARGET_IDX),
+        None,
+        collect_nearest_in_range_only=False,
+    )
     assert int(target) == 0
 
 
@@ -691,6 +766,7 @@ def test_full_tank_skips_diver_even_when_surface_blocked():
             jnp.int32(NO_TARGET_IDX),
             None,
             collect_skip_when_full=False,
+            collect_nearest_in_range_only=False,
         )
     )
     assert legacy == 0
@@ -705,7 +781,15 @@ def test_partial_offscreen_diver_not_selectable():
     objs.y = objs.y.at[:, 2].set(100.0)
     objs.active = objs.active.at[:, 2].set(1.0)
 
-    target = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
+    target = int(
+        get_heuristic_target(
+            raw,
+            objs,
+            jnp.int32(NO_TARGET_IDX),
+            None,
+            collect_nearest_in_range_only=False,
+        )
+    )
     assert target == 2
 
     # Only the off-screen diver → meta-NOOP (no fall-back to edge spawn).
@@ -722,6 +806,7 @@ def test_partial_offscreen_diver_not_selectable():
             None,
             collect_require_fully_on_screen=False,
             collect_edge_margin_px=0.0,
+            collect_nearest_in_range_only=False,
         )
     )
     assert legacy == 0
@@ -739,6 +824,7 @@ def test_fully_on_screen_edge_diver_still_selectable():
             jnp.int32(NO_TARGET_IDX),
             None,
             collect_edge_margin_px=0.0,
+            collect_nearest_in_range_only=False,
         )
     )
     assert target == 0
@@ -922,6 +1008,7 @@ def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
             jnp.int32(NO_TARGET_IDX),
             None,
             collect_edge_margin_px=0.0,
+            collect_nearest_in_range_only=False,
         )
     )
     with_mid = int(
@@ -932,6 +1019,7 @@ def test_midfield_margin_prefers_far_mid_diver_over_near_edge():
             None,
             collect_edge_margin_px=24.0,
             collect_edge_hard=False,
+            collect_nearest_in_range_only=False,
         )
     )
     assert without == 0  # nearer edge diver
@@ -949,6 +1037,7 @@ def test_midfield_margin_falls_back_to_edge_when_no_mid_diver():
             None,
             collect_edge_margin_px=24.0,
             collect_edge_hard=False,
+            collect_nearest_in_range_only=False,
         )
     )
     assert target == 0
@@ -974,6 +1063,7 @@ def test_midfield_margin_zero_keeps_nearest_edge_diver():
             jnp.int32(NO_TARGET_IDX),
             None,
             collect_edge_margin_px=0.0,
+            collect_nearest_in_range_only=False,
         )
     )
     assert target == 0

@@ -2,10 +2,10 @@
 Heuristic meta-policy for Seaquest.
 
 Simple nearest-object targeting, with two Seaquest-specific overrides:
-- COLLECT (divers) only if that diver's horizontal lane is clear of DESTROY
-  (no shark/sub with |Δy| ≤ ``DIVER_LANE_Y_PX``). Otherwise prefer sharks,
-  even when they are farther than the diver, so lanes are cleared before
-  diving in for a collect.
+- COLLECT (divers) only if that diver's horizontal lane is clear of a
+  *nearby* DESTROY (same row within ``DIVER_LANE_Y_PX`` and AABB gap ≤
+  ``DIVER_LANE_BLOCK_RANGE``, default 20px). Far same-lane sharks do not
+  veto a free-swimming diver; close ones still clear the lane first.
 - Optional ``COLLECT_REQUIRES_NO_DESTROY``: if any selectable DESTROY exists,
   never target a diver (nearest shark/sub wins). The surface waypoint is
   still forced by index (not nearest-COLLECT) so this flag does not steal
@@ -21,17 +21,24 @@ Simple nearest-object targeting, with two Seaquest-specific overrides:
 - ``ENEMY_REQUIRE_ON_SCREEN`` (default True): sharks/subs (DESTROY) are only
   nearest-/interrupt-selectable once their centre x is on-screen
   (``[0, 160]``). Spawning off-screen enemies no longer pull targeting early.
-  Lane-blocking still uses all active DESTROY so COLLECT does not dive into
-  an unseen same-lane shark.
-- ``DESTROY_NEAREST_IN_DANGER_ONLY`` (default True): DESTROY only enters
-  nearest scoring when within ``DESTROY_INTERRUPT_RANGE``. Distant on-screen
-  sharks no longer win over far divers; they still interrupt in-band.
-  Lane-blocking uses the same danger band in this mode so a far same-lane
-  shark cannot NOOP every diver while itself remaining unselectable.
+  Lane-blocking only uses on-screen DESTROY inside ``DIVER_LANE_BLOCK_RANGE``.
+- ``DESTROY_NEAREST_IN_DANGER_ONLY`` (default False): when True, DESTROY only
+  enters nearest scoring inside ``DESTROY_INTERRUPT_RANGE`` (far sharks lose
+  to distant divers). Default False keeps DESTROY in the general nearest
+  pool so combat stays the priority.
+- ``DIVER_LANE_BLOCK_RANGE`` (default 20): AABB gap within which a same-lane
+  shark/sub blocks COLLECT. Tighter than ``DESTROY_INTERRUPT_RANGE`` (40) so
+  free divers stay selectable while a far lane shark sits outside; as the
+  player closes in, that shark enters the band before contact. ``<=0``
+  restores legacy "any same-lane DESTROY blocks".
 - ``COLLECT_SKIP_WHEN_FULL`` (default True): never target a diver when
   ``collected_divers >= 6``. Surface WP is still forced when the approach is
   clear; when it is not, pick combat / meta-NOOP instead of another COLLECT
   so the skill is not trained on "collect a 7th diver".
+- ``COLLECT_NEAREST_IN_RANGE_ONLY`` (default True): COLLECT only enters
+  nearest scoring inside ``COLLECT_NEAR_RANGE`` (default 20px AABB gap).
+  Far divers are ignored so DESTROY stays the default target — stops the
+  spawn-frame dive toward a mid-screen diver. Close free divers still win.
 - Surface sub (slot 28) is ignored for *nearest* targeting unless the player
   is near the surface and within ``SURFACE_SUB_NEAR_RANGE``. It still
   interrupts as AVOID from any depth inside ``SURFACE_SUB_AVOID_RANGE_{X,Y}``.
@@ -116,6 +123,10 @@ O2_CRITICAL_ENEMY_INTERRUPT_RANGE = 0.0
 # A diver's lane is blocked if a DESTROY shares this vertical band (centre Δy).
 # Overridable via config ``DIVER_LANE_Y_PX``.
 DIVER_LANE_Y_PX = 14.0
+# Same-lane DESTROY only blocks COLLECT inside this AABB gap (tighter than
+# DESTROY_INTERRUPT_RANGE=40 so free divers stay selectable vs far lane
+# sharks). Overridable via ``DIVER_LANE_BLOCK_RANGE``. ``<=0`` = any distance.
+DIVER_LANE_BLOCK_RANGE = 20.0
 # Midfield COLLECT: centre x must lie in ``[margin, SCREEN_W - margin]``.
 # Default is a hard gate (no edge fall-back) so COLLECT is not trained on
 # edge-suicide rushes. Soft mode (``COLLECT_EDGE_HARD=false``) keeps the old
@@ -126,14 +137,19 @@ COLLECT_EDGE_HARD = True
 # Hard COLLECT / DESTROY visibility gates (on by default).
 COLLECT_REQUIRE_FULLY_ON_SCREEN = True
 COLLECT_SKIP_WHEN_FULL = True
+# COLLECT only joins *nearest* inside this AABB gap (default on). Far divers
+# are dropped so DESTROY remains the default — avoids spawn-frame rushes at
+# mid-screen divers. Same scale as ``DIVER_LANE_BLOCK_RANGE``.
+COLLECT_NEAREST_IN_RANGE_ONLY = True
+COLLECT_NEAR_RANGE = 20.0
 # DESTROY nearest/interrupt only once centre x is on-screen (spawning enemies
 # no longer steal targeting). Lane-blocking ignores this gate.
 ENEMY_REQUIRE_ON_SCREEN = True
-# DESTROY only joins *nearest* scoring inside ``DESTROY_INTERRUPT_RANGE``
-# (danger zone). Far on-screen sharks no longer beat distant divers via
-# pure nearest; they still interrupt. Lane-block uses the same band in this
-# mode so blockers cannot NOOP COLLECT while staying unselectable.
-DESTROY_NEAREST_IN_DANGER_ONLY = True
+# When True, DESTROY only joins *nearest* scoring inside
+# ``DESTROY_INTERRUPT_RANGE`` (far sharks lose to distant divers; lane-block
+# uses the same band). Default False: DESTROY stays in the general nearest
+# pool — combat priority, which was more robust against surface-rush deaths.
+DESTROY_NEAREST_IN_DANGER_ONLY = False
 SEAQUEST_SCREEN_W = 160.0
 DANGER_RELEASE_RANGE = 40.0  # retained for callers / future use
 # Past the Seaquest breathing band (y in [47, 52]); matches jax_seaquest.
@@ -329,11 +345,14 @@ def _select_target(
     surface_sub_avoid_range_y=None,
     surface_sub_near_range=None,
     diver_lane_y_px=None,
+    diver_lane_block_range=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
     collect_edge_hard=None,
     collect_require_fully_on_screen=None,
     collect_skip_when_full=None,
+    collect_nearest_in_range_only=None,
+    collect_near_range=None,
     enemy_require_on_screen=None,
     destroy_nearest_in_danger_only=None,
 ):
@@ -355,6 +374,8 @@ def _select_target(
         surface_sub_near_range = SURFACE_SUB_NEAR_RANGE
     if diver_lane_y_px is None:
         diver_lane_y_px = DIVER_LANE_Y_PX
+    if diver_lane_block_range is None:
+        diver_lane_block_range = DIVER_LANE_BLOCK_RANGE
     if collect_edge_margin_px is None:
         collect_edge_margin_px = COLLECT_EDGE_MARGIN_PX
     if collect_edge_hard is None:
@@ -363,6 +384,10 @@ def _select_target(
         collect_require_fully_on_screen = COLLECT_REQUIRE_FULLY_ON_SCREEN
     if collect_skip_when_full is None:
         collect_skip_when_full = COLLECT_SKIP_WHEN_FULL
+    if collect_nearest_in_range_only is None:
+        collect_nearest_in_range_only = COLLECT_NEAREST_IN_RANGE_ONLY
+    if collect_near_range is None:
+        collect_near_range = COLLECT_NEAR_RANGE
     if enemy_require_on_screen is None:
         enemy_require_on_screen = ENEMY_REQUIRE_ON_SCREEN
     if destroy_nearest_in_danger_only is None:
@@ -371,6 +396,7 @@ def _select_target(
     collect_edge_hard = bool(collect_edge_hard)
     collect_require_fully_on_screen = bool(collect_require_fully_on_screen)
     collect_skip_when_full = bool(collect_skip_when_full)
+    collect_nearest_in_range_only = bool(collect_nearest_in_range_only)
     enemy_require_on_screen = bool(enemy_require_on_screen)
     destroy_nearest_in_danger_only = bool(destroy_nearest_in_danger_only)
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
@@ -385,7 +411,9 @@ def _select_target(
     )
     surface_sub_near_range = jnp.asarray(surface_sub_near_range, dtype=jnp.float32)
     diver_lane_y_px = jnp.asarray(diver_lane_y_px, dtype=jnp.float32)
+    diver_lane_block_range = jnp.asarray(diver_lane_block_range, dtype=jnp.float32)
     collect_edge_margin_px = jnp.asarray(collect_edge_margin_px, dtype=jnp.float32)
+    collect_near_range = jnp.asarray(collect_near_range, dtype=jnp.float32)
     oxygen = _latest_leaf(raw_observation.oxygen_level)
     danger_close_range = _oxygen_scaled_interrupt_range(oxygen, danger_close_range)
     destroy_interrupt_range = _oxygen_scaled_interrupt_range(
@@ -499,11 +527,9 @@ def _select_target(
     )
     selectable = jnp.logical_and(selectable, jnp.logical_not(destroy_offscreen))
 
-    # Lane-clear COLLECT: a diver is ineligible if a *threatening* DESTROY
-    # shares its horizontal row. When DESTROY_NEAREST_IN_DANGER_ONLY is on,
-    # only sharks/subs inside DESTROY_INTERRUPT_RANGE (and on-screen) block —
-    # otherwise far same-lane sharks would NOOP every diver while themselves
-    # remaining unselectable. Legacy mode blocks on any active DESTROY.
+    # Lane-clear COLLECT: a diver is ineligible if a *nearby* same-lane DESTROY
+    # shares its row (AABB gap ≤ DIVER_LANE_BLOCK_RANGE). Far lane sharks do
+    # not veto free-swimming divers; ``<=0`` restores any-distance blocking.
     cy = oy.astype(jnp.float32) + oh.astype(jnp.float32) / 2.0
     same_lane = jnp.logical_and(
         diver_lane_y_px > 0.0,
@@ -517,16 +543,11 @@ def _select_target(
             centre_on_screen,
         ),
     )
-    destroy_threat = jnp.logical_and(
-        destroy_threat,
-        jnp.logical_or(
-            jnp.logical_not(destroy_nearest_in_danger_only),
-            jnp.logical_and(
-                destroy_interrupt_range > 0.0,
-                distances <= destroy_interrupt_range,
-            ),
-        ),
+    in_lane_block_band = jnp.logical_or(
+        diver_lane_block_range <= 0.0,
+        distances <= diver_lane_block_range,
     )
+    destroy_threat = jnp.logical_and(destroy_threat, in_lane_block_band)
     blocks = jnp.logical_and(same_lane, destroy_threat[None, :])
     blocks = jnp.logical_and(blocks, idxs[:, None] != idxs[None, :])
     diver_blocked = jnp.logical_and(is_collect, jnp.any(blocks, axis=1))
@@ -549,6 +570,20 @@ def _select_target(
         ),
     )
     selectable_nearest = jnp.logical_and(selectable_nearest, destroy_nearest_ok)
+
+    # COLLECT nearest only when really close — far divers must not win over
+    # DESTROY (spawn-frame dive deaths). DESTROY stays in the general pool.
+    collect_near_ok = jnp.logical_or(
+        jnp.logical_not(is_collect),
+        jnp.logical_or(
+            jnp.logical_not(collect_nearest_in_range_only),
+            jnp.logical_and(
+                collect_near_range > 0.0,
+                distances <= collect_near_range,
+            ),
+        ),
+    )
+    selectable_nearest = jnp.logical_and(selectable_nearest, collect_near_ok)
 
     # Soft midfield fall-back (only when COLLECT_EDGE_HARD is false): if any
     # lane-clear midfield diver exists, drop remaining edge divers.
@@ -585,9 +620,27 @@ def _select_target(
     # Empty scene → trailing meta-NOOP (appended last; never game slot 0).
     idle_noop_idx = jnp.asarray(active_mask.shape[0] - 1, dtype=jnp.int32)
 
-    # Nearby sharks/subs steal COLLECT (and other nearer non-DESTROY) so
-    # FRAME_SKIP cannot ram a shark the heuristic has not yet selected.
+    # Nearby sharks/subs steal COLLECT / nearer non-DESTROY. Use the same
+    # tight band as lane-block (default 20) so a free diver is not overridden
+    # by a mid-range same-lane shark; ``<=0`` falls back to DESTROY_INTERRUPT.
+    destroy_steal_range = jnp.where(
+        diver_lane_block_range > 0.0,
+        diver_lane_block_range,
+        destroy_interrupt_range,
+    )
     destroy_close = jnp.logical_and(
+        selectable,
+        jnp.logical_and(
+            is_destroy,
+            jnp.logical_and(
+                destroy_steal_range > 0.0,
+                distances <= destroy_steal_range,
+            ),
+        ),
+    )
+    # While forcing surface, keep the larger DESTROY interrupt so mid-range
+    # sharks can still override the waypoint under FRAME_SKIP.
+    destroy_close_surface = jnp.logical_and(
         selectable,
         jnp.logical_and(
             is_destroy,
@@ -643,7 +696,7 @@ def _select_target(
         ),
     )
     surface_interrupt = jnp.logical_or(
-        jnp.logical_or(avoid_close, destroy_close),
+        jnp.logical_or(avoid_close, destroy_close_surface),
         avoid_interrupt,
     )
     interrupt_dist = jnp.where(surface_interrupt, distances, jnp.inf)
@@ -715,11 +768,14 @@ def get_heuristic_target_with_state(
     surface_sub_avoid_range_y=None,
     surface_sub_near_range=None,
     diver_lane_y_px=None,
+    diver_lane_block_range=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
     collect_edge_hard=None,
     collect_require_fully_on_screen=None,
     collect_skip_when_full=None,
+    collect_nearest_in_range_only=None,
+    collect_near_range=None,
     enemy_require_on_screen=None,
     destroy_nearest_in_danger_only=None,
 ):
@@ -736,11 +792,14 @@ def get_heuristic_target_with_state(
         surface_sub_avoid_range_y=surface_sub_avoid_range_y,
         surface_sub_near_range=surface_sub_near_range,
         diver_lane_y_px=diver_lane_y_px,
+        diver_lane_block_range=diver_lane_block_range,
         collect_requires_no_destroy=collect_requires_no_destroy,
         collect_edge_margin_px=collect_edge_margin_px,
         collect_edge_hard=collect_edge_hard,
         collect_require_fully_on_screen=collect_require_fully_on_screen,
         collect_skip_when_full=collect_skip_when_full,
+        collect_nearest_in_range_only=collect_nearest_in_range_only,
+        collect_near_range=collect_near_range,
         enemy_require_on_screen=enemy_require_on_screen,
         destroy_nearest_in_danger_only=destroy_nearest_in_danger_only,
     )
@@ -769,11 +828,14 @@ def get_heuristic_target(
     surface_sub_avoid_range_y=None,
     surface_sub_near_range=None,
     diver_lane_y_px=None,
+    diver_lane_block_range=None,
     collect_requires_no_destroy=False,
     collect_edge_margin_px=None,
     collect_edge_hard=None,
     collect_require_fully_on_screen=None,
     collect_skip_when_full=None,
+    collect_nearest_in_range_only=None,
+    collect_near_range=None,
     enemy_require_on_screen=None,
     destroy_nearest_in_danger_only=None,
 ):
@@ -791,11 +853,14 @@ def get_heuristic_target(
         surface_sub_avoid_range_y=surface_sub_avoid_range_y,
         surface_sub_near_range=surface_sub_near_range,
         diver_lane_y_px=diver_lane_y_px,
+        diver_lane_block_range=diver_lane_block_range,
         collect_requires_no_destroy=collect_requires_no_destroy,
         collect_edge_margin_px=collect_edge_margin_px,
         collect_edge_hard=collect_edge_hard,
         collect_require_fully_on_screen=collect_require_fully_on_screen,
         collect_skip_when_full=collect_skip_when_full,
+        collect_nearest_in_range_only=collect_nearest_in_range_only,
+        collect_near_range=collect_near_range,
         enemy_require_on_screen=enemy_require_on_screen,
         destroy_nearest_in_danger_only=destroy_nearest_in_danger_only,
     )
