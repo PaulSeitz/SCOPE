@@ -422,7 +422,7 @@ def test_close_diver_beats_far_other_lane_shark():
 
 
 def test_divers_only_hunts_far_diver():
-    """No DESTROY on screen → hunt far divers (no_enemies / empty combat)."""
+    """No DESTROY + already underwater → hunt far divers (no_enemies / empty combat)."""
     raw = _make_raw(px=80.0, py=100.0, pw=16.0, ph=11.0)
     objs = _make_objects(diver_xy=(130.0, 100.0))
     from concept_based_learning.observations.egocentric import aabb_surface_gap_px
@@ -436,6 +436,27 @@ def test_divers_only_hunts_far_diver():
     assert gap > COLLECT_NEAR_RANGE
     target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
     assert int(target) == 0
+
+
+def test_surface_does_not_hunt_far_diver_without_destroy():
+    """At/near surface with empty combat → do NOT COLLECT far divers (spawn-dive death)."""
+    # Life-start breathing band; same gap as divers-only hunt test.
+    raw = _make_raw(px=80.0, py=46.0, pw=16.0, ph=11.0, oxygen=64.0)
+    objs = _make_objects(diver_xy=(130.0, 100.0))
+    from concept_based_learning.observations.egocentric import aabb_surface_gap_px
+    from concept_based_learning.environments.seaquest.heuristic_policy import (
+        COLLECT_NEAR_RANGE,
+        PLAYER_UNDERWATER_Y,
+    )
+
+    assert 46.0 <= PLAYER_UNDERWATER_Y
+    gap = float(
+        aabb_surface_gap_px(80.0, 46.0, 16.0, 11.0, 130.0, 100.0, 8.0, 8.0)
+    )
+    assert gap > COLLECT_NEAR_RANGE
+    target = get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None)
+    # Idle meta-NOOP (last slot), not the far diver.
+    assert int(target) != 0
 
 
 def test_no_diver_falls_back_to_far_on_screen_shark():
@@ -1087,7 +1108,7 @@ def test_midfield_margin_zero_keeps_nearest_edge_diver():
 
 
 def test_enemy_offscreen_not_selected_for_nearest():
-    """Spawning / half-spawned sharks are ignored until AABB is fully on-screen."""
+    """Spawning sharks are ignored until centre x is on-screen."""
     raw = _make_raw(px=80.0, py=100.0)
     # Shark mostly off left: x=-6,w=8 → centre=-2 (off-screen), other lane so
     # it does not lane-block the midfield diver.
@@ -1098,11 +1119,11 @@ def test_enemy_offscreen_not_selected_for_nearest():
     target = int(get_heuristic_target(raw, objs, jnp.int32(NO_TARGET_IDX), None))
     assert target == 0  # diver, not the off-screen shark
 
-    # Half-spawned: centre ON screen (x=-2,w=8 → centre=2) but AABB past edge —
-    # old centre gate would select this; fully-on-screen must reject it.
+    # Half-spawned but centre ON screen (x=-2,w=8 → centre=2): centre gate
+    # selects DESTROY (full-AABB was too strict and starved combat entry).
     objs_half = _make_objects(shark_xy=(-2.0, 100.0))
     half = int(get_heuristic_target(raw, objs_half, jnp.int32(NO_TARGET_IDX), None))
-    assert half == 34
+    assert half == 4
 
     # Only fully off-screen shark → meta-NOOP (no early DESTROY pull).
     objs_only = _make_objects(shark_xy=(-6.0, 100.0))
