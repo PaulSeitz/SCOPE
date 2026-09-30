@@ -18,10 +18,10 @@ JAXAtari path uses ``USE_NATIVE_DOWNSCALING=false`` (ALE-style bilinear resize).
 
 Example::
 
-    # same HPs as f163gauq, JAXAtari Seaquest
-    python scripts/benchmarks/baselines/pqn_atari_jaxatari.py \\
-      --env-id seaquest --seed 2 \\
-      --jaxatari-root /path/to/JAXAtari-seaquest-robustness
+    # dual-GPU: jaxatari env on GPU0, torch PQN on GPU1
+    CUDA_VISIBLE_DEVICES=0,1 python scripts/benchmarks/baselines/pqn_atari_jaxatari.py \\
+      --env-id seaquest --seed 2 --env-gpu 0 --train-gpu 1 \\
+      --jaxatari-root /path/to/JAXAtari
 
     # original ALE backend (bit-identical code path to the W&B script)
     python scripts/benchmarks/baselines/pqn_atari_jaxatari.py \\
@@ -47,15 +47,13 @@ os.environ["OPENBLAS_NUM_THREADS"] = n  # OpenBLAS
 os.environ["VECLIB_MAXIMUM_THREADS"] = n  # Apple Accelerate
 os.environ["NUMEXPR_NUM_THREADS"] = n  # NumExpr
 
+# IMPORTANT: do NOT import torch before JAX when --backend jaxatari.
+# Torch CUDA init first often breaks XLA/cuDNN ("dnn_support != nullptr") on
+# shared-driver clusters. Torch is imported in main() after JAX warms up.
 
 import gym
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 import tyro
-from torch.utils.tensorboard import SummaryWriter
 
 
 @dataclass
@@ -173,33 +171,41 @@ class ClipRewardsWrapper(gym.Wrapper):
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    import torch
+
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
 
-class QNetwork(nn.Module):
-    def __init__(self, env):
-        super().__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-            nn.LayerNorm([32, 20, 20]),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.LayerNorm([64, 9, 9]),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.LayerNorm([64, 7, 7]),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(3136, 512)),
-            nn.LayerNorm(512),
-            nn.ReLU(),
-            layer_init(nn.Linear(512, env.single_action_space.n)),
-        )
+def make_q_network(env):
+    """Build CleanRL PQN CNN after torch has been imported."""
+    import torch.nn as nn
 
-    def forward(self, x):
-        return self.network(x / 255.0)
+    class QNetwork(nn.Module):
+        def __init__(self, env_):
+            super().__init__()
+            self.network = nn.Sequential(
+                layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+                nn.LayerNorm([32, 20, 20]),
+                nn.ReLU(),
+                layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+                nn.LayerNorm([64, 9, 9]),
+                nn.ReLU(),
+                layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+                nn.LayerNorm([64, 7, 7]),
+                nn.ReLU(),
+                nn.Flatten(),
+                layer_init(nn.Linear(3136, 512)),
+                nn.LayerNorm(512),
+                nn.ReLU(),
+                layer_init(nn.Linear(512, env_.single_action_space.n)),
+            )
+
+        def forward(self, x):
+            return self.network(x / 255.0)
+
+    return QNetwork(env)
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -264,14 +270,16 @@ def _resolve_jax_device(env_gpu: int):
     return dev
 
 
-def _resolve_torch_device(*, cuda: bool, train_gpu: int) -> "torch.device":
+def _resolve_torch_device(*, cuda: bool, train_gpu: int):
+    import torch
+
     if not (cuda and torch.cuda.is_available()):
         print("[torch] CUDA unavailable — training on CPU")
         return torch.device("cpu")
-    n = torch.cuda.device_count()
-    if train_gpu < 0 or train_gpu >= n:
+    n_dev = torch.cuda.device_count()
+    if train_gpu < 0 or train_gpu >= n_dev:
         raise SystemExit(
-            f"--train-gpu={train_gpu} out of range for {n} visible torch GPU(s)"
+            f"--train-gpu={train_gpu} out of range for {n_dev} visible torch GPU(s)"
         )
     dev = torch.device(f"cuda:{train_gpu}")
     print(
@@ -279,6 +287,41 @@ def _resolve_torch_device(*, cuda: bool, train_gpu: int) -> "torch.device":
         f"(--train-gpu={train_gpu})"
     )
     return dev
+
+
+def _warmup_jax_before_torch(args: Args) -> None:
+    """Initialize JAX/XLA (+jaxatari import) before torch touches the driver.
+
+    Avoids the common cluster failure:
+      jax.errors.JaxRuntimeError: ... dnn_support != nullptr
+    which shows up when torch CUDA init runs first, then jaxatari import
+    evaluates ``jnp.array(...)`` defaults during class body execution.
+    """
+    if args.backend != "jaxatari":
+        return
+    _maybe_add_jaxatari_path(args.jaxatari_root)
+    import jax
+    import jax.numpy as jnp
+
+    dev = _resolve_jax_device(args.env_gpu)
+    try:
+        with jax.default_device(dev):
+            _ = jnp.asarray([0, 0])
+            import jaxatari  # noqa: F401  — force the fragile import here
+
+        print(f"[jax] warmup ok on {dev} (jaxatari import succeeded)")
+    except Exception as exc:
+        raise SystemExit(
+            "JAX GPU/cuDNN failed before torch import.\n"
+            f"  device={dev}\n"
+            f"  error={type(exc).__name__}: {exc}\n"
+            "Check: `python -c 'import jax; import jax.numpy as jnp; "
+            "print(jax.devices()); print(jnp.array([0,0]))'` WITHOUT torch.\n"
+            "If that fails, fix the JAX CUDA stack "
+            '(e.g. `uv pip install -U \"jax[cuda12]\" nvidia-cudnn-cu12`).\n'
+            "If that works alone but this script fails, CUDA_VISIBLE_DEVICES / "
+            "multi-GPU pinning is wrong."
+        ) from exc
 
 
 class JaxAtariVectorEnv:
@@ -423,6 +466,16 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+
+    # JAX must claim the driver/cuDNN before torch when using jaxatari.
+    _warmup_jax_before_torch(args)
+
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import torch.optim as optim
+    from torch.utils.tensorboard import SummaryWriter
+
     run_name = f"{args.env_id}__{args.exp_name}__{args.backend}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -459,7 +512,7 @@ if __name__ == "__main__":
     envs = make_envs(args)
     # assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    q_network = QNetwork(envs).to(device)
+    q_network = make_q_network(envs).to(device)
     optimizer = optim.RAdam(q_network.parameters(), lr=args.learning_rate)
 
     # ALGO Logic: Storage setup
@@ -504,8 +557,9 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, next_done, info = envs.step(action.cpu().numpy())
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+            rewards[step] = torch.tensor(reward, device=device).view(-1)
+            next_obs = torch.tensor(next_obs, device=device)
+            next_done = torch.tensor(next_done, device=device)
 
             for idx, d in enumerate(next_done):
                 if d:
