@@ -844,6 +844,14 @@ NEWSEAQUEST_SPAWNFIX_STEMS = (
     "surfacesub5_skillmech_eval_full_newseaquest",
 )
 
+# ALE CleanRL PQN W&B f163gauq HPs on JAXAtari Seaquest (10M, seed=2).
+#   configs/experiment/paper_eval/ale_pqn_match/ARCHITECTURE_COMPARE.md
+#   python scripts/run_paper_eval.py --suite ale_pqn_match \
+#     --gpus 0 --wait-deps --skip-rq-gate --lean
+# Do not pass --seed (YAML SEED=2 matches the ALE run).
+ALE_PQN_MATCH_SUITE = "ale_pqn_match"
+ALE_PQN_MATCH_STEMS = ("ale_pqn_match_seaquest_seed2",)
+
 # Paper-HP PQN on old_seaquest (dense diver re-arm) × seeds 44/45/46.
 # Uses ENV_NAME=old_seaquest in the same robustness jaxatari checkout.
 #   python scripts/materialize_seaquest_env_vs_config_seeds.py
@@ -2146,6 +2154,7 @@ SUITE_STEMS = {
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_STEMS,
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: EGO_MIN_SURFACESUB5_SKILLMECH_RW_STEMS,
     NEWSEAQUEST_SPAWNFIX_SUITE: NEWSEAQUEST_SPAWNFIX_STEMS,
+    ALE_PQN_MATCH_SUITE: ALE_PQN_MATCH_STEMS,
     PQN_PAPERHPS_OLDSEAQUEST_SUITE: PQN_PAPERHPS_OLDSEAQUEST_STEMS,
     NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE: NEWSEAQUEST_CLIP10_OFFPOLICY_STEMS,
     FIXED_EGO_SKILL_BASELINE_SUITE: FIXED_EGO_SKILL_BASELINE_STEMS,
@@ -2287,6 +2296,7 @@ SUITE_RTPT: dict[str, str] = {
     EGO_MIN_SURFACESUB5_CLIP10_CANFIRE_SUITE: "ego_c10cf",
     EGO_MIN_SURFACESUB5_SKILLMECH_RW_SUITE: "ego_skm",
     NEWSEAQUEST_SPAWNFIX_SUITE: "sq_new",
+    ALE_PQN_MATCH_SUITE: "ale_pqn",
     PQN_PAPERHPS_OLDSEAQUEST_SUITE: "pqn_old",
     NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE: "sq_c10op",
     FIXED_EGO_SKILL_BASELINE_SUITE: "ego_fix",
@@ -3933,6 +3943,10 @@ def main() -> None:
             f"{NEWSEAQUEST_SPAWNFIX_SUITE}: retrain PQN + clip10 skillmech "
             "(OFF_POLICY=false) on spawn-fixed Seaquest, then full SQ mods "
             "(fresh SAVE_PATHs; --wait-deps --gpus 2,3). "
+            f"{ALE_PQN_MATCH_SUITE}: ALE CleanRL PQN W&B f163gauq HPs "
+            "(10M / 128×32×2441 / LR 2.5e-4 / seed=2 / native_downscale=false) "
+            "on JAXAtari Seaquest flat PQN; "
+            "--suite ale_pqn_match --gpus 0 --wait-deps --skip-rq-gate --lean. "
             f"{PQN_PAPERHPS_OLDSEAQUEST_SUITE}: paper-HP PQN on old_seaquest "
             "×3 seeds (ENV_NAME=old_seaquest dense re-arm; EVAL_SEED≠SEED). "
             f"{NEWSEAQUEST_CLIP10_OFFPOLICY_SUITE}: clip10 skillmech on "

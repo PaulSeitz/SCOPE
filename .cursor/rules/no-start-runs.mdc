@@ -1,0 +1,13 @@
+---
+description: Never start/launch training, eval, or long GPU/cluster runs unless the user explicitly asks
+alwaysApply: true
+---
+
+# Do not start runs
+
+Unless the user **explicitly** asks to launch/start/kick off a run:
+
+- **Do not** start training, eval, finetune, paper_eval suites, wandb syncing jobs, or other long GPU/CPU runs.
+- **Do** wire configs, materialize YAMLs, register suites, compare HPs/architecture, and print the exact command for the user to run.
+- “Wire up”, “set up”, “prepare”, “add a config/suite” ≠ permission to launch.
+- If a run was started by mistake: stop it immediately and report where it was pointed (local log path + wandb entity/project/run URL if any).
