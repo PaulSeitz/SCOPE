@@ -112,6 +112,12 @@ class Args:
     """env backend: 'jaxatari' (default) or 'ale' (AtariVectorEnv, original script)"""
     jaxatari_root: Optional[str] = None
     """optional path to a JAXAtari checkout (adds <root>/src to sys.path)"""
+    env_gpu: int = 0
+    """CUDA index (within CUDA_VISIBLE_DEVICES) for jaxatari env stepping"""
+    train_gpu: int = 1
+    """CUDA index (within CUDA_VISIBLE_DEVICES) for the torch Q-network.
+    Use a different GPU than --env-gpu so 128 JAX envs do not share with torch.
+    Ignored if CUDA is unavailable (falls back to CPU)."""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -237,7 +243,42 @@ def _to_nchw_uint8(obs: np.ndarray) -> np.ndarray:
         raise RuntimeError(
             f"Expected batched NCHW stack (N, 4, H, W); got shape {arr.shape}"
         )
-    return arr.astype(np.uint8, copy=False)
+    # JAX device_get arrays are often read-only; torch warns / UB without a copy.
+    return np.array(arr, dtype=np.uint8, copy=True)
+
+
+def _resolve_jax_device(env_gpu: int):
+    import jax
+
+    gpus = jax.devices("gpu")
+    if not gpus:
+        cpu = jax.devices("cpu")[0]
+        print(f"[jaxatari] no GPU for JAX — using {cpu}")
+        return cpu
+    if env_gpu < 0 or env_gpu >= len(gpus):
+        raise SystemExit(
+            f"--env-gpu={env_gpu} out of range for {len(gpus)} visible JAX GPU(s): {gpus}"
+        )
+    dev = gpus[env_gpu]
+    print(f"[jaxatari] env on JAX device {dev} (--env-gpu={env_gpu})")
+    return dev
+
+
+def _resolve_torch_device(*, cuda: bool, train_gpu: int) -> "torch.device":
+    if not (cuda and torch.cuda.is_available()):
+        print("[torch] CUDA unavailable — training on CPU")
+        return torch.device("cpu")
+    n = torch.cuda.device_count()
+    if train_gpu < 0 or train_gpu >= n:
+        raise SystemExit(
+            f"--train-gpu={train_gpu} out of range for {n} visible torch GPU(s)"
+        )
+    dev = torch.device(f"cuda:{train_gpu}")
+    print(
+        f"[torch] train on {dev} ({torch.cuda.get_device_name(train_gpu)}) "
+        f"(--train-gpu={train_gpu})"
+    )
+    return dev
 
 
 class JaxAtariVectorEnv:
@@ -255,6 +296,7 @@ class JaxAtariVectorEnv:
         noop_max: int = 30,
         sticky_prob: float = 0.0,
         use_native_downscaling: bool = False,
+        env_gpu: int = 0,
     ):
         import jax
         import jax.numpy as jnp
@@ -266,6 +308,7 @@ class JaxAtariVectorEnv:
         self._jax = jax
         self._jnp = jnp
         self._jrandom = jrandom
+        self._jax_device = _resolve_jax_device(env_gpu)
 
         base = jaxatari.make(game.lower())
         wrapped = AtariWrapper(
@@ -300,26 +343,29 @@ class JaxAtariVectorEnv:
         self.action_space = self.single_action_space
         self.observation_space = self.single_observation_space
 
-        self._reset_fn = jax.jit(jax.vmap(self._env.reset))
-        self._step_fn = jax.jit(jax.vmap(self._env.step))
-        self._key = jrandom.PRNGKey(int(seed))
+        with jax.default_device(self._jax_device):
+            self._reset_fn = jax.jit(jax.vmap(self._env.reset))
+            self._step_fn = jax.jit(jax.vmap(self._env.step))
+            self._key = jrandom.PRNGKey(int(seed))
         self._state = None
 
     def reset(self, seed: Optional[int] = None, **kwargs):
         del kwargs
-        if seed is not None:
-            self._key = self._jrandom.PRNGKey(int(seed))
-        keys = self._jrandom.split(self._key, self.num_envs + 1)
-        self._key = keys[0]
-        obs, self._state = self._reset_fn(keys[1:])
+        with self._jax.default_device(self._jax_device):
+            if seed is not None:
+                self._key = self._jrandom.PRNGKey(int(seed))
+            keys = self._jrandom.split(self._key, self.num_envs + 1)
+            self._key = keys[0]
+            obs, self._state = self._reset_fn(keys[1:])
         obs = _to_nchw_uint8(self._jax.device_get(obs))
         return obs, {}
 
     def step(self, actions):
-        actions = self._jnp.asarray(actions, dtype=self._jnp.int32)
-        obs, self._state, reward, terminated, truncated, info = self._step_fn(
-            self._state, actions
-        )
+        with self._jax.default_device(self._jax_device):
+            actions = self._jnp.asarray(actions, dtype=self._jnp.int32)
+            obs, self._state, reward, terminated, truncated, info = self._step_fn(
+                self._state, actions
+            )
         obs = _to_nchw_uint8(self._jax.device_get(obs))
         reward = np.asarray(self._jax.device_get(reward), dtype=np.float32)
         terminations = np.asarray(self._jax.device_get(terminated), dtype=bool)
@@ -352,12 +398,18 @@ def make_envs(args: Args):
         )
     elif args.backend == "jaxatari":
         _maybe_add_jaxatari_path(args.jaxatari_root)
+        if args.env_gpu == args.train_gpu:
+            print(
+                f"WARNING: --env-gpu and --train-gpu both {args.env_gpu}; "
+                "JAX env and torch will share one GPU (likely OOM / thrash)."
+            )
         envs = JaxAtariVectorEnv(
             game=game_name,
             num_envs=args.num_envs,
             episodic_life=True,
             seed=args.seed,
             use_native_downscaling=False,
+            env_gpu=args.env_gpu,
         )
     else:
         raise SystemExit(f"Unknown --backend {args.backend!r} (use 'jaxatari' or 'ale')")
@@ -397,10 +449,13 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = _resolve_torch_device(cuda=args.cuda, train_gpu=args.train_gpu)
 
     # env setup
-    print(f"Backend: {args.backend}  env_id={args.env_id}  num_envs={args.num_envs}")
+    print(
+        f"Backend: {args.backend}  env_id={args.env_id}  num_envs={args.num_envs}  "
+        f"env_gpu={args.env_gpu}  train_gpu={args.train_gpu}"
+    )
     envs = make_envs(args)
     # assert isinstance(envs.action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -418,8 +473,8 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs = torch.Tensor(envs.reset()).to(device)
-    next_done = torch.zeros(args.num_envs).to(device)
+    next_obs = torch.tensor(envs.reset(), device=device)
+    next_done = torch.zeros(args.num_envs, device=device)
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
