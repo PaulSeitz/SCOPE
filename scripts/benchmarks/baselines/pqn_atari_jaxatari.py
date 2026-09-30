@@ -557,9 +557,10 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, next_done, info = envs.step(action.cpu().numpy())
-            rewards[step] = torch.tensor(reward, device=device).view(-1)
+            rewards[step] = torch.tensor(reward, device=device, dtype=torch.float32).view(-1)
+            # float dones: CleanRL uses 1.0 - done; torch refuses float-bool subtract.
             next_obs = torch.tensor(next_obs, device=device)
-            next_done = torch.tensor(next_done, device=device)
+            next_done = torch.tensor(next_done, device=device, dtype=torch.float32)
 
             for idx, d in enumerate(next_done):
                 if d:
