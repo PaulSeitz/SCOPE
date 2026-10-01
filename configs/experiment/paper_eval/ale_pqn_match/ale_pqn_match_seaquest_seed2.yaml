@@ -67,3 +67,6 @@ EPS_DECAY: 0.1
 GAME_MODS: null
 EVAL_GAME_MODS: null
 SEED: 2
+ENTITY: paul-seitz-tu-darmstadt
+PROJECT: concept_based_learning
+WANDB_MODE: online

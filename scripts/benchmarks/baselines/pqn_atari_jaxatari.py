@@ -68,9 +68,9 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "baselines_new"
+    wandb_project_name: str = "concept_based_learning"
     """the wandb's project name"""
-    wandb_entity: str = "jaxatari"
+    wandb_entity: str = "paul-seitz-tu-darmstadt"
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
