@@ -1330,6 +1330,25 @@ def _skills_heu_v2_transfer_ab_stems() -> tuple[str, ...]:
 
 
 SKILLS_HEU_V2_TRANSFER_AB_STEMS = _skills_heu_v2_transfer_ab_stems()
+# IB ablation: heu-v2 50M ego vs pixel_embed(+target outline), home paper_core.
+#   python scripts/materialize_skills_ib_ego_vs_pixel.py
+#   python scripts/run_paper_eval.py --suite skills_ib_ego_vs_pixel \
+#     --gpus 0 --wait-deps --skip-rq-gate --lean
+SKILLS_IB_EGO_VS_PIXEL_SUITE = "skills_ib_ego_vs_pixel"
+
+
+def _skills_ib_ego_vs_pixel_stems() -> tuple[str, ...]:
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from materialize_skills_ib_ego_vs_pixel import suite_stems  # type: ignore
+
+    return suite_stems()
+
+
+SKILLS_IB_EGO_VS_PIXEL_STEMS = _skills_ib_ego_vs_pixel_stems()
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -2202,6 +2221,7 @@ SUITE_STEMS = {
     PQN_PAPER_T5_PQN_SUITE: PQN_PAPER_T5_PQN_STEMS,
     SKILLS_HEU_CANFIRE_AB_SUITE: SKILLS_HEU_CANFIRE_AB_STEMS,
     SKILLS_HEU_V2_TRANSFER_AB_SUITE: SKILLS_HEU_V2_TRANSFER_AB_STEMS,
+    SKILLS_IB_EGO_VS_PIXEL_SUITE: SKILLS_IB_EGO_VS_PIXEL_STEMS,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -4067,6 +4087,13 @@ def main() -> None:
             "(SI/BR/TP/AS/Pong/Breakout/Freeway/NTG/Phoenix) paper_core mods; "
             "python scripts/materialize_skills_heu_v2_transfer.py then "
             "--suite skills_heu_v2_transfer_ab --gpus 0 --wait-deps "
+            "--skip-rq-gate --lean. "
+            f"{SKILLS_IB_EGO_VS_PIXEL_SUITE}: IB ablation — fresh heu-v2 50M "
+            "ego vs pixel_embed + target outline (same HPs/heuristic; new "
+            "SAVE_PATHs, not pre-spawn-fix optim_scale heu_v2 ckpts); "
+            "home paper_core evals; "
+            "python scripts/materialize_skills_ib_ego_vs_pixel.py then "
+            "--suite skills_ib_ego_vs_pixel --gpus 0 --wait-deps "
             "--skip-rq-gate --lean. "
             f"{OPTIM_SCALE_PQN_OC_SUITE} / {OPTIM_SCALE_PQN_PIXEL_SUITE}: flat PQN "
             "OC vs pixel @ same 1:1 HPs × seeds 44/45/46 + full Seaquest mod eval; "
