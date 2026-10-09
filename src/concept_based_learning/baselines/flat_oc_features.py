@@ -17,8 +17,8 @@ from typing import Any
 import chex
 import jax
 import jax.numpy as jnp
-import jaxatari.spaces as spaces
-from jaxatari.wrappers import JaxatariWrapper
+import jaxtari.spaces as spaces
+from jaxtari.wrappers import JaxatariWrapper
 
 from concept_based_learning.networks.meta_network import (
     _full_object_feature_matrix,
@@ -199,7 +199,7 @@ def make_flat_oc_build_env(
     game_mods: list | None = None,
 ):
     """Build LogWrapper(FlatOcFeatureWrapper(semantic_env))."""
-    from jaxatari.wrappers import LogWrapper
+    from jaxtari.wrappers import LogWrapper
 
     from concept_based_learning.environments.env_manager import EnvManager
 

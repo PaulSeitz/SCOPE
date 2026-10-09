@@ -52,9 +52,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("tmp/seaquest_diver_cleared_probe.json"))
     args = ap.parse_args()
 
-    import jaxatari
-    from jaxatari.environment import JAXAtariAction as Action
-    from jaxatari.games.jax_seaquest import SeaquestConstants
+    import jaxtari
+    from jaxtari.environment import JAXAtariAction as Action
+    from jaxtari.games.jax_seaquest import SeaquestConstants
 
     consts = SeaquestConstants()
     enemy_reload = int(consts.ENEMY_SPAWN_TIMER_RELOAD)
@@ -67,7 +67,7 @@ def main() -> None:
         flush=True,
     )
 
-    env = jaxatari.make("seaquest")
+    env = jaxtari.make("seaquest")
     # Underlying game for conditional reload helper
     game = getattr(env, "game", None) or getattr(getattr(env, "unwrapped", env), "game", None)
     action_set = np.asarray(env.ACTION_SET)

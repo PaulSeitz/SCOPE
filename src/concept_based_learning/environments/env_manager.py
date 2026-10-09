@@ -4,32 +4,32 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import jax.numpy as jnp
-from jaxatari import make as make_atari_env
-from jaxatari.core import MOD_MODULES as JAXATARI_MOD_MODULES
-from jaxatari.wrappers import AtariWrapper
+from jaxtari import make as make_atari_env
+from jaxtari.core import MOD_MODULES as JAXATARI_MOD_MODULES
+from jaxtari.wrappers import AtariWrapper
 try:
-    from jaxatari.wrappers import PixelAndObjectObsWrapper
+    from jaxtari.wrappers import PixelAndObjectObsWrapper
 except ImportError:  # pragma: no cover - compatibility with older jaxatari forks
     PixelAndObjectObsWrapper = None
-from jaxatari.games.jax_seaquest import SeaquestRenderer
-from jaxatari.games.jax_choppercommand import ChopperCommandRenderer
-from jaxatari.games.jax_spaceinvaders import SpaceInvadersRenderer
-from jaxatari.games.jax_phoenix import PhoenixRenderer
-from jaxatari.games.jax_freeway import FreewayRenderer
-from jaxatari.games.jax_pong import PongRenderer
-from jaxatari.games.jax_breakout import BreakoutRenderer
-from jaxatari.games.jax_beamrider import BeamriderRenderer
-from jaxatari.games.jax_kangaroo import KangarooRenderer
-from jaxatari.games.jax_skiing import SkiingRenderer
-from jaxatari.games.jax_tennis import TennisRenderer
-from jaxatari.games.jax_asterix import AsterixRenderer
-from jaxatari.games.jax_montezumarevenge import MontezumaRevengeRenderer
-from jaxatari.games.jax_venture import VentureRenderer
-from jaxatari.games.jax_asteroids import AsteroidsRenderer
-from jaxatari.games.jax_namethisgame import Renderer_NameThisGame
-from jaxatari.games.jax_timepilot import TimePilotRenderer
+from jaxtari.games.jax_seaquest import SeaquestRenderer
+from jaxtari.games.jax_choppercommand import ChopperCommandRenderer
+from jaxtari.games.jax_spaceinvaders import SpaceInvadersRenderer
+from jaxtari.games.jax_phoenix import PhoenixRenderer
+from jaxtari.games.jax_freeway import FreewayRenderer
+from jaxtari.games.jax_pong import PongRenderer
+from jaxtari.games.jax_breakout import BreakoutRenderer
+from jaxtari.games.jax_beamrider import BeamriderRenderer
+from jaxtari.games.jax_kangaroo import KangarooRenderer
+from jaxtari.games.jax_skiing import SkiingRenderer
+from jaxtari.games.jax_tennis import TennisRenderer
+from jaxtari.games.jax_asterix import AsterixRenderer
+from jaxtari.games.jax_montezumarevenge import MontezumaRevengeRenderer
+from jaxtari.games.jax_venture import VentureRenderer
+from jaxtari.games.jax_asteroids import AsteroidsRenderer
+from jaxtari.games.jax_namethisgame import Renderer_NameThisGame
+from jaxtari.games.jax_timepilot import TimePilotRenderer
 # Kaboom is not in upstream jaxatari yet — keep label/policy code, do not register.
-# from jaxatari.games.jax_kaboom import KaboomRenderer
+# from jaxtari.games.jax_kaboom import KaboomRenderer
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
@@ -238,6 +238,64 @@ def _normalize_game_mods(raw: Union[None, str, List[Any]]) -> Optional[List[str]
         return [raw]
     out = [str(x) for x in list(raw)]
     return out if out else None
+
+
+def _fullres_display_renderer(
+    *,
+    jax_game_id: str,
+    game_mods: Optional[List[str]],
+    renderer_cls: Type[Any],
+) -> Any:
+    """Build a full-res viz renderer that still carries asset-level GAME_MODS.
+
+    Pixel wrappers may hot-swap the *live* game renderer to native 84×84. The
+    visualizer needs a separate 210×160 RGB renderer. A bare ``renderer_cls()``
+    misses init-time remaps such as Seaquest ``change_background_color`` (which
+    also used to be wiped by native downscaling — fixed in jaxatari via
+    ``_reapply_renderer_asset_mods``). For mods that touch renderer assets we
+    spawn a short-lived full-res ``make(..., mods=...)`` and reuse its renderer.
+    """
+    mods = [str(m) for m in (game_mods or [])]
+    # Asset / palette remaps that a bare renderer_cls() would miss.
+    asset_mod_keys = {
+        "change_background_color",
+        "grayscale",
+        "inverted_colors",
+        "random_color_enemies",
+    }
+    if not asset_mod_keys.intersection(mods):
+        return renderer_cls()
+
+    try:
+        side = make_atari_env(jax_game_id, mods=mods)
+    except Exception as exc:
+        warnings.warn(
+            f"Falling back to stock display renderer (modded make failed: {exc})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return renderer_cls()
+
+    # make() returns SeaquestEnvMod (or similar); renderer lives on the core game.
+    cur: Any = side
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        rend = getattr(cur, "renderer", None)
+        if rend is not None and hasattr(rend, "BACKGROUND_FRAMES"):
+            # Prefer the innermost game renderer (full-res, post asset remap).
+            core = cur
+            while hasattr(core, "_env"):
+                inner = core._env
+                if hasattr(inner, "renderer") and hasattr(
+                    inner.renderer, "BACKGROUND_FRAMES"
+                ):
+                    core = inner
+                else:
+                    break
+            return core.renderer
+        cur = getattr(cur, "_env", getattr(cur, "env", None))
+    return renderer_cls()
 
 
 def _atari_wrapper_supports(param_name: str) -> bool:
@@ -747,7 +805,7 @@ class EnvManager:
             get_heuristic_with_state=montezuma_get_heuristic_with_state,
             reset_policy_on_life_lost=True,
         )
-        # Alias accepted by jaxatari.make("montezuma_revenge").
+        # Alias accepted by jaxtari.make("montezuma_revenge").
         self._registry["montezuma_revenge"] = self._registry["montezumarevenge"]
 
         self._registry["venture"] = EnvComponents(
@@ -971,7 +1029,7 @@ class EnvManager:
             if PixelAndObjectObsWrapper is None:
                 raise ImportError(
                     "META_INPUT_MODE='pixel_embed' requires PixelAndObjectObsWrapper "
-                    "from jaxtari/jaxatari.wrappers, but it is unavailable in this install."
+                    "from jaxtari/jaxtari.wrappers, but it is unavailable in this install."
                 )
             resize_shape = config.get("META_PIXEL_RESIZE_SHAPE", (84, 84))
             if isinstance(resize_shape, list):
@@ -998,6 +1056,11 @@ class EnvManager:
         setattr(env, "_cbl_clip_reward", clip_reward)
 
         env = components.semantic_wrapper_cls(env)
-        renderer = components.renderer_cls()
+        # Full-res display renderer for viz (live env may be native-downscaled).
+        renderer = _fullres_display_renderer(
+            jax_game_id=jax_id,
+            game_mods=game_mods,
+            renderer_cls=components.renderer_cls,
+        )
         return env, renderer
 

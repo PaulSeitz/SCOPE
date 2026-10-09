@@ -24,8 +24,8 @@ from omegaconf import OmegaConf
 from safetensors.flax import save_file
 from flax.traverse_util import flatten_dict
 
-import jaxatari
-from jaxatari.wrappers import (
+import jaxtari
+from jaxtari.wrappers import (
     AtariWrapper,
     FlattenObservationWrapper,
     LogWrapper,
@@ -143,10 +143,41 @@ def make_train(config: dict[str, Any]):
             )
         return LogWrapper(wrapped)
 
+    clip_reward_cfg = bool(cfg.get("CLIP_REWARD", True))
+
     if oc_input_mode:
         env = apply_wrappers(None)
     else:
-        env = apply_wrappers(jaxatari.make(env_name, mods=train_mods))
+        env = apply_wrappers(jaxtari.make(env_name, mods=train_mods))
+
+    # AtariWrapper does not clip; PixelObsWrapper / ObjectCentricWrapper sign-clip
+    # the frame-skip sum (DQN / purejaxql reward_clip). Fail loud if miswired.
+    if not oc_input_mode:
+        clip_layer = env
+        found_clip_attr = False
+        while clip_layer is not None:
+            if hasattr(clip_layer, "clip_reward"):
+                found_clip_attr = True
+                if bool(clip_layer.clip_reward) != clip_reward_cfg:
+                    raise RuntimeError(
+                        f"CLIP_REWARD={clip_reward_cfg} but "
+                        f"{type(clip_layer).__name__}.clip_reward="
+                        f"{clip_layer.clip_reward}"
+                    )
+                break
+            clip_layer = getattr(clip_layer, "_env", None)
+        if not found_clip_attr:
+            raise RuntimeError(
+                "flat PQN wrap stack has no clip_reward attribute; "
+                "PixelObsWrapper/ObjectCentricWrapper must apply jnp.sign "
+                f"(CLIP_REWARD={clip_reward_cfg})"
+            )
+        print(
+            f"[flat_pqn] reward clip: CLIP_REWARD={clip_reward_cfg} "
+            f"on {type(clip_layer).__name__} "
+            "(TD uses sign(sum of frame-skip rewards); "
+            "info['env_reward'] stays unclipped)"
+        )
 
     # OC build path uses the object-centric MLP trunk (not the pixel CNN).
     network_object_centric = bool(object_centric or oc_input_mode)

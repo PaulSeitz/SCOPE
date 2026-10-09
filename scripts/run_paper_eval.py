@@ -1349,6 +1349,30 @@ def _skills_ib_ego_vs_pixel_stems() -> tuple[str, ...]:
 
 
 SKILLS_IB_EGO_VS_PIXEL_STEMS = _skills_ib_ego_vs_pixel_stems()
+# Locked thesis-final 50M sweep (RQ1/RQ2/RQ3 + ablations + floors). Per-GPU
+# suites are static LPT/dependency-aware queues — launch one per GPU:
+#   python scripts/materialize_thesis_final.py
+#   python scripts/run_paper_eval.py --suite thesis_final_3gpu_g0 --gpus 0 \
+#     --wait-deps --wait-deps-timeout-h 72 --skip-rq-gate --lean --resume
+THESIS_FINAL_SUITE = "thesis_final"
+
+
+def _thesis_final_suites() -> dict[str, tuple[str, ...]]:
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import materialize_thesis_final as tf  # type: ignore
+
+    suites = {THESIS_FINAL_SUITE: tf.suite_stems()}
+    for n in tf.GPU_COUNTS:
+        for g in range(n):
+            suites[tf.gpu_suite_name(g, n)] = tf.gpu_suite_stems(g, n)
+    return suites
+
+
+THESIS_FINAL_SUITES = _thesis_final_suites()
 # Locked 10M ego skills on paper bases only (SQ/PH/NTG/AS); no baselines.
 FINAL_10M_BASE_SKILLS_SUITE = "final_10m_base_skills"
 # Flat PQN pixel @ 10M on bases (2–2 GPU split) + home evals.
@@ -2222,6 +2246,7 @@ SUITE_STEMS = {
     SKILLS_HEU_CANFIRE_AB_SUITE: SKILLS_HEU_CANFIRE_AB_STEMS,
     SKILLS_HEU_V2_TRANSFER_AB_SUITE: SKILLS_HEU_V2_TRANSFER_AB_STEMS,
     SKILLS_IB_EGO_VS_PIXEL_SUITE: SKILLS_IB_EGO_VS_PIXEL_STEMS,
+    **THESIS_FINAL_SUITES,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
     FINAL_10M_PQN_PIXEL_GPU1_SUITE: FINAL_10M_PQN_PIXEL_GPU1_STEMS,
@@ -3227,8 +3252,8 @@ def _pin_jaxatari_action_sets_to_host() -> None:
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from jaxatari.core import GAME_MODULES
-        from jaxatari.environment import JaxEnvironment
+        from jaxtari.core import GAME_MODULES
+        from jaxtari.environment import JaxEnvironment
     except Exception:
         return
 
@@ -4095,6 +4120,10 @@ def main() -> None:
             "python scripts/materialize_skills_ib_ego_vs_pixel.py then "
             "--suite skills_ib_ego_vs_pixel --gpus 0 --wait-deps "
             "--skip-rq-gate --lean. "
+            f"{THESIS_FINAL_SUITE}: locked thesis-final 50M sweep (RQ1–3, "
+            "ablations, floors); per-GPU queues thesis_final_{2,3}gpu_g<i>; "
+            "python scripts/materialize_thesis_final.py, see "
+            "docs/thesis_final_RUNLOG.md for launch lines. "
             f"{OPTIM_SCALE_PQN_OC_SUITE} / {OPTIM_SCALE_PQN_PIXEL_SUITE}: flat PQN "
             "OC vs pixel @ same 1:1 HPs × seeds 44/45/46 + full Seaquest mod eval; "
             "train→eval sequential per seed — run one suite per GPU; "

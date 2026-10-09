@@ -2,7 +2,7 @@
 
 import jax.numpy as jnp
 import pytest
-from jaxatari.environment import JAXAtariAction as Atari
+from jaxtari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.observations.egocentric import (
     configure_ego_obs_from_config,

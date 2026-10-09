@@ -1,6 +1,6 @@
 """Runtime setup so NEXUS trains/evals against the installed Seaquest fork.
 
-Default (cluster): use ``JAXATARI_ROOT`` / the installed ``jaxatari`` package
+Default (cluster): use ``JAXATARI_ROOT`` / the installed ``jaxtari`` package
 (the robustness Seaquest fork). NEXUS's vendored copy is only used with
 ``--vendored-seaquest``.
 
@@ -36,17 +36,18 @@ def apply_nexus_source_fixes(nexus_root: Path) -> None:
             path.write_text(text[len(bad) :], encoding="utf-8")
             print(f"Patched dead imports in {path}")
 
-    wrappers = nexus_root / "JAXAtari" / "src" / "jaxatari" / "wrappers.py"
-    if wrappers.is_file():
-        text = wrappers.read_text(encoding="utf-8")
-        new = text.replace('print("len obs: ", len(obs))', "pass  # CBL: struct obs")
-        new = new.replace('print("obs: ", obs)', "pass  # CBL")
-        new = new.replace("print(obs)", "pass  # CBL")
-        if new != text:
-            wrappers.write_text(new, encoding="utf-8")
-            print(f"Patched len(obs) debug prints in {wrappers}")
+    for pkg in ("jaxtari", "jaxatari"):
+        wrappers = nexus_root / "JAXAtari" / "src" / pkg / "wrappers.py"
+        if wrappers.is_file():
+            text = wrappers.read_text(encoding="utf-8")
+            new = text.replace('print("len obs: ", len(obs))', "pass  # CBL: struct obs")
+            new = new.replace('print("obs: ", obs)', "pass  # CBL")
+            new = new.replace("print(obs)", "pass  # CBL")
+            if new != text:
+                wrappers.write_text(new, encoding="utf-8")
+                print(f"Patched len(obs) debug prints in {wrappers}")
 
-    # Modern jaxatari nests SeaquestState under ObjectCentricState.atari_state;
+    # Modern jaxtari nests SeaquestState under ObjectCentricState.atari_state;
     # NEXUS video_recorder only unwraps MultiRewardLog / Pixel / Atari.
     video = (
         nexus_root
@@ -66,13 +67,13 @@ def apply_nexus_source_fixes(nexus_root: Path) -> None:
         insert = (
             "    if isinstance(states, PixelState):\n"
             "        states = states.atari_state\n\n"
-            "    # CBL: modern jaxatari OC / Pixel+OC nest AtariState one level deeper\n"
+            "    # CBL: modern jaxtari OC / Pixel+OC nest AtariState one level deeper\n"
             "    while hasattr(states, \"atari_state\") and not isinstance(states, AtariState):\n"
             "        states = states.atari_state\n\n"
             "    if isinstance(states, AtariState):\n"
             "        states = states.env_state\n"
         )
-        if needle in text and "CBL: modern jaxatari OC" not in text:
+        if needle in text and "CBL: modern jaxtari OC" not in text:
             text = text.replace(needle, insert, 1)
             old_fallback = "        num_states = len(states[-1])\n"
             new_fallback = (
@@ -92,8 +93,14 @@ def prepend_sys_path(paths: Sequence[Path]) -> None:
         sys.path.insert(0, s)
 
 
-def _clear_jaxatari_modules() -> None:
-    to_drop = [k for k in sys.modules if k == "jaxatari" or k.startswith("jaxatari.")]
+def _clear_jaxtari_modules() -> None:
+    to_drop = [
+        k
+        for k in sys.modules
+        if k in ("jaxtari", "jaxatari")
+        or k.startswith("jaxtari.")
+        or k.startswith("jaxatari.")
+    ]
     for k in to_drop:
         del sys.modules[k]
 
@@ -101,10 +108,10 @@ def _clear_jaxatari_modules() -> None:
 def install_jaxatari(src: Path, *, label: str) -> Path:
     src = src.resolve()
     prepend_sys_path([src])
-    _clear_jaxatari_modules()
-    import jaxatari  # noqa: F401
+    _clear_jaxtari_modules()
+    import jaxtari  # noqa: F401
 
-    print(f"Using jaxatari from {src} ({label})")
+    print(f"Using jaxtari from {src} ({label})")
     return src
 
 
@@ -112,7 +119,7 @@ def ensure_reward_funcs_api() -> None:
     """Monkeypatch JaxSeaquest so NEXUS can pass reward_funcs=..."""
     import jax
     from jax.flatten_util import ravel_pytree
-    from jaxatari.games.jax_seaquest import JaxSeaquest
+    from jaxtari.games.jax_seaquest import JaxSeaquest
 
     if getattr(JaxSeaquest, "_cbl_nexus_reward_funcs_patched", False):
         return
@@ -129,7 +136,7 @@ def ensure_reward_funcs_api() -> None:
         if not hasattr(self, "frame_stack_size"):
             self.frame_stack_size = 4
         if not hasattr(self, "action_set") or self.action_set is None:
-            from jaxatari.environment import JAXAtariAction as Action
+            from jaxtari.environment import JAXAtariAction as Action
 
             self.action_set = [
                 Action.NOOP,
@@ -199,8 +206,8 @@ def map_disable_enemies_wrapper_to_no_enemies_mod() -> None:
     """NEXUS create_env(no_enemies=True) → robustness ``no_enemies`` mod body."""
     try:
         import jax
-        from jaxatari.wrappers import JaxatariWrapper
-        import jaxatari.games.mods.seaquest_mods as sq_mods
+        from jaxtari.wrappers import JaxatariWrapper
+        import jaxtari.games.mods.seaquest_mods as sq_mods
 
         class DisableEnemiesWrapper(JaxatariWrapper):
             """Drop-in for NEXUS → robustness ``no_enemies`` mod."""
@@ -227,7 +234,7 @@ def map_disable_enemies_wrapper_to_no_enemies_mod() -> None:
 def patch_atari_wrapper_kwargs() -> None:
     """Installed AtariWrapper lacks NEXUS noise kwargs (detect_prob/std_dev)."""
     import inspect
-    from jaxatari.wrappers import AtariWrapper
+    from jaxtari.wrappers import AtariWrapper
 
     if getattr(AtariWrapper, "_cbl_nexus_kwargs_patched", False):
         return
@@ -256,7 +263,7 @@ def patch_atari_wrapper_kwargs() -> None:
 def patch_object_centric_defaults() -> None:
     """Modern OC defaults clip_reward=True; NEXUS Atari used clip_reward=False."""
     import inspect
-    from jaxatari.wrappers import ObjectCentricWrapper
+    from jaxtari.wrappers import ObjectCentricWrapper
 
     if getattr(ObjectCentricWrapper, "_cbl_nexus_oc_patched", False):
         return
@@ -282,7 +289,7 @@ def patch_five_tuple_step_api() -> None:
     on the outermost MultiRewardLogWrapper (and PixelObs if used bare).
     """
     import jax
-    from jaxatari.wrappers import MultiRewardLogWrapper
+    from jaxtari.wrappers import MultiRewardLogWrapper
 
     if getattr(MultiRewardLogWrapper, "_cbl_nexus_five_tuple_patched", False):
         return

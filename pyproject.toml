@@ -13,6 +13,7 @@ dependencies = [
     "chex>=0.1.87",
     "flax",
     "jax",
+    "jaxtari>=0.2.0",
     "ml-dtypes",
     "numpy",
     "opt-einsum>=3.4.0",

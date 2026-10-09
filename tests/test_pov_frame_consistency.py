@@ -161,7 +161,7 @@ def test_mirrored_targets_give_mirrored_bearings(env, sprite_ori):
 
 def test_seaquest_two_axes_match_the_pov_model():
     """Facing right: below is my right -> DOWN; above is my left -> UP; ahead -> RIGHT."""
-    from jaxatari.environment import JAXAtariAction as Atari
+    from jaxtari.environment import JAXAtariAction as Atari
 
     noop, fire, move, mfire = _MOVE_SPECS["seaquest"]
     for sprite_ori, ahead_action, expected in (

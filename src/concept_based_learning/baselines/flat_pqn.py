@@ -19,8 +19,8 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 from omegaconf import OmegaConf
 from safetensors.flax import load_file
 
-import jaxatari
-from jaxatari.wrappers import (
+import jaxtari
+from jaxtari.wrappers import (
     AtariWrapper,
     FlattenObservationWrapper,
     LogWrapper,
@@ -311,7 +311,7 @@ def make_flat_pqn_eval_env(
                 game_mods=mods,
             )
 
-        env = jaxatari.make(game, mods=mods)
+        env = jaxtari.make(game, mods=mods)
         env = AtariWrapper(
             env,
             sticky_actions=0.0,
@@ -367,7 +367,9 @@ def _make_jitted_flat_pqn_episode_runner(
     *,
     max_frames: int,
     env_name: str,
+    random_action_dim: int | None = None,
 ):
+    """``random_action_dim`` set → uniform random actions; ``network`` is unused."""
     update_metrics, _finalize_unused = make_metric_fns(
         env_name, has_semantic_obs=False
     )
@@ -375,6 +377,7 @@ def _make_jitted_flat_pqn_episode_runner(
     @jax.jit
     def run_episode(rng):
         obs, state = env.reset(rng)
+        action_rng = jax.random.fold_in(rng, 1)
 
         def cond(carry):
             _obs, _state, _total, done, step, _metrics = carry
@@ -382,15 +385,20 @@ def _make_jitted_flat_pqn_episode_runner(
 
         def body(carry):
             obs_c, state_c, total_c, done, step, metrics = carry
-            policy_obs = obs_c
-            if not network.object_centric:
-                policy_obs = _prepare_pixel_policy_obs(policy_obs)
-            q_vals = network.apply(
-                {"params": params, "batch_stats": batch_stats},
-                policy_obs[None, ...],
-                train=False,
-            )
-            action = jnp.argmax(q_vals, axis=-1)[0]
+            if random_action_dim is not None:
+                action = jax.random.randint(
+                    jax.random.fold_in(action_rng, step), (), 0, int(random_action_dim)
+                )
+            else:
+                policy_obs = obs_c
+                if not network.object_centric:
+                    policy_obs = _prepare_pixel_policy_obs(policy_obs)
+                q_vals = network.apply(
+                    {"params": params, "batch_stats": batch_stats},
+                    policy_obs[None, ...],
+                    train=False,
+                )
+                action = jnp.argmax(q_vals, axis=-1)[0]
             obs_n, state_n, reward, terminated, truncated, _info = env.step(
                 state_c, action
             )
@@ -506,6 +514,34 @@ def run_flat_pqn_greedy_eval(
         label = "oc" if object_centric else "pixel"
         xfer = "" if eval_env == train_env else f"  zero-shot {train_env}→{eval_env}"
         print(f"  Compiling flat PQN ({label}) greedy eval...{xfer}", flush=True)
+    return {
+        **_collect_episode_stats(
+            run_episode,
+            num_episodes=num_episodes,
+            num_seeds=num_seeds,
+            base_seed=base_seed,
+            max_frames=max_frames,
+            label="Flat PQN",
+            progress=progress,
+            on_episode_done=on_episode_done,
+        ),
+        "object_centric": bool(object_centric),
+        "train_env": train_env,
+        "eval_env": eval_env,
+    }
+
+
+def _collect_episode_stats(
+    run_episode,
+    *,
+    num_episodes: int,
+    num_seeds: int,
+    base_seed: int,
+    max_frames: int,
+    label: str,
+    progress: bool,
+    on_episode_done: Callable[[], None] | None,
+) -> dict[str, Any]:
     _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
 
     returns: list[float] = []
@@ -517,7 +553,7 @@ def run_flat_pqn_greedy_eval(
             run_idx += 1
             if progress:
                 print(
-                    f"  Flat PQN episode {run_idx}/{total_runs} "
+                    f"  {label} episode {run_idx}/{total_runs} "
                     f"(seed {seed_idx + 1}/{num_seeds}, ep {ep_idx + 1}/{num_episodes})...",
                     flush=True,
                 )
@@ -544,10 +580,56 @@ def run_flat_pqn_greedy_eval(
         "num_seeds": int(num_seeds),
         "episodes_per_seed": int(num_episodes),
         "max_frames_per_episode": int(max_frames),
-        "object_centric": bool(object_centric),
-        "train_env": train_env,
-        "eval_env": eval_env,
         **aggregate_episode_metrics(episode_metrics),
+    }
+
+
+def run_random_action_eval(
+    *,
+    config: dict[str, Any],
+    game_mods: list[str],
+    num_episodes: int,
+    num_seeds: int,
+    base_seed: int,
+    max_frames: int,
+    env_name: str,
+    progress: bool = True,
+    on_episode_done: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Uniform random actions over the game's minimal action set (Atari floor)."""
+    eval_env = str(env_name).lower()
+    env = make_flat_pqn_eval_env(
+        object_centric=True,
+        game_mods=game_mods,
+        config={**config, "OC_INPUT_MODE": None},
+        env_name=eval_env,
+        full_action_space=False,
+    )
+    action_dim = int(env.action_space().n)
+    run_episode = _make_jitted_flat_pqn_episode_runner(
+        env,
+        None,
+        None,
+        None,
+        max_frames=max_frames,
+        env_name=eval_env,
+        random_action_dim=action_dim,
+    )
+    if progress:
+        print(f"  Compiling random-action eval ({eval_env}, n={action_dim})...", flush=True)
+    return {
+        **_collect_episode_stats(
+            run_episode,
+            num_episodes=num_episodes,
+            num_seeds=num_seeds,
+            base_seed=base_seed,
+            max_frames=max_frames,
+            label="Random",
+            progress=progress,
+            on_episode_done=on_episode_done,
+        ),
+        "action_dim": action_dim,
+        "eval_env": eval_env,
     }
 
 

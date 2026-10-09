@@ -307,7 +307,7 @@ def _warmup_jax_before_torch(args: Args) -> None:
     try:
         with jax.default_device(dev):
             _ = jnp.asarray([0, 0])
-            import jaxatari  # noqa: F401  — force the fragile import here
+            import jaxtari  # noqa: F401  — force the fragile import here
 
         print(f"[jax] warmup ok on {dev} (jaxatari import succeeded)")
     except Exception as exc:
@@ -344,16 +344,16 @@ class JaxAtariVectorEnv:
         import jax
         import jax.numpy as jnp
         import jax.random as jrandom
-        import jaxatari
+        import jaxtari
         from gymnasium import spaces as gym_spaces
-        from jaxatari.wrappers import AtariWrapper, PixelObsWrapper
+        from jaxtari.wrappers import AtariWrapper, PixelObsWrapper
 
         self._jax = jax
         self._jnp = jnp
         self._jrandom = jrandom
         self._jax_device = _resolve_jax_device(env_gpu)
 
-        base = jaxatari.make(game.lower())
+        base = jaxtari.make(game.lower())
         wrapped = AtariWrapper(
             base,
             sticky_actions=float(sticky_prob),

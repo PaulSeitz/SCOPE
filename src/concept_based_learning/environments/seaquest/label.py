@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-from jaxatari.environment import JAXAtariAction as Atari
+from jaxtari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,

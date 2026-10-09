@@ -7,9 +7,9 @@ import jax
 import jax.numpy as jnp
 from flax import struct
 
-import jaxatari.spaces as spaces
-from jaxatari.wrappers import JaxatariWrapper, AtariState
-from jaxatari.environment import ObjectObservation
+import jaxtari.spaces as spaces
+from jaxtari.wrappers import JaxatariWrapper, AtariState
+from jaxtari.environment import ObjectObservation
 
 # Universal Semantic Labels
 # Skill labels must stay contiguous starting at 1: skill_idx = label - 1

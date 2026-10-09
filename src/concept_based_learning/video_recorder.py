@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import wandb
-from jaxatari.renderers import JAXGameRenderer
+from jaxtari.renderers import JAXGameRenderer
 
 from concept_based_learning.environments.skill_rewards import SKILL_REWARD_ORDER
 from concept_based_learning.training.episode_stats import unwrap_base_env_state

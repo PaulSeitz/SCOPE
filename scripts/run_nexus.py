@@ -16,7 +16,7 @@ Examples
   python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper
   python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_paper
 
-  # Full paper_eval seaquest mod allowlist via jaxatari.make:
+  # Full paper_eval seaquest mod allowlist via jaxtari.make:
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_nexus_symbolic_paper \\
       --ckpt outputs/models/nexus/cbl_seaquest_nexus_symbolic_paper
 

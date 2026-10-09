@@ -1,6 +1,6 @@
 """Evaluate a NEXUS Seaquest checkpoint on the CBL paper_eval mod allowlist.
 
-Uses the same jaxatari mod API as paper_eval (``jaxatari.make(..., mods=...)``)
+Uses the same jaxatari mod API as paper_eval (``jaxtari.make(..., mods=...)``)
 and writes ``*_mods.json`` / CSV next to other RQ1 results.
 """
 
@@ -194,9 +194,9 @@ def _normalize_game_mods(game_mods: list[str]) -> list[str] | None:
 
 
 def _make_nexus_eval_env(game_mods: list[str]):
-    """Build env via jaxatari.make (paper_eval style) + NEXUS OC stack."""
-    import jaxatari
-    from jaxatari.wrappers import (
+    """Build env via jaxtari.make (paper_eval style) + NEXUS OC stack."""
+    import jaxtari
+    from jaxtari.wrappers import (
         AtariWrapper,
         FlattenObservationWrapper,
         LogWrapper,
@@ -204,7 +204,7 @@ def _make_nexus_eval_env(game_mods: list[str]):
     )
 
     mods = _normalize_game_mods(game_mods)
-    env = jaxatari.make("seaquest", mods=mods)
+    env = jaxtari.make("seaquest", mods=mods)
 
     # Match NEXUS eval wrappers: no sticky / no episodic life.
     # AtariWrapper signature differs across forks — try common kwargs.

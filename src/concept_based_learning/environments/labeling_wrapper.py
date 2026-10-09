@@ -4,9 +4,9 @@ import chex
 import functools
 import jax
 import jax.numpy as jnp
-import jaxatari.spaces as spaces
-from jaxatari.environment import ObjectObservation
-from jaxatari.wrappers import JaxatariWrapper
+import jaxtari.spaces as spaces
+from jaxtari.environment import ObjectObservation
+from jaxtari.wrappers import JaxatariWrapper
 
 from concept_based_learning.environments.datatypes import (
     SemanticObservation,

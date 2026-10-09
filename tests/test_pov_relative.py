@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jaxatari.environment import JAXAtariAction as Atari
+from jaxtari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.seaquest.label import (
     _legacy_orientation_relative_mapper,
@@ -149,7 +149,7 @@ def test_forward_spam_differs_from_target_aligned_on_pong_vertical_profile():
     from concept_based_learning.observations.pov_relative import (
         make_facing_relative_mappers,
     )
-    from jaxatari.environment import JAXAtariAction as Atari
+    from jaxtari.environment import JAXAtariAction as Atari
 
     pov_mapper, _ = make_facing_relative_mappers("pong")
 

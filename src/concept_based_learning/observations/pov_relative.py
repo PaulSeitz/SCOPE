@@ -459,7 +459,7 @@ def apply_seaquest_ascent_block(mapped_action, raw_obs, target_idx):
         SURFACE_Y_THRESHOLD,
         using_legacy_seaquest_ascent_block,
     )
-    from jaxatari.environment import JAXAtariAction as Atari
+    from jaxtari.environment import JAXAtariAction as Atari
 
     if not using_legacy_seaquest_ascent_block():
         return mapped_action

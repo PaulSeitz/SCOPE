@@ -835,11 +835,11 @@ class JaxBackend:
     def __init__(self, seed: int):
         import jax
         import jax.numpy as jnp
-        import jaxatari
+        import jaxtari
 
         self._jax = jax
         self._jnp = jnp
-        self.env = jaxatari.make("seaquest")
+        self.env = jaxtari.make("seaquest")
         self._rng = jax.random.PRNGKey(int(seed))
         self._seed = seed
         self.reset()

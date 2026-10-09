@@ -169,10 +169,10 @@ def probe_ale(frames: int, seeds: list[int], sticky: float) -> tuple[SpawnStats,
 def probe_jaxatari(frames: int, seeds: list[int]) -> tuple[SpawnStats, list[dict]]:
     import jax
     import jax.numpy as jnp
-    import jaxatari
-    from jaxatari.environment import JAXAtariAction as Action
+    import jaxtari
+    from jaxtari.environment import JAXAtariAction as Action
 
-    env = jaxatari.make("seaquest")
+    env = jaxtari.make("seaquest")
     action_set = np.asarray(env.ACTION_SET)
     up_idxs = np.where(action_set == int(Action.UP))[0]
     if len(up_idxs) == 0:

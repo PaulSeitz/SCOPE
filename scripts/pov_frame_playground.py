@@ -135,8 +135,8 @@ def expected_ego_move(phi_deg: float) -> int:
 
 
 def make_raw_env(env: str):
-    from jaxatari import make as make_atari_env
-    from jaxatari.wrappers import AtariWrapper
+    from jaxtari import make as make_atari_env
+    from jaxtari.wrappers import AtariWrapper
 
     base = make_atari_env(env)
     if env == "asterix":

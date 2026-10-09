@@ -8,10 +8,10 @@ import sys
 from flax import struct
 import chex
 
-import jaxatari.spaces as spaces
-from jaxatari.wrappers import JaxatariWrapper, AtariState, AtariWrapper
-from jaxatari.environment import ObjectObservation
-from jaxatari import make as make_atari_env
+import jaxtari.spaces as spaces
+from jaxtari.wrappers import JaxatariWrapper, AtariState, AtariWrapper
+from jaxtari.environment import ObjectObservation
+from jaxtari import make as make_atari_env
 
 from src.concept_based_learning.environments.datatypes import (
     LABEL_NOOP,

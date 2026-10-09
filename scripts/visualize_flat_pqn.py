@@ -102,7 +102,12 @@ def _print_paper_audit(config: dict[str, Any]) -> None:
         ("NOOP_MAX", "typically 30", f"{noop} (default; not in YAML)", "ok"),
         ("FIRST_FIRE", "common Atari practice", f"{first_fire}", "ok"),
         ("max_frames_per_episode", "108000 (30min@60fps ALE)", f"{max_frames} (AtariWrapper default; NOT passed explicitly in flat_pqn_train)", "ok (implicit)"),
-        ("USE_NATIVE_DOWNSCALING", "False for real ALE (cv2/area 84×84). Native is JAXAtari-only hot-swap.", f"{native} ← THIS RUN USED NATIVE", "DEVIATION" if native else "ok"),
+        (
+            "USE_NATIVE_DOWNSCALING",
+            "False for real ALE (cv2/area 84×84). Native is JAXAtari-only hot-swap.",
+            f"{native}" + (" ← THIS RUN USED NATIVE" if native else " (ALE-style resize)"),
+            "DEVIATION" if native else "ok",
+        ),
         ("PIXEL_GRAYSCALE / 84×84", "True / [84,84]", f"{config.get('PIXEL_GRAYSCALE')} / {config.get('PIXEL_RESIZE_SHAPE')}", "ok"),
         ("CLIP_REWARD (train)", "True", f"{config.get('CLIP_REWARD')}", "ok"),
     ]
@@ -111,11 +116,14 @@ def _print_paper_audit(config: dict[str, Any]) -> None:
         print(f"  {mark} {name}")
         print(f"      paper/norm: {paper}")
         print(f"      ours:       {ours}")
-    print(
-        "\n  Note: native downscaling re-renders JAXAtari Seaquest at 84×84 inside the\n"
-        "  game (apply_native_downscaling). Paper ALE PQN uses standard resize of\n"
-        "  210×160 frames — a real preprocess mismatch for ALE transfer / paper parity.\n"
-    )
+    if native:
+        print(
+            "\n  Note: native downscaling re-renders JAXAtari Seaquest at 84×84 inside the\n"
+            "  game (apply_native_downscaling). Paper ALE PQN uses standard resize of\n"
+            "  210×160 frames — a real preprocess mismatch for ALE transfer / paper parity.\n"
+        )
+    else:
+        print()
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +485,7 @@ def main() -> None:
         if args.record:
             recorded.append(_upscale_rgb(rgb, args.record_upscale))
     else:
-        import jaxatari
+        import jaxtari
 
         mods = list(args.mods) if args.mods else []
         env = make_flat_pqn_eval_env(
@@ -487,7 +495,7 @@ def main() -> None:
             env_name=game_name,
             required_action_dim=ckpt_action_dim,
         )
-        jaxatari_renderer = jaxatari.make(game_name, mods=mods or None).renderer
+        jaxatari_renderer = jaxtari.make(game_name, mods=mods or None).renderer
         action_dim = int(env.action_space().n)
         jitted_reset = jax.jit(env.reset)
         jitted_step = jax.jit(env.step)
