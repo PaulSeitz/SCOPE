@@ -200,7 +200,7 @@ alg:
   SKILL_FREEZE_AFTER_UPDATES: 0     # Stop skill learning after N updates (0 disables). Options: int >= 0.
 
   # Heuristic target policy.
-  HEURISTIC_MODE: "env_specific"    # Heuristic target selector. Options: "env_specific","nearest","sweep" (sweep only for SpaceInvaders).
+  HEURISTIC_MODE: "env_specific"    # Heuristic target selector. Options: "env_specific","nearest","sweep","random_bottom". SpaceInvaders defaults to bottom-row L→R sweep (env_specific/sweep); random_bottom keeps the legacy uniform pick.
   # Game action when no object is targeted. Beamrider defaults to FIRE (1) via
   # EnvComponents so empty sectors still advance; other envs default to NOOP (0).
   NO_TARGET_GAME_ACTION: null

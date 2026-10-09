@@ -53,7 +53,7 @@ TANDEM_TRAIN = f"seaquest_from_scratch_tandem_pixel_ego_pov_{SPINE}_{SPARSE_TAG}
 TANDEM_EVAL = f"{TANDEM_TRAIN}_eval"
 
 TRANSFER_ENVS: dict[str, dict] = {
-    "spaceinvaders": {"max_objects": 41, "heu": "env_specific", "prefix": "si"},
+    "spaceinvaders": {"max_objects": 41, "heu": "sweep", "prefix": "si"},
     "beamrider": {"max_objects": 31, "heu": "env_specific", "prefix": "br"},
     "timepilot": {"max_objects": 7, "heu": "env_specific", "prefix": "tp"},
     "asteroids": {"max_objects": 18, "heu": "env_specific", "prefix": "as"},

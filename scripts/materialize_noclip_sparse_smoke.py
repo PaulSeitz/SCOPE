@@ -69,7 +69,7 @@ ENVS: dict[str, dict] = {
     "pong": {"max_objects": 2, "heu": "nearest", "prefix": "po"},
     "breakout": {"max_objects": 3, "heu": "nearest", "prefix": "bo"},
     "beamrider": {"max_objects": 31, "heu": "env_specific", "prefix": "br"},
-    "spaceinvaders": {"max_objects": 41, "heu": "env_specific", "prefix": "si"},
+    "spaceinvaders": {"max_objects": 41, "heu": "sweep", "prefix": "si"},
     "freeway": {"max_objects": 12, "heu": "env_specific", "prefix": "fw"},
 }
 

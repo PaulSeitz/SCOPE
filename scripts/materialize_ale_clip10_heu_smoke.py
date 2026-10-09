@@ -115,7 +115,7 @@ ENVS: dict[str, dict] = {
     },
     "spaceinvaders": {
         "max_objects": 41,
-        "heu": "env_specific",
+        "heu": "sweep",
         "prefix": "si",
         "scratch": True,
         "transfer": True,

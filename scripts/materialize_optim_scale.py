@@ -97,7 +97,7 @@ BASE_SEED = 44
 BASE_OTHER_ENVS: tuple[str, ...] = ("phoenix", "namethisgame", "asteroids")
 # EVAL_PLAN transfer scratch envs not yet run at optim_scale lock.
 TRANSFER_ENV_META: dict[str, dict] = {
-    "spaceinvaders": {"max_objects": 41, "heu": "env_specific", "prefix": "si", "rq": 2},
+    "spaceinvaders": {"max_objects": 41, "heu": "sweep", "prefix": "si", "rq": 2},
     "beamrider": {"max_objects": 31, "heu": "env_specific", "prefix": "br", "rq": 2},
     "timepilot": {"max_objects": 7, "heu": "env_specific", "prefix": "tp", "rq": 2},
     "pong": {"max_objects": 2, "heu": "nearest", "prefix": "po", "rq": 2},

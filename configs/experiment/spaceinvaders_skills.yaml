@@ -1,6 +1,6 @@
 # experiment/spaceinvaders_skills.yaml
 #
-# Clean Space Invaders skills-only run (heuristic target selection via spaceinvaders_policy).
+# Clean Space Invaders skills-only run (bottom-row L→R sweep heuristic).
 # - No action masking or curriculum staging
 # - Full off-policy with RELABEL_ALL_OBJECTS
 
@@ -20,6 +20,8 @@ GAME_MODS: null
 EVAL_GAME_MODS: null
 
 alg:
+  HEURISTIC_MODE: "sweep"
+
   NUM_SKILLS: 3
   SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
   MAX_OBJECTS: 41
