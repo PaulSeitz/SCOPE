@@ -32,6 +32,7 @@ from concept_based_learning.observations.action_space import (
     mask_q_with_legal_ego,
 )
 from concept_based_learning.networks.skill_network import (
+    FLAT_OC_SKILL_INPUT_MODES,
     OBJECT_CONDITIONED_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
     QNetwork,
@@ -41,6 +42,7 @@ from concept_based_learning.networks.skill_network import (
 from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.observations.target_conditioning import build_oc_psi_features
+from concept_based_learning.observations.meta_oc_simple import build_skill_oc_flat_rel_obs
 from concept_based_learning.environments.meta_target_mask import (
     apply_meta_noop_target_mask,
     coerce_inactive_targets_to_meta_noop,
@@ -353,21 +355,33 @@ def make_train(
             return jax.vmap(
                 lambda r, o, t, c: get_ego_obs(r, o, t, distance_clip_px=c)
             )(raw_obs, objects, target_idxs, distance_clips)
+        if skill_input_mode in FLAT_OC_SKILL_INPUT_MODES:
+            return jax.vmap(
+                lambda r, o, t: build_skill_oc_flat_rel_obs(
+                    r, o, t, max_objects=MAX_OBJECTS
+                )
+            )(raw_obs, objects, target_idxs)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
+            "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+            "pixel_embed, pixel_embed_cond."
         )
 
     def _skill_input_single(raw_obs, objects, target_idx):
         if skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
             return get_ego_obs(raw_obs, objects, target_idx)
+        if skill_input_mode in FLAT_OC_SKILL_INPUT_MODES:
+            return build_skill_oc_flat_rel_obs(
+                raw_obs, objects, target_idx, max_objects=MAX_OBJECTS
+            )
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
+            "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+            "pixel_embed, pixel_embed_cond."
         )
 
     def train(rng, params, batch_stats):

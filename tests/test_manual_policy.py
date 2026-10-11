@@ -420,7 +420,7 @@ def test_destroy_targets_nearby_monkey_on_same_floor():
         collect_tail=tail,
     )
     raw, objs = _make_obs((30, 56), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _MONKEY_SLOT0
     assert int(target) != _L1_TOP
@@ -456,7 +456,7 @@ def test_destroy_emergency_close_monkey_ignores_floor_heuristic():
         collect_tail=tail,
     )
     raw, objs = _make_obs((30, 56), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _MONKEY_SLOT0
     assert int(target) != _L1_TOP
@@ -519,7 +519,7 @@ def test_destroy_suppressed_while_on_ladder():
             active=jnp.array([1, 1] + [0] * 18, dtype=jnp.int32),
         ),
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _MONKEY_SLOT0
@@ -581,7 +581,7 @@ def test_destroy_shaft_blocking_monkey_while_climbing():
             active=jnp.array([0, 1] + [0] * 18, dtype=jnp.int32),
         ),
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _MONKEY_SLOT0
     assert int(target) != _L1_TOP
@@ -600,9 +600,9 @@ def test_l1_top_does_not_complete_mid_climb():
         l2_bot=(136, 56, 2, 2),
     )
     raw, objs = _make_obs((18, 84), slots)
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
-    assert int(state2.plan_idx) == 4
+    assert int(state2.plan_idx) == 6
     assert int(target) == _L1_TOP
     assert int(target) != _L2_BOT
 
@@ -648,9 +648,9 @@ def test_l1_top_stage_completes_on_platform():
             width=_stack(jnp.int32(8)),
         )
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
-    assert int(state2.plan_idx) == 5
+    assert int(state2.plan_idx) == 7
     assert int(target) == _FRUIT1
     assert int(target) != _L1_TOP
 
@@ -736,7 +736,7 @@ def test_destroy_ignores_far_falling_coco():
             height=_stack(jnp.int32(24)),
         )
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(1))  # L0 top
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(2))  # L0 top
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L0_TOP
     assert int(target) != _FALLING_COCO_SLOT
@@ -1057,7 +1057,7 @@ def test_thrown_coco_avoid_suppressed_while_on_ladder():
         ),
     )
 
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _THROWN_COCO_SLOT0
@@ -1125,7 +1125,7 @@ def test_falling_coco_suppressed_in_upper_ladder_shaft():
             active=jnp.array([0, 1] + [0] * 18, dtype=jnp.int32),
         ),
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _FALLING_COCO_SLOT
@@ -1193,7 +1193,7 @@ def test_falling_coco_avoid_suppressed_while_on_ladder():
         ),
     )
 
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(4))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(6))
     target, _ = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _L1_TOP
     assert int(target) != _FALLING_COCO_SLOT
@@ -1206,15 +1206,17 @@ def test_kangaroo_plan_includes_fruits_between_climbs():
         _FRUIT1,
         _FRUIT2,
         _L0_BOT,
+        _L0_MID,
         _L0_TOP,
         _L2_TOP,
     )
 
     slots = [s.slot for s in KANGAROO_L1_STAGES]
     assert slots[0] == _L0_BOT
-    assert slots[1] == _L0_TOP
-    assert slots[2] == _FRUIT0
-    assert slots[5] == _FRUIT1
+    assert slots[1] == _L0_MID
+    assert slots[2] == _L0_TOP
+    assert slots[3] == _FRUIT0
+    assert slots[7] == _FRUIT1
     assert slots[-2] == _L2_TOP
     assert slots[-1] == _FRUIT2
     assert 43 not in slots  # no bell
@@ -1259,10 +1261,10 @@ def test_fruit0_skipped_when_player_on_floor_above():
             width=_stack(jnp.int32(8)),
         )
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(2))  # fruit0
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))  # fruit0
     target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) != _FRUIT0
-    assert int(state2.plan_idx) >= 3  # advanced past fruit0 (L1 bot stage)
+    assert int(state2.plan_idx) >= 4  # advanced past fruit0 (L1 bot stage)
     assert int(target) == _L1_BOT
 
 
@@ -1299,10 +1301,10 @@ def test_fruit0_selected_when_player_on_floor_below():
             width=_stack(jnp.int32(8)),
         )
     )
-    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(2))
+    state = KANGAROO_POLICY.initial_state().replace(plan_idx=jnp.int32(3))  # fruit0
     target, state2 = KANGAROO_POLICY.step(raw, objs, state, None)
     assert int(target) == _FRUIT0
-    assert int(state2.plan_idx) == 2
+    assert int(state2.plan_idx) == 3
 
 
 def test_kangaroo_crash_freezes_plan_at_stage_zero():

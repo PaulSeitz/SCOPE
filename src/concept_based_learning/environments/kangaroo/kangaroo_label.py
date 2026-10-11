@@ -73,7 +73,11 @@ _TOP_FALLBACK_LIFT = 8
 # Pull top waypoints above standing-centre so arrive / overlap only fire once the
 # player is actually on the upper platform — not while still on the ladder a few
 # px below the floor (arrive_dist alone was firing early).
+# Larger lift keeps the COLLECT bearing steeply upward through the mount.
 _TOP_WAYPOINT_LIFT_PX = 17
+# Mid-climb beads on unused ladder-bot slots 10..12. ~24px up from the foot
+# completes early in the shaft; the high top WP then takes over.
+_MID_WAYPOINT_ABOVE_BOT_PX = 24
 # Bottom WP at standing-centre (offset 0): a downward bearing made greedy FORWARD
 # pick DOWNRIGHT near the foot and jump instead of entering the shaft.
 _BOTTOM_WAYPOINT_Y_OFFSET_PX = 0
@@ -345,6 +349,15 @@ class KangarooSemanticWrapper(JaxatariSemanticBaseWrapper):
         wp_w = jnp.concatenate([waypoint_w, waypoint_w])
         wp_h = jnp.concatenate([waypoint_h, waypoint_h])
         wp_act = jnp.concatenate([bot_active, top_active])
+        # Mid-climb beads on unused ladder-bot slots 10..12 (ladders 10+ are inactive).
+        mid_y = bot_y[:3] - jnp.float32(_MID_WAYPOINT_ABOVE_BOT_PX)
+        for i in range(3):
+            mi = 10 + i
+            wp_x = wp_x.at[mi].set(bot_x[i])
+            wp_y = wp_y.at[mi].set(mid_y[i])
+            wp_w = wp_w.at[mi].set(waypoint_w[i])
+            wp_h = wp_h.at[mi].set(waypoint_h[i])
+            wp_act = wp_act.at[mi].set(bot_active[i])
         n_wp = wp_x.shape[0]  # 40
 
         collect_x = jnp.concatenate([wp_x, fruits.x, bell_x, child_x])

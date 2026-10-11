@@ -19,11 +19,14 @@ from concept_based_learning.observations.target_conditioning import (
 
 # Skill input modes whose forward pass reads pixel_obs (require PixelAndObjectObsWrapper).
 PIXEL_SKILL_INPUT_MODES = ("pixel_embed", "pixel_embed_cond")
+# Flattened relative object-list skills (MLP on prebuilt vector; needs objects).
+FLAT_OC_SKILL_INPUT_MODES = ("oc_flat_rel",)
 # Modes that need labeled ``objects`` for index-invariant target cues.
 OBJECT_CONDITIONED_SKILL_INPUT_MODES = (
     "oc_embed",
     "object_embed",
     "object_embedding",
+    *FLAT_OC_SKILL_INPUT_MODES,
 ) + PIXEL_SKILL_INPUT_MODES
 
 
@@ -40,6 +43,10 @@ class QNetwork(nn.Module):
         ``Dense(embed_dim)`` embeds each object row, then the target row is
         gathered — so the Dense input width is the per-object feature size
         ``F`` (shared across envs), not ``M·F``. Requires ``objects``.
+    oc_flat_rel
+        Prebuilt flattened relative object list + ``is_target`` + globals
+        (see ``build_skill_oc_flat_rel_obs``). Same MLP head as ``ego``;
+        ``x`` is already the full skill input.
     pixel_embed / pixel_embed_cond
         CNN over pixels with an optional painted target outline
         (``pixel_paint_target_outline``; default on). ``pixel_embed_cond`` is
@@ -80,7 +87,9 @@ class QNetwork(nn.Module):
             target_idx = jnp.array(0, dtype=jnp.int32)
         target_idx = jnp.asarray(target_idx, dtype=jnp.int32)
 
-        if mode == "ego":
+        if mode in ("ego", "oc_flat_rel"):
+            # ``oc_flat_rel``: ``x`` is already flatten(rows)+global from the
+            # observation builder; same MLP as ego.
             pass
         elif mode in ("ego_embed", "ego_embedding"):
             # Same relative ego features as ``ego``, but with a learned projection
@@ -173,7 +182,8 @@ class QNetwork(nn.Module):
         else:
             raise ValueError(
                 f"Unknown SKILL_INPUT_MODE={self.input_mode!r}. "
-                "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
+                "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+                "pixel_embed, pixel_embed_cond."
             )
 
         if self.norm_type == "layer_norm":

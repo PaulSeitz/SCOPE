@@ -1,0 +1,38 @@
+# Thesis-final floor — random_actions on phoenix (eval only).
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: random_actions
+PAPER_EVAL_MODS: phoenix
+PAPER_EVAL_MOD_KEYS:
+- base
+- formation_reshuffle
+- player_drift
+- fast_enemy_bullets
+- static_score_bait
+PAPER_EVAL_REQUIRES_RQ1: []
+NUM_SEEDS: 1
+ALG_NAME: flat_pqn
+ENV_NAME: phoenix
+OBJECT_CENTRIC: true
+FRAME_SKIP: 4
+FRAME_STACK_SIZE: 4
+SAVE_PATH: ./outputs/models/paper_eval/thesis_final/tf_floor_random_actions_phoenix
+WANDB_RUN_NAME: ph_tf_floor_random_actions_phoenix
+WANDB_TAGS:
+- suite:thesis_final
+- rq:floor
+- env:phoenix
+- baseline:random_actions
+- phase:mod_eval
+- budget:50m_optim
+- scale:pqn_optim_1to1
+- num_envs:1024
+- num_steps:32
+- num_updates:1525
+- lr:0.00025
+- lr_decay:linear
+- max_grad_norm:10
+- eps:1.0to0.001
+SEED: 44
+EVAL_SEED: 10044
+EVAL_NUM_SEEDS: 9

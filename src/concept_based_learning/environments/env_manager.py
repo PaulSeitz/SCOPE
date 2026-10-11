@@ -939,7 +939,7 @@ class EnvManager:
                 bool(config.get("USE_LEGACY_SEAQUEST_ACTION_MAPPER", False))
             )
             set_seaquest_ascent_block(
-                bool(config.get("USE_LEGACY_SEAQUEST_ASCENT_BLOCK", True))
+                bool(config.get("USE_LEGACY_SEAQUEST_ASCENT_BLOCK", False))
             )
             set_seaquest_surfacing_death_guard(
                 bool(config.get("USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD", False))

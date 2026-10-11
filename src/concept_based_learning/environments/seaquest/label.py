@@ -142,10 +142,11 @@ _SEAQUEST_MOVE_TABLE = [3, 8, 5, 9, 4, 7, 2, 6]
 _SEAQUEST_MOVE_FIRE_TABLE = [11, 16, 13, 17, 12, 15, 10, 14]
 
 _USE_LEGACY_SEAQUEST_ACTION_MAPPER = False
-_USE_LEGACY_SEAQUEST_ASCENT_BLOCK = True
+_USE_LEGACY_SEAQUEST_ASCENT_BLOCK = False
 _USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD = False
 
-# Surface threshold used by the ascent-block logic (unchanged).
+# Kept for archaeology / any caller that still imports the constant.
+# Near-surface ascent rewriting is removed from the live mapper path.
 SURFACE_Y_THRESHOLD = 52.0
 
 
@@ -170,8 +171,14 @@ def using_legacy_seaquest_action_mapper() -> bool:
 
 
 def set_seaquest_ascent_block(use_legacy: bool) -> None:
+    """Ascent block is removed; ``True`` is rejected so configs cannot re-enable it."""
+    if use_legacy:
+        raise RuntimeError(
+            "USE_LEGACY_SEAQUEST_ASCENT_BLOCK is disabled and removed from the "
+            "live Seaquest action path. Set it to false (or omit it)."
+        )
     global _USE_LEGACY_SEAQUEST_ASCENT_BLOCK
-    _USE_LEGACY_SEAQUEST_ASCENT_BLOCK = bool(use_legacy)
+    _USE_LEGACY_SEAQUEST_ASCENT_BLOCK = False
 
 
 def using_legacy_seaquest_ascent_block() -> bool:
@@ -264,45 +271,17 @@ def _legacy_orientation_relative_mapper(ego_action, raw_obs, target_idx, objects
 
 
 def seaquest_action_mapper(ego_action, raw_obs, target_idx, objects):
-    # Legacy orientation-relative mapper removed from the live path
-    # (see set_seaquest_action_mapper). Kept as _legacy_orientation_relative_mapper
-    # below for archaeology only — do not re-enable for paper eval.
-    # if _USE_LEGACY_SEAQUEST_ACTION_MAPPER:
-    #     mapped_action = _legacy_orientation_relative_mapper(...)
+    # Legacy orientation-relative mapper and near-surface ascent rewrite are
+    # removed from the live path (see set_seaquest_action_mapper /
+    # set_seaquest_ascent_block). Target-aligned mapping only.
     if _USE_LEGACY_SEAQUEST_ACTION_MAPPER:
         raise RuntimeError(
             "Legacy Seaquest action mapper is commented out for this eval; "
             "set USE_LEGACY_SEAQUEST_ACTION_MAPPER: false and use "
             "USE_POV_RELATIVE_MAPPER: true."
         )
-    mapped_action = _target_aligned_seaquest_action_mapper(
+    return _target_aligned_seaquest_action_mapper(
         ego_action, raw_obs, target_idx, objects
-    )
-
-    near_surface = raw_obs.player.y[-1] <= SURFACE_Y_THRESHOLD
-    surface_target_exception = target_idx == SURFACE_DUMMY_IDX
-    should_block_ascent = jnp.logical_and(
-        _USE_LEGACY_SEAQUEST_ASCENT_BLOCK,
-        jnp.logical_and(near_surface, jnp.logical_not(surface_target_exception)),
-    )
-
-    ascent_actions = jnp.array(
-        [Atari.UP, Atari.UPLEFT, Atari.UPRIGHT, Atari.UPFIRE, Atari.UPLEFTFIRE, Atari.UPRIGHTFIRE],
-        dtype=jnp.int32,
-    )
-    ascent_fire_actions = jnp.array(
-        [Atari.UPFIRE, Atari.UPLEFTFIRE, Atari.UPRIGHTFIRE],
-        dtype=jnp.int32,
-    )
-
-    is_ascent_action = jnp.any(mapped_action == ascent_actions)
-    is_ascent_fire_action = jnp.any(mapped_action == ascent_fire_actions)
-    blocked_replacement = jnp.where(is_ascent_fire_action, Atari.FIRE, Atari.NOOP)
-
-    return jnp.where(
-        jnp.logical_and(should_block_ascent, is_ascent_action),
-        blocked_replacement,
-        mapped_action,
     )
 
 

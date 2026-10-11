@@ -1604,9 +1604,9 @@ SPARSE_CDA_CLEAN_STEMS = (
     + SPARSE_CDA_CLEAN_GPU2_STEMS
 )
 
-# Alias: full ground-up batch = tier A (most users start here).
-THESIS_FINAL_SUITE = THESIS_TIER_A_SUITE
-THESIS_FINAL_STEMS = THESIS_TIER_A_STEMS
+# Legacy alias for tier A (do not reuse THESIS_FINAL_SUITE — that name is the
+# locked 50M sweep registered via THESIS_FINAL_SUITES above).
+THESIS_TIER_A_ALIAS_STEMS = THESIS_TIER_A_STEMS
 DISTBINS8_PIPELINE_SUITE = "distbins8_pipeline"
 DISTBINS8_PIPELINE_STEMS = (
     "seaquest_skills_ego_clip50_angbins_distbins8",
@@ -2259,7 +2259,7 @@ SUITE_STEMS = {
     KANGAROO_SURFACEGAP_SUITE: KANGAROO_SURFACEGAP_STEMS,
     KANGAROO_FACING_SURFACEGAP_SUITE: KANGAROO_FACING_SURFACEGAP_STEMS,
     SURFACEGAP_DUAL_SUITE: SURFACEGAP_DUAL_STEMS,
-    THESIS_FINAL_SUITE: THESIS_FINAL_STEMS,
+    THESIS_TIER_A_SUITE: THESIS_TIER_A_STEMS,
     DISTBINS8_PIPELINE_SUITE: DISTBINS8_PIPELINE_STEMS,
     KANGAROO_LIFETIME_SUITE: KANGAROO_LIFETIME_STEMS,
     CLIP50_LIFETIME_PIPELINE_SUITE: CLIP50_LIFETIME_PIPELINE_STEMS,
@@ -3923,7 +3923,7 @@ def main() -> None:
             f"{CLIP50_ANGBINS_FULL_SUITE}: existing clip50+θ-bins ckpt; full "
             "Seaquest/Pong/Tennis/BeamRider tables, then RQ3 OC tandem "
             "(1 GPU sequential). "
-            f"{THESIS_TIER_A_SUITE} (alias {THESIS_FINAL_SUITE}): ground-up Tier A — "
+            f"{THESIS_TIER_A_SUITE}: ground-up Tier A — "
             "legacy clip50_angbins ego (pre-facing). Prefer "
             f"{THESIS_FACING_SUITE} for the overnight facing φ8 clip50 spine "
             "(COLLECT-surface ego + pixel/oc POV-mapper retrains + RQ2 zero-shot). "

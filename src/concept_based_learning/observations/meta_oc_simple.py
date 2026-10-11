@@ -294,3 +294,44 @@ def build_meta_oc_simple_features(
     else:
         raise ValueError(f"Unhandled oc_simple mode: {canon!r}")
     return global_f.astype(jnp.float32), obj_m.astype(jnp.float32)
+
+
+def build_skill_oc_flat_rel_obs(
+    raw_obs: Any,
+    objects: Any,
+    target_idx: Any,
+    *,
+    max_objects: int,
+) -> jnp.ndarray:
+    """Flattened relative object list + globals for skill ``oc_flat_rel``.
+
+    Per-object row (slot order = labeled observation order, pad/trim to
+    ``max_objects``)::
+
+        [Δx, Δy, dist, same_lane, lane_delta, active] + one_hot(label) + is_target
+
+    Then ``flatten(rows) || global`` where global is
+    ``[player_x, player_y, player_w, player_h, oxygen, collected_divers]``.
+
+    Latest frame only (no frame-stack), matching meta ``oc_simple_rel``.
+    """
+    obj_m = build_meta_oc_simple_rel_object_matrix(
+        raw_obs, objects, max_objects=max_objects
+    )
+    # obj_m: [M, 6 + NUM_LABELS]; col 5 is active.
+    m = int(obj_m.shape[0])
+    idx = jnp.asarray(target_idx, dtype=jnp.int32)
+    is_target = jnn.one_hot(jnp.clip(idx, 0, m - 1), m, dtype=jnp.float32)
+    rows = jnp.concatenate([obj_m, is_target[:, None]], axis=-1)
+    active = obj_m[:, 5]
+    rows = rows * active[:, None]
+    flat = rows.reshape((-1,))
+    global_f = build_meta_oc_simple_global(raw_obs)
+    return jnp.concatenate([flat, global_f]).astype(jnp.float32)
+
+
+def skill_oc_flat_rel_dim(max_objects: int) -> int:
+    """Input width for ``oc_flat_rel`` (latest frame)."""
+    per_obj = 6 + NUM_LABELS + 1  # geom + label OH + is_target
+    global_dim = 6  # player xywh + oxygen + collected_divers
+    return int(max_objects) * per_obj + global_dim

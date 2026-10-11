@@ -11,7 +11,10 @@ from typing import Any
 import numpy as np
 import yaml
 
-from concept_based_learning.baselines.flat_pqn import run_flat_pqn_greedy_eval
+from concept_based_learning.baselines.flat_pqn import (
+    run_flat_pqn_greedy_eval,
+    run_random_action_eval,
+)
 from concept_based_learning.paper_eval.mods import ModSpec, mod_specs_for_env
 from concept_based_learning.training.rtpt_progress import (
     RTPT_EVAL_UNITS_PER_MOD,
@@ -282,6 +285,7 @@ def run_mod_eval(
       - ``fixed_skills`` / ``fixed_ego_rules`` / ``constant_ego``: same heuristic
         scaffolding with hand-coded ego-action rules (no skill checkpoint)
       - ``flat_pqn``: flat PQN checkpoint
+      - ``random_actions``: uniform random over the minimal action set (no ckpt)
 
     ``mods_allowlist``: optional paper_eval mods YAML stem (e.g. ``seaquest_visual_ood``)
     when it differs from ``env_name``. Defaults to ``env_name``.
@@ -397,6 +401,27 @@ def run_mod_eval(
                 base_seed=base_seed,
                 max_frames=max_frames,
                 object_centric=object_centric,
+                env_name=str(env_name),
+                progress=True,
+            )
+            stats["mods"] = list(merged or ())
+            stats["category"] = mod.category
+            results[mod.key] = stats
+            _rtpt_tick_eval_mod()
+        _attach_drop_from_base(results)
+        payload["results"] = results
+    elif kind == "random_actions":
+        results = {}
+        for mod in mod_specs:
+            merged = merge_train_and_eval_game_mods(config, mod.mods)
+            print(f"\n--- random_actions / {mod.key} (mods={merged or 'none'}) ---")
+            stats = run_random_action_eval(
+                config=config,
+                game_mods=merged or [],
+                num_episodes=num_episodes,
+                num_seeds=num_seeds,
+                base_seed=base_seed,
+                max_frames=max_frames,
                 env_name=str(env_name),
                 progress=True,
             )

@@ -96,10 +96,12 @@ from concept_based_learning.environments.meta_target_persistence import (
     meta_target_persist_enabled,
 )
 from concept_based_learning.networks.skill_network import (
+    FLAT_OC_SKILL_INPUT_MODES,
     PIXEL_SKILL_INPUT_MODES,
     QNetwork,
     q_network_from_config,
 )
+from concept_based_learning.observations.meta_oc_simple import build_skill_oc_flat_rel_obs
 from concept_based_learning.observations.pov_relative import (
     resolve_action_mappers,
     using_pov_relative,
@@ -560,8 +562,9 @@ def infer_skill_hparams_from_params(
     Expects Flax ``QNetwork`` param keys ``Dense_0`` … ``Dense_{NUM_LAYERS}``.
 
     ``Dense_0`` input size is egocentric length only for ``ego`` / ``ego_embed``.
-    For ``oc_embed`` / ``pixel_embed`` it is the embedding width — do **not**
-    treat it as ``channels × FRAME_STACK_SIZE``.
+    For ``oc_flat_rel`` it is the flattened relative object-list width (latest
+    frame). For ``oc_embed`` / ``pixel_embed`` it is the embedding width — do
+    **not** treat it as ``channels × FRAME_STACK_SIZE``.
     """
     sample, num_skills = _unwrap_stacked_skill_params(params_tree)
     packed = as_per_skill_param_list(params_tree)
@@ -595,6 +598,9 @@ def infer_skill_hparams_from_params(
         # stacks when eval drops weapon extras (e.g. 20 / pose2 → 10 instead of 4).
         if channels_per_frame > 0 and first_in % channels_per_frame == 0:
             frame_stack_size = first_in // channels_per_frame
+        ckpt_ego_in = first_in
+    elif mode in FLAT_OC_SKILL_INPUT_MODES:
+        # Latest-frame flat OC vector — no frame-stack inference.
         ckpt_ego_in = first_in
 
     out = {
@@ -725,16 +731,21 @@ def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
 
 
 def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
-    """Fail fast when the eval env's ego observation length does not match the checkpoint."""
+    """Fail fast when the eval env's skill observation length does not match the checkpoint."""
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     ckpt_in = config.pop("_ckpt_ego_in", None)
-    # oc/pixel Dense_0 is embed width — not comparable to ego feat length.
-    if mode not in ("ego", "ego_embed"):
+    # oc_embed / pixel Dense_0 is embed width — not comparable to feat length.
+    if mode not in ("ego", "ego_embed", *FLAT_OC_SKILL_INPUT_MODES):
         return
     if ckpt_in is None:
         return
     if int(ego_feat_dim) == int(ckpt_in):
         return
+    if mode in FLAT_OC_SKILL_INPUT_MODES:
+        raise ValueError(
+            f"Skill checkpoint expects MLP input size {ckpt_in}, but this environment's "
+            f"oc_flat_rel observation length is {ego_feat_dim}."
+        )
     channels_per_frame = ego_obs_channels_per_frame()
     need_stack = (
         ckpt_in // channels_per_frame
@@ -833,11 +844,17 @@ def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     if mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
         return get_ego_obs(raw_obs, objects, target_idx)
+    if mode in FLAT_OC_SKILL_INPUT_MODES:
+        max_objects = int(config.get("MAX_OBJECTS", 35))
+        return build_skill_oc_flat_rel_obs(
+            raw_obs, objects, target_idx, max_objects=max_objects
+        )
     if mode == "oc_embed":
         return flatten_raw_observation(raw_obs)
     raise ValueError(
         f"Unknown SKILL_INPUT_MODE={mode!r}. "
-        "Expected one of: ego, ego_embed, oc_embed, pixel_embed, pixel_embed_cond."
+        "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+        "pixel_embed, pixel_embed_cond."
     )
 
 

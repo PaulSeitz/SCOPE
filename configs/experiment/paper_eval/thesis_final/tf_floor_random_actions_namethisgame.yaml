@@ -1,0 +1,38 @@
+# Thesis-final floor — random_actions on namethisgame (eval only).
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: random_actions
+PAPER_EVAL_MODS: namethisgame
+PAPER_EVAL_MOD_KEYS:
+- base
+- shift_tentacle_spawn_x
+- slower_player
+- faster_shark
+- no_shark_short_tentacles
+PAPER_EVAL_REQUIRES_RQ1: []
+NUM_SEEDS: 1
+ALG_NAME: flat_pqn
+ENV_NAME: namethisgame
+OBJECT_CENTRIC: true
+FRAME_SKIP: 4
+FRAME_STACK_SIZE: 4
+SAVE_PATH: ./outputs/models/paper_eval/thesis_final/tf_floor_random_actions_namethisgame
+WANDB_RUN_NAME: ntg_tf_floor_random_actions_namethisgame
+WANDB_TAGS:
+- suite:thesis_final
+- rq:floor
+- env:namethisgame
+- baseline:random_actions
+- phase:mod_eval
+- budget:50m_optim
+- scale:pqn_optim_1to1
+- num_envs:1024
+- num_steps:32
+- num_updates:1525
+- lr:0.00025
+- lr_decay:linear
+- max_grad_norm:10
+- eps:1.0to0.001
+SEED: 44
+EVAL_SEED: 10044
+EVAL_NUM_SEEDS: 9

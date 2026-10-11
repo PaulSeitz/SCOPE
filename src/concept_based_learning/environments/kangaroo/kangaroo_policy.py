@@ -15,7 +15,8 @@ Interrupt priority (lowest first, later overrides earlier):
      (``objects.state[falling]=1``); highest reactive priority; climbing-suppressed.
 
 Level-1 slots (meta-NOOP is last = 54):
-  ladder waypoints      = 0..39  (COLLECT; plan uses L0–L2 pairs)
+  ladder waypoints      = 0..39  (COLLECT; plan uses L0–L2 bot/mid/top)
+  mid-climb beads       = 10..12 (stamped on unused ladder-bot slots)
   fruits / bell / child = 40..44 (COLLECT; plan uses fruits 40..42)
   monkeys               = 45..48 (DESTROY)
   falling coconut       = 49     (AVOID)
@@ -49,6 +50,8 @@ from concept_based_learning.environments.manual_policy.state import NO_TARGET_ID
 _L0_BOT, _L0_TOP = 0, 20
 _L1_BOT, _L1_TOP = 1, 21
 _L2_BOT, _L2_TOP = 2, 22
+# Mid-climb beads stamped on unused ladder-bot slots (see kangaroo_label).
+_L0_MID, _L1_MID, _L2_MID = 10, 11, 12
 
 # Fruits (COLLECT) between climbs; bell/child stay labeled but off-plan.
 _FRUIT0, _FRUIT1, _FRUIT2 = 40, 41, 42
@@ -110,8 +113,9 @@ _LADDER_TOP_SLOT_OFFSET = 20
 LADDER_ARRIVE = 0.0
 LADDER_TOP_ARRIVE = 10.0
 # Top completion: player centre dy = py - oy in this band (standing on upper floor).
+# Standing ⇒ dy ≈ _TOP_WAYPOINT_LIFT_PX (17).
 LADDER_TOP_PLATFORM_DY_MIN = 10.0
-LADDER_TOP_PLATFORM_DY_MAX = 18.0
+LADDER_TOP_PLATFORM_DY_MAX = 22.0
 LADDER_TOP_PLATFORM_X_SLACK = 28.0
 
 
@@ -388,14 +392,27 @@ def _kangaroo_thrown_coco_threat_mask(raw, objects, ctx, plan_target):
     return jnp.logical_and(is_thrown, jnp.logical_and(path_ok, floor_ok))
 
 
+def _wp_mid(slot: int) -> NavigateTo:
+    """Mid-shaft bead: complete on near-overlap while climbing."""
+    return NavigateTo(
+        slot=slot,
+        arrive_dist=8.0,
+        complete_when="arrive",
+        skip_if_inactive=False,
+    )
+
+
 KANGAROO_L1_STAGES = (
     _wp(_L0_BOT),
+    _wp_mid(_L0_MID),
     _wp_top(_L0_TOP),
     _collect(_FRUIT0),
     _wp(_L1_BOT),
+    _wp_mid(_L1_MID),
     _wp_top(_L1_TOP),
     _collect(_FRUIT1),
     _wp(_L2_BOT),
+    _wp_mid(_L2_MID),
     _wp_top(_L2_TOP),
     _collect(_FRUIT2),
 )

@@ -24,11 +24,26 @@ DEFAULT_OUTLINE_THICKNESS = 2
 
 
 def _last_frame_objects(objects):
-    """Take the last frame-stack entry: leaves ``[..., stack, max_objects]`` → ``[..., max_objects]``."""
-    return jax.tree_util.tree_map(
-        lambda x: x[..., -1, :] if jnp.ndim(x) >= 2 else x,
-        objects,
-    )
+    """Take the last frame-stack entry from labeled object leaves.
+
+    Per-object leaves are ``[..., stack, max_objects]`` → ``[..., max_objects]``.
+    Frame-global leaves (``state``, ``orientation``, ``was_collected``, …) are
+    ``[..., stack]`` → ``[...]`` (one scalar per lead dim, broadcast onto every
+    object later). Matching on ``x``'s object-axis length avoids treating the
+    stack axis of globals as an object axis (which used to make init F=12 and
+    trajectory F=9 for skill ``oc_embed``).
+    """
+    ref_m = int(jnp.asarray(objects.x).shape[-1])
+
+    def _last(x):
+        x = jnp.asarray(x)
+        if x.ndim >= 2 and int(x.shape[-1]) == ref_m:
+            return x[..., -1, :]
+        if x.ndim >= 1:
+            return x[..., -1]
+        return x
+
+    return jax.tree_util.tree_map(_last, objects)
 
 
 def scale_bbox_to_frame(x, y, w, h, frame_h: int, frame_w: int):
@@ -205,6 +220,43 @@ def _fit_object_axis(arr: jnp.ndarray, max_objects: int) -> jnp.ndarray:
     return jnp.pad(arr, pad)
 
 
+def _broadcast_to_object_grid(
+    arr: jnp.ndarray, *, ref: jnp.ndarray, max_objects: int
+) -> jnp.ndarray | None:
+    """Align a leaf to ``ref`` ``[..., max_objects]``; ``None`` if incompatible."""
+    lead_shape = ref.shape[:-1]
+    arr = jnp.asarray(arr, dtype=jnp.float32)
+    if arr.ndim == 0:
+        return jnp.broadcast_to(arr, ref.shape)
+    # Already per-object (same lead + object axis, or object axis only).
+    if arr.shape == ref.shape:
+        return arr
+    if arr.ndim >= 1 and arr.shape[-1] == ref.shape[-1]:
+        if arr.shape[:-1] == lead_shape:
+            return _fit_object_axis(arr, max_objects)
+        try:
+            return _fit_object_axis(
+                jnp.broadcast_to(arr, lead_shape + (arr.shape[-1],)), max_objects
+            )
+        except ValueError:
+            pass
+    # Frame-global scalar under some prefix of the lead dims (e.g. missing env
+    # axis after a non-vmapped field, or plain () after last-frame).
+    scalar = arr
+    if scalar.shape == lead_shape:
+        return jnp.broadcast_to(scalar[..., None], ref.shape)
+    if len(scalar.shape) < len(lead_shape) and lead_shape[: scalar.ndim] == scalar.shape:
+        for _ in range(len(lead_shape) - scalar.ndim):
+            scalar = scalar[..., None]
+        scalar = jnp.broadcast_to(scalar, lead_shape)
+        return jnp.broadcast_to(scalar[..., None], ref.shape)
+    try:
+        scalar = jnp.broadcast_to(scalar, lead_shape)
+        return jnp.broadcast_to(scalar[..., None], ref.shape)
+    except ValueError:
+        return None
+
+
 def build_oc_object_matrix(objects, *, max_objects: int) -> jnp.ndarray:
     """
     Full object-observation matrix ``[..., max_objects, F]`` (no is_target).
@@ -212,33 +264,21 @@ def build_oc_object_matrix(objects, *, max_objects: int) -> jnp.ndarray:
     Flattens **all** numeric leaves of the labeled ``objects`` pytree (same
     source meta uses for its per-object features): bbox, active, visual_id,
     state, orientation, semantic_label, flags, …
+
+    Frame-global leaves are broadcast onto every object so ``F`` is stable
+    across probe init (unbatched) and trajectory apply (``[T, N, …]``).
     """
     if objects is None:
         raise ValueError("objects is required for oc_embed features.")
     objs = _last_frame_objects(objects)
-    ref = jnp.asarray(objs.x, dtype=jnp.float32)
-    ref = _fit_object_axis(ref, max_objects)
-    lead_shape = ref.shape[:-1]
+    ref = _fit_object_axis(jnp.asarray(objs.x, dtype=jnp.float32), max_objects)
 
     leaves, _ = jax.tree_util.tree_flatten(objs)
     cols = []
     for leaf in leaves:
-        arr = jnp.asarray(leaf, dtype=jnp.float32)
-        if arr.ndim == 0:
-            arr = jnp.broadcast_to(arr, ref.shape)
-        else:
-            # Align leading dims to ref, then pad/truncate the object axis.
-            if arr.shape[:-1] != lead_shape and arr.ndim >= 1:
-                # Object-axis length may still differ from ref before fitting.
-                try:
-                    arr = jnp.broadcast_to(arr, lead_shape + (arr.shape[-1],))
-                except ValueError:
-                    flat = arr.reshape(-1)
-                    arr = jnp.broadcast_to(flat, lead_shape + flat.shape)
-                    if arr.shape[-1] != ref.shape[-1] and arr.shape != ref.shape:
-                        # Non-object-shaped exotic leaf — skip.
-                        continue
-            arr = _fit_object_axis(arr, max_objects)
+        arr = _broadcast_to_object_grid(leaf, ref=ref, max_objects=max_objects)
+        if arr is None:
+            continue
         cols.append(arr[..., None])
     if not cols:
         raise ValueError("objects pytree produced no numeric leaves for oc_embed.")

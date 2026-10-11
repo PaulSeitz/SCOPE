@@ -447,66 +447,13 @@ def resolve_action_mappers(components, config: dict) -> tuple[Callable, Callable
         return components.action_mapper, components.inverse_action_mapper
 
     mapper, inverse = make_facing_relative_mappers(components.jax_game_id)
-    if str(components.jax_game_id).lower() in {"seaquest", "old_seaquest"}:
-        mapper = _wrap_seaquest_ascent_block(mapper)
     return mapper, inverse
 
 
 def apply_seaquest_ascent_block(mapped_action, raw_obs, target_idx):
-    """Legacy guard: drop ascent actions near the surface unless the target is it."""
-    from concept_based_learning.environments.seaquest.label import (
-        SURFACE_DUMMY_IDX,
-        SURFACE_Y_THRESHOLD,
-        using_legacy_seaquest_ascent_block,
-    )
-    from jaxtari.environment import JAXAtariAction as Atari
-
-    if not using_legacy_seaquest_ascent_block():
-        return mapped_action
-
-    near_surface = raw_obs.player.y[-1] <= SURFACE_Y_THRESHOLD
-    surface_target_exception = target_idx == SURFACE_DUMMY_IDX
-    should_block_ascent = jnp.logical_and(
-        near_surface,
-        jnp.logical_not(surface_target_exception),
-    )
-
-    ascent_actions = jnp.array(
-        [
-            Atari.UP,
-            Atari.UPLEFT,
-            Atari.UPRIGHT,
-            Atari.UPFIRE,
-            Atari.UPLEFTFIRE,
-            Atari.UPRIGHTFIRE,
-        ],
-        dtype=jnp.int32,
-    )
-    ascent_fire_actions = jnp.array(
-        [Atari.UPFIRE, Atari.UPLEFTFIRE, Atari.UPRIGHTFIRE],
-        dtype=jnp.int32,
-    )
-
-    is_ascent_action = jnp.any(mapped_action == ascent_actions)
-    is_ascent_fire_action = jnp.any(mapped_action == ascent_fire_actions)
-    blocked_replacement = jnp.where(is_ascent_fire_action, Atari.FIRE, Atari.NOOP)
-
-    return jnp.where(
-        jnp.logical_and(should_block_ascent, is_ascent_action),
-        blocked_replacement,
-        mapped_action,
-    )
-
-
-def _wrap_seaquest_ascent_block(base_mapper):
-    def mapper(ego_action, raw_obs, target_idx, objects):
-        return apply_seaquest_ascent_block(
-            base_mapper(ego_action, raw_obs, target_idx, objects),
-            raw_obs,
-            target_idx,
-        )
-
-    return mapper
+    """No-op: near-surface ascent rewriting was removed from the live path."""
+    del raw_obs, target_idx
+    return mapped_action
 
 
 def pov_facing_psi_rad(
