@@ -45,12 +45,12 @@ mkdir -p logs
 
 - core: 156 runs ≈ 60.8 A6000-h
 - extras: 54 runs ≈ 6.8 A6000-h
-- NEXUS (outside paper_eval): 6 train+eval ≈ 10.5 h (estimate)
+- NEXUS (outside paper_eval): 3 Seaquest symbolic (paper HPs) + 9 home HRL (50M optim, NUM_AGENTS=3) ≈ 13.8 h (estimate)
 
 ### 2 GPUs
 
-- GPU 0 (`thesis_final_2gpu_g0`, 104 runs): core done ≈ 30.5 h, all ≈ 33.7 h, + NEXUS shard 5.2 h → 39.0 h
-- GPU 1 (`thesis_final_2gpu_g1`, 106 runs): core done ≈ 30.3 h, all ≈ 33.8 h, + NEXUS shard 5.2 h → 39.0 h
+- GPU 0 (`thesis_final_2gpu_g0`, 104 runs): core done ≈ 30.5 h, all ≈ 33.7 h, + NEXUS shard 7.3 h → 41.0 h
+- GPU 1 (`thesis_final_2gpu_g1`, 106 runs): core done ≈ 30.3 h, all ≈ 33.8 h, + NEXUS shard 6.5 h → 40.3 h
 
 ```bash
 mkdir -p logs
@@ -60,9 +60,9 @@ nohup bash -c 'python scripts/run_paper_eval.py --suite thesis_final_2gpu_g1 --g
 
 ### 3 GPUs
 
-- GPU 0 (`thesis_final_3gpu_g0`, 70 runs): core done ≈ 20.3 h, all ≈ 22.5 h, + NEXUS shard 3.5 h → 26.0 h
-- GPU 1 (`thesis_final_3gpu_g1`, 70 runs): core done ≈ 20.2 h, all ≈ 22.5 h, + NEXUS shard 3.5 h → 26.0 h
-- GPU 2 (`thesis_final_3gpu_g2`, 70 runs): core done ≈ 20.3 h, all ≈ 22.5 h, + NEXUS shard 3.5 h → 26.0 h
+- GPU 0 (`thesis_final_3gpu_g0`, 70 runs): core done ≈ 20.3 h, all ≈ 22.5 h, + NEXUS shard 4.6 h → 27.1 h
+- GPU 1 (`thesis_final_3gpu_g1`, 70 runs): core done ≈ 20.2 h, all ≈ 22.5 h, + NEXUS shard 4.6 h → 27.1 h
+- GPU 2 (`thesis_final_3gpu_g2`, 70 runs): core done ≈ 20.3 h, all ≈ 22.5 h, + NEXUS shard 4.6 h → 27.1 h
 
 ```bash
 mkdir -p logs
@@ -296,6 +296,12 @@ nohup bash -c 'python scripts/run_paper_eval.py --suite thesis_final_3gpu_g2 --g
 - `tf_seaquest_nexus_symbolic_seed44` — `cbl_seaquest_nexus_symbolic_paper` train + mod eval
 - `tf_seaquest_nexus_symbolic_seed45` — `cbl_seaquest_nexus_symbolic_paper` train + mod eval
 - `tf_seaquest_nexus_symbolic_seed46` — `cbl_seaquest_nexus_symbolic_paper` train + mod eval
-- `tf_seaquest_nexus_hrl_seed44` — `cbl_seaquest_hrl_baseline_paper` train + mod eval
-- `tf_seaquest_nexus_hrl_seed45` — `cbl_seaquest_hrl_baseline_paper` train + mod eval
-- `tf_seaquest_nexus_hrl_seed46` — `cbl_seaquest_hrl_baseline_paper` train + mod eval
+- `tf_seaquest_nexus_hrl_seed44` — `cbl_seaquest_hrl_baseline_optim50m` train + mod eval
+- `tf_seaquest_nexus_hrl_seed45` — `cbl_seaquest_hrl_baseline_optim50m` train + mod eval
+- `tf_seaquest_nexus_hrl_seed46` — `cbl_seaquest_hrl_baseline_optim50m` train + mod eval
+- `tf_timepilot_nexus_hrl_seed44` — `cbl_timepilot_hrl_baseline_optim50m` train + mod eval
+- `tf_timepilot_nexus_hrl_seed45` — `cbl_timepilot_hrl_baseline_optim50m` train + mod eval
+- `tf_timepilot_nexus_hrl_seed46` — `cbl_timepilot_hrl_baseline_optim50m` train + mod eval
+- `tf_namethisgame_nexus_hrl_seed44` — `cbl_namethisgame_hrl_baseline_optim50m` train + mod eval
+- `tf_namethisgame_nexus_hrl_seed45` — `cbl_namethisgame_hrl_baseline_optim50m` train + mod eval
+- `tf_namethisgame_nexus_hrl_seed46` — `cbl_namethisgame_hrl_baseline_optim50m` train + mod eval

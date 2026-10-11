@@ -19,7 +19,7 @@ by hand — re-run the materializer.
 |---|---|
 | Train seeds | **44, 45, 46** (three independent runs) |
 | Config layout | one YAML per seed (`NUM_SEEDS: 1`, top-level `SEED`) |
-| Applies to | skills, flat PQN (pixel / OC), tandem, NEXUS symbolic / HRL |
+| Applies to | skills, flat PQN (pixel / OC), tandem, NEXUS symbolic, home HRL |
 
 There is no multi-seed loop inside a single train config.
 
@@ -132,15 +132,25 @@ the 9 non-Seaquest envs × 3 seeds.
 On every env: `random_actions`, `heuristic_random`, `fixed_ego_rules`.  
 On home envs additionally: `constant_ego`.
 
-### NEXUS (outside `run_paper_eval`)
+### NEXUS / HRL (outside `run_paper_eval`)
 
-Seaquest only, author HPs, seeds 44/45/46:
+Seeds 44/45/46; mod-eval uses `EVAL_SEED = s+10000`, 3 eval seeds × 3 episodes.
 
-- `cbl_seaquest_nexus_symbolic_paper`
-- `cbl_seaquest_hrl_baseline_paper`
+**Symbolic NEXUS** (Seaquest only, author paper HPs):
 
-Then the same Seaquest mod strip with 3 eval seeds × 3 episodes
-(`scripts/run_thesis_final_nexus.sh`).
+- `cbl_seaquest_nexus_symbolic_paper` + Seaquest thesis mod strip
+
+**HRL / HPQN baseline** (all three home envs, CBL 50M optim 1:1,
+`NO_REWARDS`, `NUM_AGENTS=3`, learned meta):
+
+- `cbl_seaquest_hrl_baseline_optim50m`
+- `cbl_timepilot_hrl_baseline_optim50m`
+- `cbl_namethisgame_hrl_baseline_optim50m`
+
+Each home uses that env’s thesis / `paper_core` mod strip
+(`scripts/run_thesis_final_nexus.sh`). Legacy
+`cbl_seaquest_hrl_baseline_paper` (NEXUS paper outer HPs) is kept on disk
+but is not part of the thesis_final schedule.
 
 ---
 

@@ -1,7 +1,8 @@
-"""Evaluate a NEXUS Seaquest checkpoint on the CBL paper_eval mod allowlist.
+"""Evaluate a NEXUS / HRL checkpoint on the CBL paper_eval mod allowlist.
 
 Uses the same jaxatari mod API as paper_eval (``jaxtari.make(..., mods=...)``)
-and writes ``*_mods.json`` / CSV next to other RQ1 results.
+and writes ``*_mods.json`` / CSV next to other RQ1 results. Env is taken from
+the alg config (Seaquest symbolic NEXUS or multi-home HRL).
 """
 
 from __future__ import annotations
@@ -12,6 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from nexus.hrl_env import learned_meta_policy as shared_learned_meta_policy
+from nexus.hrl_env import nexus_env_to_key
 
 
 def run_nexus_mod_eval(
@@ -56,8 +60,9 @@ def run_nexus_mod_eval(
 
     alg_name = str(config["ALG_NAME"])
     env_name = str(config["ENV_NAME"])
+    env_key = nexus_env_to_key(env_name)
     params_path = _find_ckpt(ckpt_dir, alg_name, env_name)
-    print(f"Loading NEXUS params from {params_path}")
+    print(f"Loading NEXUS params from {params_path} (env={env_key})")
     params = load_params(params_path)
     bs_path = params_path.with_name(params_path.stem + "_bs.safetensors")
     batch_stats = load_params(bs_path) if bs_path.is_file() else None
@@ -78,13 +83,14 @@ def run_nexus_mod_eval(
             if meta_bs_path.is_file():
                 meta_bs = load_params(meta_bs_path)
 
-    specs = mod_specs_for_env("seaquest", trial=trial, keys=mod_keys)
+    specs = mod_specs_for_env(env_key, trial=trial, keys=mod_keys)
     results: dict[str, Any] = {}
     for spec in specs:
-        print(f"\n=== NEXUS mod-eval {spec.key} mods={list(spec.mods) or 'none'} ===")
+        print(f"\n=== NEXUS mod-eval {env_key}/{spec.key} mods={list(spec.mods) or 'none'} ===")
         try:
             stats = _rollout_mod(
                 config=config,
+                env_key=env_key,
                 params=params,
                 batch_stats=batch_stats,
                 meta_params=meta_params,
@@ -119,7 +125,7 @@ def run_nexus_mod_eval(
     payload = {
         "agent_kind": "nexus",
         "alg": alg,
-        "env": "seaquest",
+        "env": env_key,
         "ckpt": str(params_path),
         "base_seed": seed,
         "num_episodes": num_episodes,
@@ -193,7 +199,7 @@ def _normalize_game_mods(game_mods: list[str]) -> list[str] | None:
     return uniq or None
 
 
-def _make_nexus_eval_env(game_mods: list[str]):
+def _make_nexus_eval_env(env_key: str, game_mods: list[str]):
     """Build env via jaxtari.make (paper_eval style) + NEXUS OC stack."""
     import jaxtari
     from jaxtari.wrappers import (
@@ -204,7 +210,7 @@ def _make_nexus_eval_env(game_mods: list[str]):
     )
 
     mods = _normalize_game_mods(game_mods)
-    env = jaxtari.make("seaquest", mods=mods)
+    env = jaxtari.make(env_key, mods=mods)
 
     # Match NEXUS eval wrappers: no sticky / no episodic life.
     # AtariWrapper signature differs across forks — try common kwargs.
@@ -226,9 +232,28 @@ def _make_nexus_eval_env(game_mods: list[str]):
     return env
 
 
+def _meta_callables(env_key: str):
+    """LLM/combined meta stay Seaquest-only; learned meta is shared."""
+    learned_meta_policy = shared_learned_meta_policy
+    llm_meta_policy = None
+    combined_meta_policy = None
+    if env_key == "seaquest":
+        from symbolic_options.reward_functions.seaquest import (
+            combined_meta_policy as _comb,
+        )
+        from symbolic_options.reward_functions.seaquest import (
+            llm_meta_policy as _llm,
+        )
+
+        llm_meta_policy = _llm
+        combined_meta_policy = _comb
+    return llm_meta_policy, learned_meta_policy, combined_meta_policy
+
+
 def _rollout_mod(
     *,
     config: dict[str, Any],
+    env_key: str,
     params,
     batch_stats,
     meta_params,
@@ -243,13 +268,10 @@ def _rollout_mod(
     import jax.numpy as jnp
     import optax
     from symbolic_options.hierarchical_pqn_jaxtari import QNetwork, CustomTrainState
-    from symbolic_options.reward_functions.seaquest import (
-        llm_meta_policy,
-        learned_meta_policy,
-        combined_meta_policy,
-    )
 
-    env = _make_nexus_eval_env(game_mods)
+    llm_meta_policy, learned_meta_policy, combined_meta_policy = _meta_callables(env_key)
+
+    env = _make_nexus_eval_env(env_key, game_mods)
     num_actions = int(env.action_space().n)
     obs_shape = env.observation_space().shape
     hierarchical = bool(config.get("HIERARCHICAL", False))
@@ -345,17 +367,31 @@ def _rollout_mod(
                     all_actions = jnp.argmax(all_q, axis=-1)
 
                     if meta_mode == "llm":
+                        if llm_meta_policy is None:
+                            raise ValueError(
+                                f"META_POLICY=llm is only supported for seaquest "
+                                f"(got env={env_key})"
+                            )
                         meta_q = llm_meta_policy(None, None, flat_obs_b, env_state)
                     elif meta_mode == "learned" and meta_state is not None:
                         meta_q = learned_meta_policy(
                             meta_network, meta_state, flat_obs_b, env_state
                         )
                     elif meta_mode == "combined" and meta_state is not None:
+                        if combined_meta_policy is None:
+                            raise ValueError(
+                                f"META_POLICY=combined is only supported for seaquest "
+                                f"(got env={env_key})"
+                            )
                         meta_q = combined_meta_policy(
                             meta_network, meta_state, flat_obs_b, env_state
                         )
+                    elif meta_mode == "learned":
+                        raise ValueError("learned meta requires a *_meta.safetensors ckpt")
                     else:
-                        meta_q = llm_meta_policy(None, None, flat_obs_b, env_state)
+                        raise ValueError(
+                            f"Unsupported META_POLICY={meta_mode!r} for env={env_key}"
+                        )
                     if meta_q.ndim == 1:
                         meta_q = meta_q[None, ...]
                     active = int(jnp.argmax(meta_q, axis=-1)[0])

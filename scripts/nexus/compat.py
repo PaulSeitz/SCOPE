@@ -84,6 +84,92 @@ def apply_nexus_source_fixes(nexus_root: Path) -> None:
             video.write_text(text, encoding="utf-8")
             print(f"Patched modern OC state unwrap in {video}")
 
+    _patch_main_hrl_factory_fallback(nexus_root)
+
+
+_CBL_HRL_MAIN_MARKER = "# CBL: NO_REWARDS HRL factory fallback"
+_CBL_HRL_MAIN_BLOCK = '''
+    else:
+        # CBL: NO_REWARDS HRL factory fallback for TimePilot / NameThisGame
+        # (scripts/nexus/hrl_env.py — symbolic NEXUS stays Seaquest-only).
+        import sys as _cbl_sys
+        from pathlib import Path as _CblPath
+        _cbl_scripts = _CblPath(__file__).resolve().parents[2] / "scripts"
+        # When run via CBL run_nexus runner, PROJECT_ROOT/scripts is already on path.
+        if str(_cbl_scripts) not in _cbl_sys.path:
+            # Fallback: walk up from NEXUS_ROOT to ConceptBasedLearning/scripts
+            _nexus_root = _CblPath(__file__).resolve().parents[1]
+            for _cand in (
+                _nexus_root.parent.parent / "scripts",  # third_party/symbolic_options → CBL
+                _nexus_root.parent / "scripts",
+            ):
+                if (_cand / "nexus" / "hrl_env.py").is_file():
+                    _cbl_sys.path.insert(0, str(_cand))
+                    break
+        from nexus.hrl_env import try_build_hrl_no_rewards_setup
+        _cbl_setup = try_build_hrl_no_rewards_setup(config)
+        if _cbl_setup is None:
+            raise NotImplementedError(f"Env {config['ENV_NAME']} not implemented.")
+        env = _cbl_setup["env"]
+        eval_envs = _cbl_setup["eval_envs"]
+        create_env = _cbl_setup["create_env"]
+        renderer = _cbl_setup["renderer"]
+        reward_funcs = _cbl_setup["reward_funcs"]
+        learned_meta_policy = _cbl_setup["learned_meta_policy"]
+        llm_meta_policy = _cbl_setup["llm_meta_policy"]
+        conditional_meta_policy = _cbl_setup["conditional_meta_policy"]
+        combined_meta_policy = _cbl_setup["combined_meta_policy"]
+        test_env = _cbl_setup["test_env"]
+        test_env_modif = _cbl_setup["test_env_modif"]
+        env_params = _cbl_setup["env_params"]
+        basic_env = _cbl_setup["basic_env"]
+'''
+
+
+def _patch_main_hrl_factory_fallback(nexus_root: Path) -> None:
+    """Replace ``build_setup``'s final NotImplementedError with CBL HRL factory."""
+    main_py = nexus_root / "main.py"
+    if not main_py.is_file():
+        return
+    text = main_py.read_text(encoding="utf-8")
+    if _CBL_HRL_MAIN_MARKER in text:
+        return
+    old = (
+        "    else:\n"
+        "        raise NotImplementedError(f\"Env {config['ENV_NAME']} not implemented.\")\n"
+    )
+    # Also match double-quoted / slightly different spacing from upstream.
+    old_alt = (
+        '    else:\n'
+        '        raise NotImplementedError(f"Env {config[\'ENV_NAME\']} not implemented.")\n'
+    )
+    if old in text:
+        text = text.replace(old, _CBL_HRL_MAIN_BLOCK.lstrip("\n"), 1)
+    elif old_alt in text:
+        text = text.replace(old_alt, _CBL_HRL_MAIN_BLOCK.lstrip("\n"), 1)
+    else:
+        # Last-resort: find the raise line inside build_setup.
+        needle = 'raise NotImplementedError(f"Env {config[\'ENV_NAME\']} not implemented.")'
+        needle2 = 'raise NotImplementedError(f"Env {config[\'ENV_NAME\']} not implemented.")'
+        # Try common forms
+        for n in (
+            'raise NotImplementedError(f"Env {config[\'ENV_NAME\']} not implemented.")',
+            "raise NotImplementedError(f\"Env {config['ENV_NAME']} not implemented.\")",
+        ):
+            if n in text and "Craftax" in text:
+                # Replace the else+raise block heuristically
+                idx = text.rfind("    else:\n", 0, text.find(n) + 1)
+                if idx < 0:
+                    continue
+                end = text.find("\n", text.find(n)) + 1
+                text = text[:idx] + _CBL_HRL_MAIN_BLOCK.lstrip("\n") + text[end:]
+                break
+        else:
+            print(f"WARNING: could not patch HRL factory into {main_py}")
+            return
+    main_py.write_text(text, encoding="utf-8")
+    print(f"Patched CBL HRL factory fallback into {main_py}")
+
 
 def prepend_sys_path(paths: Sequence[Path]) -> None:
     for p in reversed([Path(x).resolve() for x in paths]):
@@ -326,6 +412,9 @@ def prepare_nexus_runtime(
     """
     apply_nexus_source_fixes(nexus_root)
     prepend_sys_path([nexus_root / "src"])
+    # CBL helpers (hrl_env, mod_eval) live under ConceptBasedLearning/scripts.
+    cbl_scripts = Path(__file__).resolve().parents[1]
+    prepend_sys_path([cbl_scripts])
 
     if use_vendored_seaquest:
         install_jaxatari(nexus_root / "JAXAtari" / "src", label="NEXUS vendored")
