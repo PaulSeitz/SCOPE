@@ -191,6 +191,21 @@ def _clear_jaxtari_modules() -> None:
         del sys.modules[k]
 
 
+def _alias_jaxatari_to_jaxtari() -> None:
+    """Point every ``jaxatari*`` sys.modules entry at the matching ``jaxtari*``.
+
+    Must be re-run after any ``import jaxtari...`` so NEXUS's legacy
+    ``from jaxatari...`` imports do not load a second copy of the package
+    (and miss monkeypatches like DisableEnemiesWrapper).
+    """
+    if "jaxtari" not in sys.modules:
+        return
+    sys.modules["jaxatari"] = sys.modules["jaxtari"]
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("jaxtari."):
+            sys.modules["jaxatari" + name[len("jaxtari") :]] = mod
+
+
 def install_jaxatari(src: Path, *, label: str) -> Path:
     src = src.resolve()
     prepend_sys_path([src])
@@ -199,10 +214,7 @@ def install_jaxatari(src: Path, *, label: str) -> Path:
 
     # NEXUS still does `from jaxatari...`. The robustness fork only ships
     # `jaxtari`; without this alias, imports fall through to ~/JAXAtari.
-    sys.modules["jaxatari"] = sys.modules["jaxtari"]
-    for name, mod in list(sys.modules.items()):
-        if name.startswith("jaxtari."):
-            sys.modules["jaxatari" + name[len("jaxtari") :]] = mod
+    _alias_jaxatari_to_jaxtari()
 
     print(f"Using jaxtari from {src} ({label}; jaxatari→jaxtari alias)")
     return src
@@ -319,6 +331,7 @@ def map_disable_enemies_wrapper_to_no_enemies_mod() -> None:
                 return obs, new_state, reward, done, info
 
         sq_mods.DisableEnemiesWrapper = DisableEnemiesWrapper
+        _alias_jaxatari_to_jaxtari()
         print("Mapped NEXUS DisableEnemiesWrapper → robustness no_enemies mod")
     except Exception as e:
         print(f"WARNING: could not map DisableEnemiesWrapper to no_enemies: {e}")
@@ -434,3 +447,5 @@ def prepare_nexus_runtime(
         patch_object_centric_defaults()
         patch_five_tuple_step_api()
         map_disable_enemies_wrapper_to_no_enemies_mod()
+        # Re-bind after patches so NEXUS `import jaxatari...` sees them.
+        _alias_jaxatari_to_jaxtari()
