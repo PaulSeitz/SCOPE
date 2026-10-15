@@ -197,7 +197,14 @@ def install_jaxatari(src: Path, *, label: str) -> Path:
     _clear_jaxtari_modules()
     import jaxtari  # noqa: F401
 
-    print(f"Using jaxtari from {src} ({label})")
+    # NEXUS still does `from jaxatari...`. The robustness fork only ships
+    # `jaxtari`; without this alias, imports fall through to ~/JAXAtari.
+    sys.modules["jaxatari"] = sys.modules["jaxtari"]
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("jaxtari."):
+            sys.modules["jaxatari" + name[len("jaxtari") :]] = mod
+
+    print(f"Using jaxtari from {src} ({label}; jaxatari→jaxtari alias)")
     return src
 
 

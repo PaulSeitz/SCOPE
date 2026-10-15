@@ -1380,7 +1380,8 @@ def run_greedy_eval_episodes(
 
     rng = jax.random.PRNGKey(base_seed)
     obs, _state = env.reset(rng)
-    dummy_ego = get_ego_obs(
+    dummy_ego = _skill_input_from_obs(
+        config,
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
@@ -1542,9 +1543,10 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     rng, rng_reset = jax.random.split(rng)
     obs, state = env.reset(rng_reset)
 
-    # Infer ego feature dimension from a dummy egocentric observation
-    # using target index 0 as a placeholder.
-    dummy_ego = get_ego_obs(
+    # Infer skill-input feature dimension (ego / oc_flat_rel / …) from a
+    # dummy observation using target index 0 as a placeholder.
+    dummy_ego = _skill_input_from_obs(
+        config,
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
@@ -2284,7 +2286,8 @@ def run_live_visualization(
     obs, state = jax.device_get((obs, state))
     _log("env.reset ready")
 
-    dummy_ego = get_ego_obs(
+    dummy_ego = _skill_input_from_obs(
+        config,
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),

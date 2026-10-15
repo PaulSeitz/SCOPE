@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: spaceinvaders
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_shield_row
+    mods: [shift_shield_row]
+    category: layout
+  - key: no_enemy_fire
+    mods: [no_enemy_fire]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_shield_row
+  - no_enemy_fire

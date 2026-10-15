@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: asteroids
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_initial_rocks
+    mods: [shift_initial_rocks]
+    category: layout
+  - key: no_ship_collisions
+    mods: [no_ship_collisions]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_initial_rocks
+  - no_ship_collisions

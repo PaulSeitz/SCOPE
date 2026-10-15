@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: beamrider
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_player_row
+    mods: [shift_player_row]
+    category: layout
+  - key: no_enemy_shots
+    mods: [no_enemy_shots]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_player_row
+  - no_enemy_shots

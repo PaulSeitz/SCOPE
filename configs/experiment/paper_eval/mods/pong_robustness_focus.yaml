@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: pong
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_player_plane
+    mods: [shift_player_plane]
+    category: layout
+  - key: slower_enemy
+    mods: [slower_enemy]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_player_plane
+  - slower_enemy
