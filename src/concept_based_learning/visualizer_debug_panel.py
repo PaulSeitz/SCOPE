@@ -238,7 +238,10 @@ def apply_pov_overlay(
     show_fov_wedge: bool = True,
 ) -> np.ndarray:
     """Draw view direction, POV wedge, body facing, and chosen move on the game frame."""
-    import cv2
+    try:
+        import cv2
+    except ImportError:
+        return frame_rgb
 
     frame = np.ascontiguousarray(frame_rgb, dtype=np.uint8).copy()
     h, w = frame.shape[:2]

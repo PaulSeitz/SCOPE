@@ -126,35 +126,21 @@ def normalize_summary_row(row: dict[str, Any]) -> dict[str, Any]:
     score_mean = _to_float(row.get("mean_env_score_final"))
     score_std = _to_float(row.get("std_env_score_final"))
 
-    # Prefer unclipped ALE score when present and non-zero. Hierarchical CSVs
-    # often store clipped ``mean`` (~count of +1 events) with a real
-    # ``mean_env_score_final``. Pixel / some wrappers report score=0 while
-    # ``mean`` already holds the unclipped return — do not overwrite that.
-    use_score = score_mean == score_mean and (
-        abs(score_mean) > 1e-8
-        or (reward_mean != reward_mean or abs(reward_mean) <= 1e-8)
-    )
-    if use_score:
-        out["mean"] = score_mean
-        out["std"] = score_std if score_std == score_std else reward_std
-        out["mean_reward_sum"] = reward_mean
-        out["score_source"] = "env_score_final"
-        # Drop/retention from clipped reward sums are invalid — recompute later.
-        out["drop_from_base"] = float("nan")
-        out["drop_frac_from_base"] = float("nan")
-        out["retention"] = float("nan")
-    else:
-        out["mean"] = reward_mean
-        out["std"] = reward_std
-        out["score_source"] = "episode_return"
-        out["drop_from_base"] = _to_float(row.get("drop_from_base"))
-        out["drop_frac_from_base"] = _to_float(row.get("drop_frac_from_base"))
-        ret = _to_float(row.get("retention"), default=float("nan"))
-        if ret != ret:  # NaN
-            dfrac = out["drop_frac_from_base"]
-            if dfrac == dfrac:
-                ret = 1.0 + dfrac
-        out["retention"] = ret
+    # Unclipped episode returns are the reported score. Engine score stays
+    # in mean_env_score_final and is not substituted over the return list.
+    out["mean"] = reward_mean
+    out["std"] = reward_std
+    out["mean_reward_sum"] = reward_mean
+    out["score_source"] = "episode_return"
+    del score_mean, score_std
+    out["drop_from_base"] = _to_float(row.get("drop_from_base"))
+    out["drop_frac_from_base"] = _to_float(row.get("drop_frac_from_base"))
+    ret = _to_float(row.get("retention"), default=float("nan"))
+    if ret != ret:  # NaN
+        dfrac = out["drop_frac_from_base"]
+        if dfrac == dfrac:
+            ret = 1.0 + dfrac
+    out["retention"] = ret
     out["max_frames"] = _to_float(row.get("max_frames") or row.get("max_frames_per_episode"))
 
     base_mean = _to_float(row.get("base_mean"))

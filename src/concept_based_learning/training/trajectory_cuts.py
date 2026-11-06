@@ -42,6 +42,8 @@ def skill_target_switch_cut(
     target_idx,
     num_objects: int,
     mode: str,
+    *,
+    object_ids=None,
 ):
     """
     Per-edge bootstrap cut mask for relabel-all skill training.
@@ -66,7 +68,11 @@ def skill_target_switch_cut(
         )
 
     if mode == SKILL_TARGET_CUT_INVOLVED:
-        obj_ids = jnp.arange(num_objects, dtype=target_idx.dtype)[None, None, :]
+        # Sampled row numbers need not equal global object slots.
+        obj_ids = (
+            jnp.arange(num_objects, dtype=target_idx.dtype)[None, None, :]
+            if object_ids is None else object_ids[:-1]
+        )
         involved = jnp.logical_or(
             committed_prev[:, :, None] == obj_ids,
             committed_next[:, :, None] == obj_ids,

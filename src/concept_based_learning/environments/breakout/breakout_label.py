@@ -51,9 +51,8 @@ class BreakoutSemanticWrapper(JaxatariSemanticBaseWrapper):
         ball_w = jnp.expand_dims(ball.width, axis=0) if ball.width.ndim == 0 else ball.width
         ball_h = jnp.expand_dims(ball.height, axis=0) if ball.height.ndim == 0 else ball.height
 
-        # Ball is always active (set off-screen on life loss, but we use AABB for reward anyway).
-        # COLLECT reward fires on rising-edge AABB overlap.
-        ball_active = jnp.ones(1, dtype=jnp.int32)
+        # Preserve visibility supplied by the launch adapter.
+        ball_active = jnp.atleast_1d(ball.active).astype(jnp.int32)
         ball_label = jnp.array([LABEL_COLLECT], dtype=jnp.int32)
 
         pad_size = self.game_max_objects - 1

@@ -15,12 +15,18 @@ from concept_based_learning.observations.target_conditioning import (
     normalize_pixel_obs,
     paint_target_outline_pixels,
 )
+from concept_based_learning.observations.ego_context import (
+    EGO_CONTEXT_SKILL_INPUT_MODES,
+    EGO_OC_NATIVE,
+    OC_NATIVE_TARGET_FRONT,
+)
 
 
 # Skill input modes whose forward pass reads pixel_obs (require PixelAndObjectObsWrapper).
 PIXEL_SKILL_INPUT_MODES = ("pixel_embed", "pixel_embed_cond")
 # Flattened relative object-list skills (MLP on prebuilt vector; needs objects).
-FLAT_OC_SKILL_INPUT_MODES = ("oc_flat_rel",)
+FLAT_OC_SKILL_INPUT_MODES = ("oc_flat_rel", "oc_flat_rel_role")
+NATIVE_OC_SKILL_INPUT_MODES = ("oc_native", EGO_OC_NATIVE, OC_NATIVE_TARGET_FRONT)
 # Modes that need labeled ``objects`` for index-invariant target cues.
 OBJECT_CONDITIONED_SKILL_INPUT_MODES = (
     "oc_embed",
@@ -43,10 +49,14 @@ class QNetwork(nn.Module):
         ``Dense(embed_dim)`` embeds each object row, then the target row is
         gathered — so the Dense input width is the per-object feature size
         ``F`` (shared across envs), not ``M·F``. Requires ``objects``.
-    oc_flat_rel
-        Prebuilt flattened relative object list + ``is_target`` + globals
-        (see ``build_skill_oc_flat_rel_obs``). Same MLP head as ``ego``;
+    oc_flat_rel / oc_flat_rel_role
+        Prebuilt flattened relative object list + ``is_target`` + globals.
+        ``oc_flat_rel_role`` also appends the meta role-pool
+        (see ``build_skill_oc_flat_rel_role_obs``). Same MLP head as ``ego``;
         ``x`` is already the full skill input.
+    ego_scene_rel / ego_abs_pos
+        Reference ego vector plus a relative scene or the absolute player
+        position (see ``observations/ego_context.py``). Same MLP as ``ego``.
     pixel_embed / pixel_embed_cond
         CNN over pixels with an optional painted target outline
         (``pixel_paint_target_outline``; default on). ``pixel_embed_cond`` is
@@ -87,8 +97,13 @@ class QNetwork(nn.Module):
             target_idx = jnp.array(0, dtype=jnp.int32)
         target_idx = jnp.asarray(target_idx, dtype=jnp.int32)
 
-        if mode in ("ego", "oc_flat_rel"):
-            # ``oc_flat_rel``: ``x`` is already flatten(rows)+global from the
+        if mode in (
+            "ego",
+            *EGO_CONTEXT_SKILL_INPUT_MODES,
+            *FLAT_OC_SKILL_INPUT_MODES,
+            *NATIVE_OC_SKILL_INPUT_MODES,
+        ):
+            # Flat OC modes: ``x`` is already the full skill vector from the
             # observation builder; same MLP as ego.
             pass
         elif mode in ("ego_embed", "ego_embedding"):
@@ -182,7 +197,7 @@ class QNetwork(nn.Module):
         else:
             raise ValueError(
                 f"Unknown SKILL_INPUT_MODE={self.input_mode!r}. "
-                "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+                "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, oc_flat_rel_role, "
                 "pixel_embed, pixel_embed_cond."
             )
 

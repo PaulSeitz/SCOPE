@@ -356,6 +356,7 @@ def _select_target(
     collect_require_fully_on_screen=None,
     collect_skip_when_full=None,
     collect_nearest_in_range_only=None,
+    collect_early_when_no_threats=False,
     collect_near_range=None,
     enemy_require_on_screen=None,
     destroy_nearest_in_danger_only=None,
@@ -401,6 +402,7 @@ def _select_target(
     collect_require_fully_on_screen = bool(collect_require_fully_on_screen)
     collect_skip_when_full = bool(collect_skip_when_full)
     collect_nearest_in_range_only = bool(collect_nearest_in_range_only)
+    collect_early_when_no_threats = bool(collect_early_when_no_threats)
     enemy_require_on_screen = bool(enemy_require_on_screen)
     destroy_nearest_in_danger_only = bool(destroy_nearest_in_danger_only)
     danger_close_range = jnp.asarray(danger_close_range, dtype=jnp.float32)
@@ -586,6 +588,24 @@ def _select_target(
         jnp.logical_not(any_destroy_selectable),
         player_underwater,
     )
+    # Optional training-distribution probe. Ignore the near-distance/surface
+    # gate only when no active DESTROY/AVOID hitbox intersects the screen.
+    # Offscreen spawns do not block it. Diver margin/capacity checks above and
+    # danger/surfacing overrides below remain in force.
+    visible_threat = (
+        active_mask
+        & (is_destroy | is_avoid)
+        & (ox_f < screen_w)
+        & ((ox_f + ow_f) > 0.0)
+        & (oy < 210.0)
+        & ((oy + oh) > 0.0)
+    )
+    early_collect_clear = (
+        collect_early_when_no_threats & ~jnp.any(visible_threat)
+    )
+    collect_without_near_gate = jnp.logical_or(
+        divers_only_underwater, early_collect_clear
+    )
     collect_in_near_band = jnp.logical_and(
         collect_near_range > 0.0,
         distances <= collect_near_range,
@@ -594,7 +614,7 @@ def _select_target(
         jnp.logical_not(is_collect),
         jnp.logical_or(
             jnp.logical_not(collect_nearest_in_range_only),
-            jnp.logical_or(divers_only_underwater, collect_in_near_band),
+            jnp.logical_or(collect_without_near_gate, collect_in_near_band),
         ),
     )
     selectable_nearest = jnp.logical_and(selectable_nearest, collect_near_ok)
@@ -789,6 +809,7 @@ def get_heuristic_target_with_state(
     collect_require_fully_on_screen=None,
     collect_skip_when_full=None,
     collect_nearest_in_range_only=None,
+    collect_early_when_no_threats=False,
     collect_near_range=None,
     enemy_require_on_screen=None,
     destroy_nearest_in_danger_only=None,
@@ -813,6 +834,7 @@ def get_heuristic_target_with_state(
         collect_require_fully_on_screen=collect_require_fully_on_screen,
         collect_skip_when_full=collect_skip_when_full,
         collect_nearest_in_range_only=collect_nearest_in_range_only,
+        collect_early_when_no_threats=collect_early_when_no_threats,
         collect_near_range=collect_near_range,
         enemy_require_on_screen=enemy_require_on_screen,
         destroy_nearest_in_danger_only=destroy_nearest_in_danger_only,
@@ -849,6 +871,7 @@ def get_heuristic_target(
     collect_require_fully_on_screen=None,
     collect_skip_when_full=None,
     collect_nearest_in_range_only=None,
+    collect_early_when_no_threats=False,
     collect_near_range=None,
     enemy_require_on_screen=None,
     destroy_nearest_in_danger_only=None,
@@ -874,6 +897,7 @@ def get_heuristic_target(
         collect_require_fully_on_screen=collect_require_fully_on_screen,
         collect_skip_when_full=collect_skip_when_full,
         collect_nearest_in_range_only=collect_nearest_in_range_only,
+        collect_early_when_no_threats=collect_early_when_no_threats,
         collect_near_range=collect_near_range,
         enemy_require_on_screen=enemy_require_on_screen,
         destroy_nearest_in_danger_only=destroy_nearest_in_danger_only,

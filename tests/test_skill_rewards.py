@@ -154,6 +154,53 @@ def test_collect_idle_gets_no_progress():
     assert not bool(d[1])
 
 
+def test_distant_collectible_leaving_screen_is_not_contact():
+    """A diver that deactivates far from the player was not collected."""
+    prev_r, prev_t = _mk(50, 100, 120, 100, LABEL_COLLECT, tw=8, th=7)
+    next_r, next_t = _mk(50, 100, 0, 0, LABEL_COLLECT, tw=8, th=7, active=0)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0),
+        destroy_contact_fail=True, collect_sparse_only=True,
+    )
+    assert float(r[0]) == 0.0 and not bool(d[0])
+    assert float(r[1]) == 0.0 and not bool(d[1])
+    assert float(r[2]) == 0.0 and not bool(d[2])
+
+
+def test_cleared_inactive_slot_is_not_contact():
+    """Destruction that zeros the sprite must not collide with a player at the origin."""
+    prev_r, prev_t = _mk(0, 0, 120, 100, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(0, 0, 0, 0, LABEL_DESTROY, tw=8, th=7, active=0)
+    next_t = next_t.replace(was_killed=_S(1))
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0),
+        destroy_contact_fail=True, collect_sparse_only=True,
+        config={"AVOID_KILLED_EVENT_MODE": "none"},
+    )
+    assert float(r[0]) == DESTROY_SUCCESS_REWARD and bool(d[0])
+    assert float(r[1]) == 0.0 and not bool(d[1])
+    assert float(r[2]) == 0.0 and not bool(d[2])
+
+
+def test_collection_still_counts_when_player_overlaps_last_box():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_COLLECT, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 0, 0, LABEL_COLLECT, tw=8, th=7, active=0)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0), collect_sparse_only=True,
+    )
+    assert float(r[1]) == COLLECT_SUCCESS_REWARD
+    assert bool(d[1])
+
+
+def test_freeway_bottom_edge_overlap_is_detected():
+    from concept_based_learning.environments.skill_rewards import _bbox_overlap
+
+    player = _Ent(_S(40), _S(100), _S(8), _S(10))
+    target = _Ent(_S(40), _S(91), _S(8), _S(8))
+    assert bool(jnp.all(_bbox_overlap(player, target, 0, y_is_bottom_edge=True)))
+    assert not bool(jnp.any(_bbox_overlap(player, target, 0, y_is_bottom_edge=False)))
+
+
 def test_avoid_escape_progress_when_distance_increases():
     # Move away from threat → escape shaping, not survival farm / not done.
     prev_r, prev_t = _mk(50, 100, 80, 100, LABEL_AVOID, tw=8, th=1)
@@ -516,6 +563,74 @@ def test_collect_plus_one_on_destroy_labeled_contact():
     assert bool(d[0])
 
 
+@pytest.mark.parametrize("target_label", [LABEL_COLLECT, LABEL_DESTROY, LABEL_AVOID])
+def test_collect_success_first_keeps_contact_reward_on_same_step_death(target_label):
+    """A lethal ram is still a successful counterfactual COLLECT transition."""
+    prev_r, prev_t = _mk(10, 50, 50, 50, target_label, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, target_label, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(1),
+        penalize_collect_death=True,
+        config={"COLLECT_DEATH_PRECEDENCE": "success_first"},
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_SUCCESS_REWARD)
+    assert bool(d[1])
+    # Combat heads retain their safety death override.
+    assert float(r[0]) == SKILL_DEATH_PENALTY
+    assert float(r[2]) == SKILL_DEATH_PENALTY
+
+
+def test_collect_success_first_keeps_was_collected_reward_on_death():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_COLLECT, tw=8, th=7)
+    next_r, next_t = _mk(10, 50, 50, 50, LABEL_COLLECT, tw=8, th=7)
+    next_t = next_t.replace(was_collected=_S(1))
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(1),
+        penalize_collect_death=True,
+        collect_death_precedence="success_first",
+    )
+    assert float(r[1]) == pytest.approx(COLLECT_SUCCESS_REWARD)
+    assert bool(d[1])
+
+
+def test_collect_success_first_still_penalizes_death_without_contact():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(20, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(1),
+        penalize_collect_death=True,
+        collect_death_precedence="success_first",
+    )
+    assert float(r[1]) == SKILL_DEATH_PENALTY
+    assert bool(d[1])
+
+
+def test_collect_death_first_default_still_overrides_contact_success():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, _ = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(1),
+        penalize_collect_death=True,
+    )
+    assert float(r[1]) == SKILL_DEATH_PENALTY
+
+
 def test_collect_approach_on_destroy_labeled_target():
     prev_r, prev_t = _mk(10, 50, 40, 50, LABEL_DESTROY, tw=4, th=4)
     next_r, next_t = _mk(20, 50, 40, 50, LABEL_DESTROY, tw=4, th=4)
@@ -532,6 +647,90 @@ def test_avoid_escape_on_destroy_labeled_target():
     r, d = extract_skill_rewards(prev_r, next_r, prev_t, next_t, jnp.int32(0))
     assert float(r[2]) == pytest.approx(AVOID_ESCAPE_REWARD)
     assert not bool(d[2])
+
+
+def test_avoid_killed_event_can_be_scoped_to_avoid_labels():
+    prev_r, prev_t = _mk(10, 50, 60, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(10, 50, 60, 50, LABEL_DESTROY, tw=8, th=7)
+    next_t = next_t.replace(was_killed=_S(1))
+
+    legacy_r, legacy_d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0)
+    )
+    scoped_r, scoped_d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        config={"AVOID_KILLED_EVENT_MODE": "avoid_label_only"},
+    )
+    assert float(legacy_r[2]) == AVOID_FAILURE_REWARD
+    assert bool(legacy_d[2])
+    assert float(scoped_r[2]) == 0.0
+    assert not bool(scoped_d[2])
+
+
+@pytest.mark.parametrize("target_label", [LABEL_DESTROY, LABEL_AVOID, LABEL_COLLECT])
+def test_avoid_ignores_target_destruction_in_reference_mode(target_label):
+    """Shooting the target is not an AVOID failure, whatever its label."""
+    prev_r, prev_t = _mk(10, 50, 60, 50, target_label, tw=8, th=7)
+    next_r, next_t = _mk(10, 50, 60, 50, target_label, tw=8, th=7)
+    next_t = next_t.replace(was_killed=_S(1))
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0),
+        config={"AVOID_KILLED_EVENT_MODE": "none", "AVOID_SPARSE_ONLY": False},
+    )
+    assert float(r[2]) == 0.0
+    assert not bool(d[2])
+
+
+def test_avoid_reference_mode_still_fails_on_contact_and_death():
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        prev_r, next_r, prev_t, next_t, jnp.int32(0),
+        config={"AVOID_KILLED_EVENT_MODE": "none"},
+    )
+    assert float(r[2]) == AVOID_FAILURE_REWARD
+    assert bool(d[2])
+    away_r, away_t = _mk(10, 50, 80, 50, LABEL_DESTROY, tw=8, th=7)
+    next_away_r, next_away_t = _mk(10, 50, 100, 50, LABEL_DESTROY, tw=8, th=7)
+    r, d = extract_skill_rewards(
+        away_r, next_away_r, away_t, next_away_t, jnp.int32(1),
+        config={"AVOID_KILLED_EVENT_MODE": "none", "AVOID_SPARSE_ONLY": False},
+    )
+    assert float(r[2]) == SKILL_DEATH_PENALTY
+    assert bool(d[2])
+
+
+def test_avoid_label_killed_event_and_cross_label_contact_still_fail():
+    prev_r, prev_t = _mk(10, 50, 60, 50, LABEL_AVOID, tw=8, th=7)
+    next_r, next_t = _mk(10, 50, 60, 50, LABEL_AVOID, tw=8, th=7)
+    next_t = next_t.replace(was_killed=_S(1))
+    killed_r, killed_d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        avoid_killed_event_mode="avoid_label_only",
+    )
+    assert float(killed_r[2]) == AVOID_FAILURE_REWARD
+    assert bool(killed_d[2])
+
+    prev_r, prev_t = _mk(10, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    next_r, next_t = _mk(50, 50, 50, 50, LABEL_DESTROY, tw=8, th=7)
+    contact_r, contact_d = extract_skill_rewards(
+        prev_r,
+        next_r,
+        prev_t,
+        next_t,
+        jnp.int32(0),
+        avoid_killed_event_mode="avoid_label_only",
+    )
+    assert float(contact_r[2]) == AVOID_FAILURE_REWARD
+    assert bool(contact_d[2])
 
 
 def test_death_applies_to_combat_skills_regardless_of_target_label():

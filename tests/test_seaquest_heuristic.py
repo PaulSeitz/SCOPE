@@ -1143,3 +1143,50 @@ def test_enemy_offscreen_not_selected_for_nearest():
         )
     )
     assert legacy == 4
+
+
+@pytest.mark.parametrize(
+    "objects, expected",
+    [
+        (_make_objects(diver_xy=(30.0, 100.0)), 0),
+        (_make_objects(diver_xy=(30.0, 100.0), shark_xy=(180.0, 120.0)), 0),
+        (_make_objects(diver_xy=(30.0, 100.0), shark_xy=(130.0, 120.0)), None),
+        (_make_objects(diver_xy=(30.0, 100.0), missile_xy=(130.0, 140.0)), None),
+        (_make_objects(diver_xy=(30.0, 100.0),
+                       surface_sub_xy=(130.0, 46.0), surface_sub_active=True), None),
+        (_make_objects(diver_xy=(-2.0, 100.0)), None),
+    ],
+)
+def test_early_collect_only_relaxes_range_when_screen_has_no_threat(objects, expected):
+    raw = _make_raw(px=80.0, py=46.0, oxygen=64.0, divers=0)
+    target = int(get_heuristic_target(
+        raw, objects, NO_TARGET_IDX, jnp.array([0, 0], dtype=jnp.uint32),
+        collect_early_when_no_threats=True,
+    ))
+    if expected is None:
+        assert target != 0
+    else:
+        assert target == expected
+
+
+def test_early_collect_is_opt_in_and_keeps_capacity_and_surface_overrides():
+    objects = _make_objects(diver_xy=(30.0, 100.0))
+    rng = jnp.array([0, 0], dtype=jnp.uint32)
+    raw = _make_raw(px=80.0, py=46.0, oxygen=64.0, divers=0)
+    assert int(get_heuristic_target(raw, objects, NO_TARGET_IDX, rng)) != 0
+    for raw in (
+        _make_raw(px=80.0, py=100.0, oxygen=64.0, divers=6),
+        _make_raw(px=80.0, py=100.0, oxygen=2.0, divers=0),
+    ):
+        assert int(get_heuristic_target(
+            raw, objects, NO_TARGET_IDX, rng,
+            collect_early_when_no_threats=True,
+        )) == SURFACE_DUMMY_IDX
+
+
+def test_early_collect_flag_reaches_configured_heuristic():
+    from concept_based_learning.environments.heuristics import _seaquest_heuristic_kwargs
+    assert _seaquest_heuristic_kwargs({})["collect_early_when_no_threats"] is False
+    assert _seaquest_heuristic_kwargs(
+        {"COLLECT_EARLY_WHEN_NO_THREATS": True}
+    )["collect_early_when_no_threats"] is True

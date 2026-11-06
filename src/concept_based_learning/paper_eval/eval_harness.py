@@ -73,57 +73,9 @@ def _rtpt_tick_eval_mod() -> None:
 
 
 def _promote_unclipped_score(stats: dict[str, Any]) -> None:
-    """
-    Prefer ALE ``env_score_final`` over the sum of step rewards.
-
-    Training often uses CLIP_REWARD; hierarchical greedy eval used to inherit
-    that, so ``mean`` became a count of +1 events while flat PQN reported raw
-    score. Paper metrics always want unclipped game score.
-    """
-    score_mean = stats.get("mean_env_score_final")
-    try:
-        score_mean_f = float(score_mean)
-    except (TypeError, ValueError):
-        return
-    if score_mean_f != score_mean_f:  # NaN
-        return
-    # Pixel / some wrappers leave env_score_final at 0 while ``mean`` already
-    # holds the unclipped return — keep that return.
-    try:
-        reward_mean_f = float(stats.get("mean"))
-    except (TypeError, ValueError):
-        reward_mean_f = float("nan")
-    if abs(score_mean_f) <= 1e-8 and reward_mean_f == reward_mean_f and abs(reward_mean_f) > 1e-8:
-        return
-
-    if "mean" in stats:
+    """Keep the unclipped reward sum as ``mean``. Engine score stays diagnostic."""
+    if "mean" in stats and "mean_reward_sum" not in stats:
         stats["mean_reward_sum"] = stats["mean"]
-    stats["mean"] = score_mean_f
-
-    score_std = stats.get("std_env_score_final")
-    try:
-        score_std_f = float(score_std)
-    except (TypeError, ValueError):
-        score_std_f = float("nan")
-    if score_std_f == score_std_f:
-        stats["std"] = score_std_f
-
-    episode_metrics = stats.get("episode_metrics")
-    if isinstance(episode_metrics, list) and episode_metrics:
-        scores: list[float] = []
-        for m in episode_metrics:
-            if not isinstance(m, dict):
-                continue
-            try:
-                s = float(m.get("env_score_final"))
-            except (TypeError, ValueError):
-                continue
-            if s == s:
-                scores.append(s)
-        if scores:
-            stats["returns"] = scores
-            stats["min"] = float(min(scores))
-            stats["max"] = float(max(scores))
 
 
 def _attach_drop_from_base(results: dict[str, dict[str, Any]]) -> None:
@@ -142,6 +94,195 @@ def _attach_drop_from_base(results: dict[str, dict[str, Any]]) -> None:
         stats["drop_frac_from_base"] = (
             (mean - base_mean) / abs(base_mean) if abs(base_mean) > 1e-8 else float("nan")
         )
+
+
+def _parallel_mods_enabled(config: dict[str, Any], n_mods: int) -> bool:
+    if os.environ.get("CBL_EVAL_MOD_WORKER") == "1":
+        return False
+    if n_mods <= 1:
+        return False
+    return bool(config.get("EVAL_PARALLEL_MODS", True))
+
+
+def _max_parallel_mods() -> int:
+    """How many modification workers may compile at once.
+
+    Nine at once exhausted CUDA-graph memory on a full 48 GB card.
+    """
+    raw = os.environ.get("CBL_EVAL_MAX_PARALLEL_MODS", "2")
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 2
+    return max(1, n)
+
+
+def _mod_mem_fraction(n_mods: int) -> str:
+    """Per-process cap so N workers cannot each grab the whole GPU."""
+    return f"{min(0.22, 0.70 / max(int(n_mods), 1)):.3f}"
+
+
+def _run_skill_mods_in_subprocesses(
+    config: dict[str, Any],
+    *,
+    skills_path: str | Path,
+    meta_path: str | Path | None,
+    mod_specs: list[ModSpec],
+    num_episodes: int,
+    num_seeds: int,
+    base_seed: int,
+    max_frames: int,
+) -> dict[str, Any]:
+    """One process per mod. Same ``run_hierarchical_mod_eval`` as the serial path."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    # Optional CBL_EVAL_SKILL_BATCH runs mods in smaller groups; unset keeps all at once.
+    width = max(1, int(os.environ.get("CBL_EVAL_SKILL_BATCH") or len(mod_specs)))
+    width = min(width, len(mod_specs))
+    frac = _mod_mem_fraction(width)
+    print(
+        f"  Parallel mods: {len(mod_specs)} total, {width} at a time, "
+        f"XLA_PYTHON_CLIENT_MEM_FRACTION={frac} (preallocate off)",
+        flush=True,
+    )
+    tmp = Path(tempfile.mkdtemp(prefix="cbl_eval_mods_"))
+    procs: list[tuple[str, subprocess.Popen, Path]] = []
+    failed: list[tuple[str, int]] = []
+    for index, mod in enumerate(mod_specs):
+        job = {
+            "config": config,
+            "skills_path": str(skills_path),
+            "meta_path": str(meta_path) if meta_path else None,
+            "mod": {
+                "key": mod.key,
+                "mods": list(mod.mods),
+                "category": mod.category,
+                "relabel": bool(mod.relabel),
+            },
+            "num_episodes": int(num_episodes),
+            "num_seeds": int(num_seeds),
+            "base_seed": int(base_seed),
+            "max_frames": int(max_frames),
+        }
+        job_path = tmp / f"{mod.key}.pkl"
+        out_path = tmp / f"{mod.key}.json"
+        job["out"] = str(out_path)
+        job_path.write_bytes(pickle.dumps(job))
+        env = os.environ.copy()
+        env["CBL_EVAL_MOD_WORKER"] = "1"
+        env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+        env["XLA_PYTHON_CLIENT_MEM_FRACTION"] = frac
+        env.setdefault("SDL_VIDEODRIVER", "dummy")
+        env.setdefault("WANDB_MODE", "disabled")
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "concept_based_learning.paper_eval.eval_mod_worker",
+                str(job_path),
+            ],
+            env=env,
+        )
+        procs.append((mod.key, proc, out_path))
+        if (index + 1) % width == 0 or index + 1 == len(mod_specs):
+            for key, running, path in procs[-(index % width + 1) :]:
+                rc = running.wait()
+                if rc != 0 or not path.is_file():
+                    failed.append((key, int(rc)))
+    if failed:
+        raise RuntimeError(f"parallel mod workers failed: {failed} (dir {tmp})")
+
+    results: dict[str, Any] = {}
+    for _key, _proc, out_path in procs:
+        piece = json.loads(out_path.read_text(encoding="utf-8"))
+        results.update(piece)
+    _attach_drop_from_base(results)
+    return results
+
+
+def _run_flat_pqn_mods_in_subprocesses(
+    *,
+    flat_pqn_path: str | Path,
+    config: dict[str, Any],
+    env_name: str,
+    object_centric: bool,
+    mod_specs: list[ModSpec],
+    num_episodes: int,
+    num_seeds: int,
+    base_seed: int,
+    max_frames: int,
+) -> dict[str, Any]:
+    """One process per mod. Same ``run_flat_pqn_greedy_eval`` as the serial path."""
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    width = min(_max_parallel_mods(), len(mod_specs))
+    frac = _mod_mem_fraction(width)
+    print(
+        f"  Parallel mods: {len(mod_specs)} total, {width} at a time, "
+        f"XLA_PYTHON_CLIENT_MEM_FRACTION={frac} (preallocate off)",
+        flush=True,
+    )
+    tmp = Path(tempfile.mkdtemp(prefix="cbl_eval_pqn_mods_"))
+    procs: list[tuple[ModSpec, subprocess.Popen, Path]] = []
+    failed: list[tuple[str, int]] = []
+    for start in range(0, len(mod_specs), width):
+        batch = mod_specs[start : start + width]
+        running: list[tuple[ModSpec, subprocess.Popen, Path]] = []
+        for mod in batch:
+            merged = merge_train_and_eval_game_mods(config, mod.mods)
+            out_path = tmp / f"{mod.key}.json"
+            job = {
+                "model_path": str(flat_pqn_path),
+                "game_mods": list(merged or ()),
+                "num_episodes": int(num_episodes),
+                "num_seeds": int(num_seeds),
+                "base_seed": int(base_seed),
+                "max_frames": int(max_frames),
+                "object_centric": bool(object_centric),
+                "env_name": str(env_name),
+                "out": str(out_path),
+            }
+            job_path = tmp / f"{mod.key}.pkl"
+            job_path.write_bytes(pickle.dumps(job))
+            env = os.environ.copy()
+            env["CBL_EVAL_MOD_WORKER"] = "1"
+            env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+            env["XLA_PYTHON_CLIENT_MEM_FRACTION"] = frac
+            env.setdefault("SDL_VIDEODRIVER", "dummy")
+            env.setdefault("WANDB_MODE", "disabled")
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "concept_based_learning.paper_eval.eval_flat_pqn_worker",
+                    str(job_path),
+                ],
+                env=env,
+            )
+            running.append((mod, proc, out_path))
+        for mod, proc, out_path in running:
+            rc = proc.wait()
+            procs.append((mod, proc, out_path))
+            if rc != 0 or not out_path.is_file():
+                failed.append((mod.key, int(rc)))
+    if failed:
+        raise RuntimeError(f"parallel flat PQN mod workers failed: {failed} (dir {tmp})")
+
+    results: dict[str, Any] = {}
+    for mod, _proc, out_path in procs:
+        stats = json.loads(out_path.read_text(encoding="utf-8"))
+        stats["mods"] = list(merge_train_and_eval_game_mods(config, mod.mods) or ())
+        stats["category"] = mod.category
+        results[mod.key] = stats
+        _rtpt_tick_eval_mod()
+    _attach_drop_from_base(results)
+    return results
 
 
 def run_hierarchical_mod_eval(
@@ -222,6 +363,7 @@ def _overlay_ego_flags_from_skill_config(
             "EGO_DISTANCE_CLIP_MAX_PX",
             "EGO_DISTANCE_CLIP_CHOICES_PX",
             "EGO_DISTANCE_MODE",
+            "EGO_AABB_GEOM",
             "EGO_DISTANCE_DELTA_SIGN_EPS_PX",
             "EGO_DISTANCE_BINS",
             "EGO_DISTANCE_BINS_SCALAR",
@@ -236,6 +378,8 @@ def _overlay_ego_flags_from_skill_config(
             "EGO_PSI_ANGLE_SCALAR",
             "EGO_POSE_XY",
             "USE_POV_RELATIVE_MAPPER",
+            "EGO_OBSERVATION_FRAME",
+            "EGO_ACTION_FRAME",
             "USE_POV_FIXED_BILATERAL",
             "USE_POV_FACING_FRAME",
             "FRAME_STACK_SIZE",
@@ -359,6 +503,13 @@ def run_mod_eval(
             if mode not in {"fixed_ego_rules", "constant_ego"}:
                 mode = "fixed_ego_rules"
             cfg["SKILL_POLICY_MODE"] = mode
+        if kind == "tandem" and (
+            meta_path is None or not Path(str(meta_path)).is_file()
+        ):
+            raise FileNotFoundError(
+                "tandem eval requires the learned selector checkpoint, "
+                f"missing {meta_path}"
+            )
         if kind not in {
             "heuristic_random",
             "fixed_skills",
@@ -372,43 +523,72 @@ def run_mod_eval(
             cfg = align_config_with_skill_checkpoint(cfg, params_tree)
             if meta_path is not None and Path(str(meta_path)).is_file():
                 meta_params = load_params_from_file(str(meta_path))
-        # heuristic_random / fixed_*: params_tree=None → no learned skill heads
-        results = run_hierarchical_mod_eval(
-            cfg,
-            params_tree=params_tree,
-            meta_params=meta_params,
-            mod_specs=mod_specs,
-            num_episodes=num_episodes,
-            num_seeds=num_seeds,
-            base_seed=base_seed,
-            max_frames=max_frames,
-        )
+        # Learned skills reload from disk in each worker. Heuristic / fixed
+        # arms stay in-process (no checkpoint to reopen).
+        if (
+            skills_path is not None
+            and _parallel_mods_enabled(cfg, len(mod_specs))
+        ):
+            results = _run_skill_mods_in_subprocesses(
+                cfg,
+                skills_path=skills_path,
+                meta_path=meta_path,
+                mod_specs=mod_specs,
+                num_episodes=num_episodes,
+                num_seeds=num_seeds,
+                base_seed=base_seed,
+                max_frames=max_frames,
+            )
+        else:
+            results = run_hierarchical_mod_eval(
+                cfg,
+                params_tree=params_tree,
+                meta_params=meta_params,
+                mod_specs=mod_specs,
+                num_episodes=num_episodes,
+                num_seeds=num_seeds,
+                base_seed=base_seed,
+                max_frames=max_frames,
+            )
         payload["results"] = results
         payload["skill_policy_mode"] = str(cfg.get("SKILL_POLICY_MODE", "learned"))
 
     elif kind == "flat_pqn":
         if flat_pqn_path is None:
             raise ValueError("flat_pqn eval requires flat_pqn_path")
-        results = {}
-        for mod in mod_specs:
-            merged = merge_train_and_eval_game_mods(config, mod.mods)
-            print(f"\n--- flat_pqn / {mod.key} (mods={merged or 'none'}) ---")
-            stats = run_flat_pqn_greedy_eval(
-                model_path=str(flat_pqn_path),
-                game_mods=merged or [],
+        if _parallel_mods_enabled(config, len(mod_specs)):
+            results = _run_flat_pqn_mods_in_subprocesses(
+                flat_pqn_path=flat_pqn_path,
+                config=config,
+                env_name=str(env_name),
+                object_centric=object_centric,
+                mod_specs=mod_specs,
                 num_episodes=num_episodes,
                 num_seeds=num_seeds,
                 base_seed=base_seed,
                 max_frames=max_frames,
-                object_centric=object_centric,
-                env_name=str(env_name),
-                progress=True,
             )
-            stats["mods"] = list(merged or ())
-            stats["category"] = mod.category
-            results[mod.key] = stats
-            _rtpt_tick_eval_mod()
-        _attach_drop_from_base(results)
+        else:
+            results = {}
+            for mod in mod_specs:
+                merged = merge_train_and_eval_game_mods(config, mod.mods)
+                print(f"\n--- flat_pqn / {mod.key} (mods={merged or 'none'}) ---")
+                stats = run_flat_pqn_greedy_eval(
+                    model_path=str(flat_pqn_path),
+                    game_mods=merged or [],
+                    num_episodes=num_episodes,
+                    num_seeds=num_seeds,
+                    base_seed=base_seed,
+                    max_frames=max_frames,
+                    object_centric=object_centric,
+                    env_name=str(env_name),
+                    progress=True,
+                )
+                stats["mods"] = list(merged or ())
+                stats["category"] = mod.category
+                results[mod.key] = stats
+                _rtpt_tick_eval_mod()
+            _attach_drop_from_base(results)
         payload["results"] = results
     elif kind == "random_actions":
         results = {}

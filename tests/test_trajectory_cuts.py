@@ -50,3 +50,10 @@ def test_env_cut_lifetime_vs_global():
 def test_unknown_mode_raises():
     with pytest.raises(ValueError, match="Unknown SKILL_TARGET_CUT"):
         normalize_skill_target_cut("bogus")
+
+
+def test_involved_cuts_use_sampled_global_object_ids():
+    targets = jnp.array([[7], [12]])
+    ids = jnp.array([[[2, 12, 7]], [[12, 7, 2]]])
+    cuts = skill_target_switch_cut(targets, 3, SKILL_TARGET_CUT_INVOLVED, object_ids=ids)
+    assert cuts.tolist() == [[[0., 1., 1.]]]

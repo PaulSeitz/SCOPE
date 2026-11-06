@@ -13,6 +13,10 @@ import numpy as np
 import optax
 from pathlib import Path
 
+from concept_based_learning.training.returns import (
+    lambda_return_targets, object_lambda_return_targets,
+)
+
 from concept_based_learning.observations.egocentric import (
     destroy_only_extras_active,
     ego_distance_clip_choices_px,
@@ -42,7 +46,15 @@ from concept_based_learning.networks.skill_network import (
 from concept_based_learning.networks.meta_factory import create_meta_network
 from concept_based_learning.networks.meta_network import flatten_raw_observation
 from concept_based_learning.observations.target_conditioning import build_oc_psi_features
-from concept_based_learning.observations.meta_oc_simple import build_skill_oc_flat_rel_obs
+from concept_based_learning.observations.meta_oc_simple import build_flat_oc_skill_obs
+from concept_based_learning.observations.ego_context import (
+    EGO_CONTEXT_SKILL_INPUT_MODES,
+    EGO_OC_NATIVE,
+    OC_NATIVE_TARGET_FRONT,
+    build_ego_context_skill_obs,
+    build_ego_oc_native_obs,
+    build_oc_native_target_front_obs,
+)
 from concept_based_learning.environments.meta_target_mask import (
     apply_meta_noop_target_mask,
     coerce_inactive_targets_to_meta_noop,
@@ -89,7 +101,6 @@ from concept_based_learning.training.trajectory_cuts import (
     DEFAULT_SKILL_TARGET_CUT,
     normalize_skill_target_cut,
     skill_target_switch_cut,
-    skill_target_switch_cut_env,
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
@@ -175,6 +186,7 @@ def make_train(
     )
     _skill_chunk_configured = int(config.get("SKILL_BOOTSTRAP_CHUNK_STEPS", 0))
     skill_gamma = float(config.get("SKILL_GAMMA", config["GAMMA"]))
+    skill_lambda = float(config.get("SKILL_LAMBDA", config["LAMBDA"]))
     skill_reward_lambda = float(config.get("SKILL_REWARD_LAMBDA", 0.0))
     # Default True preserves historical sign-clipped env TD targets (DQN/PQN Atari).
     clip_env_reward = bool(config.get("CLIP_REWARD", True))
@@ -249,7 +261,8 @@ def make_train(
     use_clip_dr = (
         _clip_choices is not None
         and len(_clip_choices) > 0
-        and skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES)
+        and skill_input_mode
+        in ("ego", "ego_embed", *EGO_CONTEXT_SKILL_INPUT_MODES, *PIXEL_SKILL_INPUT_MODES)
     )
     clip_choices_arr = (
         jnp.asarray(_clip_choices, dtype=jnp.float32) if use_clip_dr else None
@@ -348,39 +361,104 @@ def make_train(
         )
         return chosen_actions
 
-    def _skill_inputs(raw_obs, objects, target_idxs, distance_clips=None):
+    def _skill_inputs(raw_obs, objects, target_idxs, distance_clips=None, native_vecs=None):
         if skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
             if distance_clips is None:
                 return jax.vmap(get_ego_obs)(raw_obs, objects, target_idxs)
             return jax.vmap(
                 lambda r, o, t, c: get_ego_obs(r, o, t, distance_clip_px=c)
             )(raw_obs, objects, target_idxs, distance_clips)
+        if skill_input_mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+            if distance_clips is None:
+                return jax.vmap(
+                    lambda r, o, t: build_ego_context_skill_obs(
+                        r, o, t, mode=skill_input_mode, max_objects=MAX_OBJECTS
+                    )
+                )(raw_obs, objects, target_idxs)
+            return jax.vmap(
+                lambda r, o, t, c: build_ego_context_skill_obs(
+                    r,
+                    o,
+                    t,
+                    mode=skill_input_mode,
+                    max_objects=MAX_OBJECTS,
+                    distance_clip_px=c,
+                )
+            )(raw_obs, objects, target_idxs, distance_clips)
         if skill_input_mode in FLAT_OC_SKILL_INPUT_MODES:
             return jax.vmap(
-                lambda r, o, t: build_skill_oc_flat_rel_obs(
-                    r, o, t, max_objects=MAX_OBJECTS
+                lambda r, o, t: build_flat_oc_skill_obs(
+                    r, o, t, max_objects=MAX_OBJECTS, mode=skill_input_mode
                 )
             )(raw_obs, objects, target_idxs)
+        if skill_input_mode == EGO_OC_NATIVE:
+            return jax.vmap(
+                lambda r, o, t, v: build_ego_oc_native_obs(
+                    r, o, t, v, max_objects=MAX_OBJECTS
+                )
+            )(raw_obs, objects, target_idxs, native_vecs)
+        if skill_input_mode == OC_NATIVE_TARGET_FRONT:
+            return jax.vmap(
+                lambda o, t, v: build_oc_native_target_front_obs(
+                    o, t, v, max_objects=MAX_OBJECTS
+                )
+            )(objects, target_idxs, native_vecs)
+        if skill_input_mode == "oc_native":
+            from concept_based_learning.observations.native_oc_stack import (
+                oc_native_skill_features,
+            )
+
+            return jax.vmap(
+                lambda vec, idx: oc_native_skill_features(vec, idx, MAX_OBJECTS)
+            )(native_vecs, target_idxs)
         if skill_input_mode == "oc_embed":
             return jax.vmap(flatten_raw_observation)(raw_obs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+            "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, oc_embed, "
+            "oc_flat_rel, oc_flat_rel_role, "
             "pixel_embed, pixel_embed_cond."
         )
 
-    def _skill_input_single(raw_obs, objects, target_idx):
+    def _skill_input_single(raw_obs, objects, target_idx, native_vec=None):
         if skill_input_mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
             return get_ego_obs(raw_obs, objects, target_idx)
-        if skill_input_mode in FLAT_OC_SKILL_INPUT_MODES:
-            return build_skill_oc_flat_rel_obs(
-                raw_obs, objects, target_idx, max_objects=MAX_OBJECTS
+        if skill_input_mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+            return build_ego_context_skill_obs(
+                raw_obs,
+                objects,
+                target_idx,
+                mode=skill_input_mode,
+                max_objects=MAX_OBJECTS,
             )
+        if skill_input_mode in FLAT_OC_SKILL_INPUT_MODES:
+            return build_flat_oc_skill_obs(
+                raw_obs,
+                objects,
+                target_idx,
+                max_objects=MAX_OBJECTS,
+                mode=skill_input_mode,
+            )
+        if skill_input_mode == EGO_OC_NATIVE:
+            return build_ego_oc_native_obs(
+                raw_obs, objects, target_idx, native_vec, max_objects=MAX_OBJECTS
+            )
+        if skill_input_mode == OC_NATIVE_TARGET_FRONT:
+            return build_oc_native_target_front_obs(
+                objects, target_idx, native_vec, max_objects=MAX_OBJECTS
+            )
+        if skill_input_mode == "oc_native":
+            from concept_based_learning.observations.native_oc_stack import (
+                oc_native_skill_features,
+            )
+
+            return oc_native_skill_features(native_vec, target_idx, MAX_OBJECTS)
         if skill_input_mode == "oc_embed":
             return flatten_raw_observation(raw_obs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+            "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, oc_embed, "
+            "oc_flat_rel, oc_flat_rel_role, "
             "pixel_embed, pixel_embed_cond."
         )
 
@@ -448,6 +526,7 @@ def make_train(
                 lambda x: jnp.expand_dims(x, axis=0), probe_obs.objects
             ),
             jnp.expand_dims(probe_target, axis=0),
+            native_vecs=jnp.expand_dims(probe_obs.native_oc_vector, 0),
         )[0]
         probe_pixel = (
             probe_obs.pixel_observation
@@ -689,6 +768,7 @@ def make_train(
                     last_obs.objects,
                     safe_target_idxs,
                     step_clips,
+                    native_vecs=last_obs.native_oc_vector,
                 )
                 pixel_obses = (
                     last_obs.pixel_observation
@@ -827,7 +907,19 @@ def make_train(
                     step_env_state
                 )
                 life_lost = extract_life_lost(env_state, step_env_state)
-                game_over = is_game_over(new_done, life_lost, prev_lives, lives_after_step)
+                game_over = is_game_over(
+                    new_done,
+                    life_lost,
+                    prev_lives,
+                    lives_after_step,
+                    zero_lives_still_playing=str(config.get("ENV_NAME", "")).lower()
+                    == "seaquest",
+                )
+                life_lost = jnp.where(
+                    jnp.logical_and(new_done, life_lost < 0),
+                    jnp.int32(1),
+                    life_lost,
+                )
                 # Continue the same game after a per-life death; hard-reset only on game over
                 # or non-life termination (e.g. time limit).
                 reset_mask = jnp.logical_or(
@@ -915,20 +1007,21 @@ def make_train(
                     new_obs.objects,
                     safe_target_idxs,
                     env_clip_caps if use_clip_dr else None,
+                    native_vecs=new_obs.native_oc_vector,
                 )
 
                 if relabel_all_objects:
                     obj_ids = jnp.arange(MAX_OBJECTS, dtype=jnp.int32)
                     ego_obs_all_full = jax.vmap(
-                        lambda raw, objs: jax.vmap(
-                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx)
+                        lambda raw, objs, vec: jax.vmap(
+                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx, vec)
                         )(obj_ids)
-                    )(last_obs.raw_observation, last_obs.objects)
+                    )(last_obs.raw_observation, last_obs.objects, last_obs.native_oc_vector)
                     next_ego_obs_all_full = jax.vmap(
-                        lambda raw, objs: jax.vmap(
-                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx)
+                        lambda raw, objs, vec: jax.vmap(
+                            lambda obj_idx: _skill_input_single(raw, objs, obj_idx, vec)
                         )(obj_ids)
-                    )(new_obs.raw_observation, new_obs.objects)
+                    )(new_obs.raw_observation, new_obs.objects, new_obs.native_oc_vector)
                     ego_action_all_full = jax.vmap(
                         lambda game_action, raw, objs: jax.vmap(
                             lambda obj_idx: inverse_action_mapper(
@@ -1255,56 +1348,26 @@ def make_train(
                     )
                     # [NUM_STEPS, NUM_ENVS, MAX_OBJECTS]
 
-                    # Seed the backward scan from the last step.
-                    last_step_done_all = jnp.logical_or(
-                        transitions.skill_done_all[-1, :, :, skill_idx],
-                        transitions.done[-1, :, jnp.newaxis],
-                    ).astype(jnp.float32)
-                    last_next_q = next_q_max_all[-1] * (1.0 - last_step_done_all)
-                    last_reward_all = transitions.rewards_all[-1, :, :, skill_idx]
-                    last_lambda = last_reward_all + skill_gamma * last_next_q
-
+                    # Align every transition with its own next-state value.
                     target_switch_cut = skill_target_switch_cut(
                         transitions.target_idx,
                         transitions.next_ego_obs_all.shape[2],
                         skill_target_cut,
+                        object_ids=transitions.object_idx_all,
                     )
-
-                    def _get_target_all(carry, xs):
-                        lambda_ret, next_q = carry
-                        # xs: per-step slices, shapes [NUM_ENVS, MAX_OBJECTS]
-                        step_reward, step_done_skill, step_done_ep, step_target_cut, q_next_step = xs
-
-                        step_done = jnp.logical_or(
-                            step_done_skill, step_done_ep[:, jnp.newaxis]
-                        )
-                        step_done = jnp.logical_or(
-                            step_done, step_target_cut.astype(jnp.bool_)
-                        ).astype(jnp.float32)
-
-                        target_bootstrap = step_reward + skill_gamma * (1.0 - step_done) * next_q
-                        delta = lambda_ret - next_q
-                        lambda_ret = target_bootstrap + skill_gamma * config["LAMBDA"] * delta
-                        lambda_ret = (1.0 - step_done) * lambda_ret + step_done * step_reward
-
-                        return (lambda_ret, q_next_step), lambda_ret
-
-                    xs_all = (
-                        transitions.rewards_all[:-1, :, :, skill_idx],
-                        transitions.skill_done_all[:-1, :, :, skill_idx],
-                        transitions.done[:-1],
-                        target_switch_cut,
-                        next_q_max_all[:-1],
+                    target_switch_cut = jnp.concatenate(
+                        (target_switch_cut, jnp.zeros_like(next_q_max_all[-1:])), axis=0
                     )
-                    _, targets_all = jax.lax.scan(
-                        _get_target_all,
-                        (last_lambda, next_q_max_all[-1]),
-                        xs_all,
-                        reverse=True,
+                    step_done_all = jnp.logical_or(
+                        transitions.skill_done_all[..., skill_idx],
+                        transitions.done[..., None],
                     )
-                    # [NUM_STEPS, NUM_ENVS, MAX_OBJECTS]
-                    train_targets = jnp.concatenate(
-                        (targets_all, last_lambda[jnp.newaxis]), axis=0
+                    step_done_all = jnp.logical_or(step_done_all, target_switch_cut)
+                    train_targets = object_lambda_return_targets(
+                        transitions.rewards_all[..., skill_idx],
+                        step_done_all, next_q_max_all,
+                        transitions.object_idx_all, transitions.relabel_mask,
+                        skill_gamma, 0.0 if use_one_step_td else skill_lambda,
                     )
                 elif use_one_step_td:
                     next_q_max_single = skill_network_q_max(
@@ -1359,44 +1422,17 @@ def make_train(
                         chunk=use_pixel_skill,
                     )
 
-                    last_step_done = jnp.logical_or(
-                        transitions.skill_done[-1, :, skill_idx], transitions.done[-1]
-                    ).astype(jnp.float32)
-                    last_step_reward = transitions.rewards[-1, :, skill_idx]
-                    lambda_returns = last_step_reward + skill_gamma * (1.0 - last_step_done) * next_q_max_single[-1]
-
-                    target_switch_cut_env = skill_target_switch_cut_env(
+                    target_switch_cut_env = skill_target_switch_cut_env_padded(
                         transitions.target_idx, skill_target_cut
                     )
-
-                    def _get_target(carry, xs):
-                        lambda_ret, next_q = carry
-                        step_reward, step_done_skill, step_done_ep, step_target_cut, q_next = xs
-
-                        step_done = jnp.logical_or(step_done_skill, step_done_ep)
-                        step_done = jnp.logical_or(
-                            step_done, step_target_cut.astype(jnp.bool_)
-                        ).astype(jnp.float32)
-                        target_bootstrap = step_reward + skill_gamma * (1.0 - step_done) * next_q
-                        delta = lambda_ret - next_q
-                        lambda_ret = target_bootstrap + skill_gamma * config["LAMBDA"] * delta
-                        lambda_ret = (1.0 - step_done) * lambda_ret + step_done * step_reward
-                        return (lambda_ret, q_next), lambda_ret
-
-                    _, targets = jax.lax.scan(
-                        _get_target,
-                        (lambda_returns, next_q_max_single[-1]),
-                        (
-                            transitions.rewards[:-1, :, skill_idx],
-                            transitions.skill_done[:-1, :, skill_idx],
-                            transitions.done[:-1],
-                            target_switch_cut_env,
-                            next_q_max_single[:-1],
-                        ),
-                        reverse=True,
+                    step_done = jnp.logical_or(
+                        transitions.skill_done[..., skill_idx], transitions.done
                     )
-                    lambda_targets = jnp.concatenate((targets, lambda_returns[np.newaxis]))
-                    train_targets = lambda_targets[..., jnp.newaxis]
+                    step_done = jnp.logical_or(step_done, target_switch_cut_env)
+                    train_targets = lambda_return_targets(
+                        transitions.rewards[..., skill_idx], step_done,
+                        next_q_max_single, skill_gamma, skill_lambda,
+                    )[..., None]
 
                 def _learn_epoch(carry, _):
                     train_state, rng = carry
@@ -1468,7 +1504,7 @@ def make_train(
                                     on_policy,
                                 )
                             sq_err = jnp.square(chosen_action_qvals - target)
-                            loss = (sq_err * valid).sum() / (valid.sum() + 1e-8)
+                            loss = 0.5 * (sq_err * valid).sum() / (valid.sum() + 1e-8)
                             return loss, (updates, chosen_action_qvals)
 
                         (loss, (updates, qvals)), grads = jax.value_and_grad(
@@ -1823,13 +1859,22 @@ def make_train(
             else:
                 raw_label = obs.objects.semantic_label[-1, target_obj_idxs]
                 active_skills = label_to_skill_idx(raw_label)
-                ego_obs = get_ego_obs(
-                    obs.raw_observation,
-                    obs.objects,
-                    target_obj_idxs,
-                )
-                ego_obs_batch = ego_obs[np.newaxis, ...]
                 skill_input_mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+                if skill_input_mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+                    ego_obs = build_ego_context_skill_obs(
+                        obs.raw_observation,
+                        obs.objects,
+                        target_obj_idxs,
+                        mode=skill_input_mode,
+                        max_objects=int(config.get("MAX_OBJECTS", 35)),
+                    )
+                else:
+                    ego_obs = get_ego_obs(
+                        obs.raw_observation,
+                        obs.objects,
+                        target_obj_idxs,
+                    )
+                ego_obs_batch = ego_obs[np.newaxis, ...]
                 eval_pixel_obs = (
                     obs.pixel_observation
                     if skill_input_mode in PIXEL_SKILL_INPUT_MODES

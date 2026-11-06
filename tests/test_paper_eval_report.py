@@ -196,8 +196,8 @@ def test_load_and_retention(tmp_path: Path) -> None:
     assert len(rows) == 9
     bases = dict(base_returns_by_agent(rows))
     assert "skills/ego" in bases
-    # Prefer env_score_final over clipped mean.
-    assert bases["skills/ego"][0] == pytest.approx(5000)
+    # Reported return is the unclipped episode mean, not the engine-score column.
+    assert bases["skills/ego"][0] == pytest.approx(100)
     assert bases["pqn/pixel"][0] == pytest.approx(200)
     cats = mean_retention_by_category(rows)
     assert cats["skills/ego"]["semantic"] == pytest.approx(0.8)  # 4000/5000
@@ -214,8 +214,8 @@ def test_prefers_score_over_clipped_mean(tmp_path: Path) -> None:
     ego_base = next(
         r for r in rows if r["agent_label"] == "skills/ego" and r["mod_key"] == "base"
     )
-    assert ego_base["mean"] == pytest.approx(5000)
-    assert ego_base["score_source"] == "env_score_final"
+    assert ego_base["mean"] == pytest.approx(100)
+    assert ego_base["score_source"] == "episode_return"
     assert ego_base["mean_reward_sum"] == pytest.approx(100)
 
 
@@ -359,8 +359,8 @@ def test_train_peak_vs_eval(tmp_path: Path) -> None:
     rows = load_mod_eval_summary(csv_path)
     pairs = {p["agent_label"]: p for p in train_eval_pairs(rows, peaks, rq=1)}
     assert pairs["skills/ego"]["train_peak"] == pytest.approx(9000)
-    assert pairs["skills/ego"]["eval_mean"] == pytest.approx(5000)
-    assert pairs["skills/ego"]["gap"] == pytest.approx(4000)
+    assert pairs["skills/ego"]["eval_mean"] == pytest.approx(100)
+    assert pairs["skills/ego"]["gap"] == pytest.approx(8900)
 
     out = tmp_path / "report_train.pdf"
     build_paper_eval_report(

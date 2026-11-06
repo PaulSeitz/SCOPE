@@ -24,6 +24,7 @@ from concept_based_learning.observations.action_space import (
     _WORLD_DIR_ANGLES_DEG,
     _default_get_player,
     _nearest_world_dir,
+    make_screen_aligned_action_mappers,
 )
 
 _USE_POV_RELATIVE: bool = False
@@ -35,7 +36,30 @@ def using_pov_relative() -> bool:
 
 def configure_pov_relative_from_config(config: dict | None) -> None:
     global _USE_POV_RELATIVE
-    _USE_POV_RELATIVE = bool((config or {}).get("USE_POV_RELATIVE_MAPPER", False))
+    cfg = config or {}
+    if cfg.get("EGO_OBSERVATION_FRAME", None) not in (None, ""):
+        _USE_POV_RELATIVE = observation_frame_from_config(cfg) != "screen"
+    else:
+        _USE_POV_RELATIVE = bool(cfg.get("USE_POV_RELATIVE_MAPPER", False))
+
+
+def observation_frame_from_config(config: dict | None) -> str:
+    """Resolve observation coordinates while preserving legacy Booleans."""
+    cfg = config or {}
+    raw = cfg.get("EGO_OBSERVATION_FRAME", None)
+    if raw in (None, ""):
+        if bool(cfg.get("USE_POV_FACING_FRAME", False)):
+            return "facing"
+        return "target" if bool(cfg.get("USE_POV_RELATIVE_MAPPER", False)) else "screen"
+    frame = str(raw).strip().lower()
+    aliases = {"world": "screen", "body": "facing", "pov": "target"}
+    frame = aliases.get(frame, frame)
+    if frame not in {"target", "facing", "screen"}:
+        raise ValueError(
+            "EGO_OBSERVATION_FRAME must be 'target', 'facing', or 'screen', "
+            f"got {raw!r}."
+        )
+    return frame
 
 
 # Per-env move specs: (noop, fire, move_table[8], move_fire_table[8])
@@ -441,13 +465,54 @@ def make_facing_relative_mappers(
     return mapper, inverse_mapper
 
 
-def resolve_action_mappers(components, config: dict) -> tuple[Callable, Callable]:
-    """Pick POV-relative or registered env mappers from config."""
-    if not bool(config.get("USE_POV_RELATIVE_MAPPER", False)):
-        return components.action_mapper, components.inverse_action_mapper
+def make_screen_relative_mappers(jax_game_id: str) -> tuple[Callable, Callable]:
+    """Return fixed-screen mappers that never inspect target geometry or facing.
 
-    mapper, inverse = make_facing_relative_mappers(components.jax_game_id)
-    return mapper, inverse
+    Asteroids is the sole exception to a static lookup: its game controls rotate
+    and thrust, so its adapter reads only player orientation to reach an absolute
+    screen heading.  The selected target is still ignored.
+    """
+    game_key = str(jax_game_id).lower()
+    if game_key == "asteroids":
+        from concept_based_learning.observations.pov_rotate_aim import (
+            make_asteroids_screen_mappers,
+        )
+
+        return make_asteroids_screen_mappers()
+    if game_key not in _MOVE_SPECS:
+        raise ValueError(
+            f"No screen-frame move spec for jax_game_id={jax_game_id!r}. "
+            f"Known: {sorted(_MOVE_SPECS)}"
+        )
+    noop, fire, move, mfire = _MOVE_SPECS[game_key]
+    return make_screen_aligned_action_mappers(noop, fire, move, mfire)
+
+
+def action_frame_from_config(config: dict | None) -> str:
+    """Resolve action coordinates while preserving legacy flag behaviour."""
+    cfg = config or {}
+    raw = cfg.get("EGO_ACTION_FRAME", None)
+    if raw in (None, ""):
+        return "facing" if bool(cfg.get("USE_POV_RELATIVE_MAPPER", False)) else "target"
+    frame = str(raw).strip().lower()
+    aliases = {"world": "screen", "body": "facing", "pov": "facing"}
+    frame = aliases.get(frame, frame)
+    if frame not in {"target", "facing", "screen"}:
+        raise ValueError(
+            "EGO_ACTION_FRAME must be 'target', 'facing', or 'screen', "
+            f"got {raw!r}."
+        )
+    return frame
+
+
+def resolve_action_mappers(components, config: dict) -> tuple[Callable, Callable]:
+    """Pick target-, facing-, or fixed-screen mappers from config."""
+    frame = action_frame_from_config(config)
+    if frame == "target":
+        return components.action_mapper, components.inverse_action_mapper
+    if frame == "screen":
+        return make_screen_relative_mappers(components.jax_game_id)
+    return make_facing_relative_mappers(components.jax_game_id)
 
 
 def apply_seaquest_ascent_block(mapped_action, raw_obs, target_idx):

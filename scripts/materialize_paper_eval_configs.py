@@ -157,8 +157,8 @@ def _base_skill_flags(env: str, skill_mode: str, *, transfer_from_seaquest: bool
 def _alg_skills(env: str, *, total_steps: int, skill_mode: str = "ego") -> dict:
     meta = ENVS[env]
     alg = {
-        "NUM_SKILLS": 4,
-        "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"],
+        "NUM_SKILLS": 3,
+        "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID"],
         "MAX_OBJECTS": meta["MAX_OBJECTS"],
         "EGO_ACTION_DIM": 18,
         "HIDDEN_SIZE": 128,
@@ -296,8 +296,8 @@ def materialize_rq2() -> None:
 
 def _seaquest_skill_alg_block(*, skill_input: str) -> dict:
     return {
-        "NUM_SKILLS": 4,
-        "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"],
+        "NUM_SKILLS": 3,
+        "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID"],
         "MAX_OBJECTS": 35,
         "EGO_ACTION_DIM": 18,
         "HIDDEN_SIZE": 128,
@@ -363,8 +363,8 @@ def _rq3_base(*, meta_mode: str, kind: str, train_mode: str, stem: str, short: s
         **WINNER_EGO_FLAGS,
         "alg": {
             "INIT_MODEL_PATH": RQ1_EGO,
-            "NUM_SKILLS": 4,
-            "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"],
+            "NUM_SKILLS": 3,
+            "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID"],
             "MAX_OBJECTS": 35,
             "EGO_ACTION_DIM": 18,
             "HIDDEN_SIZE": 128,

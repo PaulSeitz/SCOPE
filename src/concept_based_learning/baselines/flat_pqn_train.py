@@ -13,6 +13,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from concept_based_learning.environments.breakout.auto_launch import maybe_wrap_breakout_auto_launch
+from concept_based_learning.training.returns import lambda_return_targets
+
 import chex
 import jax
 import jax.numpy as jnp
@@ -108,6 +111,7 @@ def make_train(config: dict[str, Any]):
                 game_mods=train_mods,
             )
 
+        base_env = maybe_wrap_breakout_auto_launch(base_env, env_name, cfg)
         wrapped = AtariWrapper(
             base_env,
             sticky_actions=0.0 if not cfg.get("STICKY_ACTIONS", False) else 0.25,
@@ -222,6 +226,7 @@ def make_train(config: dict[str, Any]):
             norm_type=str(cfg.get("NORM_TYPE", "layer_norm")),
             norm_input=bool(cfg.get("NORM_INPUT", False)),
             object_centric=network_object_centric,
+            channel_stack=bool(cfg.get("PIXEL_CHANNEL_STACK", False)),
         )
 
         def create_agent(key):
@@ -290,28 +295,15 @@ def make_train(config: dict[str, Any]):
             )
             last_q = jnp.max(last_q, axis=-1)
 
-            def _get_target(lambda_returns_and_next_q, transition):
-                lambda_returns, next_q = lambda_returns_and_next_q
-                target_bootstrap = (
-                    transition.reward + cfg["GAMMA"] * (1 - transition.done) * next_q
-                )
-                delta = lambda_returns - next_q
-                lambda_returns = (
-                    target_bootstrap + cfg["GAMMA"] * cfg["LAMBDA"] * delta
-                )
-                lambda_returns = (1 - transition.done) * lambda_returns + transition.done * transition.reward
-                next_q = jnp.max(transition.q_val, axis=-1)
-                return (lambda_returns, next_q), lambda_returns
-
-            last_q = last_q * (1 - transitions.done[-1])
-            lambda_returns = transitions.reward[-1] + cfg["GAMMA"] * last_q
-            _, targets = jax.lax.scan(
-                _get_target,
-                (lambda_returns, last_q),
-                jax.tree_util.tree_map(lambda x: x[:-1], transitions),
-                reverse=True,
+            # q_val[t] belongs to s_t; pair each reward with V(s_{t+1}).
+            current_values = jnp.max(transitions.q_val, axis=-1)
+            next_values = jnp.concatenate(
+                (current_values[1:], last_q[None]), axis=0
             )
-            lambda_targets = jnp.concatenate((targets, lambda_returns[np.newaxis]))
+            lambda_targets = lambda_return_targets(
+                transitions.reward, transitions.done, next_values,
+                cfg["GAMMA"], cfg["LAMBDA"],
+            )
 
             def _learn_epoch(carry, _):
                 train_state, rng = carry

@@ -11,7 +11,7 @@ from concept_based_learning.networks.meta_network import MetaQNetwork
 
 # per_object_mlp: global + per-slot object features, shared row-wise MLP (default)
 # flat_mlp: raw obs vector only -> Dense(MAX_OBJECTS)
-META_ARCHITECTURE_CHOICES = ("per_object_mlp", "flat_mlp")
+META_ARCHITECTURE_CHOICES = ("per_object_mlp", "flat_mlp", "pixel_slots", "pixel_candidates")
 
 
 def _meta_num_layers(config: Dict[str, Any], arch_key: str) -> int:
@@ -46,6 +46,29 @@ def _meta_network_kwargs(config: Dict[str, Any], *, num_layers: int) -> Dict[str
 def create_meta_network(config: Dict[str, Any]) -> nn.Module:
     """Instantiate the meta Q-network selected by ``config['META_ARCHITECTURE']``."""
     arch = str(config.get("META_ARCHITECTURE", "per_object_mlp")).lower().strip()
+
+    if arch in ("pixel_slots", "pixel_candidates"):
+        from concept_based_learning.networks.pixel_meta_network import PixelMetaQNetwork
+        from concept_based_learning.environments.meta_target_mask import meta_noop_target_idx
+
+        mode = str(config.get("META_INPUT_MODE", "")).lower().strip()
+        if mode not in ("pixel_embed", "pixel_embedding", "cnn"):
+            raise ValueError(f"{arch} requires META_INPUT_MODE=pixel_embed.")
+        if bool(config.get("META_TARGET_LOCKED_INPUT", False)):
+            raise ValueError("Pixel-only pilots do not accept target-lock metadata.")
+        if bool(config.get("META_USE_FIRE_TARGET", False)):
+            raise ValueError("Pixel pilots support object targets and NOOP, not meta FIRE.")
+        if not bool(config.get("META_USE_NOOP_TARGET", False)):
+            raise ValueError("Pixel pilots require an explicit reserved NOOP slot.")
+        kwargs = _meta_network_kwargs(
+            config, num_layers=_meta_num_layers(config, "META_FLAT_NUM_LAYERS")
+        )
+        for key in ("num_skills", "use_target_locked_input", "meta_input_mode"):
+            kwargs.pop(key)
+        return PixelMetaQNetwork(
+            **kwargs, architecture=arch, noop_idx=meta_noop_target_idx(config),
+            candidate_chunk_size=int(config.get("META_CANDIDATE_CHUNK_SIZE", 1)),
+        )
 
     if arch in ("per_object_mlp", "mlp", "default"):
         kwargs = _meta_network_kwargs(

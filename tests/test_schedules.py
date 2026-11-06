@@ -64,3 +64,14 @@ def test_lr_linear_decay_matches_flat_pqn_optax_steps():
     assert float(meta(0)) == pytest.approx(2.5e-4)
     assert float(skill(n_opt)) == pytest.approx(1e-20)
     assert float(meta(n_opt)) == pytest.approx(1e-20)
+
+
+def test_meta_lr_counts_its_own_epoch_override():
+    cfg = {"TOTAL_TIMESTEPS": 160, "NUM_STEPS": 4, "NUM_ENVS": 2,
+           "NUM_MINIBATCHES": 2, "NUM_EPOCHS": 1, "META_NUM_EPOCHS": 3,
+           "LR": .001, "SKILL_LR": .001, "META_LR": .001, "LR_LINEAR_DECAY": True}
+    skill, meta = skill_learning_rate_schedule(cfg), meta_learning_rate_schedule(cfg)
+    # 20 rollout updates: 40 skill optimizer steps, 120 meta optimizer steps.
+    assert float(skill(40)) == pytest.approx(1e-20)
+    assert float(meta(40)) == pytest.approx(.001 * 2 / 3)
+    assert float(meta(120)) == pytest.approx(1e-20)

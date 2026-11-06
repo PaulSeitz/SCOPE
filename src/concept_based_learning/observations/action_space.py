@@ -101,6 +101,14 @@ _WORLD_DIR_ANGLES_DEG = jnp.array(
     dtype=jnp.float32,
 )
 
+# Fixed screen-frame interpretation of ego actions 2..9.  The abstract names
+# remain unchanged for checkpoint compatibility, but FORWARD means screen-UP,
+# BACKWARD screen-DOWN, and LEFT/RIGHT are literal screen directions.  This is
+# deliberately independent of both the selected target and player facing.
+_SCREEN_EGO_DIR_INDICES = jnp.array(
+    [6, 0, 4, 2, 7, 5, 1, 3], dtype=jnp.int32
+)
+
 
 def _default_get_player(raw_obs):
     for name in ("player", "chicken", "agent", "skier"):
@@ -204,6 +212,65 @@ def make_target_aligned_action_mappers(
         make_ego_action_mapper(**shared),
         make_inverse_ego_action_mapper(**shared, **inverse_kwargs),
     )
+
+
+def build_screen_action_table(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+) -> jnp.ndarray:
+    """Build the fixed screen-frame 18-action lookup table.
+
+    Abstract actions 2..9 map to UP, RIGHT, LEFT, DOWN, UP-RIGHT,
+    UP-LEFT, DOWN-RIGHT, DOWN-LEFT respectively.  The fire variants use the
+    same headings.  Environment tables may collapse unsupported diagonals or
+    axes, exactly as the target/facing mappers do.
+    """
+    move = jnp.asarray(move_table, dtype=jnp.int32)
+    move_fire = jnp.asarray(move_fire_table, dtype=jnp.int32)
+    screen_move = move[_SCREEN_EGO_DIR_INDICES]
+    screen_move_fire = move_fire[_SCREEN_EGO_DIR_INDICES]
+    return jnp.concatenate(
+        [
+            jnp.asarray([noop_action, fire_action], dtype=jnp.int32),
+            screen_move,
+            screen_move_fire,
+        ]
+    )
+
+
+def make_screen_aligned_action_mappers(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+):
+    """Return target- and facing-independent fixed-screen action mappers."""
+    table = build_screen_action_table(
+        noop_action, fire_action, move_table, move_fire_table
+    )
+    noop = jnp.int32(noop_action)
+    fire = jnp.int32(fire_action)
+
+    def mapper(ego_action, raw_obs, target_idx, objects):
+        del raw_obs, target_idx, objects
+        return table[jnp.asarray(ego_action, dtype=jnp.int32)]
+
+    def inverse_mapper(game_action, raw_obs, target_idx, objects):
+        del raw_obs, target_idx, objects
+        game_action = jnp.asarray(game_action, dtype=jnp.int32)
+        matches = table == game_action
+        has_match = jnp.any(matches)
+        ego_action = jnp.argmax(matches).astype(jnp.int32)
+        # NOOP/FIRE can also appear in collapsed directional tables. Preserve
+        # their canonical meanings instead of whichever duplicate comes first.
+        if int(fire_action) != int(noop_action):
+            ego_action = jnp.where(game_action == fire, jnp.int32(1), ego_action)
+        ego_action = jnp.where(game_action == noop, jnp.int32(0), ego_action)
+        return jnp.where(has_match, ego_action, jnp.int32(0)).astype(jnp.int32)
+
+    return mapper, inverse_mapper
 
 
 def make_inverse_ego_action_mapper(

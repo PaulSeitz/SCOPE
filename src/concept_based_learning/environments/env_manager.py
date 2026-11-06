@@ -31,6 +31,7 @@ from jaxtari.games.jax_timepilot import TimePilotRenderer
 # Kaboom is not in upstream jaxatari yet — keep label/policy code, do not register.
 # from jaxtari.games.jax_kaboom import KaboomRenderer
 
+from concept_based_learning.environments.breakout.auto_launch import maybe_wrap_breakout_auto_launch
 from concept_based_learning.environments.labeling_wrapper import (
     JaxatariSemanticBaseWrapper,
 )
@@ -998,6 +999,8 @@ class EnvManager:
         else:
             env = make_atari_env(jax_id)
 
+        env = maybe_wrap_breakout_auto_launch(env, jax_id, config)
+
         wrapper_kwargs: Dict[str, Any] = dict(
             sticky_actions=sticky_actions,
             episodic_life=episodic_life,
@@ -1054,6 +1057,7 @@ class EnvManager:
         setattr(env, "_cbl_frame_stack_size", frame_stack_size)
         setattr(env, "_cbl_frame_skip", frame_skip)
         setattr(env, "_cbl_clip_reward", clip_reward)
+        setattr(env, "_cbl_native_oc_stack", bool(config.get("OC_NATIVE_STACK", False)))
 
         env = components.semantic_wrapper_cls(env)
         # Full-res display renderer for viz (live env may be native-downscaled).

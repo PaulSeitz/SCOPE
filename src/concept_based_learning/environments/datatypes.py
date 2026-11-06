@@ -98,10 +98,9 @@ def project_skill_outcomes(rewards, skill_done, num_skills: int):
     Project full-vocab reward/done vectors onto ``num_skills`` trained heads.
 
     ``extract_skill_rewards`` always returns width ``NUM_SKILL_LABELS`` (5).
-    When configs truncate with ``NUM_SKILLS < 5``, fold remapped channels the
-    same way as :func:`label_to_skill_idx`:
-      NAVIGATE  → COLLECT when ``num_skills < 4`` or ``REMAP_NAVIGATE_TO_COLLECT``
-      JUMP_OVER → AVOID   when ``num_skills < 5``
+    Heads that are not instantiated are dropped. Their reward channels are not
+    added onto COLLECT or AVOID. Label routing may still send a NAVIGATE or
+    JUMP_OVER target to a trained head; that head keeps only its own reward.
     """
     rewards = jnp.asarray(rewards)
     skill_done = jnp.asarray(skill_done)
@@ -113,30 +112,6 @@ def project_skill_outcomes(rewards, skill_done, num_skills: int):
     out_w = min(num_skills, full_w)
     out_r = rewards[..., :out_w]
     out_d = skill_done[..., :out_w]
-
-    collect_i = LABEL_COLLECT - 1
-    avoid_i = LABEL_AVOID - 1
-    navigate_i = LABEL_NAVIGATE - 1
-    jump_i = LABEL_JUMP_OVER - 1
-
-    fold_navigate = (
-        num_skills < LABEL_NAVIGATE or _REMAP_NAVIGATE_TO_COLLECT
-    ) and full_w > navigate_i and out_w > collect_i
-    if fold_navigate:
-        nav_r = rewards[..., navigate_i]
-        nav_d = skill_done[..., navigate_i]
-        out_r = out_r.at[..., collect_i].add(nav_r)
-        out_d = out_d.at[..., collect_i].set(
-            jnp.logical_or(out_d[..., collect_i], nav_d)
-        )
-
-    if num_skills < LABEL_JUMP_OVER and full_w > jump_i and out_w > avoid_i:
-        jump_r = rewards[..., jump_i]
-        jump_d = skill_done[..., jump_i]
-        out_r = out_r.at[..., avoid_i].add(jump_r)
-        out_d = out_d.at[..., avoid_i].set(
-            jnp.logical_or(out_d[..., avoid_i], jump_d)
-        )
 
     if out_w < num_skills:
         pad = num_skills - out_w
@@ -242,6 +217,9 @@ class ConceptObservation:
     # Optional stacked pixel observations used by pixel-based meta encoders.
     pixel_observation: Any = None
 
+    # Decision-level native OC vector (4 normalized frames). Unused arms carry a scalar.
+    native_oc_vector: Any = None
+
 
 @struct.dataclass
 class SemanticState:
@@ -249,6 +227,8 @@ class SemanticState:
 
     atari_state: AtariState
     obs_stack: Any = None
+    # Unnormalized decision-level ravel stack, shape (frame_stack, features).
+    native_flat_stack: Any = None
 
 
 # Backwards-compatible alias used by wrappers

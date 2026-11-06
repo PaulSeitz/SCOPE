@@ -63,10 +63,10 @@ EPS_DECAY = 0.1
 GAMMA = 0.99
 LAMBDA = 0.65
 
-HOME_ENVS = ("seaquest", "timepilot", "namethisgame")
+# Time Pilot is not a home environment and is not a transfer target.
+HOME_ENVS = ("seaquest", "namethisgame")
 ENVS: dict[str, dict] = {
     "seaquest": {"max_objects": 35, "heu": "env_specific", "prefix": "sq"},
-    "timepilot": {"max_objects": 7, "heu": "env_specific", "prefix": "tp"},
     "namethisgame": {"max_objects": 11, "heu": "env_specific", "prefix": "ntg"},
     "spaceinvaders": {"max_objects": 41, "heu": "sweep", "prefix": "si"},
     "beamrider": {"max_objects": 31, "heu": "env_specific", "prefix": "br"},
@@ -76,9 +76,13 @@ ENVS: dict[str, dict] = {
     "freeway": {"max_objects": 12, "heu": "env_specific", "prefix": "fw"},
     "phoenix": {"max_objects": 21, "heu": "env_specific", "prefix": "ph"},
 }
-TRANSFER_TARGETS = tuple(e for e in ENVS if e != "seaquest")
+def transfer_targets(src: str) -> tuple[str, ...]:
+    """Every other game in the suite. Time Pilot is not in ``ENVS``."""
+    return tuple(e for e in ENVS if e != src)
+
+
+TRANSFER_TARGETS = transfer_targets("seaquest")
 EXTRA_CEILING_ENVS = tuple(e for e in TRANSFER_TARGETS if e not in HOME_ENVS)
-IN_FAMILY = (("timepilot", "asteroids"), ("namethisgame", "spaceinvaders"))
 
 # Failure-mode strip (control + semantic + dynamics + layout + visual); drops the
 # lane_scramble / dynamic_lane_drift duplicates of shift_lanes / random_spawns.
@@ -130,7 +134,9 @@ MEASURED = {
     ("pqn_pixel", "namethisgame"),
     ("tandem_pixel", "seaquest"),
 }
-EVAL_HOURS = {"seaquest": 0.25, "other": 0.12}
+# Parallel mod workers: a full home eval is about one compile plus one rollout
+# wave (~3 min), not one serial pass per modification.
+EVAL_HOURS = {"seaquest": 0.06, "other": 0.05}
 FLOOR_EVAL_SCALE = FLOOR_EVAL_NUM_SEEDS / EVAL_NUM_SEEDS
 NEXUS_TRAIN_HOURS = 1.5  # symbolic paper HPs (Seaquest)
 NEXUS_HRL_TRAIN_HOURS = 0.7  # optim50m HRL estimate (≈ tandem_oc)
@@ -141,7 +147,6 @@ NEXUS_SYMBOLIC = (
 )
 NEXUS_HRL_OPTIM = (
     ("nexus_hrl", "cbl_seaquest_hrl_baseline_optim50m", "seaquest"),
-    ("nexus_hrl", "cbl_timepilot_hrl_baseline_optim50m", "timepilot"),
     ("nexus_hrl", "cbl_namethisgame_hrl_baseline_optim50m", "namethisgame"),
 )
 
@@ -269,7 +274,15 @@ def _reward_flags(env: str, skill_input: str) -> dict:
         "DESTROY_CONTACT_FAIL": True,
         "DESTROY_LIVING_PENALTY": False,
         "COLLECT_SPARSE_ONLY": True,
-        "AVOID_SPARSE_ONLY": True,
+        # Reference AVOID is ongoing separation shaping (+0.01, nonterminal).
+        # True would pay +1 and cut the return on the first step away.
+        "AVOID_SPARSE_ONLY": False,
+        # Destruction of the target is not an AVOID failure. Contact and
+        # life loss still are, for every label.
+        "AVOID_KILLED_EVENT_MODE": "none",
+        # Seaquest selector: divers are eligible without the near-surface gate
+        # when no DESTROY/AVOID hitbox is on screen. Other games ignore this.
+        "COLLECT_EARLY_WHEN_NO_THREATS": env == "seaquest",
     }
 
 
@@ -325,8 +338,11 @@ def _outer_alg() -> dict:
 
 def _skill_heads_alg(env: str) -> dict:
     return {
-        "NUM_SKILLS": 4,
-        "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID", "NAVIGATE"],
+        # NAVIGATE is folded onto COLLECT when NUM_SKILLS < 4. Seaquest's
+        # surface waypoint is already labeled COLLECT, so the fourth head is
+        # unused and is not initialized.
+        "NUM_SKILLS": 3,
+        "SKILL_NAMES": ["DESTROY", "COLLECT", "AVOID"],
         "MAX_OBJECTS": ENVS[env]["max_objects"],
         "EGO_ACTION_DIM": 18,
         "HIDDEN_SIZE": 128,
@@ -344,7 +360,9 @@ def _reward_alg(env: str, skill_input: str) -> dict:
         "DESTROY_CONTACT_FAIL": True,
         "DESTROY_LIVING_PENALTY": False,
         "COLLECT_SPARSE_ONLY": True,
-        "AVOID_SPARSE_ONLY": True,
+        "AVOID_SPARSE_ONLY": False,
+        "AVOID_KILLED_EVENT_MODE": "none",
+        "COLLECT_EARLY_WHEN_NO_THREATS": env == "seaquest",
         "USE_EGO_SHOT_FEATURES": False,
     }
 
@@ -359,15 +377,26 @@ def _skills_body(
     pov: bool = True,
     tags: list[str],
 ) -> dict:
+    # ``screen`` is the clean no-POV arm: world-frame observations and actions.
+    # The network is still the ego MLP.
+    screen = skill_input == "screen"
+    net_input = "ego" if screen else skill_input
+    use_pov = False if screen else pov
     alg = {
         **_skill_heads_alg(env),
         "SKILL_REWARD_LAMBDA": 0.0,
         "RESTRICT_FIRE_FOR_NON_DESTROY": False,
         **_outer_alg(),
-        **_reward_alg(env, skill_input),
-        **_skill_input_alg(skill_input),
+        **_reward_alg(env, net_input),
+        **_skill_input_alg(net_input),
     }
-    return {
+    if screen:
+        alg["SKILL_INPUT_MODE"] = "ego"
+        alg["EGO_OBSERVATION_FRAME"] = "screen"
+        alg["EGO_ACTION_FRAME"] = "screen"
+        alg["USE_POV_RELATIVE_MAPPER"] = False
+        alg["USE_POV_FACING_FRAME"] = False
+    body = {
         "PAPER_EVAL_RQ": int(rq[0]),
         "PAPER_EVAL_PHASE": "train",
         "PAPER_EVAL_KIND": "skills",
@@ -377,15 +406,22 @@ def _skills_body(
         "ALG_NAME": "hierarchical_pqn",
         "TRAIN_MODE": "skills_only",
         "ENV_NAME": env,
-        **_spine(pov=pov),
+        **_spine(pov=use_pov),
         "SAVE_PATH": _save(stem),
         "WANDB_RUN_NAME": f"{ENVS[env]['prefix']}_{stem}",
         "WANDB_TAGS": tags,
-        **_skill_input_top(skill_input),
-        **_reward_flags(env, skill_input),
+        **_skill_input_top(net_input),
+        **_reward_flags(env, net_input),
         "alg": alg,
         "SEED": seed,
     }
+    if screen:
+        body["SKILL_INPUT_MODE"] = "ego"
+        body["EGO_OBSERVATION_FRAME"] = "screen"
+        body["EGO_ACTION_FRAME"] = "screen"
+        body["USE_POV_RELATIVE_MAPPER"] = False
+        body["USE_POV_FACING_FRAME"] = False
+    return body
 
 
 def _tandem_body(env: str, *, stem: str, seed: int, meta: str, tags: list[str]) -> dict:
@@ -558,6 +594,9 @@ def _skills_eval_body(
             **_reward_flags(eval_env, skill_input),
         }
     )
+    for key in ("EGO_OBSERVATION_FRAME", "EGO_ACTION_FRAME", "USE_POV_RELATIVE_MAPPER", "USE_POV_FACING_FRAME"):
+        if key in tdoc:
+            body[key] = tdoc[key]
     if meta is not None:
         body["META_INPUT_MODE"] = tdoc["META_INPUT_MODE"]
     body["alg"] = {
@@ -568,6 +607,12 @@ def _skills_eval_body(
         **_skill_input_alg(skill_input),
         **({"META_INPUT_MODE": tdoc["META_INPUT_MODE"]} if meta is not None else {}),
     }
+    if tdoc.get("EGO_OBSERVATION_FRAME") == "screen":
+        body["alg"]["SKILL_INPUT_MODE"] = "ego"
+        body["alg"]["EGO_OBSERVATION_FRAME"] = "screen"
+        body["alg"]["EGO_ACTION_FRAME"] = "screen"
+        body["alg"]["USE_POV_RELATIVE_MAPPER"] = False
+        body["alg"]["USE_POV_FACING_FRAME"] = False
     body.update(_eval_tail(train.seed))
     return body
 
@@ -730,20 +775,29 @@ def build_runs() -> list[Run]:
     # Flat PQN / tandem meta OC stay on oc_simple_rel_role (matrix + role pool).
     # Skill OC ablation uses oc_flat_rel: same relative rows + is_target, flattened
     # into the ego-style MLP (not the mismatched full oc_embed skill path).
-    for seed in SEEDS:
-        for arm, skill_input, pov in (
-            ("skills_pixel_outline", "pixel_embed", True),
-            ("skills_nopov", "ego", False),
-            ("skills_oc_flat_rel", "oc_flat_rel", True),
-        ):
-            t = skills_train(arm, "seaquest", seed, tier="core", rq="1abl",
-                             skill_input=skill_input, pov=pov)
-            home_eval(t, tier="core")
+    # Seaquest and Name This Game: pixel outline, target-aligned no-POV,
+    # screen-frame no-POV, flat OC, and role-aware flat OC. Each transfers
+    # to every other suite game.
+    ablation_arms = (
+        ("skills_pixel_outline", "pixel_embed", True),
+        ("skills_nopov", "ego", False),
+        ("skills_screen", "screen", False),
+        ("skills_oc_flat_rel", "oc_flat_rel", True),
+        ("skills_oc_flat_rel_role", "oc_flat_rel_role", True),
+    )
+    for env in HOME_ENVS:
+        for seed in SEEDS:
+            for arm, skill_input, pov in ablation_arms:
+                t = skills_train(arm, env, seed, tier="core", rq="1abl",
+                                 skill_input=skill_input, pov=pov)
+                home_eval(t, tier="core")
+                for dst in transfer_targets(env):
+                    zs_eval(t, dst, tier="core", arm=arm)
 
-    # --- RQ3: tandem (OC meta main on all homes; pixel meta ablation on SQ) -----
+    # --- RQ3: OC and pixel tandem meta-policies on both home environments -------
     tandem_oc: dict[tuple[str, int], Run] = {}
     for env in HOME_ENVS:
-        metas = ("oc", "pixel") if env == "seaquest" else ("oc",)
+        metas = ("oc", "pixel")
         for meta in metas:
             for seed in SEEDS:
                 arm = f"tandem_{meta}"
@@ -758,10 +812,13 @@ def build_runs() -> list[Run]:
                 if meta == "oc":
                     tandem_oc[(env, seed)] = t
 
-    # --- RQ2: Seaquest ego skills → 9 targets (zero-shot, target heuristic) -----
+    # --- RQ2: every learned Seaquest/NTG skill arm → every other suite game -----
     for seed in SEEDS:
         src = by_stem[_stem("skills_ego", "seaquest", seed)]
-        for dst in TRANSFER_TARGETS:
+        for dst in transfer_targets("seaquest"):
+            zs_eval(src, dst, tier="core", arm="skills_ego")
+        src = by_stem[_stem("skills_ego", "namethisgame", seed)]
+        for dst in transfer_targets("namethisgame"):
             zs_eval(src, dst, tier="core", arm="skills_ego")
 
     # --- Floors: attribution on homes, transfer floors on every target ---------
@@ -772,19 +829,23 @@ def build_runs() -> list[Run]:
         if env in HOME_ENVS:
             floor("constant_ego", env, tier="core")
 
-    # --- Extras: native ceilings, in-family ZS, tandem-skill ZS -----------------
+    # --- Extras: native ceilings on the non-home transfer targets ----------------
     for env in EXTRA_CEILING_ENVS:
         for seed in SEEDS:
             t = skills_train("skills_ego", env, seed, tier="extras", rq="2ceil")
             home_eval(t, tier="extras")
-    for src_env, dst in IN_FAMILY:
+            for dst in HOME_ENVS:
+                zs_eval(t, dst, tier="extras", arm="skills_ego")
+
+    # Tandem skill heads transfer to every other suite game.
+    for (env, _seed), t in tandem_oc.items():
+        for dst in transfer_targets(env):
+            zs_eval(t, dst, tier="core", arm="tandem_oc_skills", tandem=True)
+    for env in HOME_ENVS:
         for seed in SEEDS:
-            zs_eval(by_stem[_stem("skills_ego", src_env, seed)], dst, tier="extras",
-                    arm="skills_ego")
-    for seed in SEEDS:
-        for dst in ("timepilot", "namethisgame"):
-            zs_eval(tandem_oc[("seaquest", seed)], dst, tier="extras", arm="tandem_oc_skills",
-                    tandem=True)
+            t = by_stem[_stem("tandem_pixel", env, seed)]
+            for dst in transfer_targets(env):
+                zs_eval(t, dst, tier="core", arm="tandem_pixel_skills", tandem=True)
 
     return runs
 
@@ -903,9 +964,11 @@ def _nexus_script() -> str:
         out = f"./outputs/models/paper_eval/eval/{stem}_eval_mods.json"
         mods = " ".join(_mod_keys(env))
         lines += [
-            f"if [ $(({k} % N)) -eq \"$I\" ] && [ ! -f {out} ]; then",
-            f"  python scripts/run_nexus.py train --alg {alg} --seed {seed} "
+            f"if [ $(({k} % N)) -eq \"$I\" ] && ! python scripts/run_nexus.py check-eval --path {out} --eval-episodes 3 --eval-num-seeds {EVAL_NUM_SEEDS} --mod-keys {mods}; then",
+            f"  if ! compgen -G '{save}/*/*_seed{seed}_vmap0.safetensors' > /dev/null; then",
+            f"    python scripts/run_nexus.py train --alg {alg} --seed {seed} "
             f"--save-path {save}",
+            "  fi",
             f"  python scripts/run_nexus.py mod-eval --alg {alg} --ckpt {save} "
             f"--seed {seed + 10_000} --eval-num-seeds {EVAL_NUM_SEEDS} "
             f"--eval-episodes 3 --mod-keys {mods} --out-json {out}",
@@ -996,6 +1059,20 @@ def _runlog(runs: list[Run]) -> str:
         "(same feature builder). Skill OC ablation = `oc_flat_rel` (same relative "
         "rows + `is_target`, flattened MLP; no role-pool / set encoder).",
         "",
+        "## Follow-up (not in this suite)",
+        "",
+        "- **Robustness-focus probes:** several paper_core mods above are weak "
+        "tests of what we care about (layout shift vs task-preserving "
+        "simplification). Opt-in allowlists live at "
+        "`configs/experiment/paper_eval/mods/<game>_robustness_focus.yaml` "
+        "(implemented in the Seaquest-robustness fork’s `robustness_probes.py`). "
+        "After the locked thesis_final sweep, re-eval frozen `tf_*` checkpoints "
+        "with `PAPER_EVAL_MODS: <game>_robustness_focus`. Details: "
+        "`docs/robustness_focus_2026-10-15.md`.",
+        "- Transfers: Seaquest ego, Seaquest skill ablations (pixel outline, "
+        "no-POV, oc_flat_rel), Name This Game ego, and every scheduled tandem "
+        "each go to every other game in the suite. Time Pilot is not included.",
+        "",
         "## Budget",
         "",
         f"- core: {sum(r.tier == 'core' for r in runs)} runs ≈ {tot['core']:.1f} A6000-h",
@@ -1033,6 +1110,11 @@ def materialize(*, dry: bool) -> list[Run]:
     if not dry:
         _OUT.mkdir(parents=True, exist_ok=True)
         for old in _OUT.glob("tf_*.yaml"):
+            # Probe and avsep files are the live recipe comparison. The
+            # generator does not emit them, and a running chain still opens
+            # them by path.
+            if "probe_" in old.name or "avsep" in old.name:
+                continue
             old.unlink()
         for r in runs:
             (_OUT / f"{r.stem}.yaml").write_text(_dump(r), encoding="utf-8")

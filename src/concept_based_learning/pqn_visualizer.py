@@ -101,7 +101,15 @@ from concept_based_learning.networks.skill_network import (
     QNetwork,
     q_network_from_config,
 )
-from concept_based_learning.observations.meta_oc_simple import build_skill_oc_flat_rel_obs
+from concept_based_learning.observations.meta_oc_simple import build_flat_oc_skill_obs
+from concept_based_learning.observations.ego_context import (
+    EGO_CONTEXT_SKILL_INPUT_MODES,
+    EGO_OC_NATIVE,
+    OC_NATIVE_TARGET_FRONT,
+    build_ego_context_skill_obs,
+    build_ego_oc_native_obs,
+    build_oc_native_target_front_obs,
+)
 from concept_based_learning.observations.pov_relative import (
     resolve_action_mappers,
     using_pov_relative,
@@ -599,8 +607,8 @@ def infer_skill_hparams_from_params(
         if channels_per_frame > 0 and first_in % channels_per_frame == 0:
             frame_stack_size = first_in // channels_per_frame
         ckpt_ego_in = first_in
-    elif mode in FLAT_OC_SKILL_INPUT_MODES:
-        # Latest-frame flat OC vector — no frame-stack inference.
+    elif mode in FLAT_OC_SKILL_INPUT_MODES or mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+        # Prebuilt vector (flat OC / ego + context) — exact width check only.
         ckpt_ego_in = first_in
 
     out = {
@@ -735,16 +743,18 @@ def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
     ckpt_in = config.pop("_ckpt_ego_in", None)
     # oc_embed / pixel Dense_0 is embed width — not comparable to feat length.
-    if mode not in ("ego", "ego_embed", *FLAT_OC_SKILL_INPUT_MODES):
+    if mode not in (
+        "ego", "ego_embed", *FLAT_OC_SKILL_INPUT_MODES, *EGO_CONTEXT_SKILL_INPUT_MODES
+    ):
         return
     if ckpt_in is None:
         return
     if int(ego_feat_dim) == int(ckpt_in):
         return
-    if mode in FLAT_OC_SKILL_INPUT_MODES:
+    if mode in FLAT_OC_SKILL_INPUT_MODES or mode in EGO_CONTEXT_SKILL_INPUT_MODES:
         raise ValueError(
             f"Skill checkpoint expects MLP input size {ckpt_in}, but this environment's "
-            f"oc_flat_rel observation length is {ego_feat_dim}."
+            f"{mode} observation length is {ego_feat_dim}."
         )
     channels_per_frame = ego_obs_channels_per_frame()
     need_stack = (
@@ -840,20 +850,54 @@ def _hud_target_distance_px(raw_obs, objects, target_obj_idx: int, last_frame_eg
     return distance_pixels_from_feature(float(last_frame_ego[0]))
 
 
-def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx):
+def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx, native_vec=None):
     mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode == EGO_OC_NATIVE:
+        return build_ego_oc_native_obs(
+            raw_obs,
+            objects,
+            target_idx,
+            native_vec,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+    if mode == OC_NATIVE_TARGET_FRONT:
+        return build_oc_native_target_front_obs(
+            objects,
+            target_idx,
+            native_vec,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+    if mode == "oc_native":
+        from concept_based_learning.observations.native_oc_stack import (
+            oc_native_skill_features,
+        )
+
+        if native_vec is None:
+            raise ValueError("oc_native skills require the aligned native OC vector.")
+        return oc_native_skill_features(
+            native_vec, target_idx, int(config.get("MAX_OBJECTS", 35))
+        )
     if mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
         return get_ego_obs(raw_obs, objects, target_idx)
+    if mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+        return build_ego_context_skill_obs(
+            raw_obs,
+            objects,
+            target_idx,
+            mode=mode,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
     if mode in FLAT_OC_SKILL_INPUT_MODES:
         max_objects = int(config.get("MAX_OBJECTS", 35))
-        return build_skill_oc_flat_rel_obs(
-            raw_obs, objects, target_idx, max_objects=max_objects
+        return build_flat_oc_skill_obs(
+            raw_obs, objects, target_idx, max_objects=max_objects, mode=mode
         )
     if mode == "oc_embed":
         return flatten_raw_observation(raw_obs)
     raise ValueError(
         f"Unknown SKILL_INPUT_MODE={mode!r}. "
-        "Expected one of: ego, ego_embed, oc_embed, oc_flat_rel, "
+        "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, oc_embed, "
+        "oc_flat_rel, oc_flat_rel_role, "
         "pixel_embed, pixel_embed_cond."
     )
 
@@ -923,9 +967,14 @@ def _propose_meta_target(
         persist_steps_remaining=steps_b,
     )[0]
 
+    meta_in = (
+        obs.native_oc_vector
+        if str(config.get("META_INPUT_MODE", "")).lower().strip() == "oc_native"
+        else obs.raw_observation
+    )
     meta_q_vals = meta_network.apply(
         {"params": meta_params},
-        obs.raw_observation,
+        meta_in,
         obs.objects,
         train=False,
         target_locked=target_locked,
@@ -1136,6 +1185,7 @@ def _make_jitted_greedy_episode_runner(
                 obs.raw_observation,
                 obs.objects,
                 safe_target,
+                native_vec=obs.native_oc_vector,
             )
             pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
@@ -1385,6 +1435,7 @@ def run_greedy_eval_episodes(
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        native_vec=obs.native_oc_vector,
     )
     validate_skill_checkpoint_ego_dim(config, int(dummy_ego.shape[-1]))
     if params_tree is not None:
@@ -1412,29 +1463,73 @@ def run_greedy_eval_episodes(
         restrict_fire_for_non_destroy=restrict_fire_for_non_destroy,
     )
 
+    total_runs = num_seeds * num_episodes
+    ep_seeds = [
+        base_seed + seed_idx * 10_000 + ep_idx * 997
+        for seed_idx in range(num_seeds)
+        for ep_idx in range(num_episodes)
+    ]
+    # Batch all eval episodes on one GPU. Same seed formula as the sequential
+    # path. Cross-game transfers still need separate processes / GPUs.
+    parallel = bool(config.get("EVAL_PARALLEL_EPISODES", True)) and total_runs > 1
     if progress:
         mode = str(config.get("SKILL_POLICY_MODE", "learned"))
+        how = f"{total_runs} episodes in parallel" if parallel else "sequential episodes"
         print(
             f"  Compiling greedy eval (max {max_frames} steps/episode, "
-            f"skill_policy={mode})...",
+            f"skill_policy={mode}, {how})...",
             flush=True,
         )
-    _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
 
-    total_runs = num_seeds * num_episodes
     episode_returns: list[float] = []
     episode_metrics: list[dict[str, float]] = []
-    run_idx = 0
-    for seed_idx in range(num_seeds):
-        for ep_idx in range(num_episodes):
-            run_idx += 1
+    if parallel:
+        keys = jnp.stack([jax.random.PRNGKey(s) for s in ep_seeds])
+        run_batch = jax.jit(jax.vmap(run_episode))
+        if progress:
+            print(
+                f"  Greedy eval batch {total_runs}/{total_runs} "
+                f"({num_seeds} seeds × {num_episodes} eps)...",
+                flush=True,
+            )
+        returns_j, metrics_j = run_batch(keys)
+        returns_j, metrics_j = jax.device_get((returns_j, metrics_j))
+        for i, ep_return in enumerate(np.asarray(returns_j).tolist()):
+            ep_metrics = metrics_to_python(
+                {k: np.asarray(v)[i] for k, v in metrics_j.items()}
+                if isinstance(metrics_j, dict)
+                else jax.tree_util.tree_map(lambda x, i=i: x[i], metrics_j)
+            )
+            episode_returns.append(float(ep_return))
+            episode_metrics.append(ep_metrics)
+            if on_episode_done is not None:
+                on_episode_done()
+            if progress:
+                seed_idx = i // max(1, num_episodes)
+                ep_idx = i % max(1, num_episodes)
+                extra = ""
+                if "seaquest" in str(env_name).lower():
+                    extra = (
+                        f" kills={ep_metrics.get('env_kills', 0):.0f}"
+                        f" rescues={ep_metrics.get('env_rescues', 0):.0f}"
+                        f" divers_max={ep_metrics.get('env_divers_max', 0):.0f}"
+                    )
+                print(
+                    f"    [{seed_idx + 1}/{num_seeds} ep {ep_idx + 1}/{num_episodes}] "
+                    f"return={float(ep_return):.2f}{extra}",
+                    flush=True,
+                )
+    else:
+        _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
+        for run_idx, ep_seed in enumerate(ep_seeds, start=1):
+            seed_idx = (run_idx - 1) // max(1, num_episodes)
+            ep_idx = (run_idx - 1) % max(1, num_episodes)
             if progress:
                 print(
                     f"  Greedy eval episode {run_idx}/{total_runs} "
                     f"(seed {seed_idx + 1}/{num_seeds}, ep {ep_idx + 1}/{num_episodes})...",
                     flush=True,
                 )
-            ep_seed = base_seed + seed_idx * 10_000 + ep_idx * 997
             ep_return_j, ep_metrics_j = run_episode(jax.random.PRNGKey(ep_seed))
             ep_return = float(jax.device_get(ep_return_j))
             ep_metrics = metrics_to_python(jax.device_get(ep_metrics_j))
@@ -1550,6 +1645,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        native_vec=obs.native_oc_vector,
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
     validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
@@ -1743,6 +1839,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 obs.raw_observation,
                 obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
+                native_vec=obs.native_oc_vector,
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
             pixel_obs = _skill_pixel_obs_from_obs(config, obs)
@@ -2291,6 +2388,7 @@ def run_live_visualization(
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        native_vec=obs.native_oc_vector,
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
     validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
@@ -2480,6 +2578,7 @@ def run_live_visualization(
             obs.raw_observation,
             obs.objects,
             jnp.array(target_obj_idx, dtype=jnp.int32),
+            native_vec=obs.native_oc_vector,
         )
         ego_obs_batch = ego_obs[jnp.newaxis, ...]
         pixel_obs = _skill_pixel_obs_from_obs(config, obs)

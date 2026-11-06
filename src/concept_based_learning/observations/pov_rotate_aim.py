@@ -15,7 +15,11 @@ from typing import Callable
 
 import jax.numpy as jnp
 
-from concept_based_learning.observations.action_space import _default_get_player
+from concept_based_learning.observations.action_space import (
+    _SCREEN_EGO_DIR_INDICES,
+    _WORLD_DIR_ANGLES_DEG,
+    _default_get_player,
+)
 
 # Asteroids Discrete(14) indices (see asteroids_label.py).
 # DOWN / DOWNFIRE are hyperspace — allowed on ego BACKWARD*.
@@ -204,6 +208,65 @@ def make_asteroids_rotate_mappers(
             ego_idx,
         )
         return ego_idx.astype(jnp.int32)
+
+    return mapper, inverse_mapper
+
+
+def make_asteroids_screen_mappers(
+    *,
+    player_getter: Callable | None = None,
+) -> tuple[Callable, Callable]:
+    """Asteroids fixed-screen controller: turn to an absolute heading, then thrust.
+
+    Asteroids exposes body-relative rotate/thrust controls rather than world
+    direction buttons.  A static action table would therefore mislabel rotation
+    as screen movement.  This feedback mapper converts each screen direction to
+    an absolute heading and uses target-independent orientation feedback.
+    """
+    getter = player_getter or _default_get_player
+    desired_angles = _WORLD_DIR_ANGLES_DEG[_SCREEN_EGO_DIR_INDICES]
+
+    def mapper(ego_action, raw_obs, target_idx, objects):
+        del target_idx, objects
+        ego_action = jnp.asarray(ego_action, dtype=jnp.int32)
+        is_noop = ego_action == 0
+        is_fire_only = ego_action == 1
+        has_fire = ego_action >= 10
+        movement_action = jnp.where(has_fire, ego_action - 8, ego_action)
+        movement_idx = jnp.clip(movement_action - 2, 0, 7)
+        desired = desired_angles[movement_idx]
+
+        player = getter(raw_obs)
+        sprite_deg = jnp.asarray(player.orientation[-1], dtype=jnp.float32)
+        facing = sprite_deg - jnp.float32(90.0)
+        diff = (desired - facing + jnp.float32(180.0)) % jnp.float32(360.0) - jnp.float32(180.0)
+        aligned = jnp.abs(diff) <= jnp.float32(11.25)
+        turn_right = diff > 0
+        turn = jnp.where(turn_right, jnp.int32(_AS_RIGHT), jnp.int32(_AS_LEFT))
+        turn_fire = jnp.where(
+            turn_right, jnp.int32(_AS_RIGHTFIRE), jnp.int32(_AS_LEFTFIRE)
+        )
+        moving = jnp.where(
+            aligned,
+            jnp.where(has_fire, jnp.int32(_AS_UPFIRE), jnp.int32(_AS_UP)),
+            jnp.where(has_fire, turn_fire, turn),
+        )
+        result = jnp.where(is_fire_only, jnp.int32(_AS_FIRE), moving)
+        return jnp.where(is_noop, jnp.int32(_AS_NOOP), result).astype(jnp.int32)
+
+    def inverse_mapper(game_action, raw_obs, target_idx, objects):
+        game_action = jnp.asarray(game_action, dtype=jnp.int32)
+        actions = jnp.arange(18, dtype=jnp.int32)
+        table = jnp.asarray(
+            [mapper(a, raw_obs, target_idx, objects) for a in actions],
+            dtype=jnp.int32,
+        )
+        matches = table == game_action
+        has_match = jnp.any(matches)
+        ego_action = jnp.argmax(matches).astype(jnp.int32)
+        ego_action = jnp.where(game_action == _AS_FIRE, jnp.int32(1), ego_action)
+        ego_action = jnp.where(game_action == _AS_NOOP, jnp.int32(0), ego_action)
+        return jnp.where(has_match, ego_action, jnp.int32(0)).astype(jnp.int32)
 
     return mapper, inverse_mapper
 

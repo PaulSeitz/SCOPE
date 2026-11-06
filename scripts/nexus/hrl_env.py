@@ -101,6 +101,7 @@ def build_hrl_no_rewards_setup(config: dict[str, Any]) -> dict[str, Any]:
         FlattenObservationWrapper,
         MultiRewardLogWrapper,
         ObjectCentricWrapper,
+        PixelObsWrapper,
     )
 
     env_name = str(config.get("ENV_NAME", ""))
@@ -109,8 +110,6 @@ def build_hrl_no_rewards_setup(config: dict[str, Any]) -> dict[str, Any]:
     sticky = bool(config.get("STICKY_ACTIONS", False))
     episodic_life = bool(config.get("EPISODIC_LIFE", False))
     object_centric = bool(config.get("OBJECT_CENTRIC", True))
-    if not object_centric:
-        raise ValueError("CBL HRL factory requires OBJECT_CENTRIC=true")
 
     _, renderer = _game_and_renderer(env_key)
 
@@ -139,8 +138,19 @@ def build_hrl_no_rewards_setup(config: dict[str, Any]) -> dict[str, Any]:
                 env = AtariWrapper(env, sticky_actions=False, episodic_life=False)
             except TypeError:
                 env = AtariWrapper(env, sticky_actions=0.0, episodic_life=False)
-        env = ObjectCentricWrapper(env)
-        env = FlattenObservationWrapper(env)
+        if object_centric:
+            env = ObjectCentricWrapper(env)
+            env = FlattenObservationWrapper(env)
+        else:
+            env = PixelObsWrapper(
+                env,
+                do_pixel_resize=True,
+                pixel_resize_shape=(84, 84),
+                grayscale=True,
+                frame_stack_size=4,
+                frame_skip=4,
+                max_pooling=True,
+            )
         env = MultiRewardLogWrapper(env)
         return env
 

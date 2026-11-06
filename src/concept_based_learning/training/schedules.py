@@ -89,7 +89,8 @@ def meta_learning_rate_schedule(config, num_updates=None):
             init_value=lr_start,
             end_value=1e-20,
             transition_steps=optax_optimizer_transition_steps(
-                config, num_updates_decay(config)
+                {**config, "NUM_EPOCHS": config.get("META_NUM_EPOCHS", config["NUM_EPOCHS"])},
+                num_updates_decay(config),
             ),
         )
     lr_finish = config.get("META_LR_FINISH", None)

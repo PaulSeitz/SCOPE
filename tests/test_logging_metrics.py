@@ -74,7 +74,7 @@ def test_selected_skill_outcome_projects_full_vocab_width():
     from concept_based_learning.environments.datatypes import NUM_SKILL_LABELS
 
     active_skill = jnp.array([[1]], dtype=jnp.int32)  # COLLECT (after NAVIGATE remap)
-    # Full vocab: navigate success on channel 3 should fold into COLLECT.
+    # Navigate success stays on its own channel and is not added to COLLECT.
     skill_done = jnp.zeros((1, 1, NUM_SKILL_LABELS), dtype=jnp.bool_).at[..., 3].set(True)
     skill_rewards = jnp.zeros((1, 1, NUM_SKILL_LABELS), dtype=jnp.float32).at[..., 3].set(1.0)
     metrics = selected_skill_outcome_metrics(
@@ -83,11 +83,11 @@ def test_selected_skill_outcome_projects_full_vocab_width():
         skill_rewards,
         ["DESTROY", "COLLECT", "AVOID"],
     )
-    assert float(metrics["skill_COLLECT/selected_success_rate"]) == 1.0
-    assert float(metrics["skill_COLLECT/selected_success_count"]) == 1.0
+    assert float(metrics["skill_COLLECT/selected_success_rate"]) == 0.0
+    assert float(metrics["skill_COLLECT/selected_success_count"]) == 0.0
 
 
-def test_project_skill_outcomes_folds_navigate_and_jump():
+def test_project_skill_outcomes_does_not_fold_legacy_channels():
     from concept_based_learning.environments.datatypes import (
         NUM_SKILL_LABELS,
         project_skill_outcomes,
@@ -97,14 +97,14 @@ def test_project_skill_outcomes_folds_navigate_and_jump():
     done = jnp.zeros((NUM_SKILL_LABELS,), dtype=jnp.bool_).at[3].set(True).at[4].set(True)
     r3, d3 = project_skill_outcomes(rewards, done, 3)
     assert r3.shape == (3,)
-    assert float(r3[1]) == 1.0  # NAVIGATE → COLLECT
-    assert float(r3[2]) == -1.0  # JUMP_OVER → AVOID
-    assert bool(d3[1]) and bool(d3[2])
+    assert float(r3[1]) == 0.0
+    assert float(r3[2]) == 0.0
+    assert not bool(d3[1]) and not bool(d3[2])
     r4, d4 = project_skill_outcomes(rewards, done, 4)
     assert r4.shape == (4,)
-    assert float(r4[3]) == 1.0  # NAVIGATE kept
-    assert float(r4[2]) == -1.0  # JUMP_OVER → AVOID
-    assert bool(d4[3]) and bool(d4[2])
+    assert float(r4[3]) == 1.0
+    assert float(r4[2]) == 0.0
+    assert bool(d4[3]) and not bool(d4[2])
     r5, _ = project_skill_outcomes(rewards, done, 5)
     assert r5.shape == (5,)
     assert float(r5[3]) == 1.0 and float(r5[4]) == -1.0

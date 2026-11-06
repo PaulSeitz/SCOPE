@@ -330,8 +330,61 @@ def build_skill_oc_flat_rel_obs(
     return jnp.concatenate([flat, global_f]).astype(jnp.float32)
 
 
+def build_skill_oc_flat_rel_role_obs(
+    raw_obs: Any,
+    objects: Any,
+    target_idx: Any,
+    *,
+    max_objects: int,
+) -> jnp.ndarray:
+    """``oc_flat_rel`` plus the ``oc_simple_rel_role`` role-pool.
+
+    Same flattened relative rows and ``is_target`` mark as ``oc_flat_rel``.
+    The global tail is the meta-policy global (player box, oxygen, divers)
+    concatenated with per-role count and min distance. That is the
+    ``oc_simple_rel_role`` bundle, with explicit target conditioning.
+    """
+    base = build_skill_oc_flat_rel_obs(
+        raw_obs, objects, target_idx, max_objects=max_objects
+    )
+    role = build_meta_role_pool_features(
+        raw_obs, objects, max_objects=max_objects
+    )
+    return jnp.concatenate([base, role]).astype(jnp.float32)
+
+
 def skill_oc_flat_rel_dim(max_objects: int) -> int:
     """Input width for ``oc_flat_rel`` (latest frame)."""
     per_obj = 6 + NUM_LABELS + 1  # geom + label OH + is_target
     global_dim = 6  # player xywh + oxygen + collected_divers
     return int(max_objects) * per_obj + global_dim
+
+
+def skill_oc_flat_rel_role_dim(max_objects: int) -> int:
+    """Input width for ``oc_flat_rel_role`` (latest frame)."""
+    # 4 roles × (count, min distance).
+    return skill_oc_flat_rel_dim(max_objects) + len(_ROLE_LABELS) * 2
+
+
+def build_flat_oc_skill_obs(
+    raw_obs: Any,
+    objects: Any,
+    target_idx: Any,
+    *,
+    max_objects: int,
+    mode: str,
+) -> jnp.ndarray:
+    """Dispatch flattened OC skill inputs."""
+    canon = str(mode).lower().strip()
+    if canon == "oc_flat_rel":
+        return build_skill_oc_flat_rel_obs(
+            raw_obs, objects, target_idx, max_objects=max_objects
+        )
+    if canon == "oc_flat_rel_role":
+        return build_skill_oc_flat_rel_role_obs(
+            raw_obs, objects, target_idx, max_objects=max_objects
+        )
+    raise ValueError(
+        f"Unknown flat OC skill mode {mode!r}. "
+        "Expected oc_flat_rel or oc_flat_rel_role."
+    )

@@ -14,9 +14,12 @@ from concept_based_learning.observations.egocentric import (
     get_ego_obs,
 )
 from concept_based_learning.observations.pov_relative import (
+    action_frame_from_config,
     build_facing_action_table,
     configure_pov_relative_from_config,
     make_facing_relative_mappers,
+    make_screen_relative_mappers,
+    observation_frame_from_config,
     pov_facing_psi_rad,
     using_pov_relative,
 )
@@ -207,3 +210,117 @@ def test_pong_facing_looks_into_the_field():
         player = _Player()
 
     assert float(resolve_facing_deg(_Raw(), env_name="pong")) == pytest.approx(180.0)
+
+
+def test_explicit_action_frame_preserves_legacy_defaults():
+    assert action_frame_from_config({}) == "target"
+    assert action_frame_from_config({"USE_POV_RELATIVE_MAPPER": True}) == "facing"
+    assert action_frame_from_config({"EGO_ACTION_FRAME": "screen"}) == "screen"
+    assert action_frame_from_config({"EGO_ACTION_FRAME": "world"}) == "screen"
+    with pytest.raises(ValueError, match="EGO_ACTION_FRAME"):
+        action_frame_from_config({"EGO_ACTION_FRAME": "random"})
+
+
+def test_explicit_observation_frame_preserves_legacy_defaults():
+    assert observation_frame_from_config({}) == "screen"
+    assert observation_frame_from_config({"USE_POV_RELATIVE_MAPPER": True}) == "target"
+    assert observation_frame_from_config({"USE_POV_FACING_FRAME": True}) == "facing"
+    assert observation_frame_from_config({"EGO_OBSERVATION_FRAME": "world"}) == "screen"
+    with pytest.raises(ValueError, match="EGO_OBSERVATION_FRAME"):
+        observation_frame_from_config({"EGO_OBSERVATION_FRAME": "random"})
+
+
+def test_explicit_observation_frame_drives_legacy_observation_switches():
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_pov_facing_frame,
+    )
+
+    configure_ego_obs_from_config(
+        {
+            "EGO_OBSERVATION_FRAME": "screen",
+            "USE_POV_RELATIVE_MAPPER": True,
+            "USE_POV_FACING_FRAME": True,
+        }
+    )
+    assert not using_pov_relative()
+    assert not using_pov_facing_frame()
+
+    configure_ego_obs_from_config(
+        {
+            "EGO_OBSERVATION_FRAME": "facing",
+            "USE_POV_RELATIVE_MAPPER": False,
+            "USE_POV_FACING_FRAME": False,
+            "ENV_NAME": "seaquest",
+        }
+    )
+    assert using_pov_relative()
+    assert using_pov_facing_frame()
+    configure_ego_obs_from_config({})
+
+
+def test_seaquest_screen_mapper_is_fixed_and_target_independent():
+    mapper, inverse = make_screen_relative_mappers("seaquest")
+
+    class _Raw:
+        pass
+
+    raw = _Raw()
+    for target_idx in (jnp.int32(0), jnp.int32(9)):
+        # Abstract FORWARD/BACKWARD become literal screen UP/DOWN.
+        assert int(mapper(jnp.int32(2), raw, target_idx, None)) == int(Atari.UP)
+        assert int(mapper(jnp.int32(5), raw, target_idx, None)) == int(Atari.DOWN)
+        assert int(mapper(jnp.int32(3), raw, target_idx, None)) == int(Atari.RIGHT)
+        assert int(mapper(jnp.int32(4), raw, target_idx, None)) == int(Atari.LEFT)
+    assert int(inverse(jnp.int32(Atari.UP), raw, jnp.int32(0), None)) == 2
+
+
+def test_asteroids_screen_mapper_uses_facing_but_not_target():
+    mapper, _ = make_screen_relative_mappers("asteroids")
+
+    class _Player:
+        # Sprite 0° is screen-UP after the shared -90° orientation shift.
+        orientation = jnp.array([0.0])
+
+    class _Raw:
+        player = _Player()
+
+    raw = _Raw()
+    # Already facing screen-UP: fixed-screen UP thrusts. Fixed-screen RIGHT turns CW.
+    assert int(mapper(jnp.int32(2), raw, jnp.int32(0), None)) == 2
+    assert int(mapper(jnp.int32(3), raw, jnp.int32(0), None)) == 3
+    assert int(mapper(jnp.int32(3), raw, jnp.int32(99), object())) == 3
+
+
+@pytest.mark.parametrize(
+    ("env_name", "num_actions"),
+    [
+        ("seaquest", 18),
+        ("asteroids", 14),
+        ("beamrider", 18),
+        ("breakout", 4),
+        ("freeway", 3),
+        ("namethisgame", 6),
+        ("phoenix", 8),
+        ("pong", 6),
+        ("spaceinvaders", 6),
+        ("timepilot", 10),
+    ],
+)
+def test_screen_mapper_is_target_independent_and_legal_for_transfer_matrix(
+    env_name, num_actions
+):
+    mapper, _ = make_screen_relative_mappers(env_name)
+
+    class _Player:
+        orientation = jnp.array([0.0])
+
+    class _Raw:
+        player = _Player()
+
+    raw = _Raw()
+    first = [int(mapper(jnp.int32(a), raw, jnp.int32(0), None)) for a in range(18)]
+    moved_target = [
+        int(mapper(jnp.int32(a), raw, jnp.int32(31), object())) for a in range(18)
+    ]
+    assert first == moved_target
+    assert all(0 <= action < num_actions for action in first)

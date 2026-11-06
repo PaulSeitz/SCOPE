@@ -46,8 +46,8 @@ def test_map_over_skills_scan_matches_vmap():
 
 
 def test_skill_network_q_max_chunk_matches_full():
-    def apply_fn(vars_, x, train, *, target_idx, pixel_obs, objects):
-        del vars_, train, target_idx, pixel_obs, objects
+    def apply_fn(vars_, x, train, *, target_idx, pixel_obs, objects, oc_psi=None):
+        del vars_, train, target_idx, pixel_obs, objects, oc_psi
         # Fake Q: [T, E, A]
         return jnp.stack([x, x + 1.0], axis=-1)
 

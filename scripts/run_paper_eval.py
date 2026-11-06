@@ -1349,6 +1349,41 @@ def _skills_ib_ego_vs_pixel_stems() -> tuple[str, ...]:
 
 
 SKILLS_IB_EGO_VS_PIXEL_STEMS = _skills_ib_ego_vs_pixel_stems()
+# Same Seaquest ego-skill recipe, but the skill sees the OC meta bundle
+# (relative rows + is_target + role-pool). Not started with thesis_final.
+#   python scripts/run_paper_eval.py --suite skills_oc_rel_role \
+#     --gpus 0 --wait-deps --skip-rq-gate --lean
+SKILLS_OC_REL_ROLE_SUITE = "skills_oc_rel_role"
+SKILLS_OC_REL_ROLE_STEMS = tuple(
+    stem
+    for seed in (44, 45, 46)
+    for stem in (
+        f"tf_seaquest_skills_oc_flat_rel_role_seed{seed}",
+        f"tf_seaquest_skills_oc_flat_rel_role_seed{seed}_eval",
+    )
+)
+# Existing-checkpoint Seaquest transfers (eval only). Two queues:
+#   extended_transfer_fast  — no-POV, then remaining tandem-OC
+#   extended_transfer_pixel — pixel skills, then tandem-pixel extracted skills
+#   python scripts/materialize_extended_transfer_eval.py
+#   CUDA_VISIBLE_DEVICES=1 python scripts/run_paper_eval.py --suite extended_transfer_fast ...
+#   CUDA_VISIBLE_DEVICES=2 python scripts/run_paper_eval.py --suite extended_transfer_pixel ...
+EXTENDED_TRANSFER_FAST_SUITE = "extended_transfer_fast"
+EXTENDED_TRANSFER_PIXEL_SUITE = "extended_transfer_pixel"
+
+
+def _extended_transfer_stems() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from materialize_extended_transfer_eval import fast_stems, pixel_stems  # type: ignore
+
+    return fast_stems(), pixel_stems()
+
+
+EXTENDED_TRANSFER_FAST_STEMS, EXTENDED_TRANSFER_PIXEL_STEMS = _extended_transfer_stems()
 # Locked thesis-final 50M sweep (RQ1/RQ2/RQ3 + ablations + floors). Per-GPU
 # suites are static LPT/dependency-aware queues — launch one per GPU:
 #   python scripts/materialize_thesis_final.py
@@ -2246,6 +2281,9 @@ SUITE_STEMS = {
     SKILLS_HEU_CANFIRE_AB_SUITE: SKILLS_HEU_CANFIRE_AB_STEMS,
     SKILLS_HEU_V2_TRANSFER_AB_SUITE: SKILLS_HEU_V2_TRANSFER_AB_STEMS,
     SKILLS_IB_EGO_VS_PIXEL_SUITE: SKILLS_IB_EGO_VS_PIXEL_STEMS,
+    SKILLS_OC_REL_ROLE_SUITE: SKILLS_OC_REL_ROLE_STEMS,
+    EXTENDED_TRANSFER_FAST_SUITE: EXTENDED_TRANSFER_FAST_STEMS,
+    EXTENDED_TRANSFER_PIXEL_SUITE: EXTENDED_TRANSFER_PIXEL_STEMS,
     **THESIS_FINAL_SUITES,
     FINAL_10M_BASE_SKILLS_SUITE: FINAL_10M_BASE_SKILLS_STEMS,
     FINAL_10M_PQN_PIXEL_GPU0_SUITE: FINAL_10M_PQN_PIXEL_GPU0_STEMS,
@@ -2777,6 +2815,17 @@ def _eval_json_complete(
                 f"{path.name} incomplete ({len(results)}/{len(keys)} mods; "
                 f"missing e.g. {missing[:3]})",
             )
+    for key, stats in results.items():
+        if not isinstance(stats, dict) or stats.get("error"):
+            return False, f"{path.name} {key} has an error payload"
+        returns = stats.get("returns") or []
+        if not returns:
+            return False, f"{path.name} {key} has no episode returns"
+        try:
+            if any(float(r) != float(r) for r in returns):
+                return False, f"{path.name} {key} has a non-finite return"
+        except (TypeError, ValueError):
+            return False, f"{path.name} {key} has a non-numeric return"
     return True, f"{path.name} ({len(results)} mods)"
 
 
@@ -3135,7 +3184,12 @@ def _updates_for_config_path(
     kind = str(raw.get("PAPER_EVAL_KIND", "skills")).lower()
     cfg = _flatten_experiment_cfg(copy.deepcopy(raw))
     if phase == "eval" or kind == "heuristic_random":
-        return _n_eval_mods(raw, trial=trial) * RTPT_EVAL_UNITS_PER_MOD
+        # Parallel mod workers finish a home eval in about one mod's wall time.
+        n_mods = _n_eval_mods(raw, trial=trial)
+        parallel = n_mods > 1 and bool(raw.get("EVAL_PARALLEL_MODS", True))
+        if parallel:
+            return RTPT_EVAL_UNITS_PER_MOD
+        return n_mods * RTPT_EVAL_UNITS_PER_MOD
     if trial_steps is not None:
         cfg["TOTAL_TIMESTEPS"] = int(trial_steps)
         _align_trial_timesteps(cfg)
@@ -3354,6 +3408,8 @@ _EVAL_OVERRIDE_KEYS = (
     "HEURISTIC_MODE",
     "NO_TARGET_GAME_ACTION",
     "SKILL_DEATH_PENALIZE_COLLECT",
+    "COLLECT_DEATH_PRECEDENCE",
+    "AVOID_KILLED_EVENT_MODE",
     "COLLECT_SPARSE_ONLY",
     "COLLECT_LIVING_PENALTY",
     "DESTROY_CONTACT_FAIL",
@@ -3379,6 +3435,8 @@ _EVAL_OVERRIDE_KEYS = (
     "COLLECT_REQUIRE_FULLY_ON_SCREEN",
     "COLLECT_SKIP_WHEN_FULL",
     "COLLECT_NEAREST_IN_RANGE_ONLY",
+    "COLLECT_EARLY_WHEN_NO_THREATS",
+    "BREAKOUT_AUTO_LAUNCH",
     "COLLECT_NEAR_RANGE",
     "ENEMY_REQUIRE_ON_SCREEN",
     "DESTROY_NEAREST_IN_DANGER_ONLY",
@@ -3419,6 +3477,8 @@ _EVAL_OVERRIDE_KEYS = (
     # is pinned to a train config that still paints by default.
     "SKILL_PIXEL_PAINT_TARGET_OUTLINE",
     "USE_POV_RELATIVE_MAPPER",
+    "EGO_OBSERVATION_FRAME",
+    "EGO_ACTION_FRAME",
     "USE_POV_FIXED_BILATERAL",
     "POV_BILATERAL_AXIS",
     "USE_POV_FACING_FRAME",

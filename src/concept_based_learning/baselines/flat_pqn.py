@@ -29,6 +29,8 @@ from jaxtari.wrappers import (
     PixelObsWrapper,
 )
 
+from concept_based_learning.environments.breakout.auto_launch import maybe_wrap_breakout_auto_launch
+from concept_based_learning.observations.native_oc_stack import stack_pqn_pixel_channels
 from concept_based_learning.pqn_visualizer import resolve_config_path
 from concept_based_learning.paper_eval.env_metrics import (
     aggregate_episode_metrics,
@@ -95,6 +97,7 @@ class QNetwork(nn.Module):
     norm_type: str = "layer_norm"
     norm_input: bool = False
     object_centric: bool = True
+    channel_stack: bool = False
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, train: bool):
@@ -117,6 +120,10 @@ class QNetwork(nn.Module):
                 x = normalize(x)
                 x = nn.relu(x)
         else:
+            # Old checkpoints leave frames as a batch axis (in_channels=1).
+            # Corrected runs set channel_stack so [B,T,H,W,C] becomes [B,H,W,T*C].
+            if self.channel_stack:
+                x = stack_pqn_pixel_channels(x)
             x = x / 255.0
             x = CNN(norm_type=self.norm_type)(x, train)
 
@@ -218,6 +225,7 @@ def flat_pqn_network_kwargs(
         "norm_type": str(cfg.get("NORM_TYPE", "layer_norm")),
         "norm_input": bool(cfg.get("NORM_INPUT", False)),
         "object_centric": object_centric,
+        "channel_stack": bool(cfg.get("PIXEL_CHANNEL_STACK", False)),
     }
 
 
@@ -312,6 +320,7 @@ def make_flat_pqn_eval_env(
             )
 
         env = jaxtari.make(game, mods=mods)
+        env = maybe_wrap_breakout_auto_launch(env, game, cfg)
         env = AtariWrapper(
             env,
             sticky_actions=0.0,

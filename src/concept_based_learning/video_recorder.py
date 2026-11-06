@@ -210,27 +210,39 @@ def add_distance_angle_text(frame, distance, angle):
 
 def _write_frames_mp4(frames_chw: np.ndarray, path: str, fps: int = 30) -> None:
     """frames_chw: (T, C, H, W) uint8 RGB."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    frames_thwc = np.transpose(frames_chw, (0, 2, 3, 1)).astype(np.uint8)
     try:
         import cv2
+
+        _, _, h, w = frames_chw.shape
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
+        if not writer.isOpened():
+            raise RuntimeError(f"cv2.VideoWriter could not open path {path!r}")
+        for fr in frames_thwc:
+            writer.write(cv2.cvtColor(fr, cv2.COLOR_RGB2BGR))
+        writer.release()
+        print(f"Saved video to {path}")
+        return
     except ImportError:
-        print(
-            "Warning: OpenCV (cv2) not installed; cannot save video to disk. "
-            "Install opencv-python or enable wandb logging."
-        )
-        return
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    _, _, h, w = frames_chw.shape
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
-    if not writer.isOpened():
-        print(f"Warning: cv2.VideoWriter could not open path {path!r}")
-        return
-    for i in range(len(frames_chw)):
-        fr = np.transpose(frames_chw[i], (1, 2, 0))
-        fr_bgr = cv2.cvtColor(fr, cv2.COLOR_RGB2BGR)
-        writer.write(fr_bgr)
-    writer.release()
-    print(f"Saved video to {path}")
+        pass
+    except Exception as e:
+        print(f"Warning: cv2 video write failed ({e}); trying imageio.")
+
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        try:
+            import imageio
+        except ImportError:
+            print(
+                "Warning: neither OpenCV nor imageio is available; "
+                "cannot save video to disk."
+            )
+            return
+    imageio.mimsave(path, frames_thwc, fps=fps)
+    print(f"Saved video to {path} (imageio)")
 
 
 def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,

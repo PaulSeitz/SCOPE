@@ -37,8 +37,19 @@ def facing_frame_env_name() -> str:
 def configure_pov_facing_frame_from_config(config: dict | None) -> None:
     global _USE_POV_FACING_FRAME, _EGO_POSE_XY, _FACING_ENV
     cfg = config or {}
-    enabled = bool(cfg.get("USE_POV_FACING_FRAME", False))
-    if enabled and not bool(cfg.get("USE_POV_RELATIVE_MAPPER", False)):
+    from concept_based_learning.observations.pov_relative import (
+        observation_frame_from_config,
+    )
+
+    explicit_frame = cfg.get("EGO_OBSERVATION_FRAME", None) not in (None, "")
+    frame = observation_frame_from_config(cfg)
+    enabled = frame == "facing" if explicit_frame else bool(
+        cfg.get("USE_POV_FACING_FRAME", False)
+    )
+    relative_enabled = frame != "screen" if explicit_frame else bool(
+        cfg.get("USE_POV_RELATIVE_MAPPER", False)
+    )
+    if enabled and not relative_enabled:
         raise ValueError(
             "USE_POV_FACING_FRAME requires USE_POV_RELATIVE_MAPPER: the mapper "
             "must stay body-relative to player facing (not target-selected)."

@@ -1,5 +1,9 @@
 import time
 
+from concept_based_learning.training.returns import (
+    lambda_return_targets, object_lambda_return_targets,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -57,7 +61,6 @@ from concept_based_learning.training.trajectory_cuts import (
     DEFAULT_SKILL_TARGET_CUT,
     normalize_skill_target_cut,
     skill_target_switch_cut,
-    skill_target_switch_cut_env,
     skill_target_switch_cut_env_padded,
 )
 from concept_based_learning.training.rtpt_progress import is_rtpt_enabled, rtpt_step_callback
@@ -91,6 +94,16 @@ from concept_based_learning.training.logging_metrics import (
     resolve_skill_names,
     selected_skill_outcome_metrics,
 )
+
+
+def split_tandem_update_rng(rng):
+    """Distinct per-seed keys for the next update and each training region.
+
+    Region calls may consume their own keys. The persistent next-update key
+    is never passed into a donating JIT region.
+    """
+    keys = jax.vmap(lambda key: jax.random.split(key, 4))(rng)
+    return tuple(keys[:, i] for i in range(4))
 
 
 def make_tandem_train(
@@ -175,6 +188,11 @@ def make_tandem_train(
             flush=True,
         )
     meta_input_mode = str(config.get("META_INPUT_MODE", "flat")).lower().strip()
+
+    def _selector_obs(obs):
+        if meta_input_mode == "oc_native":
+            return obs.native_oc_vector
+        return obs.raw_observation
     debug_inputs = input_debug_enabled(config)
     skill_embed_dim = int(config.get("SKILL_EMBED_DIM", 256))
     skill_pixel_target_embed_dim = int(config.get("SKILL_PIXEL_TARGET_EMBED_DIM", 16))
@@ -397,7 +415,7 @@ def make_tandem_train(
 
         meta_vars = meta_network.init(
             rng,
-            probe_obs.raw_observation,
+            _selector_obs(probe_obs),
             probe_obs.objects,
             train=False,
             pixel_obs=probe_obs.pixel_observation,
@@ -518,7 +536,7 @@ def make_tandem_train(
                     pixel_obs=pix,
                 )
             )(
-                last_obs.raw_observation,
+                _selector_obs(last_obs),
                 last_obs.objects,
                 pixel_inputs,
                 meta_target_locked,
@@ -761,7 +779,19 @@ def make_tandem_train(
                 step_env_state
             )
             life_lost = extract_life_lost(env_state, step_env_state)
-            game_over = is_game_over(new_done, life_lost, prev_lives, lives_after_step)
+            game_over = is_game_over(
+                new_done,
+                life_lost,
+                prev_lives,
+                lives_after_step,
+                zero_lives_still_playing=str(config.get("ENV_NAME", "")).lower()
+                == "seaquest",
+            )
+            life_lost = jnp.where(
+                jnp.logical_and(new_done, life_lost < 0),
+                jnp.int32(1),
+                life_lost,
+            )
             reset_mask = jnp.logical_or(
                 game_over,
                 jnp.logical_and(new_done, life_lost <= 0),
@@ -879,7 +909,7 @@ def make_tandem_train(
             next_state_for_rollout = merge_reset_where_done(
                 new_env_state, reset_state, reset_mask
             )
-            target_obj_idxs = jnp.where(
+            carried_target_obj_idxs = jnp.where(
                 new_done,
                 jnp.full_like(target_obj_idxs, no_target_idx),
                 target_obj_idxs,
@@ -1016,14 +1046,14 @@ def make_tandem_train(
 
             transition = TandemTransition(
                 done=new_done,
-                obs=last_obs.raw_observation,
+                obs=_selector_obs(last_obs),
                 objects=last_obs.objects,
                 pixel_obs=(
                     last_obs.pixel_observation
                     if last_obs.pixel_observation is not None
                     else last_obs.raw_observation
                 ),
-                next_obs=next_obs_for_rollout.raw_observation,
+                next_obs=_selector_obs(next_obs_for_rollout),
                 next_objects=next_obs_for_rollout.objects,
                 next_pixel_obs=(
                     next_obs_for_rollout.pixel_observation
@@ -1057,7 +1087,7 @@ def make_tandem_train(
                 next_state_for_rollout,
                 running_returns,
                 rng,
-                target_obj_idxs,
+                carried_target_obj_idxs,
                 car_hits_sum,
                 persist_steps_remaining,
                 suspended_mission_idxs,
@@ -1205,41 +1235,17 @@ def make_tandem_train(
             jnp.where(next_active_mask, last_meta_q, -jnp.inf), axis=-1
         )
         last_q = jnp.where(next_active_any, masked_last_q, 0.0)
-        last_q = last_q * (1 - transitions.done[-1])
-
-        def _meta_get_target(lambda_returns_and_next_q, transition):
-            lambda_returns, next_q = lambda_returns_and_next_q
-            target_bootstrap = (
-                transition.meta_reward
-                + config["GAMMA"] * (1 - transition.done) * next_q
-            )
-            delta = lambda_returns - next_q
-            lambda_returns = (
-                target_bootstrap + config["GAMMA"] * config["LAMBDA"] * delta
-            )
-            lambda_returns = (
-                (1 - transition.done) * lambda_returns
-                + transition.done * transition.meta_reward
-            )
-
-            prev_active_mask = transition.active_mask
-            prev_active_any = jnp.any(prev_active_mask, axis=-1)
-            masked_next_q = jnp.max(
-                jnp.where(prev_active_mask, transition.meta_q_val, -jnp.inf),
-                axis=-1,
-            )
-            next_q = jnp.where(prev_active_any, masked_next_q, 0.0)
-            return (lambda_returns, next_q), lambda_returns
-
-        meta_lambda_returns = transitions.meta_reward[-1] + config["GAMMA"] * last_q
-        _, meta_targets_scan = jax.lax.scan(
-            _meta_get_target,
-            (meta_lambda_returns, last_q),
-            jax.tree.map(lambda x: x[:-1], transitions),
-            reverse=True,
+        # Stored meta_q_val[t] is V(s_t); shift it once to V(s_{t+1}).
+        active_any = jnp.any(transitions.active_mask, axis=-1)
+        current_values = jnp.max(
+            jnp.where(transitions.active_mask, transitions.meta_q_val, -jnp.inf),
+            axis=-1,
         )
-        meta_lambda_targets = jnp.concatenate(
-            (meta_targets_scan, meta_lambda_returns[jnp.newaxis])
+        current_values = jnp.where(active_any, current_values, 0.0)
+        next_values = jnp.concatenate((current_values[1:], last_q[None]), axis=0)
+        meta_lambda_targets = lambda_return_targets(
+            transitions.meta_reward, transitions.done, next_values,
+            config["GAMMA"], config["LAMBDA"],
         )
 
         def _meta_learn_epoch(carry, _):
@@ -1286,7 +1292,7 @@ def make_tandem_train(
                         axis=-1,
                     ).squeeze(axis=-1)
                     valid = jnp.any(minibatch["active_mask"], axis=-1)
-                    loss = (jnp.square(chosen_q - target) * valid).sum() / (
+                    loss = 0.5 * (jnp.square(chosen_q - target) * valid).sum() / (
                         valid.sum() + 1e-8
                     )
                     return loss, chosen_q
@@ -1294,11 +1300,15 @@ def make_tandem_train(
                 (loss, qvals), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
                     m_state_phase.params
                 )
-                update_scale = jnp.where(skip_meta_update, 0.0, 1.0)
-                grads = jax.tree_util.tree_map(lambda g: g * update_scale, grads)
-                m_state_phase = m_state_phase.apply_gradients(grads=grads)
-                m_state_phase = m_state_phase.replace(
-                    grad_steps=m_state_phase.grad_steps + 1
+                # Zero gradients still move RAdam parameters through momentum.
+                # A frozen learner must retain parameters AND optimizer state.
+                m_state_phase = jax.lax.cond(
+                    skip_meta_update,
+                    lambda state: state,
+                    lambda state: state.apply_gradients(grads=grads).replace(
+                        grad_steps=state.grad_steps + 1
+                    ),
+                    m_state_phase,
                 )
                 return (m_state_phase, rng_phase), (loss, qvals)
 
@@ -1349,58 +1359,24 @@ def make_tandem_train(
                     chunk=True,
                 )
 
-                last_step_done_all = jnp.logical_or(
-                    transitions.skill_done_all[-1, :, :, skill_idx],
-                    transitions.done[-1, :, jnp.newaxis],
-                ).astype(jnp.float32)
-                last_next_q = next_q_max_all[-1] * (1.0 - last_step_done_all)
-                last_reward_all = transitions.skill_rewards_all[-1, :, :, skill_idx]
-                last_lambda = last_reward_all + skill_gamma * last_next_q
-
                 target_switch_cut = skill_target_switch_cut(
                     transitions.target_idx,
                     transitions.next_ego_obs_all.shape[2],
                     skill_target_cut,
+                    object_ids=transitions.object_idx_all,
                 )
-
-                def _get_target_all(carry, xs):
-                    lambda_ret, next_q = carry
-                    (
-                        step_reward,
-                        step_done_skill,
-                        step_done_ep,
-                        step_target_cut,
-                        q_next_step,
-                    ) = xs
-                    step_done = jnp.logical_or(
-                        step_done_skill, step_done_ep[:, jnp.newaxis]
-                    )
-                    step_done = jnp.logical_or(
-                        step_done, step_target_cut.astype(jnp.bool_)
-                    ).astype(jnp.float32)
-                    target_bootstrap = (
-                        step_reward + skill_gamma * (1.0 - step_done) * next_q
-                    )
-                    delta = lambda_ret - next_q
-                    lambda_ret = target_bootstrap + skill_gamma * skill_lambda * delta
-                    lambda_ret = (1.0 - step_done) * lambda_ret + step_done * step_reward
-                    return (lambda_ret, q_next_step), lambda_ret
-
-                xs_all = (
-                    transitions.skill_rewards_all[:-1, :, :, skill_idx],
-                    transitions.skill_done_all[:-1, :, :, skill_idx],
-                    transitions.done[:-1],
-                    target_switch_cut,
-                    next_q_max_all[:-1],
+                target_switch_cut = jnp.concatenate(
+                    (target_switch_cut, jnp.zeros_like(next_q_max_all[-1:])), axis=0
                 )
-                _, targets_all = jax.lax.scan(
-                    _get_target_all,
-                    (last_lambda, next_q_max_all[-1]),
-                    xs_all,
-                    reverse=True,
+                step_done_all = jnp.logical_or(
+                    transitions.skill_done_all[..., skill_idx],
+                    transitions.done[..., None],
                 )
-                skill_targets = jnp.concatenate(
-                    (targets_all, last_lambda[jnp.newaxis]), axis=0
+                step_done_all = jnp.logical_or(step_done_all, target_switch_cut)
+                skill_targets = object_lambda_return_targets(
+                    transitions.skill_rewards_all[..., skill_idx], step_done_all,
+                    next_q_max_all, transitions.object_idx_all, transitions.relabel_mask,
+                    skill_gamma, 0.0 if use_one_step_td else skill_lambda,
                 )
             elif use_one_step_td:
                 next_q_max_single = skill_network_q_max(
@@ -1444,48 +1420,17 @@ def make_tandem_train(
                     chunk=use_pixel_skill,
                 )
 
-                last_step_done = jnp.logical_or(
-                    transitions.skill_done[-1, :, skill_idx],
-                    transitions.done[-1],
-                ).astype(jnp.float32)
-                last_step_reward = transitions.skill_rewards[-1, :, skill_idx]
-                last_next_q = next_q_max_single[-1].squeeze(-1)
-                lambda_returns = (
-                    last_step_reward + skill_gamma * (1.0 - last_step_done) * last_next_q
-                )
-
-                target_switch_cut_env = skill_target_switch_cut_env(
+                target_switch_cut_env = skill_target_switch_cut_env_padded(
                     transitions.target_idx, skill_target_cut
                 )
-
-                def _get_target(carry, xs):
-                    lambda_ret, next_q = carry
-                    step_reward, step_done_skill, step_done_ep, step_target_cut, q_next = xs
-                    step_done = jnp.logical_or(step_done_skill, step_done_ep)
-                    step_done = jnp.logical_or(
-                        step_done, step_target_cut.astype(jnp.bool_)
-                    ).astype(jnp.float32)
-                    target_bootstrap = step_reward + skill_gamma * (1.0 - step_done) * next_q
-                    delta = lambda_ret - next_q
-                    lambda_ret = target_bootstrap + skill_gamma * skill_lambda * delta
-                    lambda_ret = (1.0 - step_done) * lambda_ret + step_done * step_reward
-                    return (lambda_ret, q_next), lambda_ret
-
-                _, targets = jax.lax.scan(
-                    _get_target,
-                    (lambda_returns, last_next_q),
-                    (
-                        transitions.skill_rewards[:-1, :, skill_idx],
-                        transitions.skill_done[:-1, :, skill_idx],
-                        transitions.done[:-1],
-                        target_switch_cut_env,
-                        next_q_max_single[:-1].squeeze(-1),
-                    ),
-                    reverse=True,
+                step_done = jnp.logical_or(
+                    transitions.skill_done[..., skill_idx], transitions.done
                 )
-                skill_targets = jnp.concatenate(
-                    (targets, lambda_returns[jnp.newaxis]), axis=0
-                )[..., jnp.newaxis]
+                step_done = jnp.logical_or(step_done, target_switch_cut_env)
+                skill_targets = lambda_return_targets(
+                    transitions.skill_rewards[..., skill_idx], step_done,
+                    next_q_max_single.squeeze(-1), skill_gamma, skill_lambda,
+                )[..., None]
 
             def _learn_epoch(carry, _):
                 s_state_epoch, rng_epoch = carry
@@ -1571,7 +1516,7 @@ def make_tandem_train(
                                 minibatch["relabel_mask"],
                                 on_policy,
                             )
-                        loss = (jnp.square(chosen_q - target) * valid).sum() / (
+                        loss = 0.5 * (jnp.square(chosen_q - target) * valid).sum() / (
                             valid.sum() + 1e-8
                         )
                         return loss, (updates, chosen_q)
@@ -1579,13 +1524,14 @@ def make_tandem_train(
                     (loss, (updates, qvals)), grads = jax.value_and_grad(
                         _loss_fn, has_aux=True
                     )(s_state_phase.params)
-                    grads = jax.tree_util.tree_map(
-                        lambda g: g * jnp.where(skills_frozen, 0.0, 1.0), grads
-                    )
-                    s_state_phase = s_state_phase.apply_gradients(grads=grads)
-                    s_state_phase = s_state_phase.replace(
-                        grad_steps=s_state_phase.grad_steps + 1,
-                        batch_stats=updates["batch_stats"],
+                    s_state_phase = jax.lax.cond(
+                        skills_frozen,
+                        lambda state: state,
+                        lambda state: state.apply_gradients(grads=grads).replace(
+                            grad_steps=state.grad_steps + 1,
+                            batch_stats=updates["batch_stats"],
+                        ),
+                        s_state_phase,
                     )
                     return (s_state_phase, rng_phase), (loss, qvals)
 
@@ -1757,17 +1703,18 @@ def make_tandem_train(
 
     collect_jit = jax.jit(
         collect_vmap,
-        # Only donate mutable carry + rng; meta/skill states are read-only in R1 and
-        # must stay alive for R2/R3 (donating them reuses buffers and deletes refs).
-        donate_argnums=(2, 3),
+        # Only the replaced rollout carry is owned by R1. Keys are small and
+        # must not be donated/reused across the separately compiled regions.
+        donate_argnums=(2,),
     )
     meta_jit = jax.jit(
         meta_vmap,
-        donate_argnums=(0, 2, 3),
+        donate_argnums=(0,),
     )
     skills_jit = jax.jit(
         skills_vmap,
-        donate_argnums=(0, 2, 3),
+        # meta_n_updates aliases meta_state and is still read by metrics.
+        donate_argnums=(0,),
     )
     init_fn = jax.jit(jax.vmap(init_runner, in_axes=(0, None, None)))
     metrics_jit = jax.jit(metrics_vmap)
@@ -1873,21 +1820,22 @@ def make_tandem_train(
             runner_state
         )
         t0 = time.time()
+        next_rng, collect_rng, meta_rng, skills_rng = split_tandem_update_rng(rng_carry)
         new_collect, transitions, persist_carry, car_hits_sum, infos = collect_jit(
-            meta_state, skill_states, collect_carry, rng_carry
+            meta_state, skill_states, collect_carry, collect_rng
         )
         _mark("collect_jit_exec", t0)
 
         t0 = time.time()
-        meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
-            meta_state, transitions, rng_carry, persist_carry
+        meta_state, _meta_rng, meta_loss, meta_qvals, skip_meta = meta_jit(
+            meta_state, transitions, meta_rng, persist_carry
         )
         _mark("meta_jit_exec", t0)
 
         meta_n_updates = meta_state.n_updates
         t0 = time.time()
         skill_states, skill_metrics, skills_frozen = skills_jit(
-            skill_states, transitions, meta_n_updates, rng_carry
+            skill_states, transitions, meta_n_updates, skills_rng
         )
         _mark("skills_jit_exec", t0)
 
@@ -1919,15 +1867,16 @@ def make_tandem_train(
             meta_state, skill_states, collect_carry, rng_carry = _unpack_runner_state(
                 runner_state
             )
+            next_rng, collect_rng, meta_rng, skills_rng = split_tandem_update_rng(rng_carry)
             new_collect, transitions, persist_carry, car_hits_sum, infos = collect_jit(
-                meta_state, skill_states, collect_carry, rng_carry
+                meta_state, skill_states, collect_carry, collect_rng
             )
-            meta_state, rng_carry, meta_loss, meta_qvals, skip_meta = meta_jit(
-                meta_state, transitions, rng_carry, persist_carry
+            meta_state, _meta_rng, meta_loss, meta_qvals, skip_meta = meta_jit(
+                meta_state, transitions, meta_rng, persist_carry
             )
             meta_n_updates = meta_state.n_updates
             skill_states, skill_metrics, skills_frozen = skills_jit(
-                skill_states, transitions, meta_n_updates, rng_carry
+                skill_states, transitions, meta_n_updates, skills_rng
             )
             metrics = metrics_jit(
                 transitions,
@@ -1965,7 +1914,7 @@ def make_tandem_train(
                 rtpt_step_callback()
 
             runner_state = _pack_runner_state(
-                meta_state, skill_states, new_collect, rng_carry
+                meta_state, skill_states, new_collect, next_rng
             )
 
         stacked_metrics = jax.tree.map(

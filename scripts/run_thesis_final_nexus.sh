@@ -9,51 +9,57 @@ SHARD="${NEXUS_SHARD:-0/1}"
 I="${SHARD%/*}"
 N="${SHARD#*/}"
 
-if [ $((0 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed44_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed44
+if [ $((0 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed44_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed44/*/*_seed44_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed44
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_nexus_symbolic_paper --ckpt ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed44 --seed 10044 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color --out-json ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed44_eval_mods.json
 fi
-if [ $((1 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed45_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed45
+if [ $((1 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed45_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed45/*/*_seed45_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed45
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_nexus_symbolic_paper --ckpt ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed45 --seed 10045 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color --out-json ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed45_eval_mods.json
 fi
-if [ $((2 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed46_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed46
+if [ $((2 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed46_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed46/*/*_seed46_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_seaquest_nexus_symbolic_paper --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed46
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_nexus_symbolic_paper --ckpt ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_symbolic_seed46 --seed 10046 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color --out-json ./outputs/models/paper_eval/eval/tf_seaquest_nexus_symbolic_seed46_eval_mods.json
 fi
-if [ $((3 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed44_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_optim50m --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed44
+if [ $((3 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed44_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed44/*/*_seed44_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_optim50m --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed44
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed44 --seed 10044 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color --out-json ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed44_eval_mods.json
 fi
-if [ $((4 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed45_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_optim50m --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed45
+if [ $((4 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed45_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed45/*/*_seed45_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_optim50m --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed45
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed45 --seed 10045 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color --out-json ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed45_eval_mods.json
 fi
-if [ $((5 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed46_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_optim50m --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed46
+if [ $((5 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed46_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed46/*/*_seed46_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_seaquest_hrl_baseline_optim50m --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed46
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_seaquest_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_seaquest_nexus_hrl_seed46 --seed 10046 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base no_enemies swap_diver_enemy_labels swap_diver_shark_roles gravity faster_enemies shift_lanes random_spawns change_background_color --out-json ./outputs/models/paper_eval/eval/tf_seaquest_nexus_hrl_seed46_eval_mods.json
 fi
-if [ $((6 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_timepilot_nexus_hrl_seed44_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_timepilot_hrl_baseline_optim50m --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_timepilot_nexus_hrl_seed44
-  python scripts/run_nexus.py mod-eval --alg cbl_timepilot_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_timepilot_nexus_hrl_seed44 --seed 10044 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base spawn_axis_bias plane_inertia faster_enemies frozen_bait --out-json ./outputs/models/paper_eval/eval/tf_timepilot_nexus_hrl_seed44_eval_mods.json
-fi
-if [ $((7 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_timepilot_nexus_hrl_seed45_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_timepilot_hrl_baseline_optim50m --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_timepilot_nexus_hrl_seed45
-  python scripts/run_nexus.py mod-eval --alg cbl_timepilot_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_timepilot_nexus_hrl_seed45 --seed 10045 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base spawn_axis_bias plane_inertia faster_enemies frozen_bait --out-json ./outputs/models/paper_eval/eval/tf_timepilot_nexus_hrl_seed45_eval_mods.json
-fi
-if [ $((8 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_timepilot_nexus_hrl_seed46_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_timepilot_hrl_baseline_optim50m --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_timepilot_nexus_hrl_seed46
-  python scripts/run_nexus.py mod-eval --alg cbl_timepilot_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_timepilot_nexus_hrl_seed46 --seed 10046 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base spawn_axis_bias plane_inertia faster_enemies frozen_bait --out-json ./outputs/models/paper_eval/eval/tf_timepilot_nexus_hrl_seed46_eval_mods.json
-fi
-if [ $((9 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed44_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_namethisgame_hrl_baseline_optim50m --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed44
+if [ $((6 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed44_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base shift_tentacle_spawn_x slower_player faster_shark no_shark_short_tentacles; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed44/*/*_seed44_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_namethisgame_hrl_baseline_optim50m --seed 44 --save-path ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed44
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_namethisgame_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed44 --seed 10044 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base shift_tentacle_spawn_x slower_player faster_shark no_shark_short_tentacles --out-json ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed44_eval_mods.json
 fi
-if [ $((10 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed45_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_namethisgame_hrl_baseline_optim50m --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed45
+if [ $((7 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed45_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base shift_tentacle_spawn_x slower_player faster_shark no_shark_short_tentacles; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed45/*/*_seed45_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_namethisgame_hrl_baseline_optim50m --seed 45 --save-path ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed45
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_namethisgame_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed45 --seed 10045 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base shift_tentacle_spawn_x slower_player faster_shark no_shark_short_tentacles --out-json ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed45_eval_mods.json
 fi
-if [ $((11 % N)) -eq "$I" ] && [ ! -f ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed46_eval_mods.json ]; then
-  python scripts/run_nexus.py train --alg cbl_namethisgame_hrl_baseline_optim50m --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed46
+if [ $((8 % N)) -eq "$I" ] && ! python scripts/run_nexus.py check-eval --path ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed46_eval_mods.json --eval-episodes 3 --eval-num-seeds 3 --mod-keys base shift_tentacle_spawn_x slower_player faster_shark no_shark_short_tentacles; then
+  if ! compgen -G './outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed46/*/*_seed46_vmap0.safetensors' > /dev/null; then
+    python scripts/run_nexus.py train --alg cbl_namethisgame_hrl_baseline_optim50m --seed 46 --save-path ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed46
+  fi
   python scripts/run_nexus.py mod-eval --alg cbl_namethisgame_hrl_baseline_optim50m --ckpt ./outputs/models/paper_eval/thesis_final/tf_namethisgame_nexus_hrl_seed46 --seed 10046 --eval-num-seeds 3 --eval-episodes 3 --mod-keys base shift_tentacle_spawn_x slower_player faster_shark no_shark_short_tentacles --out-json ./outputs/models/paper_eval/eval/tf_namethisgame_nexus_hrl_seed46_eval_mods.json
 fi

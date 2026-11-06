@@ -47,6 +47,9 @@ class FlatMetaQNetwork(nn.Module):
             x = flatten_raw_observation(raw_obs)
             x = nn.Dense(self.meta_embed_dim, name="oc_embed")(x)
             x = nn.relu(x)
+        elif mode == "oc_native":
+            # Caller passes the aligned four-frame vector, not the raw pytree.
+            x = jnp.asarray(raw_obs, dtype=jnp.float32).reshape(-1)
         elif mode in ("oc_simple", "simple_oc", "oc_slim") or str(mode).startswith(
             "oc_simple"
         ):
@@ -76,7 +79,7 @@ class FlatMetaQNetwork(nn.Module):
         else:
             raise ValueError(
                 f"Unknown meta_input_mode={self.meta_input_mode!r}. "
-                "Expected one of: flat, oc_embed, oc_simple, pixel_embed."
+                "Expected one of: flat, oc_native, oc_embed, oc_simple, pixel_embed."
             )
         x = append_target_locked_feature(
             x,

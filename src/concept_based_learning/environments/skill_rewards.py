@@ -46,6 +46,17 @@ Reward magnitudes and trigger conditions:
   dying while collecting is often caused by threats those skills cannot see.
   Set ``penalize_collect_death=True`` (config ``SKILL_DEATH_PENALIZE_COLLECT``)
   to also stamp the death penalty on COLLECT (ablation / pre-7b4348d behavior).
+  ``COLLECT_DEATH_PRECEDENCE: success_first`` keeps a same-transition contact /
+  collection success at +1 even when that transition also loses a life; deaths
+  without COLLECT success remain -1.  The default ``death_first`` preserves the
+  historical override.
+
+  By default AVOID treats every ``was_killed`` event as failure.  This is useful
+  in games that use the event for precise harmful contact, but it also turns a
+  ranged DESTROY success into an off-policy AVOID failure.  ``avoid_label_only``
+  consumes ``was_killed`` only for AVOID-labelled targets.  The reference
+  recipe uses ``none``: destruction of the target is not an AVOID failure.
+  Geometric contact remains a failure in every mode.
 
 All rewards fire on transition edges so sustained overlap cannot be farmed.
 DESTROY relies on was_killed rather than position-based disappearance detection
@@ -143,6 +154,7 @@ class RewardContext:
     life_lost: jnp.ndarray
     avoid_escape_reward: float
     avoid_sparse_only: bool
+    avoid_killed_event_avoid_label_only: bool
     destroy_y_align: bool
     destroy_standoff: bool
     destroy_contact_fail: bool
@@ -152,6 +164,7 @@ class RewardContext:
     collect_sparse_only: bool
     y_is_bottom_edge: bool = False
     facing_deg: float = 0.0
+    avoid_killed_event_ignored: bool = False
 
 
 @dataclass(frozen=True)
@@ -215,23 +228,34 @@ def _agent_bbox(raw_obs):
     )
 
 
-def _bbox_overlap(player, target, inset_px: int = 0) -> jnp.ndarray:
-    """Standard AABB overlap with optional inward target inset."""
+def _bbox_overlap(
+    player, target, inset_px: int = 0, *, y_is_bottom_edge: bool = False
+) -> jnp.ndarray:
+    """AABB overlap. ``y`` is the top edge unless ``y_is_bottom_edge``."""
     inset = jnp.array(inset_px, dtype=target.x.dtype)
     target_x_min = target.x + inset
-    target_y_min = target.y + inset
     target_w = jnp.maximum(target.width - 2 * inset, 1)
     target_h = jnp.maximum(target.height - 2 * inset, 1)
     target_x_max = target_x_min + target_w
-    target_y_max = target_y_min + target_h
+    if y_is_bottom_edge:
+        # y is the bottom edge; the box extends upward.
+        target_y_max = target.y - inset
+        target_y_min = target_y_max - target_h
+        player_y_min = player.y - player.height
+        player_y_max = player.y
+    else:
+        target_y_min = target.y + inset
+        target_y_max = target_y_min + target_h
+        player_y_min = player.y
+        player_y_max = player.y + player.height
 
     horiz = jnp.logical_and(
         player.x <= target_x_max,
         player.x + player.width >= target_x_min,
     )
-    vert  = jnp.logical_and(
-        player.y <= target_y_max,
-        player.y + player.height >= target_y_min,
+    vert = jnp.logical_and(
+        player_y_min <= target_y_max,
+        player_y_max >= target_y_min,
     )
     return jnp.logical_and(horiz, vert)
 
@@ -240,11 +264,10 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
     """
     Reduce stacked observations to last-frame scalars and compute AABB overlaps.
 
-    next_overlap uses prev_target's position when next_target just went inactive
-    (active 1→0).  Some envs (e.g. JAXAtari Seaquest) zero the object position
-    at the same step it is collected, making next_target.x/y = 0 and causing the
-    overlap check to fail even though the player genuinely entered the hitbox.
-    Falling back to prev_target position for the overlap test recovers that signal.
+    A target that just became inactive is tested against its last real box,
+    and only if the player actually overlaps that box. Clearing the slot to
+    the origin is not contact. A collectible that leaves the screen without
+    the player touching it is not contact either.
 
     Returns:
         prev_player  — last-frame player struct at t
@@ -259,20 +282,24 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
     prev_target = last_frame(prev_target)
     next_target = last_frame(next_target)
 
-    prev_overlap = _bbox_overlap(prev_player, prev_target, inset_px=OVERLAP_INSET_PX)
+    y_is_bottom_edge = bool(_uses_bottom_edge_y(prev_raw_obs))
+    prev_overlap = _bbox_overlap(
+        prev_player, prev_target, inset_px=OVERLAP_INSET_PX,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
 
-    # Standard check: player at t+1 vs target at t+1.
-    next_overlap_live = _bbox_overlap(next_player, next_target, inset_px=OVERLAP_INSET_PX)
+    # Live geometry only. A cleared inactive slot must not collide at (0, 0).
+    next_overlap_live = jnp.logical_and(
+        next_target.active > 0,
+        _bbox_overlap(
+            next_player, next_target, inset_px=OVERLAP_INSET_PX,
+            y_is_bottom_edge=y_is_bottom_edge,
+        ),
+    )
 
-    # Vanish check: target went active→inactive this step.
-    # Some envs (e.g. JAXAtari Seaquest) zero the position at the same step the
-    # collision is registered, so next_target.x/y = 0 and the overlap check
-    # against next_target always fails.
-    #
-    # When can_go_offscreen=0 and the label opts into the fallback (COLLECT-like
-    # skills, see SkillSpec.collect_in_place_fallback), deactivation means the
-    # player collected/triggered the object in place.  Scroll-off objects and
-    # other labels are excluded (e.g. DESTROY kills must use was_killed).
+    # Collection can zero the sprite in the same step the player touches it.
+    # Recover that only when the player overlaps the last real box. A diver
+    # that swims off screen does not.
     just_deactivated = jnp.logical_and(prev_target.active > 0, next_target.active == 0)
     is_collect_like = jnp.zeros_like(just_deactivated)
     for spec in SKILL_REGISTRY:
@@ -280,13 +307,128 @@ def reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_targ
             is_collect_like = jnp.logical_or(
                 is_collect_like, prev_target.semantic_label == spec.label
             )
+    touched_last_box = _bbox_overlap(
+        next_player, prev_target, inset_px=OVERLAP_INSET_PX,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
     collected_in_place = jnp.logical_and(
         just_deactivated,
-        jnp.logical_and(prev_target.can_go_offscreen == 0, is_collect_like),
+        jnp.logical_and(
+            prev_target.can_go_offscreen == 0,
+            jnp.logical_and(is_collect_like, touched_last_box),
+        ),
     )
     next_overlap = jnp.where(collected_in_place, jnp.array(True), next_overlap_live)
 
     return prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap
+
+
+def explain_collect_contact(prev_raw_obs, next_raw_obs, prev_target, next_target):
+    """
+    Host-side breakdown of why COLLECT would (not) fire on this transition.
+
+    Training still uses ``reward_transition_context`` + ``_collect_reward``.
+    This mirrors that logic and names the success channel for diagnostics:
+    ``was_collected``, ``overlap_rising_live``, ``collect_in_place``, or
+    ``none``. A diver that deactivates without ``touched_last_box`` is
+    ``missed_deactivation`` (the hypothesized mid-skip pickup miss).
+    """
+    (
+        _prev_player,
+        _next_player,
+        prev_t,
+        next_t,
+        prev_overlap,
+        next_overlap,
+    ) = reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
+
+    y_is_bottom_edge = bool(_uses_bottom_edge_y(prev_raw_obs))
+    next_player = last_frame(_agent_bbox(next_raw_obs))
+    next_overlap_live = bool(
+        jax.device_get(
+            jnp.logical_and(
+                next_t.active > 0,
+                _bbox_overlap(
+                    next_player,
+                    next_t,
+                    inset_px=OVERLAP_INSET_PX,
+                    y_is_bottom_edge=y_is_bottom_edge,
+                ),
+            )
+        )
+    )
+    just_deactivated = bool(
+        jax.device_get(
+            jnp.logical_and(prev_t.active > 0, next_t.active == 0)
+        )
+    )
+    touched_last_box = bool(
+        jax.device_get(
+            _bbox_overlap(
+                next_player,
+                prev_t,
+                inset_px=OVERLAP_INSET_PX,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    )
+    is_collect_like = False
+    for spec in SKILL_REGISTRY:
+        if spec.collect_in_place_fallback and int(
+            jax.device_get(prev_t.semantic_label)
+        ) == int(spec.label):
+            is_collect_like = True
+            break
+    collected_in_place = bool(
+        just_deactivated
+        and int(jax.device_get(prev_t.can_go_offscreen)) == 0
+        and is_collect_like
+        and touched_last_box
+    )
+    prev_ov = bool(jax.device_get(prev_overlap))
+    next_ov = bool(jax.device_get(next_overlap))
+    overlap_rising = bool(next_ov and not prev_ov)
+    was_collected = int(jax.device_get(next_t.was_collected)) > 0
+    success = bool(overlap_rising or was_collected)
+
+    if was_collected and overlap_rising:
+        reason = "was_collected+overlap_rising"
+    elif was_collected:
+        reason = "was_collected"
+    elif overlap_rising and collected_in_place:
+        reason = "collect_in_place"
+    elif overlap_rising and next_overlap_live:
+        reason = "overlap_rising_live"
+    elif overlap_rising:
+        reason = "overlap_rising_other"
+    elif just_deactivated and is_collect_like and not touched_last_box:
+        reason = "missed_deactivation"
+    else:
+        reason = "none"
+
+    return {
+        "success": success,
+        "reason": reason,
+        "was_collected": was_collected,
+        "overlap_rising": overlap_rising,
+        "next_overlap_live": next_overlap_live,
+        "collected_in_place": collected_in_place,
+        "just_deactivated": just_deactivated,
+        "touched_last_box": touched_last_box,
+        "prev_overlap": prev_ov,
+        "next_overlap": next_ov,
+        "prev_active": int(jax.device_get(prev_t.active)),
+        "next_active": int(jax.device_get(next_t.active)),
+        "label": int(jax.device_get(prev_t.semantic_label)),
+        "prev_xy": (
+            float(jax.device_get(prev_t.x)),
+            float(jax.device_get(prev_t.y)),
+        ),
+        "next_xy": (
+            float(jax.device_get(next_t.x)),
+            float(jax.device_get(next_t.y)),
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -421,15 +563,23 @@ def _collect_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
 
 
 def _avoid_reward(ctx: RewardContext) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    # Rising-edge AABB OR env-stamped was_killed (used by envs whose collision
-    # detection is more accurate than AABB, e.g. Skiing uses state.collision_type).
-    # Escape shaping: reward *increasing* distance (mirror of NAVIGATE/COLLECT
-    # approach). Idle near the threat earns 0 — no survival farm.
-    # AVOID_SPARSE_ONLY: +1 and done on first escape step (no dense 0.01).
-    # Life-loss penalty is applied uniformly in extract_skill_rewards.
-    failure = jnp.logical_or(
-        ctx.overlap_rising_edge, ctx.next_target.was_killed == 1
-    )
+    # Contact is always a failure. was_killed is a failure only in the legacy
+    # modes: some games stamp harmful collisions there, but Seaquest uses it
+    # for a successful shot. The reference mode ignores it. Life loss is
+    # applied later in extract_skill_rewards.
+    # Escape shaping: +0.01 when distance increases. Idle earns 0.
+    # AVOID_SPARSE_ONLY: +1 and done on the first escape step instead.
+    killed_failure = ctx.next_target.was_killed == 1
+    if ctx.avoid_killed_event_ignored:
+        killed_failure = jnp.zeros_like(killed_failure)
+    elif ctx.avoid_killed_event_avoid_label_only:
+        # Use the pre-transition label: event stamping can deactivate or replace
+        # the post-transition target, while prev_target is the selected object
+        # whose trajectory generated this update.
+        killed_failure = jnp.logical_and(
+            killed_failure, ctx.prev_target.semantic_label == LABEL_AVOID
+        )
+    failure = jnp.logical_or(ctx.overlap_rising_edge, killed_failure)
     prev_dist, next_dist = _approach_distances(ctx)
     both_active = jnp.logical_and(
         ctx.prev_target.active > 0, ctx.next_target.active > 0
@@ -567,6 +717,8 @@ def extract_skill_rewards(
     collect_living_penalty: bool | None = None,
     collect_sparse_only: bool | None = None,
     avoid_sparse_only: bool | None = None,
+    collect_death_precedence: str | None = None,
+    avoid_killed_event_mode: str | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute rewards and done signals for all skills against a single target.
@@ -602,6 +754,13 @@ def extract_skill_rewards(
         avoid_sparse_only:
             if True, AVOID uses +1/done on escape instead of dense escape
             shaping. ``None`` → config ``AVOID_SPARSE_ONLY``.
+        collect_death_precedence:
+            ``death_first`` (legacy default) or ``success_first``.  In the
+            latter mode a same-transition COLLECT success wins over its optional
+            life-loss penalty. ``None`` → config ``COLLECT_DEATH_PRECEDENCE``.
+        avoid_killed_event_mode:
+            ``all_targets`` (legacy default) or ``avoid_label_only``.  Contact
+            remains a failure in both modes. ``None`` → config.
 
     Returns:
         rewards   : float32 [NUM_SKILL_REWARDS] — ordered per SKILL_REWARD_ORDER
@@ -632,6 +791,16 @@ def extract_skill_rewards(
     if avoid_sparse:
         # Dense escape bonus is unused when sparse success is on.
         avoid_escape_reward = 0.0
+    collect_death_mode = (
+        collect_death_precedence_from_config(config)
+        if collect_death_precedence is None
+        else _normalise_collect_death_precedence(collect_death_precedence)
+    )
+    avoid_killed_mode = (
+        avoid_killed_event_mode_from_config(config)
+        if avoid_killed_event_mode is None
+        else _normalise_avoid_killed_event_mode(avoid_killed_event_mode)
+    )
 
     prev_player, next_player, prev_target, next_target, prev_overlap, next_overlap = \
         reward_transition_context(prev_raw_obs, next_raw_obs, prev_target, next_target)
@@ -666,6 +835,10 @@ def extract_skill_rewards(
         life_lost=life_lost,
         avoid_escape_reward=avoid_escape_reward,
         avoid_sparse_only=avoid_sparse,
+        avoid_killed_event_avoid_label_only=(
+            avoid_killed_mode == "avoid_label_only"
+        ),
+        avoid_killed_event_ignored=(avoid_killed_mode == "none"),
         destroy_y_align=flags["destroy_y_align"],
         destroy_standoff=flags["destroy_standoff"],
         destroy_contact_fail=flags["destroy_contact_fail"],
@@ -678,6 +851,9 @@ def extract_skill_rewards(
     )
 
     died = ctx.life_lost > 0
+    collect_succeeded = jnp.logical_or(
+        ctx.overlap_rising_edge, ctx.next_target.was_collected == 1
+    )
 
     rewards_list = []
     done_list = []
@@ -693,6 +869,10 @@ def extract_skill_rewards(
             penalize_collect_death,
             spec.label == LABEL_COLLECT,
         )
+        if collect_death_mode == "success_first":
+            is_collect_opt_in = jnp.logical_and(
+                is_collect_opt_in, jnp.logical_not(collect_succeeded)
+            )
         death_applies = jnp.logical_and(
             died,
             jnp.logical_or(is_combat, is_collect_opt_in),
@@ -772,3 +952,56 @@ def penalize_collect_death_from_config(config) -> bool:
     if config is None:
         return False
     return bool(config.get("SKILL_DEATH_PENALIZE_COLLECT", False))
+
+
+def _normalise_collect_death_precedence(value) -> str:
+    mode = str(value or "death_first").strip().lower()
+    aliases = {
+        "legacy": "death_first",
+        "death": "death_first",
+        "success": "success_first",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"death_first", "success_first"}:
+        raise ValueError(
+            "COLLECT_DEATH_PRECEDENCE must be 'death_first' or 'success_first', "
+            f"got {value!r}."
+        )
+    return mode
+
+
+def collect_death_precedence_from_config(config) -> str:
+    """Same-step COLLECT success/death ordering; legacy death-first by default."""
+    if config is None:
+        return "death_first"
+    return _normalise_collect_death_precedence(
+        config.get("COLLECT_DEATH_PRECEDENCE", "death_first")
+    )
+
+
+def _normalise_avoid_killed_event_mode(value) -> str:
+    mode = str(value or "all_targets").strip().lower()
+    aliases = {
+        "legacy": "all_targets",
+        "all": "all_targets",
+        "label_only": "avoid_label_only",
+        "ignore": "none",
+        "contact_only": "none",
+        "off": "none",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"all_targets", "avoid_label_only", "none"}:
+        raise ValueError(
+            "AVOID_KILLED_EVENT_MODE must be 'all_targets', "
+            f"'avoid_label_only', or 'none', got {value!r}."
+        )
+    return mode
+
+
+def avoid_killed_event_mode_from_config(config) -> str:
+    """Scope ``was_killed`` as an AVOID failure; legacy all-targets by default."""
+    if config is None:
+        return "all_targets"
+    return _normalise_avoid_killed_event_mode(
+        config.get("AVOID_KILLED_EVENT_MODE", "all_targets")
+    )

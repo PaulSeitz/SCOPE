@@ -87,7 +87,7 @@ def _train(args: argparse.Namespace) -> int:
     save_path.mkdir(parents=True, exist_ok=True)
 
     use_vendored = bool(args.vendored_seaquest)
-    runner = nexus_root / "_cbl_nexus_runner.py"
+    runner = nexus_root / f"_cbl_nexus_runner_{os.getpid()}.py"
     runner.write_text(
         "\n".join(
             [
@@ -178,6 +178,14 @@ def _mod_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_eval(args: argparse.Namespace) -> int:
+    from nexus.results import evaluation_complete
+    return 0 if evaluation_complete(
+        args.path, mod_keys=args.mod_keys,
+        num_episodes=args.eval_episodes, num_seeds=args.eval_num_seeds,
+    ) else 1
+
+
 def _list_algs(_: argparse.Namespace) -> int:
     print("CBL NEXUS alg overlays:")
     for p in sorted(CBL_ALG_DIR.glob("cbl_*.yaml")):
@@ -217,6 +225,13 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_check = sub.add_parser("check-eval", help="Exit zero only for a complete, finite evaluation")
+    p_check.add_argument("--path", required=True)
+    p_check.add_argument("--mod-keys", nargs="*", default=None)
+    p_check.add_argument("--eval-episodes", type=int, default=None)
+    p_check.add_argument("--eval-num-seeds", type=int, default=None)
+    p_check.set_defaults(func=_check_eval)
 
     p_list = sub.add_parser("list-algs")
     _add_root_flags(p_list)

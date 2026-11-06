@@ -27,7 +27,8 @@ _JOB_WEIGHT: int = 1
 RTPT_WEIGHT_EGO = 1
 RTPT_WEIGHT_OC = 2
 RTPT_WEIGHT_PIXEL = 10
-# One greedy mod (compile + a few episodes) ≈ this many unweighted ego-train updates.
+# One parallel eval wave (all mods at once) ≈ this many unweighted ego-train updates.
+# Serial single-mod evals still multiply by the mod count in run_paper_eval.
 RTPT_EVAL_UNITS_PER_MOD = 25
 
 

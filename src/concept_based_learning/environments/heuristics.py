@@ -194,6 +194,9 @@ def _seaquest_heuristic_kwargs(config) -> dict:
         "collect_nearest_in_range_only": _seaquest_collect_nearest_in_range_only(
             config
         ),
+        "collect_early_when_no_threats": bool(
+            config.get("COLLECT_EARLY_WHEN_NO_THREATS", False)
+        ),
         "collect_near_range": _seaquest_collect_near_range(config),
         "enemy_require_on_screen": _seaquest_enemy_require_on_screen(config),
         "destroy_nearest_in_danger_only": _seaquest_destroy_nearest_in_danger_only(

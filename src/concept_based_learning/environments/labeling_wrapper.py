@@ -15,6 +15,13 @@ from concept_based_learning.environments.datatypes import (
     NUM_LABELS,
 )
 from concept_based_learning.environments.meta_object_layout import append_meta_reserved_slots
+from concept_based_learning.observations.native_oc_stack import (
+    init_native_frame_stack,
+    native_frame_bounds,
+    normalize_native_stack,
+    push_native_frame_stack,
+    ravel_native_frame,
+)
 
 
 class JaxatariSemanticBaseWrapper(JaxatariWrapper):
@@ -25,6 +32,14 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
     def __init__(self, env, max_objects: int, meta_reserved_slots: int = 1):
         super().__init__(env)
         self.stack_size = self._infer_stack_size()
+        self._native_oc = bool(getattr(self._env, "_cbl_native_oc_stack", False))
+        if self._native_oc:
+            low, high = native_frame_bounds(self._env.observation_space())
+            self._native_low = jnp.asarray(low, dtype=jnp.float32)
+            self._native_high = jnp.asarray(high, dtype=jnp.float32)
+        else:
+            self._native_low = None
+            self._native_high = None
         self.frame_skip = int(getattr(self._env, "_cbl_frame_skip", 1))
         self.clip_reward = bool(getattr(self._env, "_cbl_clip_reward", False))
         self._single_frame_api = not hasattr(self._env, "frame_stack_size")
@@ -141,7 +156,20 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             raw_observation=raw_stack,  # Pass through the stacked object-centric observation
             objects=objects_stack,
             pixel_observation=pixel_stack,
+            native_oc_vector=self._native_vector_or_placeholder(None),
         )
+
+    def _native_vector_or_placeholder(self, flat_stack):
+        if not self._native_oc or flat_stack is None:
+            return jnp.zeros((1,), dtype=jnp.float32)
+        return normalize_native_stack(flat_stack, self._native_low, self._native_high)
+
+    def _native_stack_from_frame(self, frame, previous):
+        if not self._native_oc:
+            return None
+        if previous is None:
+            return init_native_frame_stack(frame, self.stack_size)
+        return push_native_frame_stack(previous, frame)
 
     def _substep_env_state_events(self, prev_env_state, next_env_state):
         """
@@ -214,6 +242,13 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             state = SemanticState(atari_state=atari_state)
 
         semantic_obs = self._process_stack(obs_stack)
+        native_stack = None
+        if self._native_oc and self._single_frame_api:
+            native_stack = self._native_stack_from_frame(ravel_native_frame(obs), None)
+            semantic_obs = semantic_obs.replace(
+                native_oc_vector=self._native_vector_or_placeholder(native_stack)
+            )
+            state = state.replace(native_flat_stack=native_stack)
 
         return semantic_obs, state
 
@@ -264,6 +299,11 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             reward = jnp.sign(total_reward) if self.clip_reward else total_reward
             new_atari_state = atari_state
             new_state = SemanticState(atari_state=new_atari_state, obs_stack=obs_stack)
+            if self._native_oc:
+                native_stack = self._native_stack_from_frame(
+                    ravel_native_frame(obs_single), state.native_flat_stack
+                )
+                new_state = new_state.replace(native_flat_stack=native_stack)
         else:
             prev_env_state = self._unwrap_env_state(state.atari_state)
             obs_stack, new_atari_state, reward, done, info = self._step_env_compat(
@@ -282,6 +322,10 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         semantic_obs = self._stamp_collect_events_on_observation(
             semantic_obs, accumulated_collect_events
         )
+        if self._native_oc and new_state.native_flat_stack is not None:
+            semantic_obs = semantic_obs.replace(
+                native_oc_vector=self._native_vector_or_placeholder(new_state.native_flat_stack)
+            )
 
         return semantic_obs, new_state, reward, done, info
 

@@ -88,9 +88,7 @@ def _semantic_event_sums(obs: Any) -> tuple[jnp.ndarray, jnp.ndarray]:
         arr = jnp.asarray(arr)
         if arr.ndim >= 2:
             arr = arr[-1]
-        # Index 0 is the NOOP / empty pad in CBL semantic layouts.
-        if arr.shape[0] > 1:
-            arr = arr[1:]
+        # Reserved NOOP is appended and stays zero. Slot 0 is a real object.
         return jnp.sum(arr.astype(jnp.float32))
 
     return _sum_flag("was_killed"), _sum_flag("was_collected")
