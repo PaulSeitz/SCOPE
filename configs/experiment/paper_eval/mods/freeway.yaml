@@ -3,6 +3,9 @@ env: freeway
 status: ready
 
 eval_mods:
+  - key: no_cars
+    mods: [no_cars]
+    category: probe
   - key: base
     mods: []
     category: control

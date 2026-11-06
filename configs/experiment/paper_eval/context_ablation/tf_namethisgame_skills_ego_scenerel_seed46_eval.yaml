@@ -1,0 +1,104 @@
+# Context ablation: reference ego target features plus all object slots in the same player-relative facing-frame encoding (4 frames, active, is_target). No absolute coordinates.
+# Derived from tf_namethisgame_skills_ego_seed46 by scripts/materialize_context_ablation.py; do not edit by hand.
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: skills
+PAPER_EVAL_MODS: namethisgame
+PAPER_EVAL_MOD_KEYS:
+- base
+- shift_tentacle_spawn_x
+- slower_player
+- faster_shark
+- no_shark_short_tentacles
+- change_background_color
+- no_shark
+PAPER_EVAL_REQUIRES_RQ1:
+- tf_namethisgame_skills_ego_scenerel_seed46
+PAPER_EVAL_ARCHITECTURE_OF: tf_namethisgame_skills_ego_scenerel_seed46
+PAPER_EVAL_SKILLS_CKPT: ./outputs/models/paper_eval/thesis_final/tf_namethisgame_skills_ego_scenerel_seed46/namethisgame/hierarchical_pqn_namethisgame_seed46.safetensors
+NUM_SEEDS: 1
+ALG_NAME: hierarchical_pqn
+TRAIN_MODE: skills_only
+ENV_NAME: namethisgame
+USE_POV_RELATIVE_MAPPER: true
+USE_POV_FIXED_BILATERAL: false
+USE_POV_FACING_FRAME: true
+EGO_POSE_XY: false
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: false
+USE_EGO_BLOCKING_FEATURES: false
+USE_EGO_WEAPON_FEATURES: false
+USE_EGO_FACING_ENEMY_FEATURES: false
+USE_EGO_SHOT_FEATURES: false
+AVOID_INTERRUPT_RANGE: 55
+AVOID_INTERRUPT_RANGE_Y: 55
+SURFACE_SUB_AVOID_RANGE_X: 5
+SURFACE_SUB_AVOID_RANGE_Y: 5
+EGO_DISTANCE_CLIP_MAX_PX: null
+EGO_ANGLE_BINS: null
+EGO_PSI_ANGLE_BINS: 8
+EGO_LEGAL_ACTION_MASK: false
+SURFACE_SUB_NEAR_RANGE: 5
+USE_LEGACY_SEAQUEST_ACTION_MAPPER: false
+USE_LEGACY_SEAQUEST_ASCENT_BLOCK: false
+USE_LEGACY_SEAQUEST_SURFACING_DEATH_GUARD: false
+SAVE_PATH: ./outputs/models/paper_eval/thesis_final/tf_namethisgame_skills_ego_scenerel_seed46_eval
+WANDB_RUN_NAME: ntg_tf_namethisgame_skills_ego_scenerel_seed46_eval
+WANDB_TAGS:
+- suite:thesis_final
+- rq:1abl
+- env:namethisgame
+- arm:skills_ego_scenerel
+- phase:mod_eval
+- budget:50m_optim
+- scale:pqn_optim_1to1
+- num_envs:1024
+- num_steps:32
+- num_updates:1525
+- lr:0.00025
+- lr_decay:linear
+- max_grad_norm:10
+- eps:1.0to0.001
+- skill_input:ego_scene_rel
+- ablation:skill_context
+GAME_MODS: null
+EVAL_GAME_MODS: null
+SKILL_INPUT_MODE: ego_scene_rel
+HEURISTIC_MODE: env_specific
+SKILL_DEATH_PENALIZE_COLLECT: true
+RECORD_VIDEO: false
+VIDEO_AT_END: false
+DESTROY_CONTACT_FAIL: true
+DESTROY_LIVING_PENALTY: false
+COLLECT_SPARSE_ONLY: true
+AVOID_SPARSE_ONLY: false
+AVOID_KILLED_EVENT_MODE: none
+COLLECT_EARLY_WHEN_NO_THREATS: false
+alg:
+  NUM_SKILLS: 3
+  SKILL_NAMES:
+  - DESTROY
+  - COLLECT
+  - AVOID
+  MAX_OBJECTS: 11
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
+  NUM_LAYERS: 3
+  SKILL_EMBED_DIM: 256
+  SKILL_LR: 0.00025
+  FRAME_SKIP: 4
+  FRAME_STACK_SIZE: 4
+  HEURISTIC_MODE: env_specific
+  SKILL_INPUT_MODE: ego_scene_rel
+  SKILL_DEATH_PENALIZE_COLLECT: true
+  DESTROY_CONTACT_FAIL: true
+  DESTROY_LIVING_PENALTY: false
+  COLLECT_SPARSE_ONLY: true
+  AVOID_SPARSE_ONLY: false
+  AVOID_KILLED_EVENT_MODE: none
+  COLLECT_EARLY_WHEN_NO_THREATS: false
+  USE_EGO_SHOT_FEATURES: false
+SEED: 46
+EVAL_SEED: 10046
+EVAL_NUM_SEEDS: 3

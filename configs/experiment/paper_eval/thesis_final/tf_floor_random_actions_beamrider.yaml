@@ -9,8 +9,6 @@ PAPER_EVAL_MOD_KEYS:
 - slow_strafe
 - double_enemy_speed
 - idle_at_range
-- only_rejuvenator
-- rejuvenator_and_coins
 PAPER_EVAL_REQUIRES_RQ1: []
 NUM_SEEDS: 1
 ALG_NAME: flat_pqn

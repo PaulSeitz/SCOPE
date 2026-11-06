@@ -1,0 +1,47 @@
+source_reference: tf_seaquest_skills_ego_avsep_seed44
+variants:
+  a_early:
+    early_collect: true
+    geometry: centre_ray
+    train: tf_seaquest_skills_ego_probe_a_early_seed44
+    runs_in_order:
+    - tf_seaquest_skills_ego_probe_a_early_seed44
+    - tf_seaquest_skills_ego_probe_a_early_seed44_eval
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_namethisgame_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_spaceinvaders_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_asteroids_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_pong_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_breakout_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_freeway_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_phoenix_seed44
+    - tf_zs_skills_ego_probe_a_early_seaquest_to_beamrider_seed44
+  b_closest:
+    early_collect: false
+    geometry: closest_points
+    train: tf_seaquest_skills_ego_probe_b_closest_seed44
+    runs_in_order:
+    - tf_seaquest_skills_ego_probe_b_closest_seed44
+    - tf_seaquest_skills_ego_probe_b_closest_seed44_eval
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_namethisgame_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_spaceinvaders_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_asteroids_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_pong_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_breakout_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_freeway_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_phoenix_seed44
+    - tf_zs_skills_ego_probe_b_closest_seaquest_to_beamrider_seed44
+  c_combined:
+    early_collect: true
+    geometry: closest_points
+    train: tf_seaquest_skills_ego_probe_c_combined_seed44
+    runs_in_order:
+    - tf_seaquest_skills_ego_probe_c_combined_seed44
+    - tf_seaquest_skills_ego_probe_c_combined_seed44_eval
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_namethisgame_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_spaceinvaders_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_asteroids_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_pong_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_breakout_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_freeway_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_phoenix_seed44
+    - tf_zs_skills_ego_probe_c_combined_seaquest_to_beamrider_seed44

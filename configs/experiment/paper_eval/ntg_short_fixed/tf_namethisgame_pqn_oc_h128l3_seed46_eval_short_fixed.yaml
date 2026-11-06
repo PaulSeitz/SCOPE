@@ -1,0 +1,25 @@
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: flat_pqn
+PAPER_EVAL_MODS: namethisgame
+PAPER_EVAL_MOD_KEYS:
+- no_shark_short_tentacles
+PAPER_EVAL_REQUIRES_RQ1: []
+PAPER_EVAL_ARCHITECTURE_OF: tf_namethisgame_pqn_oc_h128l3_seed46
+PAPER_EVAL_FLAT_PQN_CKPT: ./outputs/models/paper_eval/rewardfix_wave/tf_namethisgame_pqn_oc_h128l3_seed46/namethisgame/flat_pqn_namethisgame_oc_seed46_vmap0.safetensors
+PAPER_EVAL_OBJECT_CENTRIC: true
+NUM_SEEDS: 1
+ALG_NAME: flat_pqn
+ENV_NAME: namethisgame
+OBJECT_CENTRIC: true
+SAVE_PATH: ./outputs/models/paper_eval/rewardfix_wave/tf_namethisgame_pqn_oc_h128l3_seed46_short_fixed
+WANDB_RUN_NAME: ntg_tf_namethisgame_pqn_oc_h128l3_seed46_full_eval
+WANDB_TAGS:
+- suite:oc_pqn_3x128
+- rq:1
+- env:namethisgame
+- arm:pqn_oc_h128l3
+- phase:mod_eval
+SEED: 46
+EVAL_SEED: 10046
+EVAL_NUM_SEEDS: 3

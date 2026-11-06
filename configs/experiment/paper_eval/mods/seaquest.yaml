@@ -66,6 +66,64 @@ eval_mods:
     mods: [swap_diver_shark_roles]
     category: semantic
     relabel: true
+  # relational: object-object behaviour changes, player rules unchanged
+  - key: decoupled_divers
+    mods: [decoupled_divers]
+    category: relational
+  - key: scrambled_relations
+    mods: [scrambled_relations]
+    category: relational
+  - key: shark_diver_bounce
+    mods: [_shark_diver_bounce]
+    category: relational
+  - key: mirror_world
+    mods: [mirror_world]
+    category: probe
+  - key: mirror_divers
+    mods: [mirror_divers]
+    category: probe
+  - key: micro_swarm
+    mods: [micro_swarm]
+    category: probe
+  - key: tiny_divers
+    mods: [tiny_divers]
+    category: probe
+  - key: sparse_world
+    mods: [sparse_world]
+    category: probe
+  - key: erratic_enemies
+    mods: [erratic_enemies]
+    category: probe
+  - key: ocean_currents
+    mods: [ocean_currents]
+    category: probe
+  - key: ghost_sharks
+    mods: [ghost_sharks]
+    category: probe
+  - key: momentum
+    mods: [momentum]
+    category: probe
+  - key: sticky_water
+    mods: [sticky_water]
+    category: probe
+  - key: slippery_turn
+    mods: [slippery_turn]
+    category: probe
+  - key: inverted_controls
+    mods: [inverted_controls]
+    category: probe
+  - key: extra_enemy_type
+    mods: [extra_enemy_type]
+    category: probe
+  - key: swapped_enemy_roles
+    mods: [swapped_enemy_roles]
+    category: relational
+  - key: torpedo_lane_shift
+    mods: [_torpedo_lane_shift]
+    category: relational
+  - key: kill_flips_enemies
+    mods: [_kill_flips_enemies]
+    category: relational
   # dynamics (expect ego to struggle more here)
   - key: gravity
     mods: [gravity]

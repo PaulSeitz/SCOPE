@@ -27,7 +27,8 @@ gpu1_pixel_stems:
   - optim_scale_pqn_pixel_seed45_eval
   - optim_scale_pqn_pixel_seed46
   - optim_scale_pqn_pixel_seed46_eval
-pixel_envs_suite: optim_scale_pqn_pixel_envs
+pixel_envs_suite:
+  name: optim_scale_pqn_pixel_envs
   envs: ['phoenix', 'namethisgame', 'asteroids', 'spaceinvaders', 'beamrider', 'timepilot', 'pong', 'breakout', 'freeway']
   seeds: [44, 45, 46]
   stems:
@@ -85,7 +86,8 @@ pixel_envs_suite: optim_scale_pqn_pixel_envs
     - optim_scale_pqn_pixel_freeway_seed44_eval
     - optim_scale_pqn_pixel_freeway_seed45_eval
     - optim_scale_pqn_pixel_freeway_seed46_eval
-oc_builds_suite: optim_scale_pqn_oc_builds
+oc_builds_suite:
+  name: optim_scale_pqn_oc_builds
   seed: 44
   modes: ['oc_simple_rel_role', 'oc_simple_role', 'oc_embed']
   stems:

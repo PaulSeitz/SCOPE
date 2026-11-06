@@ -18,6 +18,12 @@ eval_mods:
   - key: no_shark_short_tentacles
     mods: [no_shark_short_tentacles]
     category: semantic
+  - key: no_shark
+    mods: [no_shark]
+    category: semantic
+  - key: change_background_color
+    mods: [change_background_color]
+    category: visual
 
 paper_core:
   - base

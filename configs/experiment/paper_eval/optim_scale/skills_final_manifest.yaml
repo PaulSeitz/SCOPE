@@ -1,6 +1,7 @@
 # optim_scale skills final inventory (not runnable).
 locked_recipe: ε B (0.2->0.01/0.2) + LR=0.00025+linear + MAX_GRAD_NORM=10.0
-bases_suite: optim_scale_skills_bases
+bases_suite:
+  name: optim_scale_skills_bases
   seed: 44
   envs: ['phoenix', 'namethisgame', 'asteroids']
   stems:
@@ -10,7 +11,8 @@ bases_suite: optim_scale_skills_bases
     - optim_scale_skills_bases_phoenix_eval
     - optim_scale_skills_bases_namethisgame_eval
     - optim_scale_skills_bases_asteroids_eval
-transfers_suite: optim_scale_skills_transfers
+transfers_suite:
+  name: optim_scale_skills_transfers
   seed: 44
   envs: ['spaceinvaders', 'beamrider', 'timepilot', 'pong', 'breakout', 'freeway']
   stems:
@@ -26,7 +28,8 @@ transfers_suite: optim_scale_skills_transfers
     - optim_scale_skills_transfers_pong_eval
     - optim_scale_skills_transfers_breakout_eval
     - optim_scale_skills_transfers_freeway_eval
-clip_foils_suite: optim_scale_skills_clip_foils
+clip_foils_suite:
+  name: optim_scale_skills_clip_foils
   seed: 44
   clips: [10, 50]
   envs: ['seaquest', 'phoenix', 'asteroids', 'spaceinvaders', 'beamrider', 'timepilot', 'pong']
@@ -59,7 +62,8 @@ clip_foils_suite: optim_scale_skills_clip_foils
     - optim_scale_skills_clip50_beamrider_eval
     - optim_scale_skills_clip50_timepilot_eval
     - optim_scale_skills_clip50_pong_eval
-living_urgency_suite: optim_scale_skills_living_urgency
+living_urgency_suite:
+  name: optim_scale_skills_living_urgency
   seed: 44
   flags: DESTROY_LIVING_PENALTY + COLLECT_LIVING_PENALTY (COLLECT_SPARSE_ONLY off; AVOID_SPARSE_ONLY on)
   envs: ['seaquest', 'phoenix', 'asteroids', 'spaceinvaders', 'beamrider', 'timepilot', 'pong']
@@ -78,7 +82,8 @@ living_urgency_suite: optim_scale_skills_living_urgency
     - optim_scale_skills_living_urgency_beamrider_eval
     - optim_scale_skills_living_urgency_timepilot_eval
     - optim_scale_skills_living_urgency_pong_eval
-lr_suite: optim_scale_skills_lr
+lr_suite:
+  name: optim_scale_skills_lr
   seed: 1
   fixed_eps: B
   arms:
@@ -92,7 +97,8 @@ lr_suite: optim_scale_skills_lr
     - optim_scale_skills_lr_lr1e4_lin_seed1_eval
     - optim_scale_skills_lr_lr2p5e4_const_seed1_eval
     - optim_scale_skills_lr_lr5e4_lin_seed1_eval
-old_eps_suite: optim_scale_skills_old_eps
+old_eps_suite:
+  name: optim_scale_skills_old_eps
   seed: 44
   eps: 1.0->0.001/0.1
   lr: 0.00025+linear

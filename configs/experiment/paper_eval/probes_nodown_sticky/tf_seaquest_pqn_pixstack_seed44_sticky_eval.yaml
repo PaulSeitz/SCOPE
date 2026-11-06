@@ -1,0 +1,53 @@
+Probe: sticky actions on at train time (probability 0.25). Seed 44, Seaquest. Eval stays sticky-off so it matches the frozen scores. Not part of the frozen set.
+# Thesis-final home mod eval — tf_seaquest_pqn_pixstack_seed44_sticky.
+PAPER_EVAL_RQ: 1
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: flat_pqn
+PAPER_EVAL_MODS: seaquest
+PAPER_EVAL_MOD_KEYS:
+- base
+- no_enemies
+- swap_diver_enemy_labels
+- swap_diver_shark_roles
+- gravity
+- faster_enemies
+- shift_lanes
+- random_spawns
+- change_background_color
+PAPER_EVAL_REQUIRES_RQ1:
+- tf_seaquest_pqn_pixstack_seed44_sticky
+PAPER_EVAL_ARCHITECTURE_OF: tf_seaquest_pqn_pixstack_seed44_sticky
+PAPER_EVAL_FLAT_PQN_CKPT: ./outputs/models/paper_eval/thesis_final/tf_seaquest_pqn_pixstack_seed44_sticky/seaquest/flat_pqn_seaquest_pixel_seed44_vmap0.safetensors
+PAPER_EVAL_OBJECT_CENTRIC: false
+PIXEL_CHANNEL_STACK: true
+NUM_SEEDS: 1
+ALG_NAME: flat_pqn
+ENV_NAME: seaquest
+OBJECT_CENTRIC: false
+PIXEL_CHANNEL_STACK: true
+PIXEL_RESIZE: true
+PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+PIXEL_GRAYSCALE: true
+USE_NATIVE_DOWNSCALING: false
+SAVE_PATH: ./outputs/models/paper_eval/thesis_final/tf_seaquest_pqn_pixstack_seed44_sticky
+WANDB_RUN_NAME: sq_tf_seaquest_pqn_pixstack_seed44_sticky_eval
+WANDB_TAGS:
+- suite:thesis_final
+- rq:1
+- env:seaquest
+- arm:pqn_pixstack
+- phase:mod_eval
+- budget:50m_optim
+- scale:pqn_optim_1to1
+- num_envs:1024
+- num_steps:32
+- num_updates:1525
+- lr:0.00025
+- lr_decay:linear
+- max_grad_norm:10
+- eps:1.0to0.001
+SEED: 44
+EVAL_SEED: 10044
+EVAL_NUM_SEEDS: 3

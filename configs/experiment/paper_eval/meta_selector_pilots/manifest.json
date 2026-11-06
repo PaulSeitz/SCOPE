@@ -1,0 +1,17 @@
+{
+  "stems": [
+    "pm_seaquest_slots_seed44",
+    "pm_seaquest_slots_seed44_eval",
+    "pm_seaquest_candidates_seed44",
+    "pm_seaquest_candidates_seed44_eval",
+    "pm_namethisgame_slots_seed44",
+    "pm_namethisgame_slots_seed44_eval",
+    "pm_namethisgame_candidates_seed44",
+    "pm_namethisgame_candidates_seed44_eval"
+  ],
+  "source_templates": [
+    "tf_seaquest_tandem_pixel_seed44",
+    "tf_namethisgame_tandem_pixel_seed44"
+  ],
+  "launch_policy": "manual scheduler approval; slots first, candidates conditional"
+}

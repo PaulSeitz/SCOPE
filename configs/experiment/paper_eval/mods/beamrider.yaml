@@ -22,12 +22,9 @@ eval_mods:
   - key: top_idle_no_shoot
     mods: [idle_at_range]
     category: semantic
-  - key: only_rejuvenator
-    mods: [only_rejuvenator]
-    category: semantic
-  - key: rejuvenator_and_coins
-    mods: [rejuvenator_and_coins]
-    category: semantic
+  # only_rejuvenator / rejuvenator_and_coins were never registered in
+  # BeamRiderEnvMod.REGISTRY. Dropped from paper_core so eval does not
+  # abort the stem.
   # legacy / opportunistic (not in paper_core)
   - key: hardcore
     mods: [hardcore]
@@ -55,5 +52,3 @@ paper_core:
   - slow_strafe
   - double_enemy_speed
   - idle_at_range
-  - only_rejuvenator
-  - rejuvenator_and_coins

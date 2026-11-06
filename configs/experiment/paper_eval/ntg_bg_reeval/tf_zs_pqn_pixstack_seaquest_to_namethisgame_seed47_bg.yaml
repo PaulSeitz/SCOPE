@@ -1,0 +1,34 @@
+# Pixel PQN zero-shot. Channel-stacked checkpoint from seaquest, evaluated on namethisgame.
+PAPER_EVAL_RQ: 2
+PAPER_EVAL_PHASE: eval
+PAPER_EVAL_KIND: flat_pqn
+PAPER_EVAL_MODS: namethisgame
+PAPER_EVAL_MOD_KEYS:
+- change_background_color
+PAPER_EVAL_REQUIRES_RQ1: []
+PAPER_EVAL_ARCHITECTURE_OF: tf_seaquest_pqn_pixstack_seed47
+PAPER_EVAL_FLAT_PQN_CKPT: ./outputs/models/paper_eval/thesis_final/tf_seaquest_pqn_pixstack_seed47/seaquest/flat_pqn_seaquest_pixel_seed47_vmap0.safetensors
+PAPER_EVAL_OBJECT_CENTRIC: false
+PIXEL_CHANNEL_STACK: true
+NUM_SEEDS: 1
+ALG_NAME: flat_pqn
+ENV_NAME: namethisgame
+OBJECT_CENTRIC: false
+PIXEL_RESIZE: true
+PIXEL_RESIZE_SHAPE:
+- 84
+- 84
+PIXEL_GRAYSCALE: true
+USE_NATIVE_DOWNSCALING: false
+SAVE_PATH: ./outputs/models/paper_eval/thesis_final/tf_seaquest_pqn_pixstack_seed47
+WANDB_RUN_NAME: sq_tf_zs_pqn_pixstack_seaquest_to_namethisgame_seed47
+WANDB_TAGS:
+- suite:rewardfix_wave
+- rq:2
+- env:namethisgame
+- src:seaquest
+- arm:pqn_pixstack
+- phase:zero_shot
+SEED: 47
+EVAL_SEED: 10047
+EVAL_NUM_SEEDS: 3
