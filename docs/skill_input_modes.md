@@ -13,6 +13,8 @@ for transfer: RAM / layout slot `i` can mean different entities across games.
 |---|---|---|---|
 | `ego` | Relative engineered features for the selected object | Built into the features (distance, angle, …) | No |
 | `ego_embed` | Same as `ego`, then `Dense → ReLU` | Same as `ego` | No |
+| `ego_scene_rel` | `ego` + every slot in the same relative encoding | `ego` prefix + `is_target` column | No (mark, not one-hot input id) |
+| `ego_abs_pos` | `ego` + player centre (x/160, y/210) per frame | Same as `ego` | No |
 | `oc_embed` | Full labeled `objects` matrix (same leaves as meta) | Shared per-object `Dense`, then **gather target row** | No |
 | `pixel_embed` | CNN over pixel stack | **Red outline** (bright ring if grayscale) on the target bbox | No |
 | `pixel_embed_cond` | Alias of `pixel_embed` | Same outline (legacy name; slot-channel cond removed) | No |
@@ -27,6 +29,48 @@ target_idx ──gather──► relative features (dx, dy, …) ──► MLP �
 - The Q-net never sees the integer slot id.
 - This is the representation the paper argues for as transferable System-1 input.
 - `ego_embed` adds an optional Dense projection (`SKILL_EMBED_DIM`).
+
+## Further ablations (`ego_oc_native` / flat `ego_scene_rel_flat`)
+
+- `ego_oc_native` (skill arm `skills_ego_ocnative`, needs `OC_NATIVE_STACK: true`):
+  `ego(target) || native vector || one_hot(target)`. Tests whether absolute object
+  coordinates and the extra native fields still harm layout robustness when the
+  target-relative input is present.
+- `ego_scene_rows` (skill arm `skills_ego_scenerows`): the `ego_scene_rel` rows without the
+  reference prefix. The target is identified by `is_target` only.
+- `OC_INPUT_MODE: ego_scene_rel_flat` (flat PQN arm `pqn_ego_scenerel`): the scene rows
+  without `is_target` and without the prefix, the 18-action facing-relative mapping and
+  a 3x128 MLP, trained on the environment reward. Isolates the hierarchy against
+  `skills_ego_scenerel`.
+
+## Context ablations (`ego_scene_rel` / `ego_abs_pos`)
+
+Thesis follow-up to separate *what* the restriction withholds. Both keep the
+reference 36-value `ego` vector as an unchanged prefix, and the same selector,
+rewards, ego action mapping, 3×128 MLP and optimisation. Source:
+`observations/ego_context.py`; configs: `scripts/materialize_context_ablation.py`
+→ `configs/experiment/paper_eval/context_ablation/`.
+
+```
+ego_scene_rel:  ego(target) || for j in slots: [ego(j)_f·active_f, active_f]×4 , is_target_j
+ego_abs_pos:    ego(target) || [px_f/160, py_f/210]×4
+```
+
+- `ego_scene_rel` uses the reference per-object encoding (AABB-gap distance +
+  facing-relative ψ bins) for every slot, so the only change is *which objects*
+  the skill sees. No absolute coordinates, player box, labels or oxygen
+  (unlike `oc_flat_rel`, whose global tail carries the absolute player box).
+  Width: `36 + M·41` (Seaquest M=35 → 1471, Name This Game M=11 → 487). It
+  depends on M, so this arm does not transfer across games.
+- Caveat: fixed or lane-bound slots make absolute position recoverable from
+  relative offsets. Seaquest's surface waypoint (slot 33, always active, y=44)
+  gives depth, and the Name This Game tentacles (slots 1–8, x std ≈ 4.5 px)
+  give x. The arm removes *explicit* absolute location, not its correlates.
+- `ego_abs_pos` appends the explicit player centre for each stacked frame
+  (width 44). If the policy ignores it, robustness can stay unchanged. That
+  result would weaken the claim that withholding absolute location is necessary.
+- Tests: `tests/test_ego_context.py` (prefix identity, masking, rigid-shift
+  invariance of the scene, exact abs-pos tail) on real Seaquest/NTG states.
 
 ## Object-centric (`oc_embed`)
 

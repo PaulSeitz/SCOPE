@@ -1,0 +1,1664 @@
+diff --git a/JAXAtari/src/jaxatari/wrappers.py b/JAXAtari/src/jaxatari/wrappers.py
+index 130e23a..3358e42 100644
+--- a/JAXAtari/src/jaxatari/wrappers.py
++++ b/JAXAtari/src/jaxatari/wrappers.py
+@@ -178,11 +178,11 @@ class AtariWrapper(JaxatariWrapper):
+ 
+         # Create the initial frame stack from the final observation.
+         obs = jax.tree.map(lambda x: jnp.stack([x] * self.frame_stack_size), obs)
+-        print("len obs: ", len(obs))
++        pass  # CBL: struct obs
+         dropped = jax.tree.map(lambda _: jnp.zeros((self.frame_stack_size,), dtype=jnp.bool_), obs)
+         if self.std_dev > 0.0 or self.detect_prob < 1.0:
+             dropped, obs = self.add_noise(dropped, obs, wrapper_key)
+-            print(obs)
++            pass  # CBL
+ 
+         return obs, AtariState(env_state, wrapper_key, step, prev_action, obs, dropped)
+ 
+@@ -333,8 +333,8 @@ class ObjectCentricWrapper(JaxatariWrapper):
+     ) -> Tuple[chex.Array, EnvState]:
+         obs, state = self._env.reset(key)
+         # Flatten each frame in the stack
+-        print("obs: ", obs)
+-        print("len obs: ", len(obs))
++        pass  # CBL
++        pass  # CBL: struct obs
+         flat_obs = jax.vmap(self._env.obs_to_flat_array)(obs)
+         return flat_obs, state
+ 
+diff --git a/main.py b/main.py
+index b3cc90a..96a222e 100644
+--- a/main.py
++++ b/main.py
+@@ -215,7 +215,15 @@ def build_setup(config):
+                 env = ObjectCentricWrapper(env)
+                 env = FlattenObservationWrapper(env)
+             else:
+-                env = PixelObsWrapper(env, do_pixel_resize=True, pixel_resize_shape=(84, 84), grayscale=True)
++                env = PixelObsWrapper(
++                    env,
++                    do_pixel_resize=True,
++                    pixel_resize_shape=(84, 84),
++                    grayscale=True,
++                    frame_stack_size=4,
++                    frame_skip=4,
++                    max_pooling=True,
++                )
+             env = MultiRewardLogWrapper(env)
+             return env
+         env = create_env(True, False)
+@@ -264,7 +272,15 @@ def build_setup(config):
+                 env = ObjectCentricWrapper(env)
+                 env = FlattenObservationWrapper(env)
+             else:
+-                env = PixelObsWrapper(env, do_pixel_resize=True, pixel_resize_shape=(84, 84), grayscale=True)
++                env = PixelObsWrapper(
++                    env,
++                    do_pixel_resize=True,
++                    pixel_resize_shape=(84, 84),
++                    grayscale=True,
++                    frame_stack_size=4,
++                    frame_skip=4,
++                    max_pooling=True,
++                )
+             env = MultiRewardLogWrapper(env)
+             return env
+         env = create_env(True, False)
+@@ -332,7 +348,39 @@ def build_setup(config):
+         test_env_modif = create_env(basic_env, False, True)
+ 
+     else:
+-        raise NotImplementedError(f"Env {config['ENV_NAME']} not implemented.")
++        # CBL: NO_REWARDS HRL factory fallback for TimePilot / NameThisGame
++        # (scripts/nexus/hrl_env.py — symbolic NEXUS stays Seaquest-only).
++        import sys as _cbl_sys
++        from pathlib import Path as _CblPath
++        _cbl_scripts = _CblPath(__file__).resolve().parents[2] / "scripts"
++        # When run via CBL run_nexus runner, PROJECT_ROOT/scripts is already on path.
++        if str(_cbl_scripts) not in _cbl_sys.path:
++            # Fallback: walk up from NEXUS_ROOT to ConceptBasedLearning/scripts
++            _nexus_root = _CblPath(__file__).resolve().parents[1]
++            for _cand in (
++                _nexus_root.parent.parent / "scripts",  # third_party/symbolic_options → CBL
++                _nexus_root.parent / "scripts",
++            ):
++                if (_cand / "nexus" / "hrl_env.py").is_file():
++                    _cbl_sys.path.insert(0, str(_cand))
++                    break
++        from nexus.hrl_env import try_build_hrl_no_rewards_setup
++        _cbl_setup = try_build_hrl_no_rewards_setup(config)
++        if _cbl_setup is None:
++            raise NotImplementedError(f"Env {config['ENV_NAME']} not implemented.")
++        env = _cbl_setup["env"]
++        eval_envs = _cbl_setup["eval_envs"]
++        create_env = _cbl_setup["create_env"]
++        renderer = _cbl_setup["renderer"]
++        reward_funcs = _cbl_setup["reward_funcs"]
++        learned_meta_policy = _cbl_setup["learned_meta_policy"]
++        llm_meta_policy = _cbl_setup["llm_meta_policy"]
++        conditional_meta_policy = _cbl_setup["conditional_meta_policy"]
++        combined_meta_policy = _cbl_setup["combined_meta_policy"]
++        test_env = _cbl_setup["test_env"]
++        test_env_modif = _cbl_setup["test_env_modif"]
++        env_params = _cbl_setup["env_params"]
++        basic_env = _cbl_setup["basic_env"]
+ 
+     if config.get("HIERARCHICAL", False):
+         meta_policy_string = config.get("META_POLICY", "llm")
+diff --git a/src/symbolic_options/config/alg/cbl_namethisgame_hrl_baseline_optim50m.yaml b/src/symbolic_options/config/alg/cbl_namethisgame_hrl_baseline_optim50m.yaml
+new file mode 100644
+index 0000000..e43cee4
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_namethisgame_hrl_baseline_optim50m.yaml
+@@ -0,0 +1,54 @@
++# HRL / HPQN baseline — NameThisGame, CBL 50M optim 1:1 schedule.
++# NO_REWARDS + learned meta; NUM_AGENTS=3. Wired via scripts/nexus/hrl_env.py.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 32
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 2
++NUM_MINIBATCHES: 256
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 2.5e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: true
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++NO_REWARDS: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "NameThisGame"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_final_10m.yaml b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_final_10m.yaml
+new file mode 100644
+index 0000000..5e21eae
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_final_10m.yaml
+@@ -0,0 +1,58 @@
++# HPQN/HRL baseline — final_10m (CBL ourhps schedule, matched 10M).
++# Architecture: NEXUS hierarchical PQN, NO_REWARDS=true (no skill rewards).
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline"
++TOTAL_TIMESTEPS: 9994240
++TOTAL_TIMESTEPS_DECAY: 9994240
++NUM_ENVS: 128
++NUM_STEPS: 128
++EPS_START: 0.2
++EPS_FINISH: 0.01
++EPS_DECAY: 0.2
++META_EPS_START: 0.2
++META_EPS_FINISH: 0.01
++META_EPS_DECAY: 0.2
++NUM_EPOCHS: 4
++NUM_MINIBATCHES: 64
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 5.0e-4
++MAX_GRAD_NORM: 0.8
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 128
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++NO_REWARDS: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_optim50m.yaml b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_optim50m.yaml
+new file mode 100644
+index 0000000..c952ede
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_optim50m.yaml
+@@ -0,0 +1,58 @@
++# HRL / HPQN baseline — Seaquest, CBL 50M optim 1:1 schedule.
++# NO_REWARDS + learned meta; NUM_AGENTS=3 (COLLECT/DESTROY/AVOID count).
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 32
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 2
++NUM_MINIBATCHES: 256
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 2.5e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: true
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++NO_REWARDS: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_ourhps.yaml b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_ourhps.yaml
+new file mode 100644
+index 0000000..81f9b78
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_ourhps.yaml
+@@ -0,0 +1,57 @@
++# HPQN/HRL baseline with our CBL hyperparameters (same architecture flags).
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline"
++TOTAL_TIMESTEPS: 24985600
++TOTAL_TIMESTEPS_DECAY: 24985600
++NUM_ENVS: 128
++NUM_STEPS: 128
++EPS_START: 0.2
++EPS_FINISH: 0.01
++EPS_DECAY: 0.2
++META_EPS_START: 0.2
++META_EPS_FINISH: 0.01
++META_EPS_DECAY: 0.2
++NUM_EPOCHS: 4
++NUM_MINIBATCHES: 64
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 5.0e-4
++MAX_GRAD_NORM: 0.8
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 128
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++NO_REWARDS: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_paper.yaml b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_paper.yaml
+new file mode 100644
+index 0000000..ee51d31
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_hrl_baseline_paper.yaml
+@@ -0,0 +1,59 @@
++# NEXUS HPQN / HRL baseline (paper: hierarchical PQN without skill rewards,
++# learned meta). Mirrors pqn_jaxtari_sea2_hier_baseline.yaml.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 0.1
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++# CRITICAL: all options share env reward only (no skill-specific shaping).
++NO_REWARDS: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 1024
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_hrl_oc_optim50m.yaml b/src/symbolic_options/config/alg/cbl_seaquest_hrl_oc_optim50m.yaml
+new file mode 100644
+index 0000000..3fce2c3
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_hrl_oc_optim50m.yaml
+@@ -0,0 +1,55 @@
++# Default HRL, object MLP. NO_REWARDS learned meta, CBL 50M schedule. Not a NEXUS option-reward arm.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline_oc"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 32
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 2
++NUM_MINIBATCHES: 256
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 2.5e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: true
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: true
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_hrl_pixel_optim50m.yaml b/src/symbolic_options/config/alg/cbl_seaquest_hrl_pixel_optim50m.yaml
+new file mode 100644
+index 0000000..9f1a577
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_hrl_pixel_optim50m.yaml
+@@ -0,0 +1,55 @@
++# Default HRL, pixel CNN. Same NO_REWARDS recipe as the OC HRL arm.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline_pixel"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 32
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 2
++NUM_MINIBATCHES: 256
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 2.5e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: true
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: true
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: false
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_nesy_oc.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_nesy_oc.yaml
+new file mode 100644
+index 0000000..b1dd454
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_nesy_oc.yaml
+@@ -0,0 +1,55 @@
++# NEXUS neurosymbolic, object MLP. Upstream sea4 combined selection.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_combined_oc"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "combined"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_nesy_pixel.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_nesy_pixel.yaml
+new file mode 100644
+index 0000000..4ed906c
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_nesy_pixel.yaml
+@@ -0,0 +1,55 @@
++# NEXUS neurosymbolic, pixel CNN. Symbolic rules still read game state; the learned factor sees pixels.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_combined_pixel"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "combined"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: false
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_neural_oc.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_neural_oc.yaml
+new file mode 100644
+index 0000000..afdd46c
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_neural_oc.yaml
+@@ -0,0 +1,55 @@
++# NEXUS neural, object MLP. Upstream sea2_hier selection (learned) at the symbolic-paper budget.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_learned_oc"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_neural_pixel.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_neural_pixel.yaml
+new file mode 100644
+index 0000000..95121b0
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_neural_pixel.yaml
+@@ -0,0 +1,55 @@
++# NEXUS neural, pixel CNN. Same recipe as neural OC; OBJECT_CENTRIC false stacks four frames as channels.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_learned_pixel"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: false
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_final_10m.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_final_10m.yaml
+new file mode 100644
+index 0000000..6cd3139
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_final_10m.yaml
+@@ -0,0 +1,57 @@
++# NEXUS symbolic — final_10m (CBL ourhps schedule, matched 10M).
++# Architecture: 3 OC options + LLM meta; skill rewards on.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_llm"
++TOTAL_TIMESTEPS: 9994240
++TOTAL_TIMESTEPS_DECAY: 9994240
++NUM_ENVS: 128
++NUM_STEPS: 128
++EPS_START: 0.2
++EPS_FINISH: 0.01
++EPS_DECAY: 0.2
++META_EPS_START: 0.2
++META_EPS_FINISH: 0.01
++META_EPS_DECAY: 0.2
++NUM_EPOCHS: 4
++NUM_MINIBATCHES: 64
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 5.0e-4
++MAX_GRAD_NORM: 0.8
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 128
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "llm"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_oc.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_oc.yaml
+new file mode 100644
+index 0000000..6425956
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_oc.yaml
+@@ -0,0 +1,55 @@
++# NEXUS symbolic, object MLP. Fixed rules (META_POLICY llm), not an online model. Distinct from the older pqn_hier_llm checkpoints.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_llm_oc"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 0.1
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "llm"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_ourhps.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_ourhps.yaml
+new file mode 100644
+index 0000000..4ad6825
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_ourhps.yaml
+@@ -0,0 +1,58 @@
++# NEXUS symbolic Seaquest with ConceptBasedLearning skill/tandem HPs
++# (see configs/experiment/paper_eval/rq1/seaquest_skills_ego.yaml).
++# Same NEXUS architecture (3 OC options + LLM meta), different optimizer schedule.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_llm"
++TOTAL_TIMESTEPS: 24985600
++TOTAL_TIMESTEPS_DECAY: 24985600
++NUM_ENVS: 128
++NUM_STEPS: 128
++EPS_START: 0.2
++EPS_FINISH: 0.01
++EPS_DECAY: 0.2
++META_EPS_START: 0.2
++META_EPS_FINISH: 0.01
++META_EPS_DECAY: 0.2
++NUM_EPOCHS: 4
++NUM_MINIBATCHES: 64
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 5.0e-4
++MAX_GRAD_NORM: 0.8
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 128
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "llm"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_paper.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_paper.yaml
+new file mode 100644
+index 0000000..207c2dd
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_paper.yaml
+@@ -0,0 +1,59 @@
++# NEXUS default symbolic Seaquest (paper: NEXUS symbolic / hier_llm).
++# Matches third_party/.../pqn_jaxtari_sea3_hier_llm.yaml + paper Table 1 PQN-based HPs
++# (with Seaquest-tuned ε finish/decay as in the upstream config).
++# Train on current Seaquest via scripts/run_nexus.py --jaxatari-root.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_llm"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 0.1
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "llm"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 1024
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_pixel.yaml b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_pixel.yaml
+new file mode 100644
+index 0000000..75b1ae2
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_nexus_symbolic_pixel.yaml
+@@ -0,0 +1,55 @@
++# NEXUS symbolic, pixel CNN for the option heads. Selection remains the fixed rules.
++# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_llm_pixel"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 0.1
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "llm"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++NO_REWARDS: false
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: false
++
++# Frozen mod-eval is the reported test. In-training rollouts are off so the
++# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
++TEST_DURING_TRAINING: false
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_pqn_nexus_hps.yaml b/src/symbolic_options/config/alg/cbl_seaquest_pqn_nexus_hps.yaml
+new file mode 100644
+index 0000000..b1ffef9
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_pqn_nexus_hps.yaml
+@@ -0,0 +1,56 @@
++# NEXUS flat PQN Seaquest baseline — HPs as shipped in pqn_jaxtari_sea1.yaml
++# (paper Table 1 lists 1024/128 / max_grad=10 / ε 1→0.1@0.3; upstream Seaquest
++# config uses 512/64, max_grad=0.5, ε 1→0.001@0.1). This file mirrors the
++# *actual* sea1 config used for their PQN comparison runs.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 512
++NUM_STEPS: 64
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 0.1
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.1
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 0.5
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: false
++META_POLICY: "llm"
++META_GREEDY: true
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 1024
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_seaquest_pqn_paper_table1.yaml b/src/symbolic_options/config/alg/cbl_seaquest_pqn_paper_table1.yaml
+new file mode 100644
+index 0000000..1dc42ae
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_seaquest_pqn_paper_table1.yaml
+@@ -0,0 +1,49 @@
++# Paper Table 1 PQN(-based) Atari HPs applied to flat PQN Seaquest.
++# Use this when comparing against the *table* rather than sea1.yaml drift.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 128
++EPS_START: 1.0
++EPS_FINISH: 0.1
++EPS_DECAY: 0.3
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 5
++NUM_MINIBATCHES: 128
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 1.0e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: false
++GAMMA: 0.99
++LAMBDA: 0.65
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: false
++
++HIERARCHICAL: false
++META_POLICY: "llm"
++META_GREEDY: true
++ENV_NAME: "Seaquest"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 1024
++TEST_NUM_STEPS: 10000
++EPS_TEST: 0.0
++RECORD_VIDEO: true
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
++    no_enemies: false
++  - label: "mod"
++    no_enemies: true
++    noisy_eval: false
+diff --git a/src/symbolic_options/config/alg/cbl_timepilot_hrl_baseline_optim50m.yaml b/src/symbolic_options/config/alg/cbl_timepilot_hrl_baseline_optim50m.yaml
+new file mode 100644
+index 0000000..8aee931
+--- /dev/null
++++ b/src/symbolic_options/config/alg/cbl_timepilot_hrl_baseline_optim50m.yaml
+@@ -0,0 +1,54 @@
++# HRL / HPQN baseline — TimePilot, CBL 50M optim 1:1 schedule.
++# NO_REWARDS + learned meta; NUM_AGENTS=3. Wired via scripts/nexus/hrl_env.py.
++
++NAME_INITIALS: "CBL"
++ALG_NAME: "pqn_hier_baseline"
++TOTAL_TIMESTEPS: 5.0e7
++TOTAL_TIMESTEPS_DECAY: 5.0e7
++NUM_ENVS: 1024
++NUM_STEPS: 32
++EPS_START: 1.0
++EPS_FINISH: 0.001
++EPS_DECAY: 0.1
++META_EPS_START: 1.0
++META_EPS_FINISH: 0.001
++META_EPS_DECAY: 0.3
++NUM_EPOCHS: 2
++NUM_MINIBATCHES: 256
++NORM_TYPE: "layer_norm"
++NORM_INPUT: false
++LR: 2.5e-4
++MAX_GRAD_NORM: 10
++LR_LINEAR_DECAY: true
++GAMMA: 0.99
++LAMBDA: 0.5
++META_LAMBDA: 0.9
++HIDDEN_SIZE: 64
++NUM_LAYERS: 3
++STICKY_ACTIONS: false
++EPISODIC_LIFE: true
++
++NO_REWARDS: true
++
++HIERARCHICAL: true
++NUM_AGENTS: 3
++META_POLICY: "learned"
++META_GREEDY: false
++META_SHAPED_REWARD: false
++LLM_PRETRAIN: false
++RANDOM_PRETRAIN: false
++PRETRAIN_LEN: 3700
++
++ENV_NAME: "TimePilot"
++ENV_KWARGS: {}
++OBJECT_CENTRIC: true
++
++TEST_DURING_TRAINING: true
++TEST_INTERVAL: 0.1
++TEST_NUM_ENVS: 128
++TEST_NUM_STEPS: 1000
++EPS_TEST: 0.0
++RECORD_VIDEO: false
++eval_envs:
++  - label: "clean"
++    noisy_eval: false
+diff --git a/src/symbolic_options/hierarchical_pqn_jaxtari.py b/src/symbolic_options/hierarchical_pqn_jaxtari.py
+index 19b210b..c71f7ce 100644
+--- a/src/symbolic_options/hierarchical_pqn_jaxtari.py
++++ b/src/symbolic_options/hierarchical_pqn_jaxtari.py
+@@ -15,36 +15,115 @@ from jaxatari.environment import JAXAtariAction as Action
+ 
+ from symbolic_options.utils.video_recorder import video_callback
+ 
++def optional_batch_stats(variables: Any) -> Any:
++    """Return ``batch_stats``, or an empty tree when the network has none.
++
++    The LayerNorm pixel CNN does not create that collection. Training,
++    checkpoints, and evaluation still pass one through.
++    """
++    if variables is None:
++        return {}
++    getter = getattr(variables, "get", None)
++    if getter is None:
++        return {}
++    stats = getter("batch_stats")
++    if stats is None:
++        return {}
++    return stats
++
++
++def stack_pixel_channels(images: jnp.ndarray) -> jnp.ndarray:
++    """``[B,T,H,W,C]`` → ``[B,H,W,T*C]`` before the first convolution.
++
++    Same axis order as the corrected monolithic pixel PQN. A reshape without
++    this transpose would mix frame and row positions.
++    """
++    if images.ndim != 5:
++        raise ValueError(
++            f"NEXUS pixel input must be [B,T,H,W,C], got shape {images.shape}"
++        )
++    batch, frames, height, width, channels = images.shape
++    moved = jnp.transpose(images, (0, 2, 3, 1, 4))
++    return moved.reshape((batch, height, width, frames * channels))
++
++
++class _PixelCNN(nn.Module):
++    """Nature CNN used by the corrected pixel PQN baseline."""
++
++    norm_type: str = "layer_norm"
++
++    @nn.compact
++    def __call__(self, x: jnp.ndarray, train: bool):
++        if self.norm_type == "layer_norm":
++            normalize = lambda t: nn.LayerNorm()(t)
++        elif self.norm_type == "batch_norm":
++            normalize = lambda t: nn.BatchNorm(use_running_average=not train)(t)
++        else:
++            normalize = lambda t: t
++
++        x = nn.Conv(
++            32, kernel_size=(8, 8), strides=(4, 4), padding="VALID",
++            kernel_init=nn.initializers.he_normal(),
++        )(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        x = nn.Conv(
++            64, kernel_size=(4, 4), strides=(2, 2), padding="VALID",
++            kernel_init=nn.initializers.he_normal(),
++        )(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        x = nn.Conv(
++            64, kernel_size=(3, 3), strides=(1, 1), padding="VALID",
++            kernel_init=nn.initializers.he_normal(),
++        )(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        x = x.reshape((x.shape[0], -1))
++        x = nn.Dense(512, kernel_init=nn.initializers.he_normal())(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        return x
++
++
+ class QNetwork(nn.Module):
+     action_dim: int
+     hidden_size: int = 64
+     num_layers: int = 3
+     norm_type: str = "layer_norm"
+     norm_input: bool = False
++    object_centric: bool = True
+ 
+     @nn.compact
+     def __call__(self, x: jnp.ndarray, train: bool):
+-        if self.norm_input:
+-            x = nn.BatchNorm(use_running_average=not train)(x)
+-        else:
+-            # dummy normalize input for global compatibility
+-            x_dummy = nn.BatchNorm(use_running_average=not train)(x)
++        if self.object_centric:
++            if self.norm_input:
++                x = nn.BatchNorm(use_running_average=not train)(x)
++            else:
++                # dummy normalize input for global compatibility
++                x_dummy = nn.BatchNorm(use_running_average=not train)(x)
+ 
+-        if self.norm_type == "layer_norm":
+-            normalize = lambda x: nn.LayerNorm()(x)
+-        elif self.norm_type == "batch_norm":
+-            normalize = lambda x: nn.BatchNorm(use_running_average=not train)(x)
+-        else:
+-            normalize = lambda x: x
++            if self.norm_type == "layer_norm":
++                normalize = lambda x: nn.LayerNorm()(x)
++            elif self.norm_type == "batch_norm":
++                normalize = lambda x: nn.BatchNorm(use_running_average=not train)(x)
++            else:
++                normalize = lambda x: x
+ 
+-        for l in range(self.num_layers):
+-            x = nn.Dense(self.hidden_size)(x)
+-            x = normalize(x)
+-            x = nn.relu(x)
++            for l in range(self.num_layers):
++                x = nn.Dense(self.hidden_size)(x)
++                x = normalize(x)
++                x = nn.relu(x)
+ 
+-        x = nn.Dense(self.action_dim)(x)
++            x = nn.Dense(self.action_dim)(x)
++            return x
+ 
+-        return x
++        # Pixel skills and a learned selector share this encoder. Symbolic
++        # selection never reads it; it still uses the game state.
++        x = stack_pixel_channels(x)
++        x = x / 255.0
++        x = _PixelCNN(norm_type=self.norm_type)(x, train)
++        return nn.Dense(self.action_dim)(x)
+ 
+ 
+ @chex.dataclass(frozen=True)
+@@ -179,6 +258,23 @@ def select_active_agent(config, combined_q, num_envs, eps, rng):
+     )
+ 
+ 
++def lambda_return_targets(rewards, dones, values, bootstrap, gamma, trace_lambda):
++    """Paper Eq. 2/3: values[t] is max Q(s_t); bootstrap is max Q(s_T)."""
++    next_values = jnp.concatenate((values[1:], bootstrap[None]), axis=0)
++
++    def backward(next_return, transition):
++        reward, done, next_value = transition
++        target = reward + gamma * (1 - done) * (
++            (1 - trace_lambda) * next_value + trace_lambda * next_return
++        )
++        return target, target
++
++    _, targets = jax.lax.scan(
++        backward, bootstrap, (rewards, dones, next_values), reverse=True,
++    )
++    return targets
++
++
+ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+     global curr_renderer
+     global rtpt
+@@ -273,17 +369,25 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+         lr_meta = lr_scheduler_meta if config.get("LR_LINEAR_DECAY", False) else config["LR"]
+ 
+         # INIT NETWORK AND OPTIMIZER
++        object_centric = bool(config.get("OBJECT_CENTRIC", True))
++        if object_centric:
++            print("NEXUS observation: object-centric MLP")
++        else:
++            print("NEXUS observation: pixel CNN, four frames stacked as channels")
+         network = QNetwork(
+             action_dim=config["NUM_ACTIONS"],
+             hidden_size=config.get("HIDDEN_SIZE", 64),
+             num_layers=config.get("NUM_LAYERS", 3),
+             norm_type=config["NORM_TYPE"],
+             norm_input=config.get("NORM_INPUT", False),
++            object_centric=object_centric,
+         )
+ 
+         def create_agent(rng, params, batch_stats, network, lr):
+-            obs_len = np.prod(config["OBS_SHAPE"])
+-            init_x = jnp.zeros(obs_len)
++            if object_centric:
++                init_x = jnp.zeros((int(np.prod(config["OBS_SHAPE"])),))
++            else:
++                init_x = jnp.zeros((1, *tuple(config["OBS_SHAPE"])))
+             network_variables = network.init(rng, init_x, train=False)
+             tx = optax.chain(
+                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+@@ -292,7 +396,11 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+             train_state = CustomTrainState.create(
+                 apply_fn=network.apply,
+                 params=network_variables["params"] if params is None else params,
+-                batch_stats=network_variables["batch_stats"] if batch_stats is None else batch_stats,
++                batch_stats=(
++                    optional_batch_stats(network_variables)
++                    if batch_stats is None
++                    else batch_stats
++                ),
+                 tx=tx,
+             )
+             return train_state
+@@ -309,6 +417,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+             action_dim=num_agents,
+             norm_type=config["NORM_TYPE"],
+             norm_input=config.get("NORM_INPUT", False),
++            object_centric=object_centric,
+         )
+         meta_train_state = create_agent(rng, None, None, meta_network, lr_meta)
+ 
+@@ -409,44 +518,21 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+                     transitions.next_obs[-1],
+                     train=False,
+                 )
+-                last_q = last_q[..., state_idx] # select the q_val of the active agent
+-
+-                def _get_target(lambda_returns_and_next_q, transition):
+-                    lambda_returns, next_q = lambda_returns_and_next_q
+-                    lambda_mul = jax.lax.cond(
+-                        jnp.logical_or(state_idx == -1, state_idx == -2),
+-                        lambda _: config["META_LAMBDA"],
+-                        lambda _: config["LAMBDA"],
+-                        operand=None,
+-                    )
+-                    target_bootstrap = (
+-                        transition.rewards[... , state_idx] + config["GAMMA"] * (1 - transition.done) * next_q
+-                    )
+-                    delta = lambda_returns - next_q
+-                    lambda_returns = (
+-                        target_bootstrap + config["GAMMA"] * lambda_mul * delta
+-                    )
+-                    lambda_returns = (
+-                        1 - transition.done
+-                    ) * lambda_returns + transition.done * transition.rewards[... , state_idx]
+-                    next_q = jax.lax.cond(
+-                        # state_idx == num_agents,
+-                        jnp.logical_or(state_idx == -1, state_idx == -2),
+-                        lambda _: jnp.max(transition.meta_q_val, axis=-1),
+-                        lambda _: jnp.max(transition.q_val[:, state_idx, :], axis=-1),
+-                        operand=None,
+-                    )
+-                    return (lambda_returns, next_q), lambda_returns
+-
+-                last_q = last_q * (1 - transitions.done[-1])
+-                lambda_returns = transitions.rewards[-1, :, state_idx] + config["GAMMA"] * last_q
+-                _, targets = jax.lax.scan(
+-                    _get_target,
+-                    (lambda_returns, last_q),
+-                    jax.tree.map(lambda x: x[:-1], transitions),
+-                    reverse=True,
++                # Each skill uses its own max Q, and the t+1 value must align
++                # with the t+1 return in the paper's lambda-return recursion.
++                last_q = jnp.max(last_q, axis=-1)
++                is_meta = jnp.logical_or(state_idx == -1, state_idx == -2)
++                values = jax.lax.cond(
++                    is_meta,
++                    lambda _: jnp.max(transitions.meta_q_val, axis=-1),
++                    lambda _: jnp.max(transitions.q_val[:, :, state_idx, :], axis=-1),
++                    operand=None,
++                )
++                trace_lambda = jnp.where(is_meta, config["META_LAMBDA"], config["LAMBDA"])
++                lambda_targets = lambda_return_targets(
++                    transitions.rewards[..., state_idx], transitions.done,
++                    values, last_q, config["GAMMA"], trace_lambda,
+                 )
+-                lambda_targets = jnp.concatenate((targets, lambda_returns[np.newaxis]))
+ 
+                 # NETWORKS UPDATE
+                 def _learn_epoch(carry, _):
+@@ -490,7 +576,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+                         train_state = train_state.apply_gradients(grads=grads)
+                         train_state = train_state.replace(
+                             grad_steps=train_state.grad_steps + 1,
+-                            batch_stats=updates["batch_stats"],
++                            batch_stats=updates.get("batch_stats", train_state.batch_stats),
+                         )
+                         return (train_state, rng), (loss, qvals)
+ 
+@@ -591,7 +677,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+             if config.get("TEST_DURING_TRAINING", False):
+                 rng, _rng = jax.random.split(rng)
+                 should_eval = (
+-                    train_states.n_updates[0] % int(config["NUM_UPDATES"] * config["TEST_INTERVAL"]) == 0
++                    train_states.n_updates[0] % max(1, int(config["NUM_UPDATES"] * config["TEST_INTERVAL"])) == 0
+                 )
+ 
+                 def _do_eval(rng):
+@@ -750,16 +836,20 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+                 )
+ 
+             # return mean of done infos
+-            done_infos = jax.tree.map(
+-                lambda x: jnp.nanmean(
+-                    jnp.where(
+-                        infos["returned_episode"],
+-                        x,
+-                        jnp.nan,
+-                    )
+-                ),
+-                infos,
+-            )
++            # returned_episode is (T, N). Some games (Name This Game) also log
++            # per-step vectors, so x is (T, N, K). Broadcast the mask over K.
++            episode_done = infos["returned_episode"]
++
++            def _episode_nanmean(x):
++                x = jnp.asarray(x)
++                if x.shape[: episode_done.ndim] != episode_done.shape:
++                    return jnp.nanmean(x)
++                mask = episode_done.reshape(
++                    episode_done.shape + (1,) * (x.ndim - episode_done.ndim)
++                )
++                return jnp.nanmean(jnp.where(mask, x, jnp.nan))
++
++            done_infos = jax.tree.map(_episode_nanmean, infos)
+             return done_infos
+ 
+         rng, _rng = jax.random.split(rng)
+diff --git a/src/symbolic_options/reward_functions/seaquest.py b/src/symbolic_options/reward_functions/seaquest.py
+index 1513fee..296e844 100644
+--- a/src/symbolic_options/reward_functions/seaquest.py
++++ b/src/symbolic_options/reward_functions/seaquest.py
+@@ -1,9 +1,14 @@
+-from etils.exm.dummy import curr_job_name
+-from flax.linen import meta
+ import jax
+ import jax.numpy as jnp
+ from jaxatari.wrappers import AtariState, MultiRewardLogState
+ from jaxatari.games.jax_seaquest import JaxSeaquest, SeaquestState
++
++# One game instance, built at import (outside jit). env_reward and
++# shaped_reward_llm are themselves jitted and used from NEXUS's traced
++# train step; calling JaxSeaquest() there rebuilds the renderer under the
++# trace and raises TracerArrayConversionError.
++_GAME = JaxSeaquest()
++
+ def unpack(state):
+     while not isinstance(state, SeaquestState):
+         if hasattr(state, 'atari_state'):
+@@ -16,7 +21,7 @@ def unpack(state):
+ 
+ @jax.jit
+ def env_reward(prev_state: SeaquestState, state: SeaquestState):
+-    reward = JaxSeaquest()._get_reward(prev_state, state)
++    reward = _GAME._get_reward(prev_state, state)
+     return reward
+ 
+ @jax.jit
+@@ -57,8 +62,8 @@ def shaped_reward_simple(prev_state: SeaquestState, state: SeaquestState):
+ 
+ @jax.jit
+ def shaped_reward_llm(prev_state: SeaquestState, state: SeaquestState):
+-    prev_obs = JaxSeaquest()._get_observation(prev_state)
+-    curr_obs = JaxSeaquest()._get_observation(state)
++    prev_obs = _GAME._get_observation(prev_state)
++    curr_obs = _GAME._get_observation(state)
+ 
+     reward = 0.0
+ 
+diff --git a/src/symbolic_options/utils/video_recorder.py b/src/symbolic_options/utils/video_recorder.py
+index c839900..12e6c58 100644
+--- a/src/symbolic_options/utils/video_recorder.py
++++ b/src/symbolic_options/utils/video_recorder.py
+@@ -164,6 +164,10 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
+     if isinstance(states, PixelState):
+         states = states.atari_state
+ 
++    # CBL: modern jaxatari OC / Pixel+OC nest AtariState one level deeper
++    while hasattr(states, "atari_state") and not isinstance(states, AtariState):
++        states = states.atari_state
++
+     if isinstance(states, AtariState):
+         states = states.env_state
+     elif isinstance(states, ExplorationState):
+@@ -173,7 +177,7 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
+     num_states = jnp.argmax(dones)
+     # or len of the first array of the states pytree
+     if num_states == 0:
+-        num_states = len(states[-1])
++        num_states = int(jax.tree_util.tree_leaves(states)[0].shape[0])
+ 
+     # select every 4th frame (and only the first num_states)
+     # states_reduced = jax.tree_util.tree_map(lambda x: x[:num_states][::4], states)
