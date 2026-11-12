@@ -4,6 +4,7 @@ title: "SCOPE"
 type: software
 version: "1.0.0-thesis"
 date-released: "2026-11-12"
+license: MIT
 repository-code: "https://github.com/PaulSeitz/SCOPE"
 authors:
   - family-names: "Seitz"

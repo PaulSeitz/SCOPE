@@ -56,3 +56,7 @@ The SCOPE and PQN paths need no NEXUS installation. To replay NEXUS/HRL, supply 
 ## Citation
 
 If you use this code, please cite the thesis (see `CITATION.cff`).
+
+## License
+
+SCOPE is released under the MIT License (`LICENSE`). The evaluated JAXtari mod controllers in `src/concept_based_learning/jaxtari_mods/` keep their upstream MIT license (`LICENSE-JAXTARI`). `third_party/patches/symbolic_options_thesis.patch` modifies the NEXUS implementation (`symbolic_options`) and is shared with its author's permission.
