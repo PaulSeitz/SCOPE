@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite the thesis below."
 title: "SCOPE"
 type: software
-version: "1.0.0-thesis"
+version: "1.0.0"
 date-released: "2026-11-12"
 license: MIT
 repository-code: "https://github.com/PaulSeitz/SCOPE"
