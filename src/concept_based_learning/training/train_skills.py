@@ -415,7 +415,7 @@ def make_train(
             return jax.vmap(flatten_raw_observation)(raw_obs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, oc_embed, "
+            "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, ego_abs_target, oc_embed, "
             "oc_flat_rel, oc_flat_rel_role, "
             "pixel_embed, pixel_embed_cond."
         )
@@ -457,7 +457,7 @@ def make_train(
             return flatten_raw_observation(raw_obs)
         raise ValueError(
             f"Unknown SKILL_INPUT_MODE={skill_input_mode!r}. "
-            "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, oc_embed, "
+            "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, ego_abs_target, oc_embed, "
             "oc_flat_rel, oc_flat_rel_role, "
             "pixel_embed, pixel_embed_cond."
         )

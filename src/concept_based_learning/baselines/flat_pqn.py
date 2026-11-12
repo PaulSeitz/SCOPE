@@ -39,6 +39,10 @@ from concept_based_learning.paper_eval.env_metrics import (
     metrics_to_python,
 )
 
+from concept_based_learning.jaxtari_mods import register_modifications
+
+register_modifications()
+
 
 class CNN(nn.Module):
     """Pixel backbone — class name must match ``pqn_agent.CNN`` for checkpoint keys."""

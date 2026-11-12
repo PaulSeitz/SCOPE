@@ -896,7 +896,7 @@ def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx, native_vec
         return flatten_raw_observation(raw_obs)
     raise ValueError(
         f"Unknown SKILL_INPUT_MODE={mode!r}. "
-        "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, oc_embed, "
+        "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, ego_abs_target, oc_embed, "
         "oc_flat_rel, oc_flat_rel_role, "
         "pixel_embed, pixel_embed_cond."
     )
@@ -1221,6 +1221,12 @@ def _make_jitted_greedy_episode_runner(
                 )
                 q_skill = mask_q_with_legal_ego(q_skill, legal)
             ego_a = jnp.argmax(q_skill)
+        # Match the final thesis reruns: a heuristic selecting the trailing
+        # NOOP slot must idle before action mapping. Learned tandem selectors
+        # retain their original evaluation behavior.
+        if not use_meta:
+            trailing_noop = jnp.int32(int(config["MAX_OBJECTS"]) - 1)
+            ego_a = jnp.where(target == trailing_noop, jnp.int32(0), ego_a)
         game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
         game_a = jnp.where(is_fire, fire_action, game_a)
         # Idle / no-target: BeamRider needs FIRE to advance levels; default NOOP.

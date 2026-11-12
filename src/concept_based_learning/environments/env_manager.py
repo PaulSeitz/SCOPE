@@ -225,6 +225,10 @@ from concept_based_learning.environments.generic_heuristic import (
     NO_TARGET_IDX as generic_NO_TARGET_IDX,
 )
 
+from concept_based_learning.jaxtari_mods import register_modifications
+
+register_modifications()
+
 
 def _normalize_game_mods(raw: Union[None, str, List[Any]]) -> Optional[List[str]]:
     """

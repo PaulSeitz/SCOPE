@@ -1,8 +1,13 @@
 """Context ablations of the reference ego skill input.
 
-Both modes keep the reference ``get_ego_obs`` vector as an unchanged prefix,
+The additive modes keep the reference ``get_ego_obs`` vector as an unchanged prefix,
 so the heuristic selector, skill rewards, ego action mapping, MLP head and
-optimizer stay identical to the reference arm. Only the skill input grows.
+optimizer stay identical to the reference arm.
+
+``ego_abs_target`` replaces the prefix entirely with per-frame
+``[target_cx, target_cy, target_w, target_h, active, player_cx, player_cy,
+player_w, player_h]`` normalized by screen dimensions. Inactive target
+frames are zero. It exposes no relative features or other objects.
 
 ``ego_scene_rel`` (broader context, relative only)
     ``ref || flatten(rows)``. One row per object slot (pad/trim to
@@ -64,7 +69,8 @@ from concept_based_learning.observations.egocentric import (
 EGO_SCENE_REL = "ego_scene_rel"
 EGO_ABS_POS = "ego_abs_pos"
 EGO_SCENE_ROWS = "ego_scene_rows"
-EGO_CONTEXT_SKILL_INPUT_MODES = (EGO_SCENE_REL, EGO_ABS_POS, EGO_SCENE_ROWS)
+EGO_ABS_TARGET = "ego_abs_target"
+EGO_CONTEXT_SKILL_INPUT_MODES = (EGO_SCENE_REL, EGO_ABS_POS, EGO_SCENE_ROWS, EGO_ABS_TARGET)
 EGO_OC_NATIVE = "ego_oc_native"
 OC_NATIVE_TARGET_FRONT = "oc_native_target_front"
 
@@ -115,6 +121,32 @@ def build_ego_abs_pos_obs(
         os.environ.get("CBL_ABS_POS_INTERVENTION"),
     )
     return jnp.concatenate([ref, tail]).astype(jnp.float32)
+
+
+def build_ego_abs_target_obs(raw_obs: Any, objects: Any, target_idx: Any) -> jnp.ndarray:
+    """Full absolute target/player input, frame-major; no reference ego prefix."""
+    player = _get_player(raw_obs)
+    idx = jnp.asarray(target_idx, dtype=jnp.int32)
+    bottom = _uses_bottom_edge_y(raw_obs)
+    width, height = jnp.float32(SCREEN_WIDTH), jnp.float32(SCREEN_HEIGHT)
+    tx, ty, tw, th = (
+        jnp.asarray(getattr(objects, field), dtype=jnp.float32)[:, idx]
+        for field in ("x", "y", "width", "height")
+    )
+    px, py, pw, ph = (
+        jnp.asarray(getattr(player, field), dtype=jnp.float32)
+        for field in ("x", "y", "width", "height")
+    )
+    active = jnp.asarray(objects.active)[:, idx] > 0
+    frames = jnp.stack([
+        (tx + tw * 0.5) / width,
+        _center_y(ty, th, y_is_bottom_edge=bottom) / height,
+        tw / width, th / height, active.astype(jnp.float32),
+        (px + pw * 0.5) / width,
+        _center_y(py, ph, y_is_bottom_edge=bottom) / height,
+        pw / width, ph / height,
+    ], axis=-1)
+    return jnp.where(active[:, None], frames, 0.0).reshape((-1,)).astype(jnp.float32)
 
 
 def build_ego_scene_rows(
@@ -210,6 +242,8 @@ def build_ego_context_skill_obs(
     distance_clip_px=None,
 ) -> jnp.ndarray:
     canon = str(mode).lower().strip()
+    if canon == EGO_ABS_TARGET:
+        return build_ego_abs_target_obs(raw_obs, objects, target_idx)
     if canon == EGO_ABS_POS:
         return build_ego_abs_pos_obs(
             raw_obs, objects, target_idx, distance_clip_px=distance_clip_px
@@ -239,7 +273,11 @@ def build_ego_context_skill_obs(
 def ego_context_extra_dim(
     mode: str, *, ego_channels_per_frame: int, stack_size: int, max_objects: int
 ) -> int:
-    """Width appended after the reference ego vector."""
+    """Width appended after the reference ego vector (additive modes only).
+
+    Replacement modes build their full input directly; network initialization
+    infers its width from that vector rather than adding this helper.
+    """
     canon = str(mode).lower().strip()
     if canon == EGO_ABS_POS:
         return 2 * int(stack_size)

@@ -45,6 +45,10 @@ from concept_based_learning.training.rtpt_progress import (
     rtpt_step_callback,
 )
 
+from concept_based_learning.jaxtari_mods import register_modifications
+
+register_modifications()
+
 
 @chex.dataclass(frozen=True)
 class Transition:

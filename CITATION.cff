@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the thesis below."
+title: "SCOPE"
+type: software
+version: "1.0.0-thesis"
+date-released: "2026-11-12"
+repository-code: "https://github.com/PaulSeitz/SCOPE"
+authors:
+  - family-names: "Seitz"
+    given-names: "Paul"
+preferred-citation:
+  type: thesis
+  thesis-type: "Master's thesis"
+  title: "Strategic Ignorance: Improving Robustness of Hierarchical Reinforcement Learning via Target Conditioning and Information Restriction"
+  authors:
+    - family-names: "Seitz"
+      given-names: "Paul"
+  institution:
+    name: "Technische Universität Darmstadt"
+  year: 2026

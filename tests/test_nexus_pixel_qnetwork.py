@@ -5,6 +5,11 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
+
+# Optional external NEXUS dependency (third_party/symbolic_options plus
+# third_party/patches/symbolic_options_thesis.patch).
+pytest.importorskip("symbolic_options.hierarchical_pqn_jaxtari")
 
 from concept_based_learning.observations.native_oc_stack import stack_pqn_pixel_channels
 from symbolic_options.hierarchical_pqn_jaxtari import (

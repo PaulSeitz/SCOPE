@@ -419,6 +419,8 @@ def run_mod_eval(
     master_csv_dir: str | Path | None = None,
     extra_meta: dict[str, Any] | None = None,
     wandb_mode: str | None = None,
+    mod_specs: list[ModSpec] | None = None,
+    publish_report: bool = True,
 ) -> dict[str, Any]:
     """
     Evaluate one agent across the env's mod allowlist.
@@ -445,12 +447,13 @@ def run_mod_eval(
     from concept_based_learning.paper_eval.csv_export import write_mod_eval_csvs
 
     allowlist = str(mods_allowlist or env_name)
-    mod_specs = mod_specs_for_env(
-        allowlist,
-        paper_core_only=paper_core_only,
-        trial=trial,
-        keys=mod_keys,
-    )
+    if mod_specs is None:
+        mod_specs = mod_specs_for_env(
+            allowlist,
+            paper_core_only=paper_core_only,
+            trial=trial,
+            keys=mod_keys,
+        )
     if not mod_specs:
         raise ValueError(f"No mods selected for allowlist={allowlist} env={env_name}")
 
@@ -641,6 +644,9 @@ def run_mod_eval(
         drop = stats.get("drop_from_base")
         drop_s = f"  drop={drop:+.1f}" if drop is not None else ""
         print(f"  {key:28s} mean={stats['mean']:.2f}±{stats['std']:.2f}{drop_s}")
+
+    if not publish_report:
+        return payload
 
     # Text summary next to the evaluated checkpoint (+ optional train-run wandb sync).
     try:

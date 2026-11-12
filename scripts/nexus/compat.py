@@ -439,9 +439,15 @@ def prepare_nexus_runtime(
     if use_vendored_seaquest:
         install_jaxatari(nexus_root / "JAXAtari" / "src", label="NEXUS vendored")
     else:
-        if jaxatari_root is None:
-            raise ValueError("jaxatari_root required unless use_vendored_seaquest=True")
-        install_jaxatari(Path(jaxatari_root) / "src", label="installed / JAXATARI_ROOT")
+        if jaxatari_root is not None:
+            install_jaxatari(Path(jaxatari_root) / "src", label="explicit JAXtari source")
+        else:
+            import jaxtari  # noqa: F401
+
+        from concept_based_learning.jaxtari_mods import register_modifications
+
+        register_modifications()
+        _alias_jaxatari_to_jaxtari()
         ensure_reward_funcs_api()
         patch_atari_wrapper_kwargs()
         patch_object_centric_defaults()

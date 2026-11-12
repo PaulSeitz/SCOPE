@@ -1,35 +1,8 @@
 # Scripts
 
-## `queue_train_after.sh`
-
-Queue `python main.py experiment=...` to start after a training PID exits or the GPU is idle.
-
-```bash
-# Help
-./scripts/queue_train_after.sh --help
-
-# After a specific run (get PID from pgrep)
-pgrep -af "python main.py experiment=seaquest_skills_pretrain"
-./scripts/queue_train_after.sh --wait-pid 22944 --experiment seaquest_skills_pretrain_vel
-
-# When GPU 0 is free
-./scripts/queue_train_after.sh --experiment freeway_fewshot
-
-## Seaquest pretrain A/B configs
-
-| Experiment | Size (hitboxes) | Velocity | Ego dim (stack=4) |
-|------------|-----------------|----------|-------------------|
-| `seaquest_skills_pretrain` | no | no | 12 |
-| `seaquest_skills_pretrain_vel` | no | yes | 20 |
-| `seaquest_skills_pretrain_vel_size` | yes | yes | 28 |
-
-# Block terminal instead of background
-./scripts/queue_train_after.sh --wait-gpu 0 --experiment seaquest_skills_pretrain_vel --foreground
-
-# Extra Hydra overrides
-./scripts/queue_train_after.sh --experiment seaquest_skills_pretrain_vel -- SEED=44 WANDB_MODE=online
-```
-
-Logs go to `logs/queue_<experiment>_<timestamp>.log`. Use `tail -f` on that path.
-
-Run from a shell with the correct pyenv/venv active, or pass `--python "$(pyenv which python)"`.
+- `reproduce.py` verifies the archive, regenerates figures and tables, and replays checkpoints.
+- `install_environment.py` installs the pinned evaluation environment.
+- `run_nexus.py` runs the optional NEXUS and HRL baselines.
+- `materialize_evaluation.py` rebuilds the replay specification from the historical config trees and evaluation provenance. The published workflow uses the committed specification.
+- `extend_evaluation_suite.py` adds the absolute-target ablation and the rescue-metric rerun (both integrated after the 2026-11-10 suite) to the specification.
+- `run_abs_target_*.py`, `run_rescue_metrics.py`, `smoke_*.py` and `status_abs_target_campaign.py` are the cluster campaign scripts that produced those results. They are kept as provenance.

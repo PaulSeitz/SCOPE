@@ -54,7 +54,7 @@ class QNetwork(nn.Module):
         ``oc_flat_rel_role`` also appends the meta role-pool
         (see ``build_skill_oc_flat_rel_role_obs``). Same MLP head as ``ego``;
         ``x`` is already the full skill input.
-    ego_scene_rel / ego_abs_pos
+    ego_scene_rel / ego_abs_pos / ego_abs_target
         Reference ego vector plus a relative scene or the absolute player
         position (see ``observations/ego_context.py``). Same MLP as ``ego``.
     pixel_embed / pixel_embed_cond

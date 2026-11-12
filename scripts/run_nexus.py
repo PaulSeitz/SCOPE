@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Train / mod-eval NEXUS (symbolic_options) against CBL Seaquest + mods.
 
-Default jaxatari is ``JAXATARI_ROOT`` / the installed robustness fork (cluster).
+Use the JAXtari installation prepared by scripts/install_environment.py.
 Pass ``--vendored-seaquest`` only to force NEXUS's bundled old Seaquest.
 
 Cluster setup
 -------------
   git submodule update --init --recursive third_party/symbolic_options
   export NEXUS_ROOT=$PWD/third_party/symbolic_options   # or any clone path
-  export JAXATARI_ROOT=/path/to/JAXAtari-seaquest-robustness
   # optional: cd $NEXUS_ROOT && uv sync
 
 Examples
@@ -97,7 +96,8 @@ def _train(args: argparse.Namespace) -> int:
                 "from nexus.compat import prepare_nexus_runtime",
                 "prepare_nexus_runtime(",
                 f"    nexus_root=Path({str(nexus_root)!r}),",
-                f"    jaxatari_root=Path({str(jaxatari_root)!r}),",
+                (f"    jaxatari_root=Path({str(jaxatari_root)!r}),"
+                 if jaxatari_root is not None else "    jaxatari_root=None,"),
                 f"    use_vendored_seaquest={use_vendored},",
                 ")",
                 "sys.argv = "
@@ -112,23 +112,15 @@ def _train(args: argparse.Namespace) -> int:
 
     env = os.environ.copy()
     env["NEXUS_ROOT"] = str(nexus_root)
-    env["JAXATARI_ROOT"] = str(jaxatari_root)
-    env["PAPER_EVAL_JAXATARI_ROOT"] = str(jaxatari_root)
-    # Default: installed/cluster jaxatari first; NEXUS src for symbolic_options.
-    # --vendored-seaquest: NEXUS bundled JAXAtari instead.
-    jax_src = (
-        str(nexus_root / "JAXAtari" / "src")
-        if use_vendored
-        else str(Path(jaxatari_root) / "src")
-    )
-    env["PYTHONPATH"] = os.pathsep.join(
-        [
-            jax_src,
-            str(nexus_root / "src"),
-            str(PROJECT_ROOT / "scripts"),
-            env.get("PYTHONPATH", ""),
-        ]
-    )
+    paths = [str(nexus_root / "src"), str(PROJECT_ROOT / "scripts")]
+    if use_vendored:
+        paths.insert(0, str(nexus_root / "JAXAtari" / "src"))
+    elif jaxatari_root is not None:
+        paths.insert(0, str(jaxatari_root / "src"))
+    if jaxatari_root is not None:
+        env["JAXATARI_ROOT"] = str(jaxatari_root)
+        env["PAPER_EVAL_JAXATARI_ROOT"] = str(jaxatari_root)
+    env["PYTHONPATH"] = os.pathsep.join([*paths, env.get("PYTHONPATH", "")])
 
     cmd = [sys.executable, str(runner)]
     print("Running:", " ".join(cmd))
@@ -211,12 +203,12 @@ def _add_root_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--jaxatari-root",
         default=None,
-        help="JAXAtari-seaquest-robustness path (default: JAXATARI_ROOT / PAPER_EVAL_JAXATARI_ROOT)",
+        help="Optional JAXtari source checkout (default: installed package)",
     )
     p.add_argument(
         "--vendored-seaquest",
         action="store_true",
-        help="Use NEXUS bundled (old) Seaquest instead of JAXATARI_ROOT / installed fork (default)",
+        help="Use NEXUS bundled (old) Seaquest instead of the SCOPE evaluation environment",
     )
 
 

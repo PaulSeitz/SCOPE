@@ -106,6 +106,389 @@ index b3cc90a..96a222e 100644
  
      if config.get("HIERARCHICAL", False):
          meta_policy_string = config.get("META_POLICY", "llm")
+diff --git a/src/symbolic_options/hierarchical_pqn_jaxtari.py b/src/symbolic_options/hierarchical_pqn_jaxtari.py
+index 19b210b..c71f7ce 100644
+--- a/src/symbolic_options/hierarchical_pqn_jaxtari.py
++++ b/src/symbolic_options/hierarchical_pqn_jaxtari.py
+@@ -15,36 +15,115 @@ from jaxatari.environment import JAXAtariAction as Action
+ 
+ from symbolic_options.utils.video_recorder import video_callback
+ 
++def optional_batch_stats(variables: Any) -> Any:
++    """Return ``batch_stats``, or an empty tree when the network has none.
++
++    The LayerNorm pixel CNN does not create that collection. Training,
++    checkpoints, and evaluation still pass one through.
++    """
++    if variables is None:
++        return {}
++    getter = getattr(variables, "get", None)
++    if getter is None:
++        return {}
++    stats = getter("batch_stats")
++    if stats is None:
++        return {}
++    return stats
++
++
++def stack_pixel_channels(images: jnp.ndarray) -> jnp.ndarray:
++    """``[B,T,H,W,C]`` → ``[B,H,W,T*C]`` before the first convolution.
++
++    Same axis order as the corrected monolithic pixel PQN. A reshape without
++    this transpose would mix frame and row positions.
++    """
++    if images.ndim != 5:
++        raise ValueError(
++            f"NEXUS pixel input must be [B,T,H,W,C], got shape {images.shape}"
++        )
++    batch, frames, height, width, channels = images.shape
++    moved = jnp.transpose(images, (0, 2, 3, 1, 4))
++    return moved.reshape((batch, height, width, frames * channels))
++
++
++class _PixelCNN(nn.Module):
++    """Nature CNN used by the corrected pixel PQN baseline."""
++
++    norm_type: str = "layer_norm"
++
++    @nn.compact
++    def __call__(self, x: jnp.ndarray, train: bool):
++        if self.norm_type == "layer_norm":
++            normalize = lambda t: nn.LayerNorm()(t)
++        elif self.norm_type == "batch_norm":
++            normalize = lambda t: nn.BatchNorm(use_running_average=not train)(t)
++        else:
++            normalize = lambda t: t
++
++        x = nn.Conv(
++            32, kernel_size=(8, 8), strides=(4, 4), padding="VALID",
++            kernel_init=nn.initializers.he_normal(),
++        )(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        x = nn.Conv(
++            64, kernel_size=(4, 4), strides=(2, 2), padding="VALID",
++            kernel_init=nn.initializers.he_normal(),
++        )(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        x = nn.Conv(
++            64, kernel_size=(3, 3), strides=(1, 1), padding="VALID",
++            kernel_init=nn.initializers.he_normal(),
++        )(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        x = x.reshape((x.shape[0], -1))
++        x = nn.Dense(512, kernel_init=nn.initializers.he_normal())(x)
++        x = normalize(x)
++        x = nn.relu(x)
++        return x
++
++
+ class QNetwork(nn.Module):
+     action_dim: int
+     hidden_size: int = 64
+     num_layers: int = 3
+     norm_type: str = "layer_norm"
+     norm_input: bool = False
++    object_centric: bool = True
+ 
+     @nn.compact
+     def __call__(self, x: jnp.ndarray, train: bool):
+-        if self.norm_input:
+-            x = nn.BatchNorm(use_running_average=not train)(x)
+-        else:
+-            # dummy normalize input for global compatibility
+-            x_dummy = nn.BatchNorm(use_running_average=not train)(x)
++        if self.object_centric:
++            if self.norm_input:
++                x = nn.BatchNorm(use_running_average=not train)(x)
++            else:
++                # dummy normalize input for global compatibility
++                x_dummy = nn.BatchNorm(use_running_average=not train)(x)
+ 
+-        if self.norm_type == "layer_norm":
+-            normalize = lambda x: nn.LayerNorm()(x)
+-        elif self.norm_type == "batch_norm":
+-            normalize = lambda x: nn.BatchNorm(use_running_average=not train)(x)
+-        else:
+-            normalize = lambda x: x
++            if self.norm_type == "layer_norm":
++                normalize = lambda x: nn.LayerNorm()(x)
++            elif self.norm_type == "batch_norm":
++                normalize = lambda x: nn.BatchNorm(use_running_average=not train)(x)
++            else:
++                normalize = lambda x: x
+ 
+-        for l in range(self.num_layers):
+-            x = nn.Dense(self.hidden_size)(x)
+-            x = normalize(x)
+-            x = nn.relu(x)
++            for l in range(self.num_layers):
++                x = nn.Dense(self.hidden_size)(x)
++                x = normalize(x)
++                x = nn.relu(x)
+ 
+-        x = nn.Dense(self.action_dim)(x)
++            x = nn.Dense(self.action_dim)(x)
++            return x
+ 
+-        return x
++        # Pixel skills and a learned selector share this encoder. Symbolic
++        # selection never reads it; it still uses the game state.
++        x = stack_pixel_channels(x)
++        x = x / 255.0
++        x = _PixelCNN(norm_type=self.norm_type)(x, train)
++        return nn.Dense(self.action_dim)(x)
+ 
+ 
+ @chex.dataclass(frozen=True)
+@@ -179,6 +258,23 @@ def select_active_agent(config, combined_q, num_envs, eps, rng):
+     )
+ 
+ 
++def lambda_return_targets(rewards, dones, values, bootstrap, gamma, trace_lambda):
++    """Paper Eq. 2/3: values[t] is max Q(s_t); bootstrap is max Q(s_T)."""
++    next_values = jnp.concatenate((values[1:], bootstrap[None]), axis=0)
++
++    def backward(next_return, transition):
++        reward, done, next_value = transition
++        target = reward + gamma * (1 - done) * (
++            (1 - trace_lambda) * next_value + trace_lambda * next_return
++        )
++        return target, target
++
++    _, targets = jax.lax.scan(
++        backward, bootstrap, (rewards, dones, next_values), reverse=True,
++    )
++    return targets
++
++
+ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+     global curr_renderer
+     global rtpt
+@@ -273,17 +369,25 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+         lr_meta = lr_scheduler_meta if config.get("LR_LINEAR_DECAY", False) else config["LR"]
+ 
+         # INIT NETWORK AND OPTIMIZER
++        object_centric = bool(config.get("OBJECT_CENTRIC", True))
++        if object_centric:
++            print("NEXUS observation: object-centric MLP")
++        else:
++            print("NEXUS observation: pixel CNN, four frames stacked as channels")
+         network = QNetwork(
+             action_dim=config["NUM_ACTIONS"],
+             hidden_size=config.get("HIDDEN_SIZE", 64),
+             num_layers=config.get("NUM_LAYERS", 3),
+             norm_type=config["NORM_TYPE"],
+             norm_input=config.get("NORM_INPUT", False),
++            object_centric=object_centric,
+         )
+ 
+         def create_agent(rng, params, batch_stats, network, lr):
+-            obs_len = np.prod(config["OBS_SHAPE"])
+-            init_x = jnp.zeros(obs_len)
++            if object_centric:
++                init_x = jnp.zeros((int(np.prod(config["OBS_SHAPE"])),))
++            else:
++                init_x = jnp.zeros((1, *tuple(config["OBS_SHAPE"])))
+             network_variables = network.init(rng, init_x, train=False)
+             tx = optax.chain(
+                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+@@ -292,7 +396,11 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+             train_state = CustomTrainState.create(
+                 apply_fn=network.apply,
+                 params=network_variables["params"] if params is None else params,
+-                batch_stats=network_variables["batch_stats"] if batch_stats is None else batch_stats,
++                batch_stats=(
++                    optional_batch_stats(network_variables)
++                    if batch_stats is None
++                    else batch_stats
++                ),
+                 tx=tx,
+             )
+             return train_state
+@@ -309,6 +417,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+             action_dim=num_agents,
+             norm_type=config["NORM_TYPE"],
+             norm_input=config.get("NORM_INPUT", False),
++            object_centric=object_centric,
+         )
+         meta_train_state = create_agent(rng, None, None, meta_network, lr_meta)
+ 
+@@ -409,44 +518,21 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+                     transitions.next_obs[-1],
+                     train=False,
+                 )
+-                last_q = last_q[..., state_idx] # select the q_val of the active agent
+-
+-                def _get_target(lambda_returns_and_next_q, transition):
+-                    lambda_returns, next_q = lambda_returns_and_next_q
+-                    lambda_mul = jax.lax.cond(
+-                        jnp.logical_or(state_idx == -1, state_idx == -2),
+-                        lambda _: config["META_LAMBDA"],
+-                        lambda _: config["LAMBDA"],
+-                        operand=None,
+-                    )
+-                    target_bootstrap = (
+-                        transition.rewards[... , state_idx] + config["GAMMA"] * (1 - transition.done) * next_q
+-                    )
+-                    delta = lambda_returns - next_q
+-                    lambda_returns = (
+-                        target_bootstrap + config["GAMMA"] * lambda_mul * delta
+-                    )
+-                    lambda_returns = (
+-                        1 - transition.done
+-                    ) * lambda_returns + transition.done * transition.rewards[... , state_idx]
+-                    next_q = jax.lax.cond(
+-                        # state_idx == num_agents,
+-                        jnp.logical_or(state_idx == -1, state_idx == -2),
+-                        lambda _: jnp.max(transition.meta_q_val, axis=-1),
+-                        lambda _: jnp.max(transition.q_val[:, state_idx, :], axis=-1),
+-                        operand=None,
+-                    )
+-                    return (lambda_returns, next_q), lambda_returns
+-
+-                last_q = last_q * (1 - transitions.done[-1])
+-                lambda_returns = transitions.rewards[-1, :, state_idx] + config["GAMMA"] * last_q
+-                _, targets = jax.lax.scan(
+-                    _get_target,
+-                    (lambda_returns, last_q),
+-                    jax.tree.map(lambda x: x[:-1], transitions),
+-                    reverse=True,
++                # Each skill uses its own max Q, and the t+1 value must align
++                # with the t+1 return in the paper's lambda-return recursion.
++                last_q = jnp.max(last_q, axis=-1)
++                is_meta = jnp.logical_or(state_idx == -1, state_idx == -2)
++                values = jax.lax.cond(
++                    is_meta,
++                    lambda _: jnp.max(transitions.meta_q_val, axis=-1),
++                    lambda _: jnp.max(transitions.q_val[:, :, state_idx, :], axis=-1),
++                    operand=None,
++                )
++                trace_lambda = jnp.where(is_meta, config["META_LAMBDA"], config["LAMBDA"])
++                lambda_targets = lambda_return_targets(
++                    transitions.rewards[..., state_idx], transitions.done,
++                    values, last_q, config["GAMMA"], trace_lambda,
+                 )
+-                lambda_targets = jnp.concatenate((targets, lambda_returns[np.newaxis]))
+ 
+                 # NETWORKS UPDATE
+                 def _learn_epoch(carry, _):
+@@ -490,7 +576,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+                         train_state = train_state.apply_gradients(grads=grads)
+                         train_state = train_state.replace(
+                             grad_steps=train_state.grad_steps + 1,
+-                            batch_stats=updates["batch_stats"],
++                            batch_stats=updates.get("batch_stats", train_state.batch_stats),
+                         )
+                         return (train_state, rng), (loss, qvals)
+ 
+@@ -591,7 +677,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+             if config.get("TEST_DURING_TRAINING", False):
+                 rng, _rng = jax.random.split(rng)
+                 should_eval = (
+-                    train_states.n_updates[0] % int(config["NUM_UPDATES"] * config["TEST_INTERVAL"]) == 0
++                    train_states.n_updates[0] % max(1, int(config["NUM_UPDATES"] * config["TEST_INTERVAL"])) == 0
+                 )
+ 
+                 def _do_eval(rng):
+@@ -750,16 +836,20 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
+                 )
+ 
+             # return mean of done infos
+-            done_infos = jax.tree.map(
+-                lambda x: jnp.nanmean(
+-                    jnp.where(
+-                        infos["returned_episode"],
+-                        x,
+-                        jnp.nan,
+-                    )
+-                ),
+-                infos,
+-            )
++            # returned_episode is (T, N). Some games (Name This Game) also log
++            # per-step vectors, so x is (T, N, K). Broadcast the mask over K.
++            episode_done = infos["returned_episode"]
++
++            def _episode_nanmean(x):
++                x = jnp.asarray(x)
++                if x.shape[: episode_done.ndim] != episode_done.shape:
++                    return jnp.nanmean(x)
++                mask = episode_done.reshape(
++                    episode_done.shape + (1,) * (x.ndim - episode_done.ndim)
++                )
++                return jnp.nanmean(jnp.where(mask, x, jnp.nan))
++
++            done_infos = jax.tree.map(_episode_nanmean, infos)
+             return done_infos
+ 
+         rng, _rng = jax.random.split(rng)
+diff --git a/src/symbolic_options/reward_functions/seaquest.py b/src/symbolic_options/reward_functions/seaquest.py
+index 1513fee..296e844 100644
+--- a/src/symbolic_options/reward_functions/seaquest.py
++++ b/src/symbolic_options/reward_functions/seaquest.py
+@@ -1,9 +1,14 @@
+-from etils.exm.dummy import curr_job_name
+-from flax.linen import meta
+ import jax
+ import jax.numpy as jnp
+ from jaxatari.wrappers import AtariState, MultiRewardLogState
+ from jaxatari.games.jax_seaquest import JaxSeaquest, SeaquestState
++
++# One game instance, built at import (outside jit). env_reward and
++# shaped_reward_llm are themselves jitted and used from NEXUS's traced
++# train step; calling JaxSeaquest() there rebuilds the renderer under the
++# trace and raises TracerArrayConversionError.
++_GAME = JaxSeaquest()
++
+ def unpack(state):
+     while not isinstance(state, SeaquestState):
+         if hasattr(state, 'atari_state'):
+@@ -16,7 +21,7 @@ def unpack(state):
+ 
+ @jax.jit
+ def env_reward(prev_state: SeaquestState, state: SeaquestState):
+-    reward = JaxSeaquest()._get_reward(prev_state, state)
++    reward = _GAME._get_reward(prev_state, state)
+     return reward
+ 
+ @jax.jit
+@@ -57,8 +62,8 @@ def shaped_reward_simple(prev_state: SeaquestState, state: SeaquestState):
+ 
+ @jax.jit
+ def shaped_reward_llm(prev_state: SeaquestState, state: SeaquestState):
+-    prev_obs = JaxSeaquest()._get_observation(prev_state)
+-    curr_obs = JaxSeaquest()._get_observation(state)
++    prev_obs = _GAME._get_observation(prev_state)
++    curr_obs = _GAME._get_observation(state)
+ 
+     reward = 0.0
+ 
+diff --git a/src/symbolic_options/utils/video_recorder.py b/src/symbolic_options/utils/video_recorder.py
+index c839900..12e6c58 100644
+--- a/src/symbolic_options/utils/video_recorder.py
++++ b/src/symbolic_options/utils/video_recorder.py
+@@ -164,6 +164,10 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
+     if isinstance(states, PixelState):
+         states = states.atari_state
+ 
++    # CBL: modern jaxatari OC / Pixel+OC nest AtariState one level deeper
++    while hasattr(states, "atari_state") and not isinstance(states, AtariState):
++        states = states.atari_state
++
+     if isinstance(states, AtariState):
+         states = states.env_state
+     elif isinstance(states, ExplorationState):
+@@ -173,7 +177,7 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
+     num_states = jnp.argmax(dones)
+     # or len of the first array of the states pytree
+     if num_states == 0:
+-        num_states = len(states[-1])
++        num_states = int(jax.tree_util.tree_leaves(states)[0].shape[0])
+ 
+     # select every 4th frame (and only the first num_states)
+     # states_reduced = jax.tree_util.tree_map(lambda x: x[:num_states][::4], states)
 diff --git a/src/symbolic_options/config/alg/cbl_namethisgame_hrl_baseline_optim50m.yaml b/src/symbolic_options/config/alg/cbl_namethisgame_hrl_baseline_optim50m.yaml
 new file mode 100644
 index 0000000..e43cee4
@@ -1279,386 +1662,3 @@ index 0000000..8aee931
 +eval_envs:
 +  - label: "clean"
 +    noisy_eval: false
-diff --git a/src/symbolic_options/hierarchical_pqn_jaxtari.py b/src/symbolic_options/hierarchical_pqn_jaxtari.py
-index 19b210b..c71f7ce 100644
---- a/src/symbolic_options/hierarchical_pqn_jaxtari.py
-+++ b/src/symbolic_options/hierarchical_pqn_jaxtari.py
-@@ -15,36 +15,115 @@ from jaxatari.environment import JAXAtariAction as Action
- 
- from symbolic_options.utils.video_recorder import video_callback
- 
-+def optional_batch_stats(variables: Any) -> Any:
-+    """Return ``batch_stats``, or an empty tree when the network has none.
-+
-+    The LayerNorm pixel CNN does not create that collection. Training,
-+    checkpoints, and evaluation still pass one through.
-+    """
-+    if variables is None:
-+        return {}
-+    getter = getattr(variables, "get", None)
-+    if getter is None:
-+        return {}
-+    stats = getter("batch_stats")
-+    if stats is None:
-+        return {}
-+    return stats
-+
-+
-+def stack_pixel_channels(images: jnp.ndarray) -> jnp.ndarray:
-+    """``[B,T,H,W,C]`` → ``[B,H,W,T*C]`` before the first convolution.
-+
-+    Same axis order as the corrected monolithic pixel PQN. A reshape without
-+    this transpose would mix frame and row positions.
-+    """
-+    if images.ndim != 5:
-+        raise ValueError(
-+            f"NEXUS pixel input must be [B,T,H,W,C], got shape {images.shape}"
-+        )
-+    batch, frames, height, width, channels = images.shape
-+    moved = jnp.transpose(images, (0, 2, 3, 1, 4))
-+    return moved.reshape((batch, height, width, frames * channels))
-+
-+
-+class _PixelCNN(nn.Module):
-+    """Nature CNN used by the corrected pixel PQN baseline."""
-+
-+    norm_type: str = "layer_norm"
-+
-+    @nn.compact
-+    def __call__(self, x: jnp.ndarray, train: bool):
-+        if self.norm_type == "layer_norm":
-+            normalize = lambda t: nn.LayerNorm()(t)
-+        elif self.norm_type == "batch_norm":
-+            normalize = lambda t: nn.BatchNorm(use_running_average=not train)(t)
-+        else:
-+            normalize = lambda t: t
-+
-+        x = nn.Conv(
-+            32, kernel_size=(8, 8), strides=(4, 4), padding="VALID",
-+            kernel_init=nn.initializers.he_normal(),
-+        )(x)
-+        x = normalize(x)
-+        x = nn.relu(x)
-+        x = nn.Conv(
-+            64, kernel_size=(4, 4), strides=(2, 2), padding="VALID",
-+            kernel_init=nn.initializers.he_normal(),
-+        )(x)
-+        x = normalize(x)
-+        x = nn.relu(x)
-+        x = nn.Conv(
-+            64, kernel_size=(3, 3), strides=(1, 1), padding="VALID",
-+            kernel_init=nn.initializers.he_normal(),
-+        )(x)
-+        x = normalize(x)
-+        x = nn.relu(x)
-+        x = x.reshape((x.shape[0], -1))
-+        x = nn.Dense(512, kernel_init=nn.initializers.he_normal())(x)
-+        x = normalize(x)
-+        x = nn.relu(x)
-+        return x
-+
-+
- class QNetwork(nn.Module):
-     action_dim: int
-     hidden_size: int = 64
-     num_layers: int = 3
-     norm_type: str = "layer_norm"
-     norm_input: bool = False
-+    object_centric: bool = True
- 
-     @nn.compact
-     def __call__(self, x: jnp.ndarray, train: bool):
--        if self.norm_input:
--            x = nn.BatchNorm(use_running_average=not train)(x)
--        else:
--            # dummy normalize input for global compatibility
--            x_dummy = nn.BatchNorm(use_running_average=not train)(x)
-+        if self.object_centric:
-+            if self.norm_input:
-+                x = nn.BatchNorm(use_running_average=not train)(x)
-+            else:
-+                # dummy normalize input for global compatibility
-+                x_dummy = nn.BatchNorm(use_running_average=not train)(x)
- 
--        if self.norm_type == "layer_norm":
--            normalize = lambda x: nn.LayerNorm()(x)
--        elif self.norm_type == "batch_norm":
--            normalize = lambda x: nn.BatchNorm(use_running_average=not train)(x)
--        else:
--            normalize = lambda x: x
-+            if self.norm_type == "layer_norm":
-+                normalize = lambda x: nn.LayerNorm()(x)
-+            elif self.norm_type == "batch_norm":
-+                normalize = lambda x: nn.BatchNorm(use_running_average=not train)(x)
-+            else:
-+                normalize = lambda x: x
- 
--        for l in range(self.num_layers):
--            x = nn.Dense(self.hidden_size)(x)
--            x = normalize(x)
--            x = nn.relu(x)
-+            for l in range(self.num_layers):
-+                x = nn.Dense(self.hidden_size)(x)
-+                x = normalize(x)
-+                x = nn.relu(x)
- 
--        x = nn.Dense(self.action_dim)(x)
-+            x = nn.Dense(self.action_dim)(x)
-+            return x
- 
--        return x
-+        # Pixel skills and a learned selector share this encoder. Symbolic
-+        # selection never reads it; it still uses the game state.
-+        x = stack_pixel_channels(x)
-+        x = x / 255.0
-+        x = _PixelCNN(norm_type=self.norm_type)(x, train)
-+        return nn.Dense(self.action_dim)(x)
- 
- 
- @chex.dataclass(frozen=True)
-@@ -179,6 +258,23 @@ def select_active_agent(config, combined_q, num_envs, eps, rng):
-     )
- 
- 
-+def lambda_return_targets(rewards, dones, values, bootstrap, gamma, trace_lambda):
-+    """Paper Eq. 2/3: values[t] is max Q(s_t); bootstrap is max Q(s_T)."""
-+    next_values = jnp.concatenate((values[1:], bootstrap[None]), axis=0)
-+
-+    def backward(next_return, transition):
-+        reward, done, next_value = transition
-+        target = reward + gamma * (1 - done) * (
-+            (1 - trace_lambda) * next_value + trace_lambda * next_return
-+        )
-+        return target, target
-+
-+    _, targets = jax.lax.scan(
-+        backward, bootstrap, (rewards, dones, next_values), reverse=True,
-+    )
-+    return targets
-+
-+
- def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-     global curr_renderer
-     global rtpt
-@@ -273,17 +369,25 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-         lr_meta = lr_scheduler_meta if config.get("LR_LINEAR_DECAY", False) else config["LR"]
- 
-         # INIT NETWORK AND OPTIMIZER
-+        object_centric = bool(config.get("OBJECT_CENTRIC", True))
-+        if object_centric:
-+            print("NEXUS observation: object-centric MLP")
-+        else:
-+            print("NEXUS observation: pixel CNN, four frames stacked as channels")
-         network = QNetwork(
-             action_dim=config["NUM_ACTIONS"],
-             hidden_size=config.get("HIDDEN_SIZE", 64),
-             num_layers=config.get("NUM_LAYERS", 3),
-             norm_type=config["NORM_TYPE"],
-             norm_input=config.get("NORM_INPUT", False),
-+            object_centric=object_centric,
-         )
- 
-         def create_agent(rng, params, batch_stats, network, lr):
--            obs_len = np.prod(config["OBS_SHAPE"])
--            init_x = jnp.zeros(obs_len)
-+            if object_centric:
-+                init_x = jnp.zeros((int(np.prod(config["OBS_SHAPE"])),))
-+            else:
-+                init_x = jnp.zeros((1, *tuple(config["OBS_SHAPE"])))
-             network_variables = network.init(rng, init_x, train=False)
-             tx = optax.chain(
-                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-@@ -292,7 +396,11 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-             train_state = CustomTrainState.create(
-                 apply_fn=network.apply,
-                 params=network_variables["params"] if params is None else params,
--                batch_stats=network_variables["batch_stats"] if batch_stats is None else batch_stats,
-+                batch_stats=(
-+                    optional_batch_stats(network_variables)
-+                    if batch_stats is None
-+                    else batch_stats
-+                ),
-                 tx=tx,
-             )
-             return train_state
-@@ -309,6 +417,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-             action_dim=num_agents,
-             norm_type=config["NORM_TYPE"],
-             norm_input=config.get("NORM_INPUT", False),
-+            object_centric=object_centric,
-         )
-         meta_train_state = create_agent(rng, None, None, meta_network, lr_meta)
- 
-@@ -409,44 +518,21 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-                     transitions.next_obs[-1],
-                     train=False,
-                 )
--                last_q = last_q[..., state_idx] # select the q_val of the active agent
--
--                def _get_target(lambda_returns_and_next_q, transition):
--                    lambda_returns, next_q = lambda_returns_and_next_q
--                    lambda_mul = jax.lax.cond(
--                        jnp.logical_or(state_idx == -1, state_idx == -2),
--                        lambda _: config["META_LAMBDA"],
--                        lambda _: config["LAMBDA"],
--                        operand=None,
--                    )
--                    target_bootstrap = (
--                        transition.rewards[... , state_idx] + config["GAMMA"] * (1 - transition.done) * next_q
--                    )
--                    delta = lambda_returns - next_q
--                    lambda_returns = (
--                        target_bootstrap + config["GAMMA"] * lambda_mul * delta
--                    )
--                    lambda_returns = (
--                        1 - transition.done
--                    ) * lambda_returns + transition.done * transition.rewards[... , state_idx]
--                    next_q = jax.lax.cond(
--                        # state_idx == num_agents,
--                        jnp.logical_or(state_idx == -1, state_idx == -2),
--                        lambda _: jnp.max(transition.meta_q_val, axis=-1),
--                        lambda _: jnp.max(transition.q_val[:, state_idx, :], axis=-1),
--                        operand=None,
--                    )
--                    return (lambda_returns, next_q), lambda_returns
--
--                last_q = last_q * (1 - transitions.done[-1])
--                lambda_returns = transitions.rewards[-1, :, state_idx] + config["GAMMA"] * last_q
--                _, targets = jax.lax.scan(
--                    _get_target,
--                    (lambda_returns, last_q),
--                    jax.tree.map(lambda x: x[:-1], transitions),
--                    reverse=True,
-+                # Each skill uses its own max Q, and the t+1 value must align
-+                # with the t+1 return in the paper's lambda-return recursion.
-+                last_q = jnp.max(last_q, axis=-1)
-+                is_meta = jnp.logical_or(state_idx == -1, state_idx == -2)
-+                values = jax.lax.cond(
-+                    is_meta,
-+                    lambda _: jnp.max(transitions.meta_q_val, axis=-1),
-+                    lambda _: jnp.max(transitions.q_val[:, :, state_idx, :], axis=-1),
-+                    operand=None,
-+                )
-+                trace_lambda = jnp.where(is_meta, config["META_LAMBDA"], config["LAMBDA"])
-+                lambda_targets = lambda_return_targets(
-+                    transitions.rewards[..., state_idx], transitions.done,
-+                    values, last_q, config["GAMMA"], trace_lambda,
-                 )
--                lambda_targets = jnp.concatenate((targets, lambda_returns[np.newaxis]))
- 
-                 # NETWORKS UPDATE
-                 def _learn_epoch(carry, _):
-@@ -490,7 +576,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-                         train_state = train_state.apply_gradients(grads=grads)
-                         train_state = train_state.replace(
-                             grad_steps=train_state.grad_steps + 1,
--                            batch_stats=updates["batch_stats"],
-+                            batch_stats=updates.get("batch_stats", train_state.batch_stats),
-                         )
-                         return (train_state, rng), (loss, qvals)
- 
-@@ -591,7 +677,7 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-             if config.get("TEST_DURING_TRAINING", False):
-                 rng, _rng = jax.random.split(rng)
-                 should_eval = (
--                    train_states.n_updates[0] % int(config["NUM_UPDATES"] * config["TEST_INTERVAL"]) == 0
-+                    train_states.n_updates[0] % max(1, int(config["NUM_UPDATES"] * config["TEST_INTERVAL"])) == 0
-                 )
- 
-                 def _do_eval(rng):
-@@ -750,16 +836,20 @@ def make_train(config, env, eval_envs, meta_policy, meta_policy_llm, renderer):
-                 )
- 
-             # return mean of done infos
--            done_infos = jax.tree.map(
--                lambda x: jnp.nanmean(
--                    jnp.where(
--                        infos["returned_episode"],
--                        x,
--                        jnp.nan,
--                    )
--                ),
--                infos,
--            )
-+            # returned_episode is (T, N). Some games (Name This Game) also log
-+            # per-step vectors, so x is (T, N, K). Broadcast the mask over K.
-+            episode_done = infos["returned_episode"]
-+
-+            def _episode_nanmean(x):
-+                x = jnp.asarray(x)
-+                if x.shape[: episode_done.ndim] != episode_done.shape:
-+                    return jnp.nanmean(x)
-+                mask = episode_done.reshape(
-+                    episode_done.shape + (1,) * (x.ndim - episode_done.ndim)
-+                )
-+                return jnp.nanmean(jnp.where(mask, x, jnp.nan))
-+
-+            done_infos = jax.tree.map(_episode_nanmean, infos)
-             return done_infos
- 
-         rng, _rng = jax.random.split(rng)
-diff --git a/src/symbolic_options/reward_functions/seaquest.py b/src/symbolic_options/reward_functions/seaquest.py
-index 1513fee..296e844 100644
---- a/src/symbolic_options/reward_functions/seaquest.py
-+++ b/src/symbolic_options/reward_functions/seaquest.py
-@@ -1,9 +1,14 @@
--from etils.exm.dummy import curr_job_name
--from flax.linen import meta
- import jax
- import jax.numpy as jnp
- from jaxatari.wrappers import AtariState, MultiRewardLogState
- from jaxatari.games.jax_seaquest import JaxSeaquest, SeaquestState
-+
-+# One game instance, built at import (outside jit). env_reward and
-+# shaped_reward_llm are themselves jitted and used from NEXUS's traced
-+# train step; calling JaxSeaquest() there rebuilds the renderer under the
-+# trace and raises TracerArrayConversionError.
-+_GAME = JaxSeaquest()
-+
- def unpack(state):
-     while not isinstance(state, SeaquestState):
-         if hasattr(state, 'atari_state'):
-@@ -16,7 +21,7 @@ def unpack(state):
- 
- @jax.jit
- def env_reward(prev_state: SeaquestState, state: SeaquestState):
--    reward = JaxSeaquest()._get_reward(prev_state, state)
-+    reward = _GAME._get_reward(prev_state, state)
-     return reward
- 
- @jax.jit
-@@ -57,8 +62,8 @@ def shaped_reward_simple(prev_state: SeaquestState, state: SeaquestState):
- 
- @jax.jit
- def shaped_reward_llm(prev_state: SeaquestState, state: SeaquestState):
--    prev_obs = JaxSeaquest()._get_observation(prev_state)
--    curr_obs = JaxSeaquest()._get_observation(state)
-+    prev_obs = _GAME._get_observation(prev_state)
-+    curr_obs = _GAME._get_observation(state)
- 
-     reward = 0.0
- 
-diff --git a/src/symbolic_options/utils/video_recorder.py b/src/symbolic_options/utils/video_recorder.py
-index c839900..12e6c58 100644
---- a/src/symbolic_options/utils/video_recorder.py
-+++ b/src/symbolic_options/utils/video_recorder.py
-@@ -164,6 +164,10 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
-     if isinstance(states, PixelState):
-         states = states.atari_state
- 
-+    # CBL: modern jaxatari OC / Pixel+OC nest AtariState one level deeper
-+    while hasattr(states, "atari_state") and not isinstance(states, AtariState):
-+        states = states.atari_state
-+
-     if isinstance(states, AtariState):
-         states = states.env_state
-     elif isinstance(states, ExplorationState):
-@@ -173,7 +177,7 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
-     num_states = jnp.argmax(dones)
-     # or len of the first array of the states pytree
-     if num_states == 0:
--        num_states = len(states[-1])
-+        num_states = int(jax.tree_util.tree_leaves(states)[0].shape[0])
- 
-     # select every 4th frame (and only the first num_states)
-     # states_reduced = jax.tree_util.tree_map(lambda x: x[:num_states][::4], states)

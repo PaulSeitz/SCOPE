@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> None:
         mod_keys=[str(job["mod_key"])],
         output_json=Path(job["out"]),
         use_vendored_seaquest=bool(job["use_vendored_seaquest"]),
+        record_episode_metrics=bool(job.get("record_episode_metrics", False)),
     )
     print(f"  worker wrote {job['mod_key']}", flush=True)
 

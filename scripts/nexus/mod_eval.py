@@ -33,7 +33,7 @@ def _run_nexus_mods_in_subprocesses(
     *,
     specs: list[Any],
     nexus_root: Path,
-    jaxatari_root: Path,
+    jaxatari_root: Path | None,
     alg: str,
     ckpt_dir: Path,
     seed: int,
@@ -44,6 +44,7 @@ def _run_nexus_mods_in_subprocesses(
     output_json: Path,
     use_vendored_seaquest: bool,
     env_key: str,
+    record_episode_metrics: bool = False,
 ) -> dict[str, Any]:
     """One process per mod. Each child runs the serial one-mod path."""
     import pickle
@@ -79,6 +80,7 @@ def _run_nexus_mods_in_subprocesses(
                 "mod_key": spec.key,
                 "out": str(out_path),
                 "use_vendored_seaquest": bool(use_vendored_seaquest),
+                "record_episode_metrics": bool(record_episode_metrics),
             }
             job_path = tmp / f"{spec.key}.pkl"
             job_path.write_bytes(pickle.dumps(job))
@@ -162,7 +164,7 @@ def _run_nexus_mods_in_subprocesses(
 def run_nexus_mod_eval(
     *,
     nexus_root: Path,
-    jaxatari_root: Path,
+    jaxatari_root: Path | None,
     alg: str,
     ckpt_dir: Path,
     seed: int = 10044,
@@ -173,6 +175,7 @@ def run_nexus_mod_eval(
     mod_keys: list[str] | None = None,
     output_json: Path,
     use_vendored_seaquest: bool = False,
+    record_episode_metrics: bool = False,
 ) -> dict[str, Any]:
     scripts_dir = Path(__file__).resolve().parents[1]
     project_root = scripts_dir.parent
@@ -246,6 +249,7 @@ def run_nexus_mod_eval(
             output_json=output_json,
             use_vendored_seaquest=use_vendored_seaquest,
             env_key=env_key,
+            record_episode_metrics=record_episode_metrics,
         )
     results: dict[str, Any] = {}
     for spec in specs:
@@ -263,6 +267,7 @@ def run_nexus_mod_eval(
                 num_seeds=num_seeds,
                 max_frames=max_frames,
                 base_seed=seed,
+                record_episode_metrics=record_episode_metrics,
             )
         except Exception as e:
             traceback.print_exc()
@@ -317,6 +322,8 @@ def run_nexus_mod_eval(
 
 
 def _find_ckpt(ckpt_dir: Path, alg_name: str, env_name: str) -> Path:
+    if ckpt_dir.is_file():
+        return ckpt_dir
     for base in (ckpt_dir / env_name, ckpt_dir):
         if not base.is_dir():
             continue
@@ -445,6 +452,7 @@ def _rollout_mod(
     num_seeds: int,
     max_frames: int,
     base_seed: int,
+    record_episode_metrics: bool = False,
 ) -> dict[str, Any]:
     import jax
     import jax.numpy as jnp
@@ -559,16 +567,31 @@ def _rollout_mod(
         active = jnp.argmax(meta_q, axis=-1).reshape(-1)[0]
         return all_actions[active]
 
+    if record_episode_metrics:
+        from concept_based_learning.paper_eval.env_metrics import (
+            init_episode_metrics, make_metric_fns, metrics_to_python,
+        )
+        update_metrics, finalize_metrics = make_metric_fns(env_key, has_semantic_obs=False)
+        if "seaquest" in env_key:
+            from concept_based_learning.training.episode_stats import unwrap_base_env_state
+            _, probe_state = env.reset(jax.random.PRNGKey(base_seed))
+            if not hasattr(unwrap_base_env_state(probe_state), "successful_rescues"):
+                raise ValueError("Seaquest rescue logging requires successful_rescues on the base state")
+        # Only emit metrics measurable without CBL semantic kill/collect stamps.
+        metric_keys = ("env_rescues", "env_steps", "env_score_final", "env_lives_final",
+                       "env_divers_max", "env_divers_final", "env_surface_events", "env_life_losses")
+
     @jax.jit
     def episode(ep_key):
         obs, state = env.reset(ep_key)
 
         def keep_running(carry):
-            _, _, _, done, length = carry
+            _, _, _, done, length, metrics = carry
             return (~done) & (length < max_frames)
 
         def step(carry):
-            obs, state, total, _, length = carry
+            obs, state, total, _, length, metrics = carry
+            previous_state = state
             action = policy_action(obs, state)
             out = env.step(state, action)
             if len(out) == 6:
@@ -577,31 +600,48 @@ def _rollout_mod(
             else:
                 obs, state, reward, done, info = out
             total = total + info.get("env_reward", reward)
-            return obs, state, total, done, length + 1
+            if record_episode_metrics:
+                metrics = update_metrics(metrics, previous_state, state, obs, info.get("env_reward", reward))
+            return obs, state, total, done, length + 1, metrics
 
-        _, _, total, done, length = jax.lax.while_loop(
+        _, final_state, total, done, length, metrics = jax.lax.while_loop(
             keep_running, step,
-            (obs, state, jnp.float32(0), jnp.bool_(False), jnp.int32(0)),
+            (obs, state, jnp.float32(0), jnp.bool_(False), jnp.int32(0),
+             init_episode_metrics() if record_episode_metrics else {}),
         )
-        return total, done, length
+        if record_episode_metrics:
+            metrics = finalize_metrics(metrics, final_state)
+        return total, done, length, metrics
 
     returns: list[float] = []
     lengths: list[int] = []
     cutoff: list[bool] = []
+    episode_metrics: list[dict[str, float]] = []
     for seed_i in range(num_seeds):
         seed_key = jax.random.PRNGKey(base_seed + seed_i)
         for ep_i in range(num_episodes):
             ep_key = jax.random.fold_in(seed_key, ep_i)
-            total, done, length = jax.device_get(episode(ep_key))
+            total, done, length, metrics = jax.device_get(episode(ep_key))
             if not np.isfinite(total):
                 raise ValueError("Non-finite evaluation return")
             returns.append(float(total))
             lengths.append(int(length))
             cutoff.append(not bool(done))
+            if record_episode_metrics:
+                measured = metrics_to_python(metrics)
+                episode_metrics.append({key: measured[key] for key in metric_keys})
 
     arr = np.asarray(returns, dtype=np.float64)
     mean = float(arr.mean()) if arr.size else float("nan")
+    measured_stats = {}
+    if record_episode_metrics:
+        measured_stats["episode_metrics"] = episode_metrics
+        for key in metric_keys:
+            values = np.asarray([ep[key] for ep in episode_metrics], dtype=np.float64)
+            measured_stats["mean_" + key] = float(values.mean())
+            measured_stats["std_" + key] = float(values.std())
     return {
+        **measured_stats,
         "mean_return": mean,
         "mean": mean,
         "std_return": float(arr.std()) if arr.size > 1 else 0.0,
