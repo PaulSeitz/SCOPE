@@ -87,7 +87,7 @@ def _crossings(sharks, divers):
 def test_divers_clip_through_sharks_instead_of_locking_on():
     """A diver next to an oppositely headed shark keeps its own heading and passes it."""
     from jaxtari.games.jax_seaquest import JaxSeaquest
-    from jaxtari.games.mods.seaquest.seaquest_mod_plugins import DecoupledDiversMod
+    from concept_based_learning.jaxtari_mods.seaquest.seaquest_mod_plugins import DecoupledDiversMod
 
     game = JaxSeaquest()
     _, state = game.reset(jax.random.PRNGKey(0))
