@@ -30,7 +30,8 @@ def main():
         git("apply", str(PATCH))
         cmd = [sys.executable, "-m", "pip", "install", "--constraint",
                str(ROOT / "requirements-eval.txt"), "--force-reinstall", temp,
-               f"{ROOT}[analysis]"]
+               # Editable, as on the evaluation clusters: configs/ is read from the checkout.
+               "--editable", f"{ROOT}[analysis]"]
         if args.cuda12:
             cmd.append("jax[cuda12]")
         subprocess.run(cmd, check=True)

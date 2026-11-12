@@ -1,6 +1,7 @@
 """Tests for live visualizer debug panel helpers."""
 
 import numpy as np
+import pytest
 
 from concept_based_learning.observations.egocentric import (
     configure_ego_obs_from_config,
@@ -34,6 +35,7 @@ def test_ego_channel_labels_pov_psibins8():
     assert len(labels) == ego_obs_channels_per_frame()
 
 
+@pytest.mark.skipif(__import__("importlib.util").util.find_spec("cv2") is None, reason="needs OpenCV (pip install .[video])")
 def test_render_detail_panel_shape():
     configure_ego_obs_from_config({"USE_POV_RELATIVE_MAPPER": True, "EGO_PSI_ANGLE_BINS": 8})
     channels = ego_obs_channels_per_frame()
@@ -63,6 +65,7 @@ def test_render_detail_panel_shape():
     assert panel.dtype == np.uint8
 
 
+@pytest.mark.skipif(__import__("importlib.util").util.find_spec("cv2") is None, reason="needs OpenCV (pip install .[video])")
 def test_compose_display_with_panel():
     game = np.full((210, 160, 3), 128, dtype=np.uint8)
     panel = np.full((260, PANEL_WIDTH, 3), 64, dtype=np.uint8)
