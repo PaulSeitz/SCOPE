@@ -1,0 +1,2441 @@
+"""Egocentric observation features with runtime-selectable format."""
+
+import jax
+import jax.numpy as jnp
+
+from concept_based_learning.observations.line_of_sight import line_of_sight_blocked
+from concept_based_learning.observations.skill_ego_features import (
+    discrete_skill_ego_flags,
+    build_skill_ego_extras_stacked,
+    configure_ego_weapon_features,
+    skill_ego_extra_channels_per_frame,
+    using_ego_weapon_features,
+)
+
+# ---------------------------------------------------------------------------
+# Normalisation constants
+# ---------------------------------------------------------------------------
+# Screen diagonal — used to normalise distance so it stays in [0, 1]
+MAX_DIST      = 263.0   # sqrt(160² + 210²)
+MAX_SPEED     = 32.0    # pixels/frame, for velocity normalisation
+SCREEN_WIDTH  = 160.0
+SCREEN_HEIGHT = 210.0
+
+TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME = 7
+LEGACY_EGO_OBS_CHANNELS_PER_FRAME = 10
+
+# Backward-compatible constant used by old imports.
+EGO_OBS_CHANNELS_PER_FRAME = TARGET_ALIGNED_EGO_OBS_CHANNELS_PER_FRAME
+
+_USE_LEGACY_EGO_OBS = False
+_USE_EGO_SIZE_FEATURES = True
+_USE_EGO_VELOCITY_FEATURES = True
+# Line-of-sight / blocking channel: 1.0 when an occluding object (BLOCKING_LABELS)
+# lies on the player→target segment. Shared by all skills. Off by default.
+_USE_EGO_BLOCKING_FEATURES = False
+# None = normalize by MAX_DIST (full screen diagonal). Otherwise clip Euclidean
+# distance in pixels to this cap, then divide by the cap so feature ∈ [0, 1].
+_EGO_DISTANCE_CLIP_MAX_PX: float | None = None
+# Train-time domain randomization over scalar clip caps. When set, the training
+# loop samples one cap per env per episode and passes it into get_ego_obs; eval
+# / visualizer keep using ``_EGO_DISTANCE_CLIP_MAX_PX`` (no override).
+_EGO_DISTANCE_CLIP_CHOICES_PX: tuple[float, ...] | None = None
+# None / 0 = single normalized distance channel.
+# Otherwise replace it with this many triangular, overlapping distance bins.
+_EGO_DISTANCE_BINS: int | None = None
+# Optional custom centers for distance bins (pixels). If unset and
+# _EGO_DISTANCE_BINS is active, centers are generated uniformly in [0, max_px].
+_EGO_DISTANCE_BIN_CENTERS_PX: tuple[float, ...] | None = None
+# Upper support limit for generated distance bins when centers are not provided.
+_EGO_DISTANCE_BIN_MAX_PX: float = MAX_DIST
+# When True (and distance bins enabled), collapse distance bins to one scalar
+# tier channel in [0,1] (nearest-bin index normalized by n-1).
+_EGO_DISTANCE_BINS_SCALAR: bool = False
+# When set, replace scalar/bins with one binary channel per threshold (d <= t).
+_EGO_DISTANCE_FLAG_THRESHOLDS_PX: tuple[float, ...] | None = None
+# Exclusive one-hot range bands. ``[12, 40]`` → 3 channels: d<12, 12≤d<40, d≥40.
+# Unlike nested flags, these do not reconstruct a stepwise metric.
+_EGO_DISTANCE_HARD_EDGES_PX: tuple[float, ...] | None = None
+# How the distance *block* is encoded (bearing φ bins stay separate unless
+# ``EGO_POSE_XY`` takes the legacy Cartesian-only branch):
+#   scalar         — clipped Euclidean (default)
+#   xy             — body-frame (fwd, lat) absolute, clip-normalized
+#   delta_xy       — frame-to-frame Δfwd, Δlat / MAX_SPEED
+#   delta_xy_sign  — sign(Δfwd), sign(Δlat) ∈ {-1,0,1}
+#   near_tiers     — continuous clip near-field + exclusive one-hots beyond
+#                    the first hard edge (see ``near_tier_distance_features``)
+_EGO_DISTANCE_MODE: str = "scalar"
+_EGO_DISTANCE_DELTA_SIGN_EPS_PX: float = 0.5
+DISTANCE_MODE_CHOICES = (
+    "scalar",
+    "xy",
+    "delta_xy",
+    "delta_xy_sign",
+    "near_tiers",
+)
+# None / 0 = keep sin(ψ), cos(ψ) (aim error). Otherwise replace those two
+# channels with this many triangular, 50%-overlap bins of world θ_target.
+_EGO_ANGLE_BINS: int | None = None
+# When True (and angle bins enabled), collapse angle bins to one scalar
+# tier channel in [0,1] (nearest-bin index normalized by n-1).
+_EGO_ANGLE_BINS_SCALAR: bool = False
+# When True (and angle bins enabled), snap world θ to the nearest of ``n``
+# hard sectors and emit sin/cos of the sector centre (2 channels, finite
+# alphabet on the unit circle). Mutually exclusive with ``_EGO_ANGLE_BINS_SCALAR``.
+_EGO_ANGLE_SINCOS_SNAP: bool = False
+# POV-only: replace sin/cos(ψ) with overlapping triangular bins on ψ (aim offset).
+_EGO_PSI_ANGLE_BINS: int | None = None
+# POV-only: when ψ bins are off, emit one scalar = round(deg(ψ)) in [-180,180] / 180.
+_EGO_PSI_ANGLE_SCALAR: bool = False
+# Facing-frame restrained pose: finite alphabet instead of continuous dist/φ.
+# ``lcr_nearfar``: 3-way lateral (left/center/right) × 2-way distance (near/far).
+# ``quadrant_nearfar``: 4-way body bearing × near/far.
+_EGO_RESTRAINED_POSE: str | None = None
+_EGO_RESTRAINED_LATERAL_BAND_PX: float = 8.0
+_EGO_RESTRAINED_NEAR_FAR_PX: float = 50.0
+# Hit-corridor pose extras: lat / (p⊥+t⊥) + soft in-corridor bit (facing frame).
+_USE_EGO_HIT_CORRIDOR: bool = False
+_EGO_HIT_CORRIDOR_SAT: float = 4.0
+# AABB contact geometry for ego distance (+ bearing when facing/polar):
+#   centre_ray — gap along centre→centre ray (surface-aware, same bearing as centres)
+#   closest_points — true edge–edge separation vector (dist + φ from that vector)
+#   centres — pure centre→centre Euclidean (obs + rewards; no surface subtraction)
+#   body_gaps — facing-frame signed 1D surface gaps → contact dist + φ (size in halves)
+_EGO_AABB_GEOM: str = "centre_ray"
+
+RESTRAINED_POSE_CHOICES = ("lcr_nearfar", "quadrant_nearfar")
+AABB_GEOM_CHOICES = ("centre_ray", "closest_points", "centres", "body_gaps")
+
+
+def set_ego_obs_format(use_legacy: bool) -> None:
+    """Select legacy (10ch) or target-aligned / POV ego observation format.
+
+    Legacy 10-ch ego is disabled for the current paper eval — it is incompatible
+    with the facing-frame feature layout and must not leak into overnight runs.
+    """
+    if use_legacy:
+        raise RuntimeError(
+            "USE_LEGACY_EGO_OBS is disabled for the current eval. "
+            "Use the facing-frame ego path (USE_POV_FACING_FRAME) instead."
+        )
+    global _USE_LEGACY_EGO_OBS
+    _USE_LEGACY_EGO_OBS = False
+
+
+def set_ego_size_features(enabled: bool) -> None:
+    """Enable/disable size channels while keeping ego feature dimensions unchanged."""
+    global _USE_EGO_SIZE_FEATURES
+    _USE_EGO_SIZE_FEATURES = bool(enabled)
+
+
+def set_ego_hit_corridor(enabled: bool, *, sat: float = 4.0) -> None:
+    """Enable relative hit-corridor channels (lat_rel + soft in_corridor)."""
+    global _USE_EGO_HIT_CORRIDOR, _EGO_HIT_CORRIDOR_SAT
+    _USE_EGO_HIT_CORRIDOR = bool(enabled)
+    sat_f = float(sat)
+    if sat_f <= 0.0:
+        raise ValueError(f"EGO_HIT_CORRIDOR_SAT must be > 0, got {sat}")
+    _EGO_HIT_CORRIDOR_SAT = sat_f
+
+
+def using_ego_hit_corridor() -> bool:
+    return _USE_EGO_HIT_CORRIDOR
+
+
+def set_ego_aabb_geom(mode: str | None) -> None:
+    """Select AABB distance/bearing geometry (see ``AABB_GEOM_CHOICES``)."""
+    global _EGO_AABB_GEOM
+    if mode in (None, "", False):
+        _EGO_AABB_GEOM = "centre_ray"
+        return
+    key = str(mode).lower().strip()
+    if key not in AABB_GEOM_CHOICES:
+        raise ValueError(
+            f"EGO_AABB_GEOM must be one of {AABB_GEOM_CHOICES}, got {mode!r}"
+        )
+    _EGO_AABB_GEOM = key
+
+
+def ego_aabb_geom() -> str:
+    return _EGO_AABB_GEOM
+
+
+def using_ego_closest_points_geom() -> bool:
+    return _EGO_AABB_GEOM == "closest_points"
+
+
+def set_ego_velocity_features(enabled: bool) -> None:
+    """Enable/disable velocity channels while keeping ego feature dimensions unchanged."""
+    global _USE_EGO_VELOCITY_FEATURES
+    _USE_EGO_VELOCITY_FEATURES = bool(enabled)
+
+
+def using_ego_size_features() -> bool:
+    """Return True when target/player size channels are included in ego features."""
+    return _USE_EGO_SIZE_FEATURES
+
+
+def using_ego_velocity_features() -> bool:
+    """Return True when radial/tangential velocity channels are included."""
+    return _USE_EGO_VELOCITY_FEATURES
+
+
+def set_ego_blocking_features(enabled: bool) -> None:
+    """Enable/disable the shared line-of-sight blocked channel (adds 1 channel/frame)."""
+    global _USE_EGO_BLOCKING_FEATURES
+    _USE_EGO_BLOCKING_FEATURES = bool(enabled)
+
+
+def set_ego_los_features(enabled: bool) -> None:
+    """Backward-compatible alias for ``set_ego_blocking_features``."""
+    set_ego_blocking_features(enabled)
+
+
+def using_ego_blocking_features() -> bool:
+    """Return True when the shared line-of-sight blocked channel is included."""
+    return _USE_EGO_BLOCKING_FEATURES
+
+
+def using_ego_los_features() -> bool:
+    """Backward-compatible alias for ``using_ego_blocking_features``."""
+    return using_ego_blocking_features()
+
+
+def using_legacy_ego_obs() -> bool:
+    """Return True when the legacy ego observation format is active."""
+    return _USE_LEGACY_EGO_OBS
+
+
+def set_ego_distance_clip_max_pixels(max_px: float | None) -> None:
+    """
+    Clip target-aligned Euclidean distance before normalization.
+
+    When set to a positive value (e.g. 50), distances >= max_px are treated as
+    max_px so the network sees a single \"far\" bucket; normalization uses max_px.
+    Pass ``None`` to disable clipping (normalize by screen diagonal ``MAX_DIST``).
+    Pass ``0`` to **zero the distance channel** (angle-only ablation; input dim
+    unchanged). This is *not* \"clip at 0px\" — that would saturate everything to
+    contact.
+    """
+    global _EGO_DISTANCE_CLIP_MAX_PX
+    if max_px is None:
+        _EGO_DISTANCE_CLIP_MAX_PX = None
+        return
+    cap = float(max_px)
+    if cap < 0:
+        raise ValueError(f"EGO_DISTANCE_CLIP_MAX_PX must be >= 0, got {max_px}")
+    _EGO_DISTANCE_CLIP_MAX_PX = cap
+
+
+def ego_distance_clip_max_pixels() -> float | None:
+    """Return the active distance clip cap in pixels, or None if disabled."""
+    return _EGO_DISTANCE_CLIP_MAX_PX
+
+
+def set_ego_distance_clip_choices_px(
+    choices: list[float] | tuple[float, ...] | None,
+) -> None:
+    """Configure train-time per-episode clip sampling set (scalar distance only)."""
+    global _EGO_DISTANCE_CLIP_CHOICES_PX
+    if choices in (None, "", False):
+        _EGO_DISTANCE_CLIP_CHOICES_PX = None
+        return
+    caps = tuple(float(c) for c in choices)
+    if not caps:
+        _EGO_DISTANCE_CLIP_CHOICES_PX = None
+        return
+    if any(c < 0 for c in caps):
+        raise ValueError(
+            f"EGO_DISTANCE_CLIP_CHOICES_PX entries must be >= 0, got {choices}"
+        )
+    _EGO_DISTANCE_CLIP_CHOICES_PX = caps
+
+
+def ego_distance_clip_choices_px() -> tuple[float, ...] | None:
+    """Return train-time clip choices, or None when clip DR is off."""
+    return _EGO_DISTANCE_CLIP_CHOICES_PX
+
+
+def set_ego_distance_mode(
+    mode: str | None,
+    *,
+    sign_eps_px: float = 0.5,
+) -> None:
+    """Select the distance-block encoding (see ``DISTANCE_MODE_CHOICES``)."""
+    global _EGO_DISTANCE_MODE, _EGO_DISTANCE_DELTA_SIGN_EPS_PX
+    if mode in (None, "", False):
+        _EGO_DISTANCE_MODE = "scalar"
+    else:
+        key = str(mode).lower().strip()
+        if key not in DISTANCE_MODE_CHOICES:
+            raise ValueError(
+                f"EGO_DISTANCE_MODE must be one of {DISTANCE_MODE_CHOICES}, got {mode!r}"
+            )
+        _EGO_DISTANCE_MODE = key
+    eps = float(sign_eps_px)
+    if eps < 0.0:
+        raise ValueError(f"EGO_DISTANCE_DELTA_SIGN_EPS_PX must be >= 0, got {sign_eps_px}")
+    _EGO_DISTANCE_DELTA_SIGN_EPS_PX = eps
+
+
+def ego_distance_mode() -> str:
+    return _EGO_DISTANCE_MODE
+
+
+def ego_distance_delta_sign_eps_px() -> float:
+    return _EGO_DISTANCE_DELTA_SIGN_EPS_PX
+
+
+def ego_distance_zeroed() -> bool:
+    """True when distance features are forced to 0 (``EGO_DISTANCE_CLIP_MAX_PX: 0``)."""
+    return _EGO_DISTANCE_CLIP_MAX_PX is not None and float(_EGO_DISTANCE_CLIP_MAX_PX) == 0.0
+
+
+def set_ego_distance_bins(n_bins: int | None) -> None:
+    """Replace scalar distance with ``n_bins`` overlapping triangular bins."""
+    global _EGO_DISTANCE_BINS
+    if n_bins is None:
+        _EGO_DISTANCE_BINS = None
+        return
+    n = int(n_bins)
+    if n <= 0:
+        _EGO_DISTANCE_BINS = None
+        return
+    if n < 2:
+        raise ValueError(f"EGO_DISTANCE_BINS must be >= 2, got {n_bins}")
+    _EGO_DISTANCE_BINS = n
+
+
+def set_ego_distance_bins_scalar(enabled: bool) -> None:
+    """Use one scalar tier channel instead of N distance-bin channels."""
+    global _EGO_DISTANCE_BINS_SCALAR
+    _EGO_DISTANCE_BINS_SCALAR = bool(enabled)
+
+
+def ego_distance_bins() -> int | None:
+    """Return active distance-bin count, or None for scalar distance."""
+    return _EGO_DISTANCE_BINS
+
+
+def set_ego_distance_flag_thresholds_px(
+    thresholds: list[float] | tuple[float, ...] | None,
+) -> None:
+    """Replace distance scalar/bins with nested ``d <= threshold`` indicator channels."""
+    global _EGO_DISTANCE_FLAG_THRESHOLDS_PX
+    if thresholds is None:
+        _EGO_DISTANCE_FLAG_THRESHOLDS_PX = None
+        return
+    vals = tuple(float(t) for t in thresholds)
+    if len(vals) < 1:
+        raise ValueError("EGO_DISTANCE_FLAG_THRESHOLDS_PX must have at least one threshold")
+    if any(v < 0.0 for v in vals):
+        raise ValueError("EGO_DISTANCE_FLAG_THRESHOLDS_PX values must be >= 0")
+    if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
+        raise ValueError("EGO_DISTANCE_FLAG_THRESHOLDS_PX must be strictly increasing")
+    _EGO_DISTANCE_FLAG_THRESHOLDS_PX = vals
+
+
+def ego_distance_flag_thresholds_px() -> tuple[float, ...] | None:
+    return _EGO_DISTANCE_FLAG_THRESHOLDS_PX
+
+
+def set_ego_distance_hard_edges_px(
+    edges: list[float] | tuple[float, ...] | None,
+) -> None:
+    """Exclusive one-hot bands from increasing interior edges (pixels).
+
+    ``n`` edges produce ``n + 1`` channels. Example: ``[12, 40]`` → near / mid / far.
+    """
+    global _EGO_DISTANCE_HARD_EDGES_PX
+    if edges is None:
+        _EGO_DISTANCE_HARD_EDGES_PX = None
+        return
+    vals = tuple(float(t) for t in edges)
+    if len(vals) < 1:
+        raise ValueError("EGO_DISTANCE_HARD_EDGES_PX must have at least one edge")
+    if any(v <= 0.0 for v in vals):
+        raise ValueError("EGO_DISTANCE_HARD_EDGES_PX values must be > 0")
+    if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
+        raise ValueError("EGO_DISTANCE_HARD_EDGES_PX must be strictly increasing")
+    _EGO_DISTANCE_HARD_EDGES_PX = vals
+
+
+def ego_distance_hard_edges_px() -> tuple[float, ...] | None:
+    return _EGO_DISTANCE_HARD_EDGES_PX
+
+
+def exclusive_distance_band_onehots(
+    distances_px: jnp.ndarray, edges_px: jnp.ndarray
+) -> jnp.ndarray:
+    """Return one-hot bands ``(..., n_edges + 1)`` for exclusive range sections."""
+    d = jnp.asarray(distances_px, dtype=jnp.float32)[..., None]
+    edges = jnp.asarray(edges_px, dtype=jnp.float32)
+    n_bands = int(edges.shape[0]) + 1
+    idx = jnp.sum(d >= edges, axis=-1).astype(jnp.int32)
+    return jax.nn.one_hot(idx, n_bands, dtype=jnp.float32)
+
+
+def set_ego_distance_bin_centers_px(centers: list[float] | tuple[float, ...] | None) -> None:
+    """Set explicit distance-bin centers (pixels), or None for autogenerated centers."""
+    global _EGO_DISTANCE_BIN_CENTERS_PX
+    if centers is None:
+        _EGO_DISTANCE_BIN_CENTERS_PX = None
+        return
+    vals = tuple(float(c) for c in centers)
+    if len(vals) < 2:
+        raise ValueError("EGO_DISTANCE_BIN_CENTERS_PX must have at least 2 centers")
+    if any(c < 0.0 for c in vals):
+        raise ValueError("EGO_DISTANCE_BIN_CENTERS_PX values must be >= 0")
+    if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
+        raise ValueError("EGO_DISTANCE_BIN_CENTERS_PX must be strictly increasing")
+    _EGO_DISTANCE_BIN_CENTERS_PX = vals
+
+
+def set_ego_distance_bin_max_px(max_px: float | None) -> None:
+    """Set max distance support used for autogenerated bin centers."""
+    global _EGO_DISTANCE_BIN_MAX_PX
+    if max_px is None:
+        _EGO_DISTANCE_BIN_MAX_PX = MAX_DIST
+        return
+    cap = float(max_px)
+    if cap <= 0:
+        raise ValueError(f"EGO_DISTANCE_BIN_MAX_PX must be positive, got {max_px}")
+    _EGO_DISTANCE_BIN_MAX_PX = cap
+
+
+def set_ego_angle_bins(n_bins: int | None) -> None:
+    """Replace sin/cos(ψ) with ``n_bins`` overlapping world-θ bins.
+
+    ``None`` / ``0`` restores continuous sin/cos(ψ). ``n_bins`` must be >= 2.
+    Bins are triangular with 50% overlap and wrap at ±π (see
+    :func:`triangular_angle_bins`).
+    """
+    global _EGO_ANGLE_BINS
+    if n_bins is None:
+        _EGO_ANGLE_BINS = None
+        return
+    n = int(n_bins)
+    if n <= 0:
+        _EGO_ANGLE_BINS = None
+        return
+    if n < 2:
+        raise ValueError(f"EGO_ANGLE_BINS must be >= 2, got {n_bins}")
+    _EGO_ANGLE_BINS = n
+
+
+def set_ego_psi_angle_bins(n_bins: int | None) -> None:
+    """POV-only: replace sin/cos(ψ) with ``n_bins`` overlapping ψ bins."""
+    global _EGO_PSI_ANGLE_BINS
+    if n_bins is None:
+        _EGO_PSI_ANGLE_BINS = None
+        return
+    n = int(n_bins)
+    if n <= 0:
+        _EGO_PSI_ANGLE_BINS = None
+        return
+    if n < 2:
+        raise ValueError(f"EGO_PSI_ANGLE_BINS must be >= 2, got {n_bins}")
+    _EGO_PSI_ANGLE_BINS = n
+
+
+def ego_psi_angle_bins() -> int | None:
+    return _EGO_PSI_ANGLE_BINS
+
+
+def set_ego_psi_angle_scalar(enabled: bool) -> None:
+    """POV-only: one channel with signed degree ψ/φ (rounded, ÷180), not sin/cos."""
+    global _EGO_PSI_ANGLE_SCALAR
+    _EGO_PSI_ANGLE_SCALAR = bool(enabled)
+
+
+def using_ego_psi_angle_scalar() -> bool:
+    return _EGO_PSI_ANGLE_SCALAR
+
+
+def set_ego_restrained_pose(
+    mode: str | None,
+    *,
+    lateral_band_px: float | None = None,
+    near_far_px: float | None = None,
+) -> None:
+    """Enable facing-frame restrained pose encoding (mutually exclusive modes)."""
+    global _EGO_RESTRAINED_POSE, _EGO_RESTRAINED_LATERAL_BAND_PX, _EGO_RESTRAINED_NEAR_FAR_PX
+    if mode in (None, "", False):
+        _EGO_RESTRAINED_POSE = None
+        return
+    key = str(mode).lower().strip()
+    if key not in RESTRAINED_POSE_CHOICES:
+        raise ValueError(
+            f"EGO_RESTRAINED_POSE must be one of {RESTRAINED_POSE_CHOICES}, got {mode!r}"
+        )
+    _EGO_RESTRAINED_POSE = key
+    if lateral_band_px is not None:
+        _EGO_RESTRAINED_LATERAL_BAND_PX = float(lateral_band_px)
+    if near_far_px is not None:
+        _EGO_RESTRAINED_NEAR_FAR_PX = float(near_far_px)
+
+
+def using_ego_restrained_pose() -> bool:
+    return _EGO_RESTRAINED_POSE is not None
+
+
+def ego_restrained_pose_mode() -> str | None:
+    return _EGO_RESTRAINED_POSE
+
+
+def restrained_pose_channels_per_frame() -> int:
+    if _EGO_RESTRAINED_POSE == "lcr_nearfar":
+        return 5
+    if _EGO_RESTRAINED_POSE == "quadrant_nearfar":
+        return 6
+    return 0
+
+
+def restrained_lcr_nearfar_channels(
+    lat_px: jnp.ndarray,
+    distance_px: jnp.ndarray,
+    *,
+    lateral_band_px: float,
+    near_far_px: float,
+) -> list[jnp.ndarray]:
+    """One-hot lateral (L/C/R) + one-hot distance tier (near/far)."""
+    band = jnp.float32(lateral_band_px)
+    thresh = jnp.float32(near_far_px)
+    lat = jnp.asarray(lat_px, dtype=jnp.float32)
+    dist = jnp.asarray(distance_px, dtype=jnp.float32)
+    is_center = jnp.abs(lat) < band
+    is_right = lat >= band
+    is_left = lat <= -band
+    is_near = dist <= thresh
+    is_far = dist > thresh
+    return [is_left, is_center, is_right, is_near, is_far]
+
+
+def restrained_quadrant_nearfar_channels(
+    phi: jnp.ndarray,
+    distance_px: jnp.ndarray,
+    *,
+    near_far_px: float,
+) -> list[jnp.ndarray]:
+    """One-hot body bearing quadrant + one-hot near/far."""
+    thresh = jnp.float32(near_far_px)
+    ang = jnp.asarray(phi, dtype=jnp.float32)
+    dist = jnp.asarray(distance_px, dtype=jnp.float32)
+    quarter = jnp.float32(jnp.pi / 4.0)
+    three_quarter = jnp.float32(3.0 * jnp.pi / 4.0)
+    is_ahead = jnp.abs(ang) < quarter
+    is_right = jnp.logical_and(ang >= quarter, ang < three_quarter)
+    is_behind = jnp.abs(ang) >= three_quarter
+    is_left = jnp.logical_and(ang <= -quarter, ang > -three_quarter)
+    is_near = dist <= thresh
+    is_far = dist > thresh
+    return [is_ahead, is_right, is_behind, is_left, is_near, is_far]
+
+
+def _restrained_pose_feature_channels(
+    lat_px: jnp.ndarray,
+    phi: jnp.ndarray,
+    distance_px: jnp.ndarray,
+) -> list[jnp.ndarray]:
+    if _EGO_RESTRAINED_POSE == "lcr_nearfar":
+        return restrained_lcr_nearfar_channels(
+            lat_px,
+            distance_px,
+            lateral_band_px=_EGO_RESTRAINED_LATERAL_BAND_PX,
+            near_far_px=_EGO_RESTRAINED_NEAR_FAR_PX,
+        )
+    if _EGO_RESTRAINED_POSE == "quadrant_nearfar":
+        return restrained_quadrant_nearfar_channels(
+            phi,
+            distance_px,
+            near_far_px=_EGO_RESTRAINED_NEAR_FAR_PX,
+        )
+    raise RuntimeError(f"unknown restrained pose mode {_EGO_RESTRAINED_POSE!r}")
+
+
+def set_ego_angle_bins_scalar(enabled: bool) -> None:
+    """Use one scalar tier channel instead of N angle-bin channels."""
+    global _EGO_ANGLE_BINS_SCALAR
+    _EGO_ANGLE_BINS_SCALAR = bool(enabled)
+
+
+def set_ego_angle_sincos_snap(enabled: bool) -> None:
+    """Snap world θ to hard sector centres; emit sin/cos (2 channels)."""
+    global _EGO_ANGLE_SINCOS_SNAP
+    _EGO_ANGLE_SINCOS_SNAP = bool(enabled)
+
+
+def ego_angle_bins() -> int | None:
+    """Return the active world-θ bin count, or None when using sin/cos(ψ)."""
+    return _EGO_ANGLE_BINS
+
+
+def ego_angle_channels_per_frame() -> int:
+    """Pose angle block width: ``n`` bins, or 2 for sin/cos(ψ)."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_ego_pose_xy,
+        using_pov_facing_frame,
+    )
+    from concept_based_learning.observations.pov_relative import using_pov_relative
+
+    # Facing-frame Cartesian pose replaces the angle block entirely.
+    if using_pov_facing_frame() and using_ego_pose_xy():
+        return 0
+    if using_ego_restrained_pose():
+        return 0
+    if using_pov_relative() and _EGO_PSI_ANGLE_BINS:
+        return int(_EGO_PSI_ANGLE_BINS)
+    if using_pov_relative() and _EGO_PSI_ANGLE_SCALAR:
+        return 1
+    if _EGO_ANGLE_BINS:
+        if _EGO_ANGLE_SINCOS_SNAP:
+            return 2
+        return 1 if _EGO_ANGLE_BINS_SCALAR else int(_EGO_ANGLE_BINS)
+    return 2
+
+
+def quantize_angle_sincos(theta: jnp.ndarray, n_bins: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Hard world-θ sectors: sin/cos of the sector centre (``n_bins`` levels)."""
+    n = int(n_bins)
+    t = (jnp.asarray(theta, dtype=jnp.float32) + jnp.pi) / (jnp.float32(2.0) * jnp.pi)
+    idx = (jnp.floor(t * n).astype(jnp.int32) % n).astype(jnp.float32)
+    center = (idx + 0.5) * (jnp.float32(2.0) * jnp.pi) / n - jnp.pi
+    return jnp.sin(center), jnp.cos(center)
+
+
+def psi_angle_deg_scalar(theta: jnp.ndarray) -> jnp.ndarray:
+    """Rounded signed degrees in [-180, 180], normalized to [-1, 1]."""
+    deg = jnp.round(jnp.rad2deg(jnp.asarray(theta, dtype=jnp.float32)))
+    deg = (deg + 180.0) % 360.0 - 180.0
+    return (deg / 180.0).astype(jnp.float32)
+
+
+def _psi_angle_feature_channels(theta: jnp.ndarray) -> list[jnp.ndarray]:
+    """POV ψ/φ block: triangular bins, degree scalar, or sin/cos."""
+    if _EGO_PSI_ANGLE_BINS:
+        bin_feats = triangular_angle_bins(theta, _EGO_PSI_ANGLE_BINS)
+        return [bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))]
+    if _EGO_PSI_ANGLE_SCALAR:
+        return [psi_angle_deg_scalar(theta)]
+    return [jnp.sin(theta), jnp.cos(theta)]
+
+
+def triangular_angle_bins(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
+    """Triangular circular bins of ``theta`` (radians), 50% overlap.
+
+    Centres at ``k * 2π / n`` (k=0 is +x / screen-right). Half-width is
+    ``2π / n`` so adjacent bins are 0.5 at the midpoint and the features
+    form a partition of unity. Output shape is ``theta.shape + (n_bins,)``.
+    """
+    n = int(n_bins)
+    centers = jnp.arange(n, dtype=jnp.float32) * (jnp.float32(2.0 * jnp.pi) / n)
+    delta = jnp.asarray(theta, dtype=jnp.float32)[..., None] - centers
+    delta = jnp.arctan2(jnp.sin(delta), jnp.cos(delta))
+    half = jnp.float32(2.0 * jnp.pi) / n
+    return jnp.maximum(0.0, 1.0 - jnp.abs(delta) / half)
+
+
+_USE_DESTROY_ONLY_EGO_EXTRAS = False
+
+
+def set_destroy_only_ego_extras(enabled: bool) -> None:
+    """When True, LoS/weapon extras are concatenated only for the DESTROY head."""
+    global _USE_DESTROY_ONLY_EGO_EXTRAS
+    _USE_DESTROY_ONLY_EGO_EXTRAS = bool(enabled)
+
+
+def using_destroy_only_ego_extras() -> bool:
+    return _USE_DESTROY_ONLY_EGO_EXTRAS
+
+
+def configure_ego_obs_from_config(config: dict) -> None:
+    """Apply all ego observation toggles from a merged experiment config dict."""
+    from concept_based_learning.observations.pov_relative import (
+        configure_pov_relative_from_config,
+        using_pov_relative,
+    )
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        configure_pov_fixed_bilateral_from_config,
+    )
+    from concept_based_learning.observations.pov_facing_frame import (
+        configure_pov_facing_frame_from_config,
+    )
+
+    configure_pov_relative_from_config(config)
+    configure_pov_fixed_bilateral_from_config(config)
+    configure_pov_facing_frame_from_config(config)
+    set_ego_obs_format(bool(config.get("USE_LEGACY_EGO_OBS", False)))
+    set_ego_size_features(bool(config.get("USE_EGO_SIZE_FEATURES", True)))
+    set_ego_velocity_features(bool(config.get("USE_EGO_VELOCITY_FEATURES", True)))
+    set_destroy_only_ego_extras(bool(config.get("USE_DESTROY_ONLY_EGO_EXTRAS", False)))
+    # Shared blocking/LOS flag (new name preferred; old USE_EGO_LOS_FEATURES still works).
+    blocking = config.get(
+        "USE_EGO_BLOCKING_FEATURES",
+        config.get("USE_EGO_LOS_FEATURES", False),
+    )
+    set_ego_blocking_features(bool(blocking))
+    hard_edges = config.get("EGO_DISTANCE_HARD_EDGES_PX", None)
+    flag_thresh = config.get("EGO_DISTANCE_FLAG_THRESHOLDS_PX", None)
+    clip_choices = config.get("EGO_DISTANCE_CLIP_CHOICES_PX", None)
+    dist_mode = config.get("EGO_DISTANCE_MODE", None)
+    dist_mode_key = (
+        str(dist_mode).strip().lower() if dist_mode not in (None, "", False) else "scalar"
+    )
+    if dist_mode_key == "near_tiers":
+        # Continuous near-field (clip) + exclusive far bands (hard edges).
+        if hard_edges in (None, "", False):
+            raise ValueError(
+                "EGO_DISTANCE_MODE: near_tiers requires EGO_DISTANCE_HARD_EDGES_PX "
+                "(e.g. [10, 20, 50, 80, 150])."
+            )
+        clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+        if clip_px in (None, "", False):
+            raise ValueError(
+                "EGO_DISTANCE_MODE: near_tiers requires EGO_DISTANCE_CLIP_MAX_PX "
+                "(near-detail width, typically 10)."
+            )
+        set_ego_distance_hard_edges_px(hard_edges)
+        set_ego_distance_flag_thresholds_px(None)
+        set_ego_distance_clip_max_pixels(float(clip_px))
+        set_ego_distance_clip_choices_px(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_bins_scalar(False)
+        set_ego_distance_bin_centers_px(None)
+        set_ego_distance_mode(
+            "near_tiers",
+            sign_eps_px=float(config.get("EGO_DISTANCE_DELTA_SIGN_EPS_PX", 0.5)),
+        )
+        near_cap = float(clip_px)
+        first_edge = float(_EGO_DISTANCE_HARD_EDGES_PX[0])  # type: ignore[index]
+        if abs(first_edge - near_cap) > 1e-6:
+            raise ValueError(
+                "near_tiers expects the first hard edge to match "
+                f"EGO_DISTANCE_CLIP_MAX_PX ({near_cap}), got first edge {first_edge}."
+            )
+    elif hard_edges not in (None, "", False):
+        set_ego_distance_hard_edges_px(hard_edges)
+        set_ego_distance_flag_thresholds_px(None)
+        set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_clip_choices_px(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_bins_scalar(False)
+        set_ego_distance_bin_centers_px(None)
+        set_ego_distance_mode("scalar")
+    elif flag_thresh not in (None, "", False):
+        set_ego_distance_hard_edges_px(None)
+        set_ego_distance_flag_thresholds_px(flag_thresh)
+        set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_clip_choices_px(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_bins_scalar(False)
+        set_ego_distance_bin_centers_px(None)
+        set_ego_distance_mode("scalar")
+    else:
+        set_ego_distance_hard_edges_px(None)
+        set_ego_distance_flag_thresholds_px(None)
+        clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+        set_ego_distance_clip_max_pixels(None if clip_px is None else float(clip_px))
+        # Choices are train-only DR; keep the fixed clip as eval/default fallback.
+        set_ego_distance_clip_choices_px(
+            None if clip_choices in (None, "", False) else clip_choices
+        )
+        dist_bins = config.get("EGO_DISTANCE_BINS", None)
+        set_ego_distance_bins(None if dist_bins in (None, "", False) else int(dist_bins))
+        set_ego_distance_bins_scalar(bool(config.get("EGO_DISTANCE_BINS_SCALAR", False)))
+        dist_centers = config.get("EGO_DISTANCE_BIN_CENTERS_PX", None)
+        set_ego_distance_bin_centers_px(dist_centers)
+        set_ego_distance_bin_max_px(config.get("EGO_DISTANCE_BIN_MAX_PX", MAX_DIST))
+        set_ego_distance_mode(
+            dist_mode,
+            sign_eps_px=float(config.get("EGO_DISTANCE_DELTA_SIGN_EPS_PX", 0.5)),
+        )
+        if ego_distance_mode() != "scalar" and dist_bins not in (None, "", False):
+            raise ValueError(
+                "EGO_DISTANCE_MODE != scalar is mutually exclusive with EGO_DISTANCE_BINS."
+            )
+    angle_bins = config.get("EGO_ANGLE_BINS", None)
+    psi_bins = config.get("EGO_PSI_ANGLE_BINS", None)
+    if using_pov_relative():
+        set_ego_psi_angle_bins(
+            None if psi_bins in (None, "", False) else int(psi_bins)
+        )
+        angle_bins = None
+    else:
+        set_ego_psi_angle_bins(None)
+    set_ego_angle_bins(None if angle_bins in (None, "", False) else int(angle_bins))
+    set_ego_angle_sincos_snap(bool(config.get("EGO_ANGLE_SINCOS_SNAP", False)))
+    set_ego_angle_bins_scalar(
+        bool(config.get("EGO_ANGLE_BINS_SCALAR", False))
+        and not bool(config.get("EGO_ANGLE_SINCOS_SNAP", False))
+    )
+    psi_scalar = bool(config.get("EGO_PSI_ANGLE_SCALAR", False))
+    if psi_scalar and psi_bins not in (None, "", False):
+        raise ValueError(
+            "EGO_PSI_ANGLE_SCALAR requires EGO_PSI_ANGLE_BINS: null (mutually exclusive)."
+        )
+    set_ego_psi_angle_scalar(psi_scalar)
+    restrained = config.get("EGO_RESTRAINED_POSE", None)
+    if restrained not in (None, "", False):
+        set_ego_restrained_pose(
+            str(restrained),
+            lateral_band_px=config.get("EGO_RESTRAINED_LATERAL_BAND_PX", 8.0),
+            near_far_px=config.get("EGO_RESTRAINED_NEAR_FAR_PX", 50.0),
+        )
+        set_ego_psi_angle_bins(None)
+        set_ego_psi_angle_scalar(False)
+        set_ego_distance_hard_edges_px(None)
+        set_ego_distance_flag_thresholds_px(None)
+        set_ego_distance_clip_max_pixels(None)
+        set_ego_distance_clip_choices_px(None)
+        set_ego_distance_bins(None)
+        set_ego_distance_mode("scalar")
+    else:
+        set_ego_restrained_pose(None)
+    set_ego_hit_corridor(
+        bool(config.get("USE_EGO_HIT_CORRIDOR", False)),
+        sat=float(config.get("EGO_HIT_CORRIDOR_SAT", 4.0)),
+    )
+    set_ego_aabb_geom(config.get("EGO_AABB_GEOM", "centre_ray"))
+    if using_ego_hit_corridor() and bool(config.get("EGO_POSE_XY", False)):
+        raise ValueError(
+            "USE_EGO_HIT_CORRIDOR requires polar facing pose (EGO_POSE_XY: false)."
+        )
+    if bool(config.get("EGO_POSE_XY", False)) and ego_distance_mode() != "scalar":
+        raise ValueError(
+            "EGO_POSE_XY (Cartesian-only, no φ bins) is mutually exclusive with "
+            f"EGO_DISTANCE_MODE={ego_distance_mode()!r}. Use EGO_DISTANCE_MODE: xy "
+            "to keep φ bins with body-frame (fwd, lat)."
+        )
+    # Weapon/shooting channel (new name preferred; old USE_SKILL_EGO_FEATURES still works).
+
+    # Channel count is fixed (1) when enabled — no separate EXTRA_DIM config.
+    weapon = config.get(
+        "USE_EGO_WEAPON_FEATURES",
+        config.get("USE_SKILL_EGO_FEATURES", False),
+    )
+    configure_ego_weapon_features(
+        enabled=bool(weapon),
+        env_name=str(config.get("ENV_NAME", "")),
+        shot_features=bool(config.get("USE_EGO_SHOT_FEATURES", False)),
+        shot_between=bool(config.get("USE_EGO_SHOT_BETWEEN", False)),
+        facing_enemy=bool(config.get("USE_EGO_FACING_ENEMY_FEATURES", True)),
+        force_can_fire=config.get("EGO_FORCE_CAN_FIRE", None),
+    )
+
+
+def distance_feature_from_pixels(
+    distances_px: jnp.ndarray,
+    clip_cap: jnp.ndarray | float | None = None,
+) -> jnp.ndarray:
+    """Map raw pixel distances to the normalized distance channel fed to skills.
+
+    ``clip_cap`` overrides the configured ``EGO_DISTANCE_CLIP_MAX_PX`` when given
+    (used for per-env train-time clip sampling). Pass a traced scalar per call.
+    """
+    if clip_cap is not None:
+        cap = jnp.asarray(clip_cap, dtype=jnp.float32)
+        return jnp.where(
+            cap == jnp.float32(0.0),
+            jnp.zeros_like(distances_px, dtype=jnp.float32),
+            jnp.minimum(distances_px, cap) / jnp.maximum(cap, jnp.float32(1e-6)),
+        )
+    if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
+        # Sentinel 0: drop distance information (keep channel width for arch parity).
+        return jnp.where(
+            cap == jnp.float32(0.0),
+            jnp.zeros_like(distances_px, dtype=jnp.float32),
+            jnp.minimum(distances_px, cap) / cap,
+        )
+    return distances_px / MAX_DIST
+
+
+def ego_distance_channels_per_frame() -> int:
+    """Distance block width: flag indicators, ``n`` bins, xy/delta pair, or 1 scalar."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_ego_pose_xy,
+        using_pov_facing_frame,
+    )
+
+    # Facing-frame Cartesian pose: (fwd, lat) instead of scalar distance.
+    if using_pov_facing_frame() and using_ego_pose_xy():
+        return 2
+    if using_ego_restrained_pose():
+        return 0
+    if _EGO_DISTANCE_MODE == "near_tiers":
+        if not _EGO_DISTANCE_HARD_EDGES_PX:
+            raise ValueError("near_tiers mode requires EGO_DISTANCE_HARD_EDGES_PX")
+        # Continuous near + one-hots for bands at/after the first edge (drop d<edge0).
+        return 1 + len(_EGO_DISTANCE_HARD_EDGES_PX)
+    if _EGO_DISTANCE_HARD_EDGES_PX:
+        return len(_EGO_DISTANCE_HARD_EDGES_PX) + 1
+    if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
+        return len(_EGO_DISTANCE_FLAG_THRESHOLDS_PX)
+    if _EGO_DISTANCE_BINS:
+        return 1 if _EGO_DISTANCE_BINS_SCALAR else int(_EGO_DISTANCE_BINS)
+    if _EGO_DISTANCE_MODE in ("xy", "delta_xy", "delta_xy_sign"):
+        return 2
+    return 1
+
+
+def near_tier_distance_features(distances_px: jnp.ndarray) -> list[jnp.ndarray]:
+    """Clip-continuous near field + exclusive one-hots beyond the first edge.
+
+    Channel 0: ``min(d, near_cap) / near_cap`` (same as scalar clip).
+    Channels 1..: exclusive bands for ``d >= edge0`` only — the ``d < edge0``
+    one-hot is dropped so the near field is carried by the continuous channel.
+    """
+    if not _EGO_DISTANCE_HARD_EDGES_PX:
+        raise ValueError("near_tiers requires EGO_DISTANCE_HARD_EDGES_PX")
+    if _EGO_DISTANCE_CLIP_MAX_PX is None:
+        raise ValueError("near_tiers requires EGO_DISTANCE_CLIP_MAX_PX")
+    near_cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
+    d = jnp.asarray(distances_px, dtype=jnp.float32)
+    continuous = jnp.minimum(d, near_cap) / jnp.maximum(near_cap, jnp.float32(1e-6))
+    edges = jnp.asarray(_EGO_DISTANCE_HARD_EDGES_PX, dtype=jnp.float32)
+    onehots = exclusive_distance_band_onehots(d, edges)
+    # Drop band 0 (d < first edge); keep bands starting at edge0.
+    far = [onehots[..., i] for i in range(1, int(onehots.shape[-1]))]
+    return [continuous, *far]
+
+
+def body_frame_delta_xy_features(
+    fwd_px: jnp.ndarray,
+    lat_px: jnp.ndarray,
+    *,
+    sign_only: bool = False,
+    sign_eps_px: float | None = None,
+) -> list[jnp.ndarray]:
+    """Frame-to-frame body-frame (Δfwd, Δlat). Stack axis is leading.
+
+    Oldest frame is zero-padded (no prior). Continuous mode divides by
+    ``MAX_SPEED``; sign mode emits ``{-1, 0, +1}`` with a small deadzone.
+    """
+    fwd = jnp.asarray(fwd_px, dtype=jnp.float32)
+    lat = jnp.asarray(lat_px, dtype=jnp.float32)
+    d_fwd = jnp.concatenate(
+        [jnp.zeros((1,), dtype=jnp.float32), jnp.diff(fwd, axis=0)], axis=0
+    )
+    d_lat = jnp.concatenate(
+        [jnp.zeros((1,), dtype=jnp.float32), jnp.diff(lat, axis=0)], axis=0
+    )
+    if sign_only:
+        eps = jnp.float32(
+            _EGO_DISTANCE_DELTA_SIGN_EPS_PX if sign_eps_px is None else sign_eps_px
+        )
+        s_fwd = jnp.where(
+            jnp.abs(d_fwd) <= eps, jnp.float32(0.0), jnp.sign(d_fwd)
+        )
+        s_lat = jnp.where(
+            jnp.abs(d_lat) <= eps, jnp.float32(0.0), jnp.sign(d_lat)
+        )
+        return [s_fwd, s_lat]
+    return [d_fwd / jnp.float32(MAX_SPEED), d_lat / jnp.float32(MAX_SPEED)]
+
+
+def triangular_distance_bins(distances_px: jnp.ndarray, centers_px: jnp.ndarray) -> jnp.ndarray:
+    """Triangular bins over distance (pixels), with overlap from neighboring centers."""
+    d = jnp.asarray(distances_px, dtype=jnp.float32)[..., None]
+    centers = jnp.asarray(centers_px, dtype=jnp.float32)
+    n = int(centers.shape[0])
+    left_w = jnp.zeros_like(centers)
+    right_w = jnp.zeros_like(centers)
+    left_w = left_w.at[1:].set(centers[1:] - centers[:-1])
+    right_w = right_w.at[:-1].set(centers[1:] - centers[:-1])
+    # End bins keep support to the nearest neighbor spacing.
+    left_w = left_w.at[0].set(right_w[0])
+    right_w = right_w.at[-1].set(left_w[-1])
+    left = centers - left_w
+    right = centers + right_w
+    up = (d - left) / jnp.maximum(centers - left, 1e-6)
+    down = (right - d) / jnp.maximum(right - centers, 1e-6)
+    tri = jnp.minimum(up, down)
+    tri = jnp.maximum(tri, 0.0)
+    # Degenerate safety fallback.
+    if n == 1:
+        return jnp.ones_like(tri)
+    return tri
+
+
+def distance_features_from_pixels(
+    distances_px: jnp.ndarray,
+    clip_cap: jnp.ndarray | float | None = None,
+) -> list[jnp.ndarray]:
+    """Distance feature block as list of per-channel vectors."""
+    if _EGO_DISTANCE_MODE == "near_tiers":
+        return near_tier_distance_features(distances_px)
+    if _EGO_DISTANCE_HARD_EDGES_PX:
+        edges = jnp.asarray(_EGO_DISTANCE_HARD_EDGES_PX, dtype=jnp.float32)
+        onehots = exclusive_distance_band_onehots(distances_px, edges)
+        return [onehots[..., i] for i in range(int(onehots.shape[-1]))]
+    if _EGO_DISTANCE_FLAG_THRESHOLDS_PX:
+        thresholds = jnp.asarray(_EGO_DISTANCE_FLAG_THRESHOLDS_PX, dtype=jnp.float32)
+        d = jnp.asarray(distances_px, dtype=jnp.float32)[..., None]
+        flags = (d <= thresholds).astype(jnp.float32)
+        return [flags[..., i] for i in range(int(flags.shape[-1]))]
+    if _EGO_DISTANCE_BINS:
+        if _EGO_DISTANCE_BIN_CENTERS_PX is not None:
+            centers = jnp.asarray(_EGO_DISTANCE_BIN_CENTERS_PX, dtype=jnp.float32)
+        else:
+            max_px = jnp.float32(_EGO_DISTANCE_BIN_MAX_PX)
+            centers = jnp.linspace(
+                jnp.float32(0.0),
+                max_px,
+                int(_EGO_DISTANCE_BINS),
+                dtype=jnp.float32,
+            )
+        bin_feats = triangular_distance_bins(distances_px, centers)
+        if _EGO_DISTANCE_BINS_SCALAR:
+            n = jnp.float32(bin_feats.shape[-1] - 1)
+            idx = jnp.argmax(bin_feats, axis=-1).astype(jnp.float32)
+            scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
+            return [scalar]
+        return [bin_feats[:, i] for i in range(int(bin_feats.shape[-1]))]
+    return [distance_feature_from_pixels(distances_px, clip_cap=clip_cap)]
+
+
+def distance_pixels_from_feature(feature: jnp.ndarray | float) -> float:
+    """Invert the distance channel for logging / overlays (clipped view)."""
+    if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        if float(_EGO_DISTANCE_CLIP_MAX_PX) == 0.0:
+            return 0.0
+        return float(feature) * _EGO_DISTANCE_CLIP_MAX_PX
+    return float(feature) * MAX_DIST
+
+
+def _ego_velocity_channels_per_frame() -> int:
+    """POV uses one signed view-radial approach channel; otherwise radial+tangential."""
+    if not _USE_EGO_VELOCITY_FEATURES:
+        return 0
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        using_pov_fixed_bilateral,
+    )
+    from concept_based_learning.observations.pov_relative import using_pov_relative
+
+    if using_pov_fixed_bilateral():
+        return 0
+    return 1 if using_pov_relative() else 2
+
+
+def ego_obs_channels_per_frame() -> int:
+    """Return active per-frame ego feature channel count."""
+    los_channels = 1 if _USE_EGO_BLOCKING_FEATURES else 0
+    if _USE_LEGACY_EGO_OBS:
+        # Legacy channel groups:
+        #   always: dx, dy, sin(o), cos(o)             -> 4
+        #   velocity (optional): dvx, dvy              -> +2
+        #   size (optional): t_w, t_h, p_w, p_h        -> +4
+        #   line-of-sight (optional): blocked          -> +1
+        return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+            4 if _USE_EGO_SIZE_FEATURES else 0
+        ) + los_channels + skill_ego_extra_channels_per_frame()
+    # Target-aligned channel groups:
+    #   always: distance + angle (sin/cos(ψ) or N θ bins), or restrained L/C/R × near/far
+    #   velocity (optional): POV approach (1) or radial+tangential (2)
+    #   size (optional): target_w, target_h           -> +2
+    #   line-of-sight (optional): blocked             -> +1
+    if using_ego_restrained_pose():
+        pose = restrained_pose_channels_per_frame()
+    else:
+        pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
+        if _USE_EGO_HIT_CORRIDOR:
+            pose += 2
+    return pose + _ego_velocity_channels_per_frame() + (
+        2 if _USE_EGO_SIZE_FEATURES else 0
+    ) + los_channels + skill_ego_extra_channels_per_frame()
+
+
+def ego_base_channels_per_frame() -> int:
+    """Per-frame channel count excluding skill extras (includes LOS when enabled)."""
+    return ego_obs_channels_per_frame() - skill_ego_extra_channels_per_frame()
+
+
+def ego_pose_channels_per_frame() -> int:
+    """Pose block shared by every skill: distance (or dx/dy), optional vel/size, angle.
+
+    Angle is sin/cos(ψ) (2) or ``EGO_ANGLE_BINS`` overlapping world-θ bins.
+    LoS and weapon extras are *not* included; those are DESTROY concatenations
+    when ``USE_DESTROY_ONLY_EGO_EXTRAS`` is on (and still a shared suffix otherwise).
+    Pose is a prefix of the full ``get_ego_obs`` vector.
+    """
+    if _USE_LEGACY_EGO_OBS:
+        return 4 + (2 if _USE_EGO_VELOCITY_FEATURES else 0) + (
+            4 if _USE_EGO_SIZE_FEATURES else 0
+        )
+    if using_ego_restrained_pose():
+        return restrained_pose_channels_per_frame()
+    pose = ego_distance_channels_per_frame() + ego_angle_channels_per_frame()
+    if _USE_EGO_HIT_CORRIDOR:
+        pose += 2
+    return pose + (
+        _ego_velocity_channels_per_frame()
+    ) + (2 if _USE_EGO_SIZE_FEATURES else 0)
+
+
+def ego_destroy_extra_channels_per_frame() -> int:
+    """LoS + weapon extras appended after the pose prefix."""
+    los_channels = 1 if _USE_EGO_BLOCKING_FEATURES else 0
+    return los_channels + skill_ego_extra_channels_per_frame()
+
+
+def skill_ego_flat_dim(
+    skill_idx: int,
+    *,
+    stack_size: int,
+    destroy_skill_idx: int = 0,
+) -> int:
+    """Flattened ego width for one skill head (pose × stack, plus DESTROY extras)."""
+    pose = ego_pose_channels_per_frame() * int(stack_size)
+    extra = ego_destroy_extra_channels_per_frame() * int(stack_size)
+    if (
+        using_destroy_only_ego_extras()
+        and extra > 0
+        and int(skill_idx) != int(destroy_skill_idx)
+    ):
+        return pose
+    return pose + extra
+
+
+def take_ego_pose(ego: jnp.ndarray, *, stack_size: int) -> jnp.ndarray:
+    """Keep the pose prefix of each stacked frame (not a flat leading slice).
+
+    ``get_ego_obs`` flattens ``[stack, channels]`` so extras sit *inside* every
+    frame, after the pose channels. ``x[..., :12]`` would keep frame-0 extras
+    and drop later pose.
+    """
+    full_ch = ego_obs_channels_per_frame()
+    pose_ch = ego_pose_channels_per_frame()
+    stack = int(stack_size)
+    if ego.shape[-1] != stack * full_ch:
+        raise ValueError(
+            f"ego tail dim {ego.shape[-1]} != stack {stack} × channels {full_ch}"
+        )
+    leading = ego.shape[:-1]
+    framed = ego.reshape(*leading, stack, full_ch)
+    return framed[..., :pose_ch].reshape(*leading, pose_ch * stack)
+
+
+def slice_skill_ego(
+    ego: jnp.ndarray,
+    skill_idx: int,
+    *,
+    stack_size: int,
+    destroy_skill_idx: int = 0,
+) -> jnp.ndarray:
+    """Slice a full ``get_ego_obs`` vector to the head's input width.
+
+    ``skill_idx`` must be a Python int so the branch is static under JIT.
+    """
+    width = skill_ego_flat_dim(
+        skill_idx, stack_size=stack_size, destroy_skill_idx=destroy_skill_idx
+    )
+    if width == ego.shape[-1]:
+        return ego
+    return take_ego_pose(ego, stack_size=stack_size)
+
+
+def destroy_only_extras_active() -> bool:
+    """True when non-DESTROY heads should drop the LoS/weapon suffix."""
+    return using_destroy_only_ego_extras() and ego_destroy_extra_channels_per_frame() > 0
+
+
+def discrete_ego_flag_layout() -> list[tuple[str, int, int, float]]:
+    """
+    Active discrete flag channels in the latest ego frame.
+
+    Returns ``(name, channel_index_within_frame, n_levels, level_offset)`` in
+    digit order used by occupancy histograms (digit 0 = first entry). Shared
+    flags (LOS) come first; per-skill extras follow in registry order.
+    Binary flags use ``n_levels=2`` (los, can_fire, facing_enemy).
+    """
+    layout: list[tuple[str, int, int, float]] = []
+    extras_width = skill_ego_extra_channels_per_frame()
+    base = ego_base_channels_per_frame()
+    if _USE_EGO_BLOCKING_FEATURES:
+        # LOS is the last base channel (immediately before skill extras).
+        layout.append(("los_blocked", base - 1, 2, 0.0))
+    if using_ego_weapon_features() and extras_width > 0:
+        for flag in discrete_skill_ego_flags():
+            idx = base + int(flag.offset)
+            if 0 <= flag.offset < extras_width:
+                layout.append(
+                    (flag.name, idx, int(flag.n_levels), float(flag.level_offset))
+                )
+    return layout
+
+
+# ---------------------------------------------------------------------------
+# Player entity accessor (supports different field names across games)
+# ---------------------------------------------------------------------------
+
+def _get_player(raw_observation):
+    """Return the player entity from a raw observation.
+
+    Most games expose ``raw_observation.player``; Freeway uses
+    ``raw_observation.chicken``.  Additional aliases can be added here
+    without touching the rest of the module.
+    """
+    for name in ("player", "chicken", "agent", "skier"):
+        if hasattr(raw_observation, name):
+            return getattr(raw_observation, name)
+    raise AttributeError(
+        f"Cannot find a player entity in {type(raw_observation).__name__}. "
+        "Expected one of: player, chicken, agent, skier."
+    )
+
+
+def _uses_bottom_edge_y(raw_observation) -> bool:
+    """
+    Return True when this environment stores bbox y as a bottom edge.
+
+    Freeway (``raw_observation.chicken``) is the main case today. Most other games
+    expose ``raw_observation.player`` with top-left y semantics.
+    """
+    return hasattr(raw_observation, "chicken")
+
+
+def _center_y(y: jnp.ndarray, height: jnp.ndarray, *, y_is_bottom_edge: bool) -> jnp.ndarray:
+    """
+    Compute bbox centre y under an explicit coordinate convention.
+
+    - top-left convention:    center_y = y + h / 2
+    - bottom-edge convention: center_y = y - h / 2
+    """
+    if y_is_bottom_edge:
+        return y - height / 2.0
+    return y + height / 2.0
+
+
+# ---------------------------------------------------------------------------
+# Per-frame geometry (vmapped over the frame stack)
+# ---------------------------------------------------------------------------
+
+def _box_surface_extent(half_w: jnp.ndarray, half_h: jnp.ndarray, cos_t: jnp.ndarray, sin_t: jnp.ndarray) -> jnp.ndarray:
+    """
+    Distance from box centre to the surface point hit by ray (cos_t, sin_t).
+
+    Clips the unit ray to the axis-aligned box [−hw, hw] × [−hh, hh], giving the
+    exact nearest surface point — a corner when both axes are simultaneously hit,
+    an edge midpoint when only one axis is hit.  Fully differentiable; no branches.
+    """
+    # How far along the ray until each axis boundary is hit.
+    # jnp.where guards against division by zero on axis-aligned rays.
+    t_x = jnp.where(jnp.abs(cos_t) > 1e-8, half_w / jnp.abs(cos_t), jnp.inf)
+    t_y = jnp.where(jnp.abs(sin_t) > 1e-8, half_h / jnp.abs(sin_t), jnp.inf)
+    t_exit = jnp.minimum(t_x, t_y)
+    # Euclidean length of the clipped ray segment
+    return jnp.sqrt((t_exit * cos_t) ** 2 + (t_exit * sin_t) ** 2)
+
+
+def aabb_surface_gap_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Nearest-surface gap between two AABBs along the centre→centre ray.
+
+    Centre→centre ray, minus each box's surface extent along that ray; clamped
+    at 0 when boxes overlap/touch. All args broadcast (scalars vs per-object).
+    """
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    center_dist = jnp.sqrt(dx ** 2 + dy ** 2 + 1e-6)
+    theta = jnp.arctan2(dy, dx)
+    cos_t = jnp.cos(theta)
+    sin_t = jnp.sin(theta)
+    p_extent = _box_surface_extent(p_w / 2.0, p_h / 2.0, cos_t, sin_t)
+    t_extent = _box_surface_extent(t_w / 2.0, t_h / 2.0, cos_t, sin_t)
+    return jnp.maximum(center_dist - p_extent - t_extent, 0.0)
+
+
+def _aabb_minmax(
+    x,
+    y,
+    w,
+    h,
+    *,
+    y_is_bottom_edge: bool,
+):
+    """Axis-aligned ``(x0, x1, y0, y1)`` with ``y`` increasing downward on screen."""
+    x0 = x
+    x1 = x + w
+    if y_is_bottom_edge:
+        y0 = y - h
+        y1 = y
+    else:
+        y0 = y
+        y1 = y + h
+    return x0, x1, y0, y1
+
+
+def aabb_closest_delta_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Shortest separation vector from player AABB to target AABB (true edge–edge).
+
+    Returns ``(dx, dy, dist)``. Overlap / touch → ``(0, 0, 0)``. When separated on
+    both axes the vector joins the nearest corners; when only one axis separates,
+    it is axis-aligned (pure strafe or pure forward close).
+    """
+    px0, px1, py0, py1 = _aabb_minmax(
+        p_x, p_y, p_w, p_h, y_is_bottom_edge=y_is_bottom_edge
+    )
+    tx0, tx1, ty0, ty1 = _aabb_minmax(
+        t_x, t_y, t_w, t_h, y_is_bottom_edge=y_is_bottom_edge
+    )
+    dx = jnp.where(
+        px1 < tx0,
+        tx0 - px1,
+        jnp.where(tx1 < px0, tx1 - px0, jnp.float32(0.0)),
+    )
+    dy = jnp.where(
+        py1 < ty0,
+        ty0 - py1,
+        jnp.where(ty1 < py0, ty1 - py0, jnp.float32(0.0)),
+    )
+    dist = jnp.sqrt(dx * dx + dy * dy)
+    return dx, dy, dist
+
+
+def aabb_body_frame_gaps_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    facing_deg,
+    *,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Facing-frame signed 1D surface gaps and contact distance.
+
+    Centres projected into body (fwd, lat); half-extents from ``_box_surface_extent``.
+    Per axis: ``gap = |sep| - p_half - t_half`` (negative ⇒ overlap on that axis).
+
+    Returns ``(d_fwd, d_lat, dist, phi)`` where:
+      d_fwd/d_lat — signed gaps ``sign(sep) * gap``
+      dist — ``hypot(relu(gap_fwd), relu(gap_lat))``
+      phi — ``atan2`` of the positive gap corner (fallback: centre body bearing)
+    """
+    from concept_based_learning.observations.pov_facing_frame import (
+        facing_frame_phi_rad,
+        world_delta_to_facing_frame,
+    )
+
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    sep_fwd, sep_lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+
+    rad = jnp.asarray(facing_deg, dtype=jnp.float32) * (jnp.pi / jnp.float32(180.0))
+    fwd_ux = jnp.cos(rad)
+    fwd_uy = jnp.sin(rad)
+    lat_ux = -jnp.sin(rad)
+    lat_uy = jnp.cos(rad)
+    p_hf = _box_surface_extent(p_w / 2.0, p_h / 2.0, fwd_ux, fwd_uy)
+    t_hf = _box_surface_extent(t_w / 2.0, t_h / 2.0, fwd_ux, fwd_uy)
+    p_hl = _box_surface_extent(p_w / 2.0, p_h / 2.0, lat_ux, lat_uy)
+    t_hl = _box_surface_extent(t_w / 2.0, t_h / 2.0, lat_ux, lat_uy)
+    half_fwd = p_hf + t_hf
+    half_lat = p_hl + t_hl
+
+    gap_fwd = jnp.abs(sep_fwd) - half_fwd
+    gap_lat = jnp.abs(sep_lat) - half_lat
+    eps = jnp.float32(1e-6)
+    d_fwd = jnp.sign(sep_fwd + eps) * gap_fwd
+    d_lat = jnp.sign(sep_lat + eps) * gap_lat
+
+    pos_fwd = jnp.maximum(gap_fwd, jnp.float32(0.0))
+    pos_lat = jnp.maximum(gap_lat, jnp.float32(0.0))
+    dist = jnp.sqrt(pos_fwd * pos_fwd + pos_lat * pos_lat)
+
+    corner_fwd = jnp.sign(sep_fwd + eps) * pos_fwd
+    corner_lat = jnp.sign(sep_lat + eps) * pos_lat
+    use_centre = dist <= eps
+    cf = jnp.where(use_centre, sep_fwd, corner_fwd)
+    cl = jnp.where(use_centre, sep_lat, corner_lat)
+    phi = facing_frame_phi_rad(cf, cl)
+    return d_fwd, d_lat, dist, phi
+
+
+def aabb_geom_distance_px(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool = False,
+    facing_deg=None,
+):
+    """Active ego/reward contact distance (``EGO_AABB_GEOM``)."""
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    if _EGO_AABB_GEOM == "centres":
+        return jnp.sqrt((t_cx - p_cx) ** 2 + (t_cy - p_cy) ** 2)
+    if _EGO_AABB_GEOM == "body_gaps":
+        face = jnp.float32(0.0) if facing_deg is None else facing_deg
+        _df, _dl, dist, _phi = aabb_body_frame_gaps_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            face,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        return dist
+    if _EGO_AABB_GEOM == "closest_points":
+        _dx, _dy, dist = aabb_closest_delta_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        return dist
+    return aabb_surface_gap_px(
+        p_x,
+        p_y,
+        p_w,
+        p_h,
+        t_x,
+        t_y,
+        t_w,
+        t_h,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
+
+
+def hit_corridor_features(
+    lat_px,
+    facing_deg,
+    p_w,
+    p_h,
+    t_w,
+    t_h,
+    *,
+    sat: float | None = None,
+):
+    """Relative lateral miss + soft in-corridor bit (body-sized, not absolute px)."""
+    sat_f = jnp.float32(_EGO_HIT_CORRIDOR_SAT if sat is None else sat)
+    rad = jnp.asarray(facing_deg, dtype=jnp.float32) * (jnp.pi / jnp.float32(180.0))
+    # Lateral-right unit in screen coords (matches world_delta_to_facing_frame).
+    lat_ux = -jnp.sin(rad)
+    lat_uy = jnp.cos(rad)
+    p_half = _box_surface_extent(p_w / 2.0, p_h / 2.0, lat_ux, lat_uy)
+    t_half = _box_surface_extent(t_w / 2.0, t_h / 2.0, lat_ux, lat_uy)
+    half_sum = jnp.maximum(p_half + t_half, jnp.float32(1e-3))
+    lat_rel_raw = lat_px / half_sum
+    lat_rel = jnp.clip(lat_rel_raw, -sat_f, sat_f) / sat_f
+    inside = jnp.clip(jnp.float32(1.0) - jnp.abs(lat_rel_raw), 0.0, 1.0)
+    return lat_rel, inside
+
+
+def player_object_aabb_gaps(raw_observation, objects, *, y_is_bottom_edge=None):
+    """
+    Per-object AABB surface gaps from the controllable agent to ``objects``.
+
+    Returns ``(distances, p_cx, p_cy, o_cx, o_cy)`` using the last stacked frame.
+    ``y_is_bottom_edge`` defaults to :func:`_uses_bottom_edge_y`.
+    """
+    if y_is_bottom_edge is None:
+        y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    player = _get_player(raw_observation)
+    px = player.x[-1]
+    py = player.y[-1]
+    pw = player.width[-1]
+    ph = player.height[-1]
+    ox = objects.x[-1]
+    oy = objects.y[-1]
+    ow = objects.width[-1]
+    oh = objects.height[-1]
+    distances = aabb_surface_gap_px(
+        px, py, pw, ph, ox, oy, ow, oh, y_is_bottom_edge=y_is_bottom_edge
+    )
+    p_cx = px + pw / 2.0
+    p_cy = _center_y(py, ph, y_is_bottom_edge=y_is_bottom_edge)
+    o_cx = ox + ow / 2.0
+    o_cy = _center_y(oy, oh, y_is_bottom_edge=y_is_bottom_edge)
+    return distances, p_cx, p_cy, o_cx, o_cy
+
+
+def _frame_geometry_target_aligned(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    p_ori_deg,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+):
+    """
+    Compute target-aligned geometry for a single frame in the observation stack.
+
+    All inputs are scalars (a single frame slice); this function is vmapped over
+    the stack axis by get_ego_obs.
+
+    Returns
+    -------
+    distance      : nearest-surface gap between player and target bounding boxes
+    theta_target  : angle of player→target vector (centre–centre), screen-Y-down radians
+    psi           : player facing minus theta_target, wrapped to [-π, π]
+    t_cx, t_cy    : target centre coords (used for cross-frame velocity)
+    p_cx, p_cy    : player centre coords (used for cross-frame velocity)
+    t_w, t_h      : target bounding-box sizes (passed through)
+    """
+    # IMPORTANT: centre computation must match the environment's y convention.
+    # If this drifts from action mapping/reward geometry, transfer can silently fail.
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    if _EGO_AABB_GEOM == "body_gaps":
+        _df, _dl, distance, _phi = aabb_body_frame_gaps_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            p_ori_deg,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+    elif _EGO_AABB_GEOM == "centres":
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+        distance = jnp.sqrt(dx * dx + dy * dy)
+    elif _EGO_AABB_GEOM == "closest_points":
+        dx, dy, distance = aabb_closest_delta_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        cdx = t_cx - p_cx
+        cdy = t_cy - p_cy
+        use_c = distance <= jnp.float32(1e-6)
+        dx = jnp.where(use_c, cdx, dx)
+        dy = jnp.where(use_c, cdy, dy)
+    else:
+        distance = aabb_surface_gap_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+    theta_target = jnp.arctan2(dy, dx)
+
+    # ψ: player physical facing relative to θ_target.
+    # Wrap to [-π, π] so sin/cos encoding is smooth and unambiguous.
+    p_ori_rad = p_ori_deg * (jnp.pi / 180.0)
+    psi = p_ori_rad - theta_target
+    psi = jnp.arctan2(jnp.sin(psi), jnp.cos(psi))
+
+    return distance, theta_target, psi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+
+
+def _los_blocked_stacked(
+    objects,
+    target_idx,
+    p_cxs,
+    p_cys,
+    t_cxs,
+    t_cys,
+    *,
+    y_is_bottom_edge: bool,
+) -> jnp.ndarray:
+    """Per-frame LOS blocked flags (float32 [stack]) for DESTROY targets only.
+
+    Occlusion is a shooting cue: COLLECT / AVOID / NAVIGATE keep ``los_blocked=0``
+    even when objects sit on the player→target segment (ascent under sharks must
+    not look "blocked" for NAVIGATE).
+    """
+    from concept_based_learning.environments.datatypes import LABEL_DESTROY
+
+    raw = jax.vmap(
+        lambda pcx, pcy, tcx, tcy, ox, oy, ow, oh, oact, olab: line_of_sight_blocked(
+            pcx,
+            pcy,
+            tcx,
+            tcy,
+            target_idx,
+            ox,
+            oy,
+            ow,
+            oh,
+            oact,
+            olab,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        p_cxs,
+        p_cys,
+        t_cxs,
+        t_cys,
+        objects.x,
+        objects.y,
+        objects.width,
+        objects.height,
+        objects.active,
+        objects.semantic_label,
+    ).astype(jnp.float32)
+    # semantic_label: [stack, max_objects] → per-frame target label
+    tgt_labels = objects.semantic_label[
+        jnp.arange(objects.semantic_label.shape[0]), target_idx
+    ]
+    is_destroy = tgt_labels == LABEL_DESTROY
+    return jnp.where(is_destroy, raw, jnp.float32(0.0))
+
+
+# ---------------------------------------------------------------------------
+# Main observation function
+# ---------------------------------------------------------------------------
+
+def _velocity_world_to_ego_legacy(vx: jnp.ndarray, vy: jnp.ndarray, p_ori_deg: jnp.ndarray):
+    """Rotate world velocity into ego axes using the legacy convention."""
+    speed = jnp.sqrt(vx * vx + vy * vy)
+    cartesian_angle = jnp.arctan2(vy, vx)
+    jaxatari_absolute_angle = cartesian_angle + (jnp.pi / 2.0)
+    p_ori_rad = p_ori_deg * (jnp.pi / 180.0)
+    relative_angle = jaxatari_absolute_angle - p_ori_rad
+    relative_angle = jnp.arctan2(jnp.sin(relative_angle), jnp.cos(relative_angle))
+    dvx_ego = speed * jnp.cos(relative_angle)
+    dvy_ego = speed * jnp.sin(relative_angle)
+    return dvx_ego, dvy_ego
+
+
+def _single_frame_geom_legacy(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    p_ori,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+):
+    """Legacy per-frame geometry used by pre-refactor checkpoints."""
+    p_cx = p_x + (p_w / 2.0)
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + (t_w / 2.0)
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    distance = jnp.sqrt(dx ** 2 + dy ** 2)
+
+    cartesian_angle = jnp.arctan2(dy, dx)
+    jaxatari_absolute_angle = cartesian_angle + (jnp.pi / 2.0)
+    p_ori_rad = p_ori * (jnp.pi / 180.0)
+
+    relative_angle = jaxatari_absolute_angle - p_ori_rad
+    relative_angle = jnp.arctan2(jnp.sin(relative_angle), jnp.cos(relative_angle))
+
+    dx_ego = distance * jnp.cos(relative_angle)
+    dy_ego = distance * jnp.sin(relative_angle)
+
+    return (
+        dx_ego,
+        dy_ego,
+        p_ori,
+        t_w,
+        t_h,
+        p_w,
+        p_h,
+        p_cx,
+        p_cy,
+        t_cx,
+        t_cy,
+    )
+
+
+def _get_ego_obs_target_aligned(raw_observation, objects, target_idx):
+    """
+    Build the target-aligned egocentric observation over the full JAXAtari frame stack.
+
+    Parameters
+    ----------
+    raw_observation : JAXAtari raw obs PyTree; must expose raw_observation.player.{x,y,width,height,orientation}
+    objects         : LabeledObjectObservation PyTree; fields x,y,width,height shaped [stack, max_objects]
+    target_idx      : int32 scalar — index into the objects arrays
+
+    Returns
+    -------
+    flat float32 array of shape (EGO_OBS_CHANNELS_PER_FRAME * stack_size,)
+    """
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    (
+        distances,     # nearest surface gap (edge/corner to edge/corner)
+        thetas,        # centre→centre angle
+        psis,
+        t_cxs, t_cys,
+        p_cxs, p_cys,
+        t_ws,  t_hs,
+    ) = jax.vmap(
+        lambda px, py, pw, ph, po, tx, ty, tw, th: _frame_geometry_target_aligned(
+            px,
+            py,
+            pw,
+            ph,
+            po,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        player.orientation,
+        t_x_hist, t_y_hist, t_w_hist, t_h_hist,
+    )
+
+    # -------------------------------------------------------------------
+    # Radial and tangential velocities
+    # -------------------------------------------------------------------
+    # World-space relative position across the stack
+    rel_x = t_cxs - p_cxs
+    rel_y = t_cys - p_cys
+
+    # Finite-difference velocity; zero-pad the oldest frame (no prior data)
+    d_rel_x = jnp.concatenate([jnp.zeros(1, dtype=rel_x.dtype), jnp.diff(rel_x)])
+    d_rel_y = jnp.concatenate([jnp.zeros(1, dtype=rel_y.dtype), jnp.diff(rel_y)])
+
+    # Decompose into radial (along θ_target) and tangential (perpendicular) components.
+    #
+    #   radial unit vector:      ( cos θ,  sin θ)
+    #   tangential unit vector:  (-sin θ,  cos θ)   (90° CCW from radial)
+    #
+    # v_r > 0: relative position growing → target is moving away (or player lagging)
+    # v_t > 0: target drifting to the right of the line-of-sight
+    cos_t = jnp.cos(thetas)
+    sin_t = jnp.sin(thetas)
+    v_r =  d_rel_x * cos_t + d_rel_y * sin_t
+    v_t = -d_rel_x * sin_t + d_rel_y * cos_t
+
+    # -------------------------------------------------------------------
+    # Stack and normalise
+    # -------------------------------------------------------------------
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    if _USE_EGO_VELOCITY_FEATURES:
+        v_r_norm = v_r / MAX_SPEED
+        v_t_norm = v_t / MAX_SPEED
+    else:
+        v_r_norm = jnp.zeros_like(v_r, dtype=jnp.float32)
+        v_t_norm = jnp.zeros_like(v_t, dtype=jnp.float32)
+
+    channels = distance_features_from_pixels(distances)
+    if _USE_EGO_VELOCITY_FEATURES:
+        channels.extend([v_r_norm, v_t_norm])
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    if _EGO_ANGLE_BINS:
+        if _EGO_ANGLE_SINCOS_SNAP:
+            sin_t, cos_t = quantize_angle_sincos(thetas, _EGO_ANGLE_BINS)
+            channels.extend([sin_t, cos_t])
+        else:
+            bin_feats = triangular_angle_bins(thetas, _EGO_ANGLE_BINS)
+            if _EGO_ANGLE_BINS_SCALAR:
+                n = jnp.float32(bin_feats.shape[-1] - 1)
+                idx = jnp.argmax(bin_feats, axis=-1).astype(jnp.float32)
+                scalar = jnp.where(n > 0, idx / n, jnp.zeros_like(idx))
+                channels.append(scalar)
+            else:
+                channels.extend([bin_feats[:, i] for i in range(int(_EGO_ANGLE_BINS))])
+    else:
+        channels.extend([jnp.sin(psis), jnp.cos(psis)])
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
+def _get_ego_obs_pov_relative(raw_observation, objects, target_idx):
+    """POV-relative ego obs: view = toward target; ψ = facing − view; sin/cos(ψ).
+
+    When velocity is enabled, emit one signed **approach** channel in the view
+    frame (line of sight to target): positive = target closing on the player,
+    negative = receding. Lateral drift is omitted — view is locked on target.
+    """
+    from concept_based_learning.observations.pov_relative import pov_facing_psi_rad
+
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    (
+        distances,
+        thetas,
+        _psis_unused,
+        t_cxs,
+        t_cys,
+        p_cxs,
+        p_cys,
+        t_ws,
+        t_hs,
+    ) = jax.vmap(
+        lambda px, py, pw, ph, po, tx, ty, tw, th: _frame_geometry_target_aligned(
+            px,
+            py,
+            pw,
+            ph,
+            po,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        player.orientation,
+        t_x_hist,
+        t_y_hist,
+        t_w_hist,
+        t_h_hist,
+    )
+
+    facing_deg = player.orientation
+    psis = pov_facing_psi_rad(facing_deg, thetas)
+
+    rel_x = t_cxs - p_cxs
+    rel_y = t_cys - p_cys
+    d_rel_x = jnp.concatenate([jnp.zeros(1, dtype=rel_x.dtype), jnp.diff(rel_x)])
+    d_rel_y = jnp.concatenate([jnp.zeros(1, dtype=rel_y.dtype), jnp.diff(rel_y)])
+
+    # View-radial speed along θ_view (bearing to target). Standard v_r > 0 means
+    # separation growing (receding); negate so positive = closing on the player.
+    cos_t = jnp.cos(thetas)
+    sin_t = jnp.sin(thetas)
+    v_r = d_rel_x * cos_t + d_rel_y * sin_t
+    v_approach = -v_r
+
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    channels = distance_features_from_pixels(distances)
+    if _USE_EGO_VELOCITY_FEATURES:
+        channels.append(v_approach / MAX_SPEED)
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    channels.extend(_psi_angle_feature_channels(psis))
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
+def _frame_geometry_fixed_bilateral(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+    axis: str,
+):
+    """Per-frame distance + forward-hemisphere φ under virtual bilateral sectors."""
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        forward_hemisphere_phi_rad,
+        target_sector_idx,
+    )
+
+    distance = aabb_surface_gap_px(
+        p_x,
+        p_y,
+        p_w,
+        p_h,
+        t_x,
+        t_y,
+        t_w,
+        t_h,
+        y_is_bottom_edge=y_is_bottom_edge,
+    )
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    dx = t_cx - p_cx
+    dy = t_cy - p_cy
+    sector = target_sector_idx(dx, dy, axis=axis)
+    phi = forward_hemisphere_phi_rad(dx, dy, sector, axis=axis)
+    return distance, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h
+
+
+def _xy_features_from_pixels(fwd_px: jnp.ndarray, lat_px: jnp.ndarray) -> list[jnp.ndarray]:
+    """Normalize body-frame (fwd, lat) with the active distance clip (or screen size)."""
+    if _EGO_DISTANCE_CLIP_MAX_PX is not None:
+        cap = jnp.float32(_EGO_DISTANCE_CLIP_MAX_PX)
+        if float(_EGO_DISTANCE_CLIP_MAX_PX) == 0.0:
+            zeros = jnp.zeros_like(fwd_px, dtype=jnp.float32)
+            return [zeros, zeros]
+        return [
+            jnp.clip(fwd_px, -cap, cap) / cap,
+            jnp.clip(lat_px, -cap, cap) / cap,
+        ]
+    return [fwd_px / SCREEN_WIDTH, lat_px / SCREEN_HEIGHT]
+
+
+def _frame_geometry_facing(
+    p_x,
+    p_y,
+    p_w,
+    p_h,
+    facing_deg,
+    t_x,
+    t_y,
+    t_w,
+    t_h,
+    *,
+    y_is_bottom_edge: bool,
+):
+    """Per-frame AABB gap + body-frame (fwd, lat, φ) under facing-locked FPS."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        facing_frame_phi_rad,
+        world_delta_to_facing_frame,
+    )
+
+    p_cx = p_x + p_w / 2.0
+    p_cy = _center_y(p_y, p_h, y_is_bottom_edge=y_is_bottom_edge)
+    t_cx = t_x + t_w / 2.0
+    t_cy = _center_y(t_y, t_h, y_is_bottom_edge=y_is_bottom_edge)
+    if _EGO_AABB_GEOM == "body_gaps":
+        _df, _dl, distance, phi = aabb_body_frame_gaps_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            facing_deg,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        # fwd/lat for corridor extras: centre body-frame offsets
+        fwd, lat = world_delta_to_facing_frame(t_cx - p_cx, t_cy - p_cy, facing_deg)
+    elif _EGO_AABB_GEOM == "centres":
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+        distance = jnp.sqrt(dx * dx + dy * dy)
+        fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+        phi = facing_frame_phi_rad(fwd, lat)
+    elif _EGO_AABB_GEOM == "closest_points":
+        dx, dy, distance = aabb_closest_delta_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        # Overlap: fall back to centre bearing so φ is defined.
+        cdx = t_cx - p_cx
+        cdy = t_cy - p_cy
+        use_c = distance <= jnp.float32(1e-6)
+        dx = jnp.where(use_c, cdx, dx)
+        dy = jnp.where(use_c, cdy, dy)
+        fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+        phi = facing_frame_phi_rad(fwd, lat)
+    else:
+        distance = aabb_surface_gap_px(
+            p_x,
+            p_y,
+            p_w,
+            p_h,
+            t_x,
+            t_y,
+            t_w,
+            t_h,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+        dx = t_cx - p_cx
+        dy = t_cy - p_cy
+        fwd, lat = world_delta_to_facing_frame(dx, dy, facing_deg)
+        phi = facing_frame_phi_rad(fwd, lat)
+    return distance, fwd, lat, phi, t_cx, t_cy, p_cx, p_cy, t_w, t_h, p_w, p_h
+
+
+def _get_ego_obs_pov_facing_frame(
+    raw_observation, objects, target_idx, distance_clip_px=None
+):
+    """Facing-locked FPS: polar (dist, φ) or Cartesian (fwd, lat); no velocity."""
+    from concept_based_learning.observations.pov_facing_frame import (
+        resolve_facing_deg,
+        using_ego_pose_xy,
+    )
+
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    # Single scalar facing (mapper also uses latest / synthetic); broadcast over stack.
+    facing_scalar = resolve_facing_deg(raw_observation)
+    facing_hist = jnp.broadcast_to(
+        jnp.asarray(facing_scalar, dtype=jnp.float32), player.x.shape
+    )
+
+    (
+        distances,
+        fwds,
+        lats,
+        phis,
+        t_cxs,
+        t_cys,
+        p_cxs,
+        p_cys,
+        t_ws,
+        t_hs,
+        p_ws,
+        p_hs,
+    ) = jax.vmap(
+        lambda px, py, pw, ph, face, tx, ty, tw, th: _frame_geometry_facing(
+            px,
+            py,
+            pw,
+            ph,
+            face,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        facing_hist,
+        t_x_hist,
+        t_y_hist,
+        t_w_hist,
+        t_h_hist,
+    )
+
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    if using_ego_pose_xy():
+        channels = _xy_features_from_pixels(fwds, lats)
+    elif using_ego_restrained_pose():
+        pose_stack = jax.vmap(
+            lambda lat, phi, dist: jnp.stack(
+                _restrained_pose_feature_channels(lat, phi, dist), axis=-1
+            )
+        )(lats, phis, distances)
+        channels = [
+            pose_stack[..., i] for i in range(int(pose_stack.shape[-1]))
+        ]
+    else:
+        mode = _EGO_DISTANCE_MODE
+        if mode == "xy":
+            channels = _xy_features_from_pixels(fwds, lats)
+        elif mode == "delta_xy":
+            channels = body_frame_delta_xy_features(fwds, lats, sign_only=False)
+        elif mode == "delta_xy_sign":
+            channels = body_frame_delta_xy_features(fwds, lats, sign_only=True)
+        else:
+            channels = distance_features_from_pixels(
+                distances, clip_cap=distance_clip_px
+            )
+        if _USE_EGO_HIT_CORRIDOR:
+            # Corridor uses centre-frame lateral (body overlap slab), even when
+            # distance/φ use closest-points geometry.
+            from concept_based_learning.observations.pov_facing_frame import (
+                world_delta_to_facing_frame,
+            )
+
+            _cf, centre_lats = world_delta_to_facing_frame(
+                t_cxs - p_cxs, t_cys - p_cys, facing_hist
+            )
+            lat_rel, in_cor = jax.vmap(
+                lambda lat, face, pw, ph, tw, th: hit_corridor_features(
+                    lat, face, pw, ph, tw, th
+                )
+            )(centre_lats, facing_hist, p_ws, p_hs, t_ws, t_hs)
+            channels.extend([lat_rel, in_cor])
+        channels.extend(_psi_angle_feature_channels(phis))
+
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
+def _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx):
+    """Virtual bilateral sectors: distance + forward-hemisphere φ (no velocity)."""
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        active_bilateral_axis,
+        forward_hemisphere_angle_bins,
+    )
+
+    axis = active_bilateral_axis()
+
+    t_x_hist = objects.x[:, target_idx]
+    t_y_hist = objects.y[:, target_idx]
+    t_w_hist = objects.width[:, target_idx]
+    t_h_hist = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    distances, phis, t_cxs, t_cys, p_cxs, p_cys, t_ws, t_hs = jax.vmap(
+        lambda px, py, pw, ph, tx, ty, tw, th: _frame_geometry_fixed_bilateral(
+            px,
+            py,
+            pw,
+            ph,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+            axis=axis,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        t_x_hist,
+        t_y_hist,
+        t_w_hist,
+        t_h_hist,
+    )
+
+    if _USE_EGO_SIZE_FEATURES:
+        size_w = t_ws / SCREEN_WIDTH
+        size_h = t_hs / SCREEN_HEIGHT
+    else:
+        size_w = jnp.zeros_like(t_ws, dtype=jnp.float32)
+        size_h = jnp.zeros_like(t_hs, dtype=jnp.float32)
+
+    channels = distance_features_from_pixels(distances)
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([size_w, size_h])
+    if _EGO_PSI_ANGLE_BINS:
+        bin_feats = forward_hemisphere_angle_bins(phis, _EGO_PSI_ANGLE_BINS)
+        channels.extend([bin_feats[:, i] for i in range(int(_EGO_PSI_ANGLE_BINS))])
+    else:
+        channels.extend(_psi_angle_feature_channels(phis))
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cxs,
+                p_cys,
+                t_cxs,
+                t_cys,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked = jnp.stack(channels, axis=-1)
+    return stacked.astype(jnp.float32).flatten()
+
+
+def _get_ego_obs_legacy(raw_observation, objects, target_idx):
+    """Legacy 10-channel egocentric observations from pre-refactor training."""
+    t_x_history = objects.x[:, target_idx]
+    t_y_history = objects.y[:, target_idx]
+    t_w_history = objects.width[:, target_idx]
+    t_h_history = objects.height[:, target_idx]
+
+    player = _get_player(raw_observation)
+    y_is_bottom_edge = _uses_bottom_edge_y(raw_observation)
+    (
+        dx_ego,
+        dy_ego,
+        p_ori_deg,
+        t_w,
+        t_h,
+        p_w,
+        p_h,
+        p_cx,
+        p_cy,
+        t_cx,
+        t_cy,
+    ) = jax.vmap(
+        lambda px, py, pw, ph, po, tx, ty, tw, th: _single_frame_geom_legacy(
+            px,
+            py,
+            pw,
+            ph,
+            po,
+            tx,
+            ty,
+            tw,
+            th,
+            y_is_bottom_edge=y_is_bottom_edge,
+        )
+    )(
+        player.x,
+        player.y,
+        player.width,
+        player.height,
+        player.orientation,
+        t_x_history,
+        t_y_history,
+        t_w_history,
+        t_h_history,
+    )
+
+    rel_x = t_cx - p_cx
+    rel_y = t_cy - p_cy
+    dvx_world = jnp.concatenate([jnp.zeros(1, dtype=rel_x.dtype), jnp.diff(rel_x)])
+    dvy_world = jnp.concatenate([jnp.zeros(1, dtype=rel_y.dtype), jnp.diff(rel_y)])
+
+    dvx_ego, dvy_ego = jax.vmap(_velocity_world_to_ego_legacy)(
+        dvx_world, dvy_world, p_ori_deg
+    )
+
+    p_ori_rad = p_ori_deg * (jnp.pi / 180.0)
+    sin_o = jnp.sin(p_ori_rad)
+    cos_o = jnp.cos(p_ori_rad)
+
+    if _USE_EGO_SIZE_FEATURES:
+        t_w_norm = t_w / SCREEN_WIDTH
+        t_h_norm = t_h / SCREEN_HEIGHT
+        p_w_norm = p_w / SCREEN_WIDTH
+        p_h_norm = p_h / SCREEN_HEIGHT
+    else:
+        t_w_norm = jnp.zeros_like(t_w, dtype=jnp.float32)
+        t_h_norm = jnp.zeros_like(t_h, dtype=jnp.float32)
+        p_w_norm = jnp.zeros_like(p_w, dtype=jnp.float32)
+        p_h_norm = jnp.zeros_like(p_h, dtype=jnp.float32)
+
+    if _USE_EGO_VELOCITY_FEATURES:
+        dvx_norm = dvx_ego / MAX_SPEED
+        dvy_norm = dvy_ego / MAX_SPEED
+    else:
+        dvx_norm = jnp.zeros_like(dvx_ego, dtype=jnp.float32)
+        dvy_norm = jnp.zeros_like(dvy_ego, dtype=jnp.float32)
+
+    channels = [
+        dx_ego / SCREEN_WIDTH,
+        dy_ego / SCREEN_HEIGHT,
+    ]
+    if _USE_EGO_VELOCITY_FEATURES:
+        channels.extend([dvx_norm, dvy_norm])
+    if _USE_EGO_SIZE_FEATURES:
+        channels.extend([t_w_norm, t_h_norm, p_w_norm, p_h_norm])
+    channels.extend([sin_o, cos_o])
+    if _USE_EGO_BLOCKING_FEATURES:
+        channels.append(
+            _los_blocked_stacked(
+                objects,
+                target_idx,
+                p_cx,
+                p_cy,
+                t_cx,
+                t_cy,
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+    skill_extras = build_skill_ego_extras_stacked(
+        raw_observation, objects=objects, target_idx=target_idx
+    )
+    if skill_extras.shape[-1] > 0:
+        stacked_ego = jnp.concatenate([jnp.stack(channels, axis=-1), skill_extras], axis=-1)
+    else:
+        stacked_ego = jnp.stack(channels, axis=-1)
+    return stacked_ego.astype(jnp.float32).flatten()
+
+
+def get_ego_obs(
+    raw_observation, objects, target_idx, distance_clip_px=None
+):
+    """
+    Build egocentric observations using the currently selected format.
+
+    Toggle via `set_ego_obs_format(use_legacy=True/False)`.
+
+    ``distance_clip_px`` overrides ``EGO_DISTANCE_CLIP_MAX_PX`` for the scalar
+    distance channel (train-time clip sampling). Other encodings ignore it.
+    """
+    from concept_based_learning.observations.pov_relative import using_pov_relative
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        using_pov_fixed_bilateral,
+    )
+    from concept_based_learning.observations.pov_facing_frame import (
+        using_pov_facing_frame,
+    )
+
+    if using_pov_fixed_bilateral():
+        return _get_ego_obs_pov_fixed_bilateral(raw_observation, objects, target_idx)
+    if using_pov_facing_frame():
+        return _get_ego_obs_pov_facing_frame(
+            raw_observation, objects, target_idx, distance_clip_px=distance_clip_px
+        )
+    if using_pov_relative():
+        return _get_ego_obs_pov_relative(raw_observation, objects, target_idx)
+    # Legacy 10-ch ego path disabled for paper eval (see set_ego_obs_format).
+    # if _USE_LEGACY_EGO_OBS:
+    #     return _get_ego_obs_legacy(raw_observation, objects, target_idx)
+    if _USE_LEGACY_EGO_OBS:
+        raise RuntimeError(
+            "Legacy ego obs is commented out for this eval; "
+            "set USE_LEGACY_EGO_OBS: false."
+        )
+    return _get_ego_obs_target_aligned(raw_observation, objects, target_idx)

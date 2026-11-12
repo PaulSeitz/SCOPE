@@ -1,79 +1,58 @@
 # experiment/phoenix_skills.yaml
+#
+# Clean Phoenix skills-only run (heuristic target selection via phoenix_policy).
+# - No forward-action masking or curriculum staging
+# - Full off-policy with RELABEL_ALL_OBJECTS
 
-# --- Environment & Algorithm Names ---
 ALG_NAME: "hierarchical_pqn"
 ENV_NAME: "phoenix"
 TRAIN_MODE: "skills_only"
 
-# --- Environment modification hooks ---
-# Training uses `GAME_MODS` (potentially phase-specific via curriculum),
-# while evaluation can be given distinct `EVAL_GAME_MODS` so we can
-# compare behavior under different env tweaks. If `EVAL_GAME_MODS` is
-# null, eval inherits `GAME_MODS`.
+SAVE_PATH: "./outputs/models/phoenix_skills"
+
+USE_LEGACY_EGO_OBS: false
+USE_EGO_SIZE_FEATURES: false
+USE_EGO_VELOCITY_FEATURES: true
+USE_EGO_WEAPON_FEATURES: true
+EGO_DISTANCE_CLIP_MAX_PX: 30
+
 GAME_MODS: null
 EVAL_GAME_MODS: null
 
-# Optional: ENV_SEED_BASE (default SEED) gives each of NUM_ENVS a distinct initial seed
-# (ENV_SEED_BASE + env_id). Auto-reset on episode end uses fresh RNG for new episodes.
-
 alg:
-  # Training Phoenix skills **from scratch** (no INIT_MODEL_PATH).
-
-  # --- Custom Architecture Dimensions ---
-  NUM_SKILLS: 3               # DESTROY, COLLECT, AVOID
-  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]  # wandb keys: skill_DESTROY/td_loss, etc.
-  MAX_OBJECTS: 225            # 8 Enemies + 8 Enemy Bullets + 1 Boss + 204 Boss Blocks
-  EGO_ACTION_DIM: 18          # The 18 translated egocentric actions
-  HIDDEN_SIZE: 64
+  NUM_SKILLS: 3
+  SKILL_NAMES: ["DESTROY", "COLLECT", "AVOID"]
+  MAX_OBJECTS: 21
+  EGO_ACTION_DIM: 18
+  HIDDEN_SIZE: 128
   NUM_LAYERS: 3
 
-  # If true, COLLECT and AVOID skills cannot choose FIRE ego actions.
-  # Only the DESTROY skill (index 0) is allowed to fire.
   RESTRICT_FIRE_FOR_NON_DESTROY: false
 
-  # --- Environment Wrappers ---
-  # FIRST_FIRE: jaxatari AtariWrapper sends one FIRE immediately after each reset (ALE “start”).
   FIRST_FIRE: true
   STICKY_ACTIONS: false
-  EPISODIC_LIFE: True
+  EPISODIC_LIFE: true
+  FRAME_STACK_SIZE: 4
 
-  # --- PQN Rollout Hyperparameters ---
-  # Scale: more NUM_ENVS = faster collection; keep (NUM_ENVS * NUM_STEPS) fixed so
-  # NUM_UPDATES and minibatch size stay the same → same stability, faster wall-clock.
-  TOTAL_TIMESTEPS: 15_000_000 # Total frames to train
-  NUM_ENVS: 1024              # Parallel environments (was 512; 1024*64 = 512*128)
-  NUM_STEPS: 64               # Steps per env per update (shorter rollouts balance more envs; batch = 65536)
+  TOTAL_TIMESTEPS: 50_000_000
+  NUM_ENVS: 1024
+  NUM_STEPS: 32
 
-  # --- PQN Update Hyperparameters ---
-  NUM_EPOCHS: 3               # SGD epochs over rollout (2→3: more gradient steps per rollout, better sample use)
-  NUM_MINIBATCHES: 64          # Must divide NUM_ENVS*NUM_STEPS; 65536/64 = 1024 minibatch (unchanged)
-  GAMMA: 0.99                 # Discount factor
-  LAMBDA: 0.65                # GAE / Lambda return smoothing parameter
-  LR: 0.0001                  # Learning rate (2.5e-4 is standard for Atari)
-  MAX_GRAD_NORM: 0.8          # Gradient clipping
+  NUM_EPOCHS: 3
+  NUM_MINIBATCHES: 32
+  GAMMA: 0.99
+  SKILL_GAMMA: 0.99
+  LAMBDA: 0.65
+  SKILL_LAMBDA: 0.65
+  LR: 0.0001
+  MAX_GRAD_NORM: 0.8
 
-  # --- Policy Style for Skill Updates ---
-  OFF_POLICY: true             # If true, all skills learn from all transitions with a target.
-                              # If false, use strict on-policy updates (only active skill learns).
+  OFF_POLICY: true
+  RELABEL_ALL_OBJECTS: true
+  RELABEL_K_OBJECTS: null
+  SKILL_BOOTSTRAP: "q_lambda"
+  SKILL_TARGET_CUT: "lifetime"
 
-  # --- Inference Action Masking (Solution A) ---
-  # Mask out strictly forward-moving ego actions to prevent silent failures.
-  # 2=FWD, 6=FWD_RIGHT, 7=FWD_LEFT, 10=FWD_FIRE, 14=FWD_RIGHT_FIRE, 15=FWD_LEFT_FIRE
-  INVALID_EGO_ACTIONS: [2, 6, 7, 10, 14, 15]
-
-  # --- Exploration (Epsilon-Greedy) ---
-  EPS_START: 1.0              # Start 100% random
-  EPS_FINISH: 0.05            # End at 5% random
-  EPS_DECAY: 0.8              # Reach EPS_FINISH halfway through training (50%)
-
-  # --- Curriculum Learning over Skills ---
-  # When enabled, TOTAL_TIMESTEPS will be split evenly across phases.
-  CURRICULUM_ENABLED: false
-  CURRICULUM_PHASES: ["collect", "destroy", "avoid"]
-  CURRICULUM_MODS:
-    collect:
-      - collect_curriculum
-    destroy:
-      - destroy_curriculum
-    avoid:
-      - avoid_curriculum
+  EPS_START: 0.2
+  EPS_FINISH: 0.05
+  EPS_DECAY: 0.35

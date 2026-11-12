@@ -1,0 +1,28 @@
+# Probe-only allowlist: appearance OOD candidates for Seaquest.
+# Use via PAPER_EVAL_MODS: seaquest_visual_ood (not the main paper table).
+
+env: seaquest
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: random_color_enemies
+    mods: [random_color_enemies]
+    category: visual
+  - key: mines
+    mods: [mines]
+    category: visual
+  - key: fireballs
+    mods: [fireballs]
+    category: visual
+  - key: change_background_color
+    mods: [change_background_color]
+    category: visual
+  - key: grayscale
+    mods: [grayscale]
+    category: visual
+  - key: inverted_colors
+    mods: [inverted_colors]
+    category: visual

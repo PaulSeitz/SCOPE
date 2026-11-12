@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: breakout
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_paddle_row
+    mods: [shift_paddle_row]
+    category: layout
+  - key: wider_paddle
+    mods: [wider_paddle]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_paddle_row
+  - wider_paddle

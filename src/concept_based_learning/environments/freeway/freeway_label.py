@@ -1,0 +1,229 @@
+import jax.numpy as jnp
+
+from concept_based_learning.environments.labeling_wrapper import (
+    JaxatariSemanticBaseWrapper,
+    SemanticState,
+)
+from concept_based_learning.environments.datatypes import (
+    LabeledObjectObservation,
+    LABEL_AVOID,
+    LABEL_COLLECT,
+)
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
+from concept_based_learning.observations.action_space import (
+    EGO_MOVE_DELTAS_DEG,
+    make_inverse_ego_action_mapper,
+)
+
+# ---- Freeway game constants (mirror FreewayConstants defaults) ----
+FREEWAY_CHICKEN_X = 44
+FREEWAY_NUM_LANES = 10
+FREEWAY_TOP_BORDER = 15     # player scores when chicken_y (bottom edge) ≤ this (JAXAtari FreewayConstants.top_border)
+# Nudge the fixed NAVIGATE goal toward the top (smaller y in Freeway coords).
+# Must ensure goal band bottom > top_border so the rising-edge fires before the game resets
+# the chicken (scoring at chicken_y=top_border immediately spawns chicken at y≈187).
+# goal_y = top_border + chicken_hit_h - offset → 15 + 10 - 18 = 7 (top-left y).
+# With goal_h=10 and 1px reward inset, effective band y∈[8,16]; chicken scores at bottom y≤15.
+FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX = 18
+# Back-compat alias for older imports / configs.
+FREEWAY_COLLECT_GOAL_UP_OFFSET_PX = FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX
+
+# Effective hitbox sizes derived from JAXAtari insets (jax_freeway.FreewayConstants):
+#   chicken: sprite 6×8, inset x=1 each side → effective width=4
+#            inset y_top=-2 (expands upward), y_bottom=0 → effective height=10
+#   car:     sprite 8×10, inset x=0, y_top=2, y_bottom=0 → effective width=8, height=8
+# These are what we store in LabeledObjectObservation so the global AABB check
+# fires at exactly the same frame JAXAtari's own collision check fires.
+FREEWAY_CHICKEN_HIT_W = 4
+FREEWAY_CHICKEN_HIT_H = 10
+FREEWAY_CAR_HIT_W = 8
+FREEWAY_CAR_HIT_H = 8
+
+# Fixed top COLLECT goal sits at the last slot after meta NOOP + 10 cars.
+NAVIGATE_GOAL_IDX = FREEWAY_NUM_LANES + 1  # slot 11 in stacked objects
+COLLECT_GOAL_IDX = NAVIGATE_GOAL_IDX  # back-compat alias
+FREEWAY_GOAL_LABEL = LABEL_COLLECT
+
+# World direction angle table (RIGHT=0°, DOWNRIGHT=45°, …, UPRIGHT=-45°)
+_WORLD_DIR_ANGLES = jnp.array(
+    [0.0, 45.0, 90.0, 135.0, 180.0, -135.0, -90.0, -45.0], dtype=jnp.float32
+)
+
+# Freeway action indices: 0=NOOP, 1=UP, 2=DOWN
+_FREEWAY_NOOP = jnp.int32(0)
+
+# JAXAtari FreewayConstants collision insets (mirror jax_freeway.FreewayConstants).
+_CHICKEN_HIT_INSET_X = jnp.int32(1)
+_CHICKEN_HIT_INSET_Y_TOP = jnp.int32(-2)
+_CHICKEN_HIT_INSET_Y_BOTTOM = jnp.int32(0)
+
+
+def _apply_chicken_hitbox(raw_obs):
+    """Expose the same effective chicken AABB JAXAtari uses for car collisions.
+
+    Keeps Freeway's bottom-edge ``y`` convention (smaller y = higher on screen).
+    Only width/height and x are adjusted for insets; expanding the top inset grows
+    ``height`` upward without rewriting ``y`` as a top-left coordinate (that used
+    to leave ego/heuristic treating top-edge y as bottom-edge, shifting the player
+    centre ~hit_h px upward and flipping near-lane ahead/behind).
+    """
+    chicken = raw_obs.chicken
+    eff_x = chicken.x + _CHICKEN_HIT_INSET_X
+    # Bottom edge stays put when y_bottom inset is 0; taller hitbox expands upward.
+    eff_y = chicken.y - _CHICKEN_HIT_INSET_Y_BOTTOM
+    eff_w = chicken.width - 2 * _CHICKEN_HIT_INSET_X
+    eff_h = chicken.height - _CHICKEN_HIT_INSET_Y_TOP - _CHICKEN_HIT_INSET_Y_BOTTOM
+    return raw_obs.replace(
+        chicken=chicken.replace(x=eff_x, y=eff_y, width=eff_w, height=eff_h)
+    )
+
+# move_table[dir_idx] — Freeway only has vertical movement.
+_MOVE_TABLE      = jnp.array([0, 2, 2, 2, 0, 1, 1, 1], dtype=jnp.int32)
+_MOVE_FIRE_TABLE = jnp.array([0, 2, 2, 2, 0, 1, 1, 1], dtype=jnp.int32)  # no FIRE in Freeway
+
+
+def freeway_action_mapper(ego_action, raw_obs, target_idx, objects):
+    """Translate an egocentric action into a Freeway game action (0/1/2)."""
+    # y is stored as the BOTTOM edge in Freeway; use bottom-edge centres so
+    # relative direction / distance are self-consistent.
+    p_cx = raw_obs.chicken.x[-1] + raw_obs.chicken.width[-1] / 2.0
+    p_cy = raw_obs.chicken.y[-1] - raw_obs.chicken.height[-1] / 2.0
+
+    t_cx = objects.x[-1, target_idx] + objects.width[-1, target_idx] / 2.0
+    t_cy = objects.y[-1, target_idx] - objects.height[-1, target_idx] / 2.0
+
+    theta_deg  = jnp.arctan2(t_cy - p_cy, t_cx - p_cx) * (180.0 / jnp.pi)
+    desired_deg = theta_deg + EGO_MOVE_DELTAS_DEG[ego_action]
+
+    diff    = (desired_deg - _WORLD_DIR_ANGLES + 180.0) % 360.0 - 180.0
+    dir_idx = jnp.argmin(jnp.abs(diff)).astype(jnp.int32)
+
+    has_fire = ego_action >= 10
+    is_fire  = ego_action == 1
+    is_noop  = ego_action == 0
+
+    game_action = jnp.where(has_fire, _MOVE_FIRE_TABLE[dir_idx], _MOVE_TABLE[dir_idx])
+    game_action = jnp.where(is_fire, _FREEWAY_NOOP, game_action)
+    game_action = jnp.where(is_noop, _FREEWAY_NOOP, game_action)
+    return game_action
+
+
+def _freeway_get_player(raw_obs):
+    return raw_obs.chicken
+
+
+freeway_inverse_action_mapper = make_inverse_ego_action_mapper(
+    noop_action=int(_FREEWAY_NOOP),
+    fire_action=int(_FREEWAY_NOOP),
+    move_table=_MOVE_TABLE,
+    move_fire_table=_MOVE_FIRE_TABLE,
+    player_getter=_freeway_get_player,
+    y_is_bottom_edge=True,
+)
+
+
+class FreewaySemanticWrapper(JaxatariSemanticBaseWrapper):
+    def __init__(self, env):
+        # 1 meta NOOP + 10 cars + 1 fixed top COLLECT goal = 12 total slots
+        super().__init__(env, max_objects=12)
+
+    def _patch_raw_observation(self, obs):
+        return obs.replace(raw_observation=_apply_chicken_hitbox(obs.raw_observation))
+
+    def reset(self, key=None):
+        obs, env_state = super().reset(key)
+        return self._patch_raw_observation(obs), env_state
+
+    def step(self, state: SemanticState, action: int):
+        obs, env_state, reward, done, info = super().step(state, action)
+        return self._patch_raw_observation(obs), env_state, reward, done, info
+
+    def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
+        """
+        Map a single-frame FreewayObservation to a LabeledObjectObservation.
+
+        Object dimensions are effective hitbox sizes (not raw sprite sizes) so the
+        global AABB check fires at the same frame as JAXAtari's own collision.
+
+        Cars use bottom-edge y convention from JAXAtari; the effective hitbox
+        shrinks the car top by 2px (car_hit_inset_y_top=2), so we shift y up by 2
+        and reduce height by 2 to match.
+
+        The chicken's effective hitbox expands 2px upward (chicken_hit_inset_y_top=-2),
+        so the NAVIGATE goal is placed to match that extended reach.
+        """
+        car_labels = jnp.full(FREEWAY_NUM_LANES, LABEL_AVOID, dtype=jnp.int32)
+        car_offscreen = jnp.zeros(FREEWAY_NUM_LANES, dtype=jnp.int32)  # cars wrap, never scroll off
+
+        # Effective car hitbox: shift bottom-edge y up by 2 to account for
+        # car_hit_inset_y_top=2, and use effective height.
+        car_x = obs.car.x + 0                           # x inset is 0
+        car_y = obs.car.y - 2                            # top is inset 2px from sprite top
+        car_w = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_W, dtype=jnp.int32)
+        car_h = jnp.full(FREEWAY_NUM_LANES, FREEWAY_CAR_HIT_H, dtype=jnp.int32)
+
+        # Fixed COLLECT goal: placed so the chicken's effective hitbox (which extends
+        # 2px above sprite top due to chicken_hit_inset_y_top=-2) overlaps it exactly
+        # when the chicken reaches the scoring line.
+        goal_x      = jnp.array([FREEWAY_CHICKEN_X + 1], dtype=jnp.int32)   # match chicken x-inset
+        goal_y      = jnp.array(
+            [FREEWAY_TOP_BORDER + FREEWAY_CHICKEN_HIT_H - FREEWAY_NAVIGATE_GOAL_UP_OFFSET_PX],
+            dtype=jnp.int32,
+        )
+        goal_w      = jnp.array([FREEWAY_CHICKEN_HIT_W], dtype=jnp.int32)
+        goal_h      = jnp.array([FREEWAY_CHICKEN_HIT_H], dtype=jnp.int32)
+        goal_active = jnp.array([1], dtype=jnp.int32)
+        # Use Seaquest's well-trained COLLECT head for zero-shot crossing. NAVIGATE
+        # was used previously, but its sparse Seaquest surface usage transferred
+        # backward movement here.
+        goal_label  = jnp.array([FREEWAY_GOAL_LABEL], dtype=jnp.int32)
+        goal_visual_id = jnp.array([-1], dtype=jnp.int32)
+        goal_offscreen = jnp.array([0], dtype=jnp.int32)  # fixed goal never scrolls
+
+        all_x          = jnp.concatenate([car_x,                           goal_x])
+        all_y          = jnp.concatenate([car_y,                           goal_y])
+        all_w          = jnp.concatenate([car_w,                           goal_w])
+        all_h          = jnp.concatenate([car_h,                           goal_h])
+        all_active     = jnp.concatenate([obs.car.active.astype(jnp.int32), goal_active])
+        all_labels     = jnp.concatenate([car_labels,                      goal_label])
+        all_visual_id  = jnp.concatenate(
+            [jnp.arange(FREEWAY_NUM_LANES, dtype=jnp.int32), goal_visual_id]
+        )
+        all_offscreen  = jnp.concatenate([car_offscreen,                   goal_offscreen])
+
+        return LabeledObjectObservation(
+            x=all_x,
+            y=all_y,
+            width=all_w,
+            height=all_h,
+            active=all_active,
+            semantic_label=all_labels,
+            visual_id=all_visual_id,
+            can_go_offscreen=all_offscreen,
+            was_killed=jnp.zeros_like(all_offscreen),
+            was_collected=jnp.zeros_like(all_offscreen),
+        )
+
+
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    """
+    Freeway skill rewards — delegates entirely to the global reward contract.
+
+    Freeway cars wrap horizontally and never scroll off-screen, so no screen-edge
+    bounds are needed (can_go_offscreen=0 for all objects).
+    """
+    del info
+    return extract_skill_rewards(
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
+        config=config,
+    )

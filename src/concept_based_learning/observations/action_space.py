@@ -1,0 +1,454 @@
+"""Egocentric action space — target-aligned frame.
+
+Ego actions are defined relative to the player→target direction vector (θ_target).
+The factory make_ego_action_mapper returns a JAX-compatible, jit/vmap-safe function
+that translates integer ego actions into environment-specific game action integers.
+
+Ego action layout (18-dim):
+    0   NOOP
+    1   FIRE                (no movement, pure fire)
+    2   FORWARD             δ=   0°   directly toward target
+    3   RIGHT               δ= +90°   right of player→target line
+    4   LEFT                δ= -90°   left  of player→target line
+    5   BACKWARD            δ= 180°
+    6   FORWARD_RIGHT       δ= +45°
+    7   FORWARD_LEFT        δ= -45°
+    8   BACKWARD_RIGHT      δ=+135°
+    9   BACKWARD_LEFT       δ=-135°
+    10  FORWARD_FIRE
+    11  RIGHT_FIRE
+    12  LEFT_FIRE
+    13  BACKWARD_FIRE
+    14  FORWARD_RIGHT_FIRE
+    15  FORWARD_LEFT_FIRE
+    16  BACKWARD_RIGHT_FIRE
+    17  BACKWARD_LEFT_FIRE
+
+Positive δ is clockwise in screen-Y-down coordinates (right = +x, down = +y).
+
+Direction table convention (used for both move_table and move_fire_table, length 8):
+    Index  World direction    Screen-Y-down angle
+    -----  ---------------   -------------------
+      0    RIGHT              0°
+      1    DOWNRIGHT         +45°
+      2    DOWN              +90°
+      3    DOWNLEFT         +135°
+      4    LEFT              180°
+      5    UPLEFT           -135°
+      6    UP               - 90°
+      7    UPRIGHT          - 45°
+
+For environments with no FIRE, pass move_table == move_fire_table.
+For 4-directional environments, fill each diagonal entry with the nearest cardinal;
+prefer a consistent tie-break (e.g. always prefer horizontal over vertical).
+
+Example — Seaquest (full 18-action Atari layout):
+    noop_action     = 0   (NOOP)
+    fire_action     = 1   (FIRE)
+    move_table      = [3, 8, 5, 9, 4, 7, 2, 6]        # R DR D DL L UL U UR
+    move_fire_table = [11, 16, 13, 17, 12, 15, 10, 14] # same with FIRE bit
+"""
+
+import jax
+import jax.numpy as jnp
+
+# ---------------------------------------------------------------------------
+# Fire action indices (for masking in the training loop)
+# ---------------------------------------------------------------------------
+FIRE_EGO_ACTION_INDICES = jnp.array(
+    [1, 10, 11, 12, 13, 14, 15, 16, 17], dtype=jnp.int32
+)
+
+# Backward-compat aliases for configs that use the legacy constant names.
+FIRE_EGO_ACTION_INDICES_18 = FIRE_EGO_ACTION_INDICES
+FIRE_EGO_ACTION_INDICES_6  = jnp.array([1], dtype=jnp.int32)
+
+
+# ---------------------------------------------------------------------------
+# Movement deltas
+# ---------------------------------------------------------------------------
+_NaN = float("nan")
+
+# Delta angle (degrees, screen-Y-down) added to θ_target to get the desired world angle.
+# NaN for NOOP and FIRE-only: these have no movement component and their delta is never used.
+EGO_MOVE_DELTAS_DEG = jnp.array(
+    [
+        _NaN,    # 0  NOOP
+        _NaN,    # 1  FIRE
+          0.0,   # 2  FORWARD
+         90.0,   # 3  RIGHT
+        -90.0,   # 4  LEFT
+        180.0,   # 5  BACKWARD
+         45.0,   # 6  FORWARD_RIGHT
+        -45.0,   # 7  FORWARD_LEFT
+        135.0,   # 8  BACKWARD_RIGHT
+       -135.0,   # 9  BACKWARD_LEFT
+          0.0,   # 10 FORWARD_FIRE
+         90.0,   # 11 RIGHT_FIRE
+        -90.0,   # 12 LEFT_FIRE
+        180.0,   # 13 BACKWARD_FIRE
+         45.0,   # 14 FORWARD_RIGHT_FIRE
+        -45.0,   # 15 FORWARD_LEFT_FIRE
+        135.0,   # 16 BACKWARD_RIGHT_FIRE
+       -135.0,   # 17 BACKWARD_LEFT_FIRE
+    ],
+    dtype=jnp.float32,
+)
+
+# World direction angles (degrees) for direction indices 0-7.
+_WORLD_DIR_ANGLES_DEG = jnp.array(
+    [0.0, 45.0, 90.0, 135.0, 180.0, -135.0, -90.0, -45.0],
+    dtype=jnp.float32,
+)
+
+# Fixed screen-frame interpretation of ego actions 2..9.  The abstract names
+# remain unchanged for checkpoint compatibility, but FORWARD means screen-UP,
+# BACKWARD screen-DOWN, and LEFT/RIGHT are literal screen directions.  This is
+# deliberately independent of both the selected target and player facing.
+_SCREEN_EGO_DIR_INDICES = jnp.array(
+    [6, 0, 4, 2, 7, 5, 1, 3], dtype=jnp.int32
+)
+
+
+def _default_get_player(raw_obs):
+    for name in ("player", "chicken", "agent", "skier"):
+        if hasattr(raw_obs, name):
+            return getattr(raw_obs, name)
+    raise AttributeError(
+        f"Cannot find player entity in {type(raw_obs).__name__}. "
+        "Expected one of: player, chicken, agent, skier."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _nearest_world_dir(desired_world_angle_deg: jnp.ndarray) -> jnp.ndarray:
+    """
+    Return the direction index (0-7) whose angle is closest to desired_world_angle_deg.
+
+    Handles 360° wraparound correctly. When desired_world_angle_deg is NaN
+    (NOOP/FIRE ego actions), returns 0 — this result is always overridden by the
+    downstream jnp.where chain so the value does not matter.
+    """
+    diff = (desired_world_angle_deg - _WORLD_DIR_ANGLES_DEG + 180.0) % 360.0 - 180.0
+    return jnp.argmin(jnp.abs(diff)).astype(jnp.int32)
+
+
+# ---------------------------------------------------------------------------
+# Mapper factory
+# ---------------------------------------------------------------------------
+
+def make_ego_action_mapper(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+):
+    """
+    Build a JAX-compatible action mapper for a specific environment.
+
+    The returned function has the signature:
+        mapper(ego_action, raw_obs, target_idx, objects) -> int32 game action
+
+    and is safe to use inside jit and vmap.
+
+    Parameters
+    ----------
+    noop_action     : game action integer for NOOP
+    fire_action     : game action integer for stationary FIRE (no movement)
+    move_table      : int[8] — game actions for pure movement in each world direction
+                      (indexed per _WORLD_DIR_ANGLES_DEG: RIGHT=0 … UPRIGHT=7)
+    move_fire_table : int[8] — same, but movement + fire simultaneously
+    """
+    _noop = jnp.int32(noop_action)
+    _fire = jnp.int32(fire_action)
+    _move = jnp.array(move_table, dtype=jnp.int32)
+    _mfir = jnp.array(move_fire_table, dtype=jnp.int32)
+
+    def mapper(ego_action, raw_obs, target_idx, objects):
+        # 1. Compute θ_target from the most recent frame in the stack.
+        _player = _default_get_player(raw_obs)
+        p_cx = _player.x[-1] + _player.width[-1] / 2.0
+        p_cy = _player.y[-1] + _player.height[-1] / 2.0
+        t_cx = objects.x[-1, target_idx] + objects.width[-1, target_idx] / 2.0
+        t_cy = objects.y[-1, target_idx] + objects.height[-1, target_idx] / 2.0
+
+        theta_deg = jnp.arctan2(t_cy - p_cy, t_cx - p_cx) * (180.0 / jnp.pi)
+
+        # 2. Map ego action → desired world angle → nearest Atari direction.
+        desired_deg = theta_deg + EGO_MOVE_DELTAS_DEG[ego_action]
+        dir_idx = _nearest_world_dir(desired_deg)
+
+        # 3. Select game action based on whether this ego action includes FIRE.
+        has_fire     = ego_action >= 10
+        is_fire_only = ego_action == 1
+        is_noop      = ego_action == 0
+
+        game_action = jnp.where(has_fire, _mfir[dir_idx], _move[dir_idx])
+        game_action = jnp.where(is_fire_only, _fire, game_action)
+        game_action = jnp.where(is_noop, _noop, game_action)
+        return game_action
+
+    return mapper
+
+
+def make_target_aligned_action_mappers(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+    **inverse_kwargs,
+):
+    """Return (forward_mapper, inverse_mapper) sharing the same env action tables."""
+    shared = dict(
+        noop_action=noop_action,
+        fire_action=fire_action,
+        move_table=move_table,
+        move_fire_table=move_fire_table,
+    )
+    return (
+        make_ego_action_mapper(**shared),
+        make_inverse_ego_action_mapper(**shared, **inverse_kwargs),
+    )
+
+
+def build_screen_action_table(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+) -> jnp.ndarray:
+    """Build the fixed screen-frame 18-action lookup table.
+
+    Abstract actions 2..9 map to UP, RIGHT, LEFT, DOWN, UP-RIGHT,
+    UP-LEFT, DOWN-RIGHT, DOWN-LEFT respectively.  The fire variants use the
+    same headings.  Environment tables may collapse unsupported diagonals or
+    axes, exactly as the target/facing mappers do.
+    """
+    move = jnp.asarray(move_table, dtype=jnp.int32)
+    move_fire = jnp.asarray(move_fire_table, dtype=jnp.int32)
+    screen_move = move[_SCREEN_EGO_DIR_INDICES]
+    screen_move_fire = move_fire[_SCREEN_EGO_DIR_INDICES]
+    return jnp.concatenate(
+        [
+            jnp.asarray([noop_action, fire_action], dtype=jnp.int32),
+            screen_move,
+            screen_move_fire,
+        ]
+    )
+
+
+def make_screen_aligned_action_mappers(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+):
+    """Return target- and facing-independent fixed-screen action mappers."""
+    table = build_screen_action_table(
+        noop_action, fire_action, move_table, move_fire_table
+    )
+    noop = jnp.int32(noop_action)
+    fire = jnp.int32(fire_action)
+
+    def mapper(ego_action, raw_obs, target_idx, objects):
+        del raw_obs, target_idx, objects
+        return table[jnp.asarray(ego_action, dtype=jnp.int32)]
+
+    def inverse_mapper(game_action, raw_obs, target_idx, objects):
+        del raw_obs, target_idx, objects
+        game_action = jnp.asarray(game_action, dtype=jnp.int32)
+        matches = table == game_action
+        has_match = jnp.any(matches)
+        ego_action = jnp.argmax(matches).astype(jnp.int32)
+        # NOOP/FIRE can also appear in collapsed directional tables. Preserve
+        # their canonical meanings instead of whichever duplicate comes first.
+        if int(fire_action) != int(noop_action):
+            ego_action = jnp.where(game_action == fire, jnp.int32(1), ego_action)
+        ego_action = jnp.where(game_action == noop, jnp.int32(0), ego_action)
+        return jnp.where(has_match, ego_action, jnp.int32(0)).astype(jnp.int32)
+
+    return mapper, inverse_mapper
+
+
+def make_inverse_ego_action_mapper(
+    noop_action: int,
+    fire_action: int,
+    move_table,
+    move_fire_table,
+    *,
+    player_getter=_default_get_player,
+    y_is_bottom_edge: bool = False,
+):
+    """
+    Build a JAX-compatible inverse action mapper for a specific environment.
+
+    The returned function has the signature:
+        inverse_mapper(game_action, raw_obs, target_idx, objects) -> int32 ego action
+    """
+    _noop = jnp.int32(noop_action)
+    _fire = jnp.int32(fire_action)
+    _move = jnp.array(move_table, dtype=jnp.int32)
+    _mfir = jnp.array(move_fire_table, dtype=jnp.int32)
+    _move_deltas = EGO_MOVE_DELTAS_DEG[2:10]
+
+    def _center_y(y, height):
+        if y_is_bottom_edge:
+            return y - height / 2.0
+        return y + height / 2.0
+
+    def inverse_mapper(game_action, raw_obs, target_idx, objects):
+        is_move = _move == game_action
+        is_mfir = _mfir == game_action
+        matched_move = jnp.any(is_move)
+        matched_fire_move = jnp.any(is_mfir)
+        has_fire = matched_fire_move
+        dir_idx = jnp.where(has_fire, jnp.argmax(is_mfir), jnp.argmax(is_move))
+        world_angle = _WORLD_DIR_ANGLES_DEG[dir_idx]
+
+        player = player_getter(raw_obs)
+        p_cx = player.x[-1] + player.width[-1] / 2.0
+        p_cy = _center_y(player.y[-1], player.height[-1])
+        t_cx = objects.x[-1, target_idx] + objects.width[-1, target_idx] / 2.0
+        t_cy = _center_y(objects.y[-1, target_idx], objects.height[-1, target_idx])
+        theta_deg = jnp.arctan2(t_cy - p_cy, t_cx - p_cx) * (180.0 / jnp.pi)
+
+        desired_delta = (world_angle - theta_deg + 180.0) % 360.0 - 180.0
+        diff = (desired_delta - _move_deltas + 180.0) % 360.0 - 180.0
+        ego_move = (2 + jnp.argmin(jnp.abs(diff))).astype(jnp.int32)
+        ego_action = jnp.where(has_fire, ego_move + 8, ego_move)
+
+        matched = jnp.logical_or(matched_move, matched_fire_move)
+        ego_action = jnp.where(game_action == _fire, 1, ego_action)
+        ego_action = jnp.where(
+            jnp.logical_or(game_action == _noop, jnp.logical_not(matched)),
+            0,
+            ego_action,
+        )
+        return ego_action.astype(jnp.int32)
+
+    return inverse_mapper
+
+
+# ---------------------------------------------------------------------------
+# Convenience: fire ego action index lookup
+# ---------------------------------------------------------------------------
+
+def fire_ego_action_indices(ego_action_dim: int) -> jnp.ndarray:
+    """Return the fire-capable ego action indices for a given action space size."""
+    if ego_action_dim == 6:
+        return FIRE_EGO_ACTION_INDICES_6
+    return FIRE_EGO_ACTION_INDICES
+
+
+def make_realized_ego_mask_fn(
+    action_mapper,
+    *,
+    noop_action: int = 0,
+    fire_action: int = 1,
+    ego_action_dim: int = 18,
+):
+    """
+    Build a per-state mask over ego actions whose intentions the mapper can realize.
+
+    NOOP (0) and FIRE-only (1) are always legal. A pure-move ego is legal iff the
+    mapped game action is not ``noop_action``. A move+FIRE ego is legal iff the
+    mapped action is neither noop nor stationary FIRE (movement was not dropped).
+
+    When ``fire_action == noop_action`` (envs with no distinct FIRE, e.g. Freeway /
+    Skiing), move+FIRE only requires a non-noop mapping.
+
+    Used with ``EGO_LEGAL_ACTION_MASK`` so greedy / ε-greedy select
+    ``argmax Q`` among realizable intentions instead of collapsing illegal
+    FORWARD → NOOP (e.g. Phoenix when the target is directly above).
+    """
+    _noop = jnp.int32(noop_action)
+    _fire = jnp.int32(fire_action)
+    _dim = int(ego_action_dim)
+    _distinct_fire = bool(int(fire_action) != int(noop_action))
+
+    def legal_mask(raw_obs, target_idx, objects):
+        egos = jnp.arange(_dim, dtype=jnp.int32)
+
+        def _one(ego):
+            g = action_mapper(ego, raw_obs, target_idx, objects)
+            pure = jnp.logical_or(ego == 0, ego == 1)
+            move_fire = ego >= 10
+            ok_move = g != _noop
+            ok_mf = jnp.where(
+                _distinct_fire,
+                jnp.logical_and(g != _noop, g != _fire),
+                g != _noop,
+            )
+            return jnp.where(pure, True, jnp.where(move_fire, ok_mf, ok_move))
+
+        return jax.vmap(_one)(egos)
+
+    return legal_mask
+
+
+LEGAL_EGO_MASK_MODES = ("realized", "pure_cardinal", "strafe_only")
+# Pure cardinals only: NOOP, FIRE, and the four body moves (no diagonals / move+FIRE).
+PURE_CARDINAL_EGO_ACTION_INDICES = jnp.array([0, 1, 2, 3, 4, 5], dtype=jnp.int32)
+# Restricted-axis transfer: NOOP + LEFT + RIGHT ego only (Pong paddle UP/DOWN).
+STRAFE_ONLY_EGO_ACTION_INDICES = jnp.array([0, 3, 4], dtype=jnp.int32)
+
+
+def make_legal_ego_mask_fn(
+    action_mapper,
+    *,
+    mode: str = "realized",
+    noop_action: int = 0,
+    fire_action: int = 1,
+    ego_action_dim: int = 18,
+):
+    """Legal ego mask factory.
+
+    ``realized`` — default; any ego action the mapper can realize (non-NOOP).
+    ``pure_cardinal`` — ``realized`` AND ego ∈ {NOOP, FIRE, FORWARD, RIGHT, LEFT,
+    BACKWARD}; blocks diagonals and all move+FIRE combos (e.g. FORWARD_LEFT_FIRE)
+    even when they map to a valid game button. Useful for restricted-axis transfer
+    (Pong: paddle UP/DOWN only).
+    ``strafe_only`` — ``realized`` AND ego ∈ {NOOP, LEFT, RIGHT} only; no FIRE,
+    FORWARD, BACKWARD, diagonals, or move+FIRE (strictest Pong-style strafe set).
+    """
+    key = str(mode).lower().strip()
+    if key not in LEGAL_EGO_MASK_MODES:
+        raise ValueError(
+            f"EGO_LEGAL_ACTION_MASK_MODE must be one of {LEGAL_EGO_MASK_MODES}, "
+            f"got {mode!r}"
+        )
+    realized_fn = make_realized_ego_mask_fn(
+        action_mapper,
+        noop_action=noop_action,
+        fire_action=fire_action,
+        ego_action_dim=ego_action_dim,
+    )
+    if key == "realized":
+        return realized_fn
+    _dim = int(ego_action_dim)
+    if key == "pure_cardinal":
+        allow = PURE_CARDINAL_EGO_ACTION_INDICES
+    else:
+        allow = STRAFE_ONLY_EGO_ACTION_INDICES
+    static = jnp.zeros((_dim,), dtype=jnp.bool_)
+    static = static.at[allow].set(True)
+
+    def legal_mask(raw_obs, target_idx, objects):
+        return jnp.logical_and(static, realized_fn(raw_obs, target_idx, objects))
+
+    return legal_mask
+
+
+def legal_ego_mask_mode_from_config(config: dict | None) -> str | None:
+    """Return mask mode when enabled, else ``None``."""
+    if not (config or {}).get("EGO_LEGAL_ACTION_MASK", False):
+        return None
+    return str((config or {}).get("EGO_LEGAL_ACTION_MASK_MODE", "realized")).lower().strip()
+
+
+def mask_q_with_legal_ego(q_vals, legal_mask):
+    """Set illegal ego logits to -inf (broadcasts over leading batch dims)."""
+    return jnp.where(legal_mask, q_vals, jnp.asarray(-jnp.inf, dtype=q_vals.dtype))

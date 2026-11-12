@@ -1,0 +1,42 @@
+# Pong short strip: S / Dₚ / A (no Dₜ farming form — lazy_enemy is the alignment cell).
+env: pong
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_player
+    mods: [shift_player]
+    category: layout
+  - key: linear_movement
+    mods: [linear_movement]
+    category: dynamics
+  - key: lazy_enemy
+    mods: [lazy_enemy]
+    category: semantic
+  # opportunistic extras (not in paper_core)
+  - key: random_enemy
+    mods: [random_enemy]
+    category: dynamics
+  - key: shift_enemy
+    mods: [shift_enemy]
+    category: dynamics
+  - key: no_fire
+    mods: [no_fire]
+    category: semantic
+  - key: zero_score
+    mods: [zero_score]
+    category: semantic
+  - key: change_background_color
+    mods: [change_background_color]
+    category: visual
+  - key: change_player_color
+    mods: [change_player_color]
+    category: visual
+
+paper_core:
+  - base
+  - shift_player
+  - linear_movement
+  - lazy_enemy

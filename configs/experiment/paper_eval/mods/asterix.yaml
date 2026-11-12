@@ -1,0 +1,47 @@
+# Asterix mod allowlists for paper_eval RQ2.
+# Paper core mods live on the robustness-mods JAXAtari fork (asterix_mods.py).
+env: asterix
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: fast_enemies
+    mods: [fast_enemies]
+    category: dynamics
+  - key: no_enemies
+    mods: [no_enemies]
+    category: semantic
+  - key: lethal_collectibles
+    mods: [lethal_collectibles]
+    category: semantic
+  - key: top_lanes_only
+    mods: [top_lanes_only]
+    category: structural
+  - key: dense_spawns
+    mods: [dense_spawns]
+    category: dynamics
+  # Single-color recolor (not a full palette shuffle).
+  - key: recolor_enemies
+    mods: [recolor_enemies]
+    category: visual
+
+paper_core:
+  - base
+  - fast_enemies
+  - no_enemies
+  - lethal_collectibles
+  - top_lanes_only
+  - dense_spawns
+  - recolor_enemies
+
+# Optional later (not paper core for v1).
+planned_extra:
+  - slow_enemies
+  - no_collectibles
+  - friendly_enemies
+  - bottom_lanes_only
+  - mirror_lanes
+  - player_speed_up
+  - player_speed_down

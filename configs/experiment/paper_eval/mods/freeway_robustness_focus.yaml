@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: freeway
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_car_rows
+    mods: [shift_car_rows]
+    category: layout
+  - key: no_cars
+    mods: [no_cars]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_car_rows
+  - no_cars

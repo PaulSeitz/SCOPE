@@ -1,0 +1,203 @@
+# Seaquest mod allowlists for paper_eval (RQ1 / RQ3).
+# Requires JAXAtari branch: feat/seaquest-robustness-mods
+#   /home/paul/Documents/JAXAtari-seaquest-robustness
+#
+# Train on base (GAME_MODS: null). Eval harness iterates `eval_mods`.
+# Label remaps use YAML `relabel: true` → SEAQUEST_SWAP_DIVER_ENEMY_LABELS or
+# SEAQUEST_SWAP_DIVER_SHARK_ROLES (by mod key) on the eval config only
+# (never inferred from GAME_MODS; forced off when train=True).
+
+env: seaquest
+status: ready  # registry present on robustness-mods fork
+
+# Appearance OOD (PQN probe 2026-09-14): inverted/bg collapse; mines ~0.17×.
+# Filter with PAPER_EVAL_MOD_KEYS if the paper table should keep only one.
+visual_candidates:
+  - inverted_colors
+  - change_background_color
+  - mines
+
+eval_mods:
+  # control
+  - key: base
+    mods: []
+    category: control
+  # semantic / task
+  - key: disable_enemies
+    mods: [disable_enemies]
+    category: semantic
+  - key: no_enemies
+    mods: [no_enemies]
+    category: semantic
+  - key: no_divers
+    mods: [no_divers]
+    category: semantic
+  - key: unlimited_oxygen
+    mods: [unlimited_oxygen]
+    category: semantic
+  - key: peaceful_enemies
+    mods: [peaceful_enemies]
+    category: semantic
+  - key: lethal_divers
+    mods: [lethal_divers]
+    category: semantic
+  - key: only_submarines
+    mods: [only_submarines]
+    category: semantic
+  - key: only_sharks
+    mods: [only_sharks]
+    category: semantic
+  - key: no_enemy_torpedoes
+    mods: [no_enemy_torpedoes]
+    category: semantic
+  - key: surface_sub_always
+    mods: [surface_sub_always]
+    category: semantic
+  - key: no_surfacing_death
+    mods: [no_surfacing_death]
+    category: semantic
+  # E2 versatility: fork swaps sprites + OC channels; CBL remaps labels eval-only.
+  - key: swap_diver_enemy_labels
+    mods: [swap_diver_enemy_labels]
+    category: semantic
+    relabel: true
+  # Stronger E2: physics/scoring swap (lethal divers, collectable sharks) + label remap.
+  - key: swap_diver_shark_roles
+    mods: [swap_diver_shark_roles]
+    category: semantic
+    relabel: true
+  # relational: object-object behaviour changes, player rules unchanged
+  - key: decoupled_divers
+    mods: [decoupled_divers]
+    category: relational
+  - key: scrambled_relations
+    mods: [scrambled_relations]
+    category: relational
+  - key: shark_diver_bounce
+    mods: [_shark_diver_bounce]
+    category: relational
+  - key: mirror_world
+    mods: [mirror_world]
+    category: probe
+  - key: mirror_divers
+    mods: [mirror_divers]
+    category: probe
+  - key: micro_swarm
+    mods: [micro_swarm]
+    category: probe
+  - key: tiny_divers
+    mods: [tiny_divers]
+    category: probe
+  - key: sparse_world
+    mods: [sparse_world]
+    category: probe
+  - key: erratic_enemies
+    mods: [erratic_enemies]
+    category: probe
+  - key: ocean_currents
+    mods: [ocean_currents]
+    category: probe
+  - key: ghost_sharks
+    mods: [ghost_sharks]
+    category: probe
+  - key: momentum
+    mods: [momentum]
+    category: probe
+  - key: sticky_water
+    mods: [sticky_water]
+    category: probe
+  - key: slippery_turn
+    mods: [slippery_turn]
+    category: probe
+  - key: inverted_controls
+    mods: [inverted_controls]
+    category: probe
+  - key: extra_enemy_type
+    mods: [extra_enemy_type]
+    category: probe
+  - key: swapped_enemy_roles
+    mods: [swapped_enemy_roles]
+    category: relational
+  - key: torpedo_lane_shift
+    mods: [_torpedo_lane_shift]
+    category: relational
+  - key: kill_flips_enemies
+    mods: [_kill_flips_enemies]
+    category: relational
+  # dynamics (expect ego to struggle more here)
+  - key: gravity
+    mods: [gravity]
+    category: dynamics
+  - key: faster_enemies
+    mods: [faster_enemies]
+    category: dynamics
+  - key: slower_enemies
+    mods: [slower_enemies]
+    category: dynamics
+  - key: shift_lanes
+    mods: [shift_lanes]
+    category: dynamics
+  - key: vertical_oscillation
+    mods: [vertical_oscillation]
+    category: dynamics
+  - key: dense_spawns
+    mods: [dense_spawns]
+    category: dynamics
+  - key: fast_oxygen_drain
+    mods: [fast_oxygen_drain]
+    category: dynamics
+  - key: slow_oxygen_drain
+    mods: [slow_oxygen_drain]
+    category: dynamics
+  - key: inverted_lanes
+    mods: [inverted_lanes]
+    category: dynamics
+  # layout / structural (lane geometry; registry keys match fork REGISTRY)
+  - key: lane_scramble
+    mods: [lane_scramble]
+    category: layout
+  - key: dynamic_lane_drift
+    mods: [dynamic_lane_drift]
+    category: layout
+  # Hard layout: spawn still uses lane slots, but Y is rolled on spawn and held
+  # → no effective lanes for sharks / subs / divers.
+  - key: random_spawns
+    mods: [random_spawns]
+    category: layout
+  # visual / appearance (geometry & dynamics unchanged)
+  - key: inverted_colors
+    mods: [inverted_colors]
+    category: visual
+  - key: change_background_color
+    mods: [change_background_color]
+    category: visual
+  - key: mines
+    mods: [mines]
+    category: visual
+
+# Implemented on fork but not in the main paper table.
+registry_extra:
+  - random_color_enemies
+  - fireballs
+  - grayscale
+
+# Planned additions (implement on the robustness-mods fork when ready).
+planned:
+  - collectable_sharks
+  - extra_enemy_type
+  - penalize_diver_shooting
+
+# Home depth strip (S / layout / visual / A / D / multi-object fail).
+paper_core:
+  - base
+  - shift_lanes
+  - lane_scramble
+  - dynamic_lane_drift
+  - random_spawns
+  - change_background_color
+  - no_enemies
+  - swap_diver_enemy_labels
+  - swap_diver_shark_roles
+  - gravity
+  - faster_enemies
+

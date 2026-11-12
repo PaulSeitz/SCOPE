@@ -1,0 +1,37 @@
+{
+  "seed": 44,
+  "actions": "336 NOOP emulator frames per condition",
+  "sample_frames": [
+    320,
+    324,
+    328,
+    332,
+    336
+  ],
+  "main_crop_xyxy": [
+    8,
+    48,
+    160,
+    155
+  ],
+  "ghosts": "outlines of one continuously active shark, four previous samples at four-frame intervals",
+  "comparison": "same initial RNG seed and action sequence; resulting scenes need not have matched object states",
+  "source_files_sha256": {},
+  "frame_files_sha256": {},
+  "assets": [
+    {
+      "svg": "fig00_modifications.svg",
+      "svg_sha256": "8c48a60f8083cf3346f238009bdbf1d19d1964c1c0b7af064b8a89cb0b42ffa8",
+      "pdf": "fig00_modifications.pdf",
+      "pdf_sha256": "cf69cbad8e1ffc58c383c00dc0eaf82897eaba30b29257e1b8f5c39720a70b77",
+      "pdf_converted_from_svg_sha256": "8c48a60f8083cf3346f238009bdbf1d19d1964c1c0b7af064b8a89cb0b42ffa8"
+    },
+    {
+      "svg": "fig_appendix_modifications.svg",
+      "svg_sha256": "65f64160f3a468c88244be7dc4f22a84d5e0092fff473386d11539f7d0a99abf",
+      "pdf": "fig_appendix_modifications.pdf",
+      "pdf_sha256": "82ef951bc9ef672b8e21aae6df3be571971d916624f9c8bde8d14d76594b1403",
+      "pdf_converted_from_svg_sha256": "65f64160f3a468c88244be7dc4f22a84d5e0092fff473386d11539f7d0a99abf"
+    }
+  ]
+}

@@ -1,148 +1,122 @@
-import jax
 import jax.numpy as jnp
-from flax import struct
-from typing import Any
-from jaxatari.environment import JAXAtariAction as Atari
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
-    LABEL_COLLECT,
     LABEL_AVOID,
     LABEL_NOOP,
 )
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 
-
-def _bbox_overlap(player, target):
-    """True if player and target bounding boxes overlap (e.g. collision)."""
-    p_left, p_right = player.x, player.x + player.width
-    p_top, p_bottom = player.y, player.y + player.height
-    t_left, t_right = target.x, target.x + target.width
-    t_top, t_bottom = target.y, target.y + target.height
-    horiz = jnp.logical_and(p_left <= t_right, p_right >= t_left)
-    vert = jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
-    return jnp.logical_and(horiz, vert)
-
-
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
-    """
-    Returns (rewards, skill_done). skill_done[k] is True only when the transition
-    is terminal for skill k because the assigned target caused it (golden rule).
-    """
-    def last_frame(e):
-        return jax.tree_util.tree_map(lambda x: x[-1] if x.ndim > 0 else x, e)
-
-    prev_player = last_frame(prev_raw_obs.player)
-    next_player = last_frame(next_raw_obs.player)
-    prev_target = last_frame(prev_target)
-    next_target = last_frame(next_target)
-
-    was_active = prev_target.active == 1
-    is_active = next_target.active == 1
-    target_destroyed = jnp.logical_and(was_active, jnp.logical_not(is_active))
-
-    hit_by_assigned = _bbox_overlap(prev_player, prev_target)
-
-    t_left = prev_target.x
-    t_right = prev_target.x + prev_target.width
-    t_top = prev_target.y
-    t_bottom = prev_target.y + prev_target.height
-    p_left = prev_player.x
-    p_right = prev_player.x + prev_player.width
-    p_top = prev_player.y
-    p_bottom = prev_player.y + prev_player.height
-    player_overlap = jnp.logical_and(
-        jnp.logical_and(p_left <= t_right, p_right >= t_left),
-        jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    del info
+    return extract_skill_rewards(
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
+        config=config,
     )
 
-    is_collect_target = prev_target.semantic_label == LABEL_COLLECT
-    collect_success = jnp.logical_and(
-        is_collect_target,
-        jnp.logical_and(was_active, player_overlap),
-    )
 
-    # Destroy: assigned enemy died and we didn't crash into it → we must have shot it.
-    is_destroy_target = prev_target.semantic_label == LABEL_DESTROY
-    destroy_success = jnp.logical_and(
-        is_destroy_target,
-        jnp.logical_and(target_destroyed, jnp.logical_not(hit_by_assigned)),
-    )
-
-    destroy_failure = (life_lost > 0) & is_destroy_target & hit_by_assigned
-    avoid_failure = (life_lost > 0) & (prev_target.semantic_label == LABEL_AVOID) & hit_by_assigned
-
-    collect_reward = jnp.where(collect_success & (life_lost == 0), 1.0, 0.0)
-    destroy_reward = jnp.where(
-        destroy_success & (life_lost == 0),
-        1.0,
-        jnp.where(destroy_failure, -1.0, 0.0),
-    )
-    avoid_reward = jnp.where(avoid_failure, -1.0, 0.0)
-
-    collect_done = collect_success
-    destroy_done = destroy_success | destroy_failure
-    avoid_done = avoid_failure
-
-    rewards = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done, collect_done, avoid_done], dtype=jnp.bool_)
-    return rewards, skill_done
+choppercommand_action_mapper, choppercommand_inverse_action_mapper = make_target_aligned_action_mappers(
+    noop_action=0,
+    fire_action=1,
+    move_table=     [3, 8, 5, 9, 4, 7, 2, 6],
+    move_fire_table=[11, 16, 13, 17, 12, 15, 10, 14],
+)
 
 
-def choppercommand_action_mapper(ego_action: jnp.ndarray, global_features: Any, target_idx: jnp.ndarray) -> jnp.ndarray:
-    player_ori = global_features.player.orientation[-1] 
-    is_facing_right = player_ori < 180.0
-    
-    map_right = jnp.array([
-        Atari.NOOP, Atari.FIRE, Atari.RIGHT, Atari.DOWN, Atari.UP, Atari.LEFT,
-        Atari.DOWNRIGHT, Atari.UPRIGHT, Atari.DOWNLEFT, Atari.UPLEFT,
-        Atari.RIGHTFIRE, Atari.DOWNFIRE, Atari.UPFIRE, Atari.LEFTFIRE,
-        Atari.DOWNRIGHTFIRE, Atari.UPRIGHTFIRE, Atari.DOWNLEFTFIRE, Atari.UPLEFTFIRE
-    ], dtype=jnp.int32)
-    
-    map_left = jnp.array([
-        Atari.NOOP, Atari.FIRE, Atari.LEFT, Atari.UP, Atari.DOWN, Atari.RIGHT,
-        Atari.UPLEFT, Atari.DOWNLEFT, Atari.UPRIGHT, Atari.DOWNRIGHT,
-        Atari.LEFTFIRE, Atari.UPFIRE, Atari.DOWNFIRE, Atari.RIGHTFIRE,
-        Atari.UPLEFTFIRE, Atari.DOWNLEFTFIRE, Atari.UPRIGHTFIRE, Atari.DOWNRIGHTFIRE
-    ], dtype=jnp.int32)
-
-    chosen_map = jnp.where(is_facing_right, map_right, map_left)
-    return chosen_map[ego_action]
+_FRAMES_DEATH_ENEMY = 16  # FRAMES_DEATH_ANIMATION_ENEMY default
+# Keep only the 8 on-screen-closest missiles; 48 total slots are mostly inactive.
+_MISSILE_SLOTS = 8
 
 
 class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
-        # Reduced from 85 to 84 since we removed the dummy waypoint
-        super().__init__(env, max_objects=84) 
+        # 12 jets + 12 choppers + 8 capped missiles = 32 game objects + 1 NOOP
+        # Trucks excluded: they fly on the ground (y≈156) and the player chopper (y≈100)
+        # can never physically overlap them, so AVOID/COLLECT would never fire.
+        super().__init__(env, max_objects=33)
+
+    def _substep_env_state_events(self, prev_env_state, next_env_state):
+        """
+        Detect jet/chopper kills this substep.
+
+        Kill signal: death_timer transitions from > 16 (lane flag) to <= 16 (dying).
+        The game sets timer=16 on hit then immediately decrements to 15 in the same step.
+        Returns a mask over game slots [jets(12) | choppers(12) | missiles(8)].
+        """
+        def _kill_mask(prev_pos, next_pos):
+            prev_timer = prev_pos[:, 3]
+            next_timer = next_pos[:, 3]
+            direction = prev_pos[:, 2]
+            # kill_entity sets timer = 16, then update_entity_death immediately
+            # decrements to 15 in the same step. So the kill frame has:
+            # prev > 16 (alive lane-flag) → next == 15 (first dying frame).
+            # Use next <= 16 to be robust against any threshold offset.
+            return jnp.logical_and(
+                jnp.logical_and(direction != 0, prev_timer > _FRAMES_DEATH_ENEMY),
+                jnp.logical_and(next_timer > 0, next_timer <= _FRAMES_DEATH_ENEMY),
+            ).astype(jnp.int32)
+
+        jet_killed     = _kill_mask(prev_env_state.jet_positions,    next_env_state.jet_positions)
+        chopper_killed = _kill_mask(prev_env_state.chopper_positions, next_env_state.chopper_positions)
+        missile_zeros  = jnp.zeros(_MISSILE_SLOTS, dtype=jnp.int32)
+        return jnp.concatenate([jet_killed, chopper_killed, missile_zeros])  # (32,)
+
+    def _stamp_events_on_observation(self, semantic_obs, kill_mask):
+        if kill_mask is None:
+            return semantic_obs
+        # Layout: [jets(12) | choppers(12) | missiles(8)] = 32 → +1 NOOP = 33
+        was_killed_with_noop = self._with_meta_event_padding(kill_mask)
+        objects = semantic_obs.objects
+        new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
+        return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
         jets = obs.jets
         choppers = obs.choppers
-        trucks = obs.trucks
         projectiles = obs.enemy_missiles
 
         num_jets = jets.x.shape[0]
         num_choppers = choppers.x.shape[0]
-        num_trucks = trucks.x.shape[0]
-        num_enemy_missiles = projectiles.x.shape[0]
+
+        # Cap missiles to _MISSILE_SLOTS (8) by keeping the on-screen active ones.
+        m_active = projectiles.active.astype(jnp.float32)
+        m_on_screen = ((projectiles.x + projectiles.width > 0) & (projectiles.x < 160)).astype(jnp.float32)
+        m_score = m_active * m_on_screen
+        top_idx = jnp.argsort(-m_score)[:_MISSILE_SLOTS]
+        m_x = projectiles.x[top_idx]
+        m_y = projectiles.y[top_idx]
+        m_w = projectiles.width[top_idx]
+        m_h = projectiles.height[top_idx]
+        m_active_cap = (projectiles.active[top_idx] * m_on_screen[top_idx].astype(projectiles.active.dtype))
 
         enemy_labels = jnp.full(num_jets + num_choppers, LABEL_DESTROY, dtype=jnp.int32)
-        truck_labels = jnp.full(num_trucks, LABEL_AVOID, dtype=jnp.int32)
-        enemy_missile_labels = jnp.full(num_enemy_missiles, LABEL_AVOID, dtype=jnp.int32)
+        enemy_missile_labels = jnp.full(_MISSILE_SLOTS, LABEL_AVOID, dtype=jnp.int32)
 
-        final_x_unpadded = jnp.concatenate([jets.x, choppers.x, trucks.x, projectiles.x])
-        final_y_unpadded = jnp.concatenate([jets.y, choppers.y, trucks.y, projectiles.y])
-        final_w_unpadded = jnp.concatenate([jets.width, choppers.width, trucks.width, projectiles.width])
-        final_h_unpadded = jnp.concatenate([jets.height, choppers.height, trucks.height, projectiles.height])
-        final_active_unpadded = jnp.concatenate([jets.active, choppers.active, trucks.active, projectiles.active])
-        final_labels_unpadded = jnp.concatenate([enemy_labels, truck_labels, enemy_missile_labels])
+        final_x_unpadded = jnp.concatenate([jets.x, choppers.x, m_x])
+        final_y_unpadded = jnp.concatenate([jets.y, choppers.y, m_y])
+        final_w_unpadded = jnp.concatenate([jets.width, choppers.width, m_w])
+        final_h_unpadded = jnp.concatenate([jets.height, choppers.height, m_h])
+        final_active_unpadded = jnp.concatenate([jets.active, choppers.active, m_active_cap])
+        final_labels_unpadded = jnp.concatenate([enemy_labels, enemy_missile_labels])
 
         is_on_screen = (final_x_unpadded + final_w_unpadded > 0) & (final_x_unpadded < 160)
 
-        # Inject a single virtual waypoint from an off-screen enemy so the
-        # meta-policy can navigate toward incoming threats without any trainer logic.
+        # Snap one off-screen DESTROY target to the screen edge so the meta-policy
+        # can navigate toward incoming threats (label stays DESTROY — no
+        # NAVIGATE/COLLECT reward on arrival).
         is_enemy = final_labels_unpadded == LABEL_DESTROY
         is_offscreen_enemy = jnp.logical_and(
             is_enemy,
@@ -172,8 +146,10 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         final_y_unpadded = final_y_unpadded.at[virtual_idx].set(
             jnp.where(has_virtual_waypoint, virtual_y, final_y_unpadded[virtual_idx])
         )
+        # Keep DESTROY label so NAVIGATE/COLLECT rewards cannot fire at the
+        # screen-edge proxy — only a real kill stamps DESTROY success.
         final_labels_unpadded = final_labels_unpadded.at[virtual_idx].set(
-            jnp.where(has_virtual_waypoint, LABEL_COLLECT, final_labels_unpadded[virtual_idx])
+            jnp.where(has_virtual_waypoint, LABEL_DESTROY, final_labels_unpadded[virtual_idx])
         )
         final_active_unpadded = final_active_unpadded.at[virtual_idx].set(
             jnp.where(has_virtual_waypoint, 1, final_active_unpadded[virtual_idx])
@@ -184,15 +160,19 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
             jnp.where(has_virtual_waypoint, 1, final_active_unpadded[virtual_idx])
         )
 
-        # --- Array Padding to MAX_OBJECTS (84) ---
-        pad_size = self.max_objects - final_x_unpadded.shape[0]
+        # --- Array Padding to game_max_objects (32) ---
+        pad_size = self.game_max_objects - final_x_unpadded.shape[0]
         
-        pad_x = jnp.zeros(pad_size, dtype=jnp.float32)
-        pad_y = jnp.zeros(pad_size, dtype=jnp.float32)
-        pad_w = jnp.zeros(pad_size, dtype=jnp.float32)
-        pad_h = jnp.zeros(pad_size, dtype=jnp.float32)
+        pad_x = jnp.zeros(pad_size, dtype=jnp.int32)
+        pad_y = jnp.zeros(pad_size, dtype=jnp.int32)
+        pad_w = jnp.zeros(pad_size, dtype=jnp.int32)
+        pad_h = jnp.zeros(pad_size, dtype=jnp.int32)
         pad_active = jnp.zeros(pad_size, dtype=jnp.int32)
         pad_labels = jnp.full(pad_size, LABEL_NOOP, dtype=jnp.int32)
+
+        # All game objects scroll off the left/right edges.
+        all_offscreen = jnp.ones(final_x_unpadded.shape[0], dtype=jnp.int32)
+        pad_offscreen = jnp.zeros(pad_size, dtype=jnp.int32)
 
         final_x = jnp.concatenate([final_x_unpadded, pad_x])
         final_y = jnp.concatenate([final_y_unpadded, pad_y])
@@ -200,8 +180,12 @@ class ChopperCommandSemanticWrapper(JaxatariSemanticBaseWrapper):
         final_h = jnp.concatenate([final_h_unpadded, pad_h])
         final_active = jnp.concatenate([final_active_unpadded, pad_active])
         final_labels = jnp.concatenate([final_labels_unpadded, pad_labels])
+        final_offscreen = jnp.concatenate([all_offscreen, pad_offscreen])
 
         return LabeledObjectObservation(
             x=final_x, y=final_y, width=final_w, height=final_h,
-            active=final_active, semantic_label=final_labels
+            active=final_active, semantic_label=final_labels,
+            state=jnp.zeros_like(final_offscreen),
+            can_go_offscreen=final_offscreen,
+            was_killed=jnp.zeros_like(final_offscreen),
         )

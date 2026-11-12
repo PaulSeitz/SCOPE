@@ -1,158 +1,145 @@
-import jax
 import jax.numpy as jnp
-from typing import Any
 
 from concept_based_learning.environments.labeling_wrapper import JaxatariSemanticBaseWrapper
+from concept_based_learning.observations.action_space import make_target_aligned_action_mappers
 from concept_based_learning.environments.datatypes import (
     LabeledObjectObservation,
     LABEL_DESTROY,
-    LABEL_COLLECT,
     LABEL_AVOID,
     LABEL_NOOP,
 )
+from concept_based_learning.environments.skill_rewards import (
+    avoid_survival_reward_from_config,
+    extract_skill_rewards,
+    penalize_collect_death_from_config,
+)
 
-def _bbox_overlap(player, target):
-    """True if player and target bounding boxes overlap (e.g. collision)."""
-    p_left, p_right = player.x, player.x + player.width
-    p_top, p_bottom = player.y, player.y + player.height
-    t_left, t_right = target.x, target.x + target.width
-    t_top, t_bottom = target.y, target.y + target.height
-    horiz = jnp.logical_and(p_left <= t_right, p_right >= t_left)
-    vert = jnp.logical_and(p_top <= t_bottom, p_bottom >= t_top)
-    return jnp.logical_and(horiz, vert)
+# jax_phoenix observation encoding: base state 0..3, +4 while death animation plays.
+# We set active=0 the moment state >= DYING_STATE_THRESHOLD so meta-policy
+# deprioritises dying enemies immediately.  DESTROY rewards use was_killed from
+# phoenix_dying/bat_dying rising edges in _substep_env_state_events.
+DYING_STATE_THRESHOLD = 4
+# Playfield is 160px wide; ignore kills whose previous x was at the scroll edge.
+_SCROLL_X_MIN = 5
+_SCROLL_X_MAX = 155
 
 
-def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost):
-    """
-    Returns (rewards, skill_done). skill_done[k] is True only when the transition
-    is terminal for skill k because the assigned target caused it (golden rule).
-    """
-    def last_frame(e):
-        return jax.tree_util.tree_map(lambda x: x[-1] if x.ndim > 0 else x, e)
-
-    prev_target = last_frame(prev_target)
-    next_target = last_frame(next_target)
-    prev_player = last_frame(prev_raw_obs.player)
-
-    was_active = prev_target.active == 1
-    is_active = next_target.active == 1
-    success = jnp.logical_and(was_active, jnp.logical_not(is_active))
-
-    hit_by_assigned = _bbox_overlap(prev_player, prev_target)
-
-    is_destroy_target = prev_target.semantic_label == LABEL_DESTROY
-    destroy_success = jnp.logical_and(
-        is_destroy_target,
-        jnp.logical_and(success, jnp.logical_not(hit_by_assigned)),
-    )
-    destroy_failure = (life_lost > 0) & is_destroy_target & hit_by_assigned
-    avoid_failure = (life_lost > 0) & (prev_target.semantic_label == LABEL_AVOID) & hit_by_assigned
-    avoid_success = jnp.logical_and(
-        prev_target.semantic_label == LABEL_AVOID,
-        jnp.logical_and(success, jnp.logical_not(hit_by_assigned)),
+def extract_all_skills_rewards(prev_raw_obs, next_raw_obs, prev_target, next_target, life_lost, info=None, config=None):
+    del info
+    return extract_skill_rewards(
+        prev_raw_obs,
+        next_raw_obs,
+        prev_target,
+        next_target,
+        life_lost,
+        avoid_survival_reward=avoid_survival_reward_from_config(config),
+        penalize_collect_death=penalize_collect_death_from_config(config),
+        config=config,
     )
 
-    destroy_reward = jnp.where(
-        destroy_success & (life_lost == 0),
-        1.0,
-        jnp.where(destroy_failure, -1.0, 0.0),
-    )
-    collect_reward = jnp.zeros_like(destroy_reward)
-    avoid_reward = jnp.where(avoid_success, 1.0, jnp.where(avoid_failure, -1.0, 0.0))
 
-    destroy_done = destroy_success | destroy_failure
-    collect_done = jnp.zeros_like(destroy_reward, dtype=jnp.bool_)
-    avoid_done = avoid_success | avoid_failure
-
-    rewards = jnp.array([destroy_reward, collect_reward, avoid_reward], dtype=jnp.float32)
-    skill_done = jnp.array([destroy_done, collect_done, avoid_done], dtype=jnp.bool_)
-    return rewards, skill_done
+# Phoenix ACTION_SET indices: 0=NOOP 1=FIRE 2=RIGHT 3=LEFT 4=DOWN(shield)
+#   5=RIGHTFIRE 6=LEFTFIRE 7=DOWNFIRE.
+# Horizontal + shield; ship fires upward. UP has no lateral move so pure UP→NOOP /
+# UP+FIRE→FIRE; diagonals prefer horizontal; DOWN is shield.
+phoenix_action_mapper, phoenix_inverse_action_mapper = make_target_aligned_action_mappers(
+    noop_action=0,
+    fire_action=1,
+    move_table=     [2, 2, 4, 3, 3, 3, 0, 2],   # R DR D DL L UL U UR
+    move_fire_table=[5, 5, 7, 6, 6, 6, 1, 5],   # RIGHTFIRE / LEFTFIRE / DOWNFIRE / FIRE
+)
 
 
-def phoenix_action_mapper(
-    ego_action: jnp.ndarray,
-    global_features: Any,
-    target_idx: jnp.ndarray,
-) -> jnp.ndarray:
-    """
-    Translates the 18-space Egocentric Action to Phoenix environment indices.
-    Because the ship naturally faces UP (90 degrees), FORWARD = UP, LEFT = LEFT, etc.
-    We project diagonal/impossible actions to valid Phoenix actions.
-    """
-    # Phoenix runs with a reduced action set in this project.
-    # To preserve "shoot intent" when transferring 18-dim Seaquest skills,
-    # collapse any *_FIRE ego action to plain FIRE.
-    action_map = jnp.array([
-        0,  # 0: NOOP -> NOOP
-        1,  # 1: FIRE -> FIRE
-        0,  # 2: FORWARD -> NOOP (no upward movement)
-        2,  # 3: RIGHT -> RIGHT
-        3,  # 4: LEFT -> LEFT
-        4,  # 5: BACKWARD -> DOWN / Shield
-        2,  # 6: FORWARD_RIGHT -> RIGHT
-        3,  # 7: FORWARD_LEFT -> LEFT
-        2,  # 8: BACKWARD_RIGHT -> RIGHT
-        3,  # 9: BACKWARD_LEFT -> LEFT
-        1,  # 10: FORWARD_FIRE -> FIRE
-        1,  # 11: RIGHT_FIRE -> FIRE
-        1,  # 12: LEFT_FIRE -> FIRE
-        1,  # 13: BACKWARD_FIRE -> FIRE
-        1,  # 14: FORWARD_RIGHT_FIRE -> FIRE
-        1,  # 15: FORWARD_LEFT_FIRE -> FIRE
-        1,  # 16: BACKWARD_RIGHT_FIRE -> FIRE
-        1,  # 17: BACKWARD_LEFT_FIRE -> FIRE
-    ], dtype=jnp.int32)
-
-    return action_map[ego_action]
+# Targetable entities only (boss blocks are structural LABEL_NOOP and are omitted).
+PHOENIX_MAX_OBJECTS = 21
 
 
 class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
     def __init__(self, env):
-        # 8 Enemies + 8 Enemy Bullets + 1 Boss + 204 Boss Blocks = 221 objects
-        super().__init__(env, max_objects=221) 
+        # 8 enemies + 8 bullets + 1 boss (+ padding to PHOENIX_MAX_OBJECTS)
+        super().__init__(env, max_objects=PHOENIX_MAX_OBJECTS)
+
+    def _substep_env_state_events(self, prev_env_state, next_env_state):
+        """
+        Detect enemy kills this substep.
+
+        Kill signal: an enemy newly enters dying state (phoenix_dying or bat_dying
+        goes False → True). Boss kill: boss.active goes True → False.
+        Returns a 17-element mask: [enemies(8) | bullets(8) | boss(1)].
+        """
+        prev_dying = prev_env_state.phoenix_dying | prev_env_state.bat_dying
+        next_dying = next_env_state.phoenix_dying | next_env_state.bat_dying
+        enemy_killed = jnp.logical_and(~prev_dying, next_dying)
+        prev_x = prev_env_state.enemies_x
+        on_screen = jnp.logical_and(prev_x > _SCROLL_X_MIN, prev_x < _SCROLL_X_MAX)
+        enemy_killed = jnp.logical_and(enemy_killed, on_screen).astype(jnp.int32)
+
+        bullet_killed = jnp.zeros(8, dtype=jnp.int32)
+
+        boss_killed = jnp.logical_and(
+            prev_env_state.boss.active, ~next_env_state.boss.active
+        ).astype(jnp.int32)
+        boss_killed = jnp.expand_dims(boss_killed, axis=0)
+
+        return jnp.concatenate([enemy_killed, bullet_killed, boss_killed])  # (17,)
+
+    def _stamp_events_on_observation(self, semantic_obs, kill_mask):
+        if kill_mask is None:
+            return semantic_obs
+        # Game layout: [enemies(8) | bullets(8) | boss(1)] = 17 slots, padded to
+        # game_max_objects=20, then +1 meta NOOP → was_killed shape [stack, 21].
+        pad = jnp.zeros(self.game_max_objects - kill_mask.shape[0], dtype=jnp.int32)
+        was_killed_with_noop = self._with_meta_event_padding(
+            jnp.concatenate([kill_mask.astype(jnp.int32), pad])
+        )
+        objects = semantic_obs.objects
+        new_wk = objects.was_killed.at[-1].set(was_killed_with_noop)
+        return semantic_obs.replace(objects=objects.replace(was_killed=new_wk))
+
+    def _patch_player_facing_and_shield(self, obs, env_state):
+        """Fix facing to up and stamp visible shield-on into ``player.state``.
+
+        ``player.state > 0`` means the ability sprite is active (same cue a human
+        sees). Cooldown is *not* exposed — that would leak hidden timer state.
+        """
+        player = obs.raw_observation.player
+        base = self._unwrap_env_state(env_state)
+        shield_on = jnp.asarray(base.invincibility).astype(jnp.bool_)
+        shield_flag = jnp.where(shield_on, jnp.int32(1), jnp.int32(0))
+        st = jnp.asarray(getattr(player, "state", 0))
+        if st.ndim == 0:
+            new_state = jnp.full_like(player.x, shield_flag).astype(jnp.int32)
+        else:
+            new_state = jnp.full_like(st, shield_flag).astype(st.dtype)
+        new_player = player.replace(
+            orientation=jnp.full_like(player.orientation, 90.0),
+            state=new_state,
+        )
+        return obs.replace(raw_observation=obs.raw_observation.replace(player=new_player))
 
     def step(self, state, action):
-        """Override step to trick the network's orientation distribution."""
+        """Override step to stabilize facing and expose shield-active on player.state."""
         obs, env_state, reward, done, info = super().step(state, action)
-        
-        # Force orientation to 90.0 (Right) so the Seaquest-trained network doesn't panic
-        new_player = obs.raw_observation.player.replace(
-            orientation=jnp.full_like(obs.raw_observation.player.orientation, 90.0)
-        )
-        new_raw_obs = obs.raw_observation.replace(player=new_player)
-        obs = obs.replace(raw_observation=new_raw_obs)
-        
+        obs = self._patch_player_facing_and_shield(obs, env_state)
         return obs, env_state, reward, done, info
 
     def reset(self, key=None):
-        """Override reset to trick the network's orientation distribution."""
+        """Override reset to stabilize facing and expose shield-active on player.state."""
         obs, env_state = super().reset(key)
-        
-        new_player = obs.raw_observation.player.replace(
-            orientation=jnp.full_like(obs.raw_observation.player.orientation, 90.0)
-        )
-        new_raw_obs = obs.raw_observation.replace(player=new_player)
-        obs = obs.replace(raw_observation=new_raw_obs)
-        
+        obs = self._patch_player_facing_and_shield(obs, env_state)
         return obs, env_state
 
     def _extract_frame_objects(self, obs) -> LabeledObjectObservation:
-        enemies = obs.enemies                 
-        enemy_bullets = obs.enemy_projectiles 
-        boss = obs.boss                       
-        boss_blocks = obs.boss_blocks         
+        enemies = obs.enemies
+        enemy_bullets = obs.enemy_projectiles
+        boss = obs.boss
 
-        # Derive counts from the underlying JAXAtari observation to stay robust
         num_enemies = enemies.x.shape[-1]
         num_enemy_bullets = enemy_bullets.x.shape[-1]
-        num_blocks = boss_blocks.x.shape[-1]
 
         enemy_labels = jnp.full(num_enemies, LABEL_DESTROY, dtype=jnp.int32)
         enemy_bullet_labels = jnp.full(num_enemy_bullets, LABEL_AVOID, dtype=jnp.int32)
         boss_label = jnp.array([LABEL_DESTROY], dtype=jnp.int32)
-        # Boss blocks should not be treated as direct DESTROY targets; they act as
-        # environmental structure around the boss.
-        block_labels = jnp.full(num_blocks, LABEL_NOOP, dtype=jnp.int32)
 
         def extract_single_field(field):
             return jnp.expand_dims(field, axis=0) if field.ndim == 0 else field
@@ -163,29 +150,58 @@ class PhoenixSemanticWrapper(JaxatariSemanticBaseWrapper):
         boss_h = extract_single_field(boss.height)
         boss_active = extract_single_field(boss.active)
 
-        # Carry over per-object state so the policy can treat dying enemies as inactive.
+        # DESTROY aims at an enemy-sized AABB centered on the boss sprite so the
+        # skill tunnels into the body (same 6×5 as formation enemies) instead of
+        # hugging the large 32×16 boss box.
+        enemy_w0 = enemies.width.reshape(-1)[0].astype(boss_w.dtype)
+        enemy_h0 = enemies.height.reshape(-1)[0].astype(boss_h.dtype)
+        boss_cx = boss_x + boss_w // 2
+        boss_cy = boss_y + boss_h // 2
+        boss_w = jnp.full_like(boss_w, enemy_w0)
+        boss_h = jnp.full_like(boss_h, enemy_h0)
+        boss_x = boss_cx - boss_w // 2
+        boss_y = boss_cy - boss_h // 2
+
+        # Mark enemy active=0 the moment the death animation starts (state >= 4)
+        # so the meta-policy stops selecting dying enemies before sprite removal.
+        enemy_alive = (enemies.state < DYING_STATE_THRESHOLD).astype(enemies.active.dtype)
+        enemy_active = jnp.logical_and(enemies.active, enemy_alive).astype(enemies.active.dtype)
+
         # Only enemies use the special state encoding; others get a neutral default (0).
         enemy_state = enemies.state
         zeros_enemy_bullets_state = jnp.zeros_like(enemy_bullets.x, dtype=jnp.int32)
         zeros_boss_state = jnp.zeros_like(boss_x, dtype=jnp.int32)
-        zeros_blocks_state = jnp.zeros_like(boss_blocks.x, dtype=jnp.int32)
 
-        all_x = jnp.concatenate([enemies.x, enemy_bullets.x, boss_x, boss_blocks.x])
-        all_y = jnp.concatenate([enemies.y, enemy_bullets.y, boss_y, boss_blocks.y])
-        all_w = jnp.concatenate([enemies.width, enemy_bullets.width, boss_w, boss_blocks.width])
-        all_h = jnp.concatenate([enemies.height, enemy_bullets.height, boss_h, boss_blocks.height])
-        all_active = jnp.concatenate([enemies.active, enemy_bullets.active, boss_active, boss_blocks.active])
-        all_labels = jnp.concatenate([enemy_labels, enemy_bullet_labels, boss_label, block_labels])
+        all_x = jnp.concatenate([enemies.x, enemy_bullets.x, boss_x])
+        all_y = jnp.concatenate([enemies.y, enemy_bullets.y, boss_y])
+        all_w = jnp.concatenate([enemies.width, enemy_bullets.width, boss_w])
+        all_h = jnp.concatenate([enemies.height, enemy_bullets.height, boss_h])
+        all_active = jnp.concatenate([enemy_active, enemy_bullets.active, boss_active])
+        all_labels = jnp.concatenate([enemy_labels, enemy_bullet_labels, boss_label])
         all_state = jnp.concatenate(
-            [enemy_state, zeros_enemy_bullets_state, zeros_boss_state, zeros_blocks_state]
+            [enemy_state, zeros_enemy_bullets_state, zeros_boss_state]
         )
+        # All Phoenix objects fly across the playfield and can reach the screen edges.
+        all_offscreen = jnp.ones(all_x.shape[0], dtype=jnp.int32)
+
+        pad_size = self.game_max_objects - all_x.shape[0]
+        pad_x = jnp.zeros(pad_size, dtype=all_x.dtype)
+        pad_y = jnp.zeros(pad_size, dtype=all_y.dtype)
+        pad_w = jnp.zeros(pad_size, dtype=all_w.dtype)
+        pad_h = jnp.zeros(pad_size, dtype=all_h.dtype)
+        pad_active = jnp.zeros(pad_size, dtype=all_active.dtype)
+        pad_labels = jnp.full(pad_size, LABEL_NOOP, dtype=jnp.int32)
+        pad_state = jnp.zeros(pad_size, dtype=all_state.dtype)
+        pad_offscreen = jnp.zeros(pad_size, dtype=jnp.int32)
 
         return LabeledObjectObservation(
-            x=all_x,
-            y=all_y,
-            width=all_w,
-            height=all_h,
-            active=all_active,
-            semantic_label=all_labels,
-            state=all_state,
+            x=jnp.concatenate([all_x, pad_x]),
+            y=jnp.concatenate([all_y, pad_y]),
+            width=jnp.concatenate([all_w, pad_w]),
+            height=jnp.concatenate([all_h, pad_h]),
+            active=jnp.concatenate([all_active, pad_active]),
+            semantic_label=jnp.concatenate([all_labels, pad_labels]),
+            state=jnp.concatenate([all_state, pad_state]),
+            can_go_offscreen=jnp.concatenate([all_offscreen, pad_offscreen]),
+            was_killed=jnp.zeros(all_x.shape[0] + pad_size, dtype=jnp.int32),
         )

@@ -3,14 +3,30 @@ import threading
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pygame
-from jaxatari.renderers import JAXGameRenderer
 import wandb
+from jaxtari.renderers import JAXGameRenderer
+
+from concept_based_learning.environments.skill_rewards import SKILL_REWARD_ORDER
+from concept_based_learning.training.episode_stats import unwrap_base_env_state
+
+# Force pygame into headless mode before the first pygame.init() call so the
+# video renderer works on cluster nodes that have no display server.
+# SDL_VIDEODRIVER=dummy uses a null video driver; SDL_AUDIODRIVER=dummy
+# suppresses the matching audio warning. Both are no-ops if a real display
+# is already available.
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+import pygame  # noqa: E402  (must come after the env vars are set)
+
+pygame.init()
+pygame.font.init()
 
 CURRENT_VIDEO_THREAD = None
 
-# Skill index 0 = DESTROY, 1 = COLLECT, 2 = AVOID (matches label_to_skill_idx in train_agent)
-SKILL_NAMES = ["DESTROY", "COLLECT", "AVOID"]
+# Skill index = label - 1 (matches label_to_skill_idx in train_agent).
+# Derived from the global skill registry so new skills appear automatically.
+SKILL_NAMES = [name.upper() for name in SKILL_REWARD_ORDER]
 TARGET_OUTLINE_COLOR = (255, 50, 50)  # Red, same as label_visualizer LABEL_DESTROY
 TARGET_OUTLINE_WIDTH = 3
 
@@ -80,7 +96,9 @@ class SidebarRenderer:
 def video_callback(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                    target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                    wandb_step: int | None = None, distances=None, angles=None,
-                   video_output_path: str | None = None):
+                   video_output_path: str | None = None,
+                   draw_target_outline_overlay: bool = True,
+                   pov_overlay=None):
     global CURRENT_VIDEO_THREAD
 
     if renderer is None:
@@ -105,6 +123,8 @@ def video_callback(states, active_agents, combined_qs, dones, step, renderer, mo
             "distances": distances,
             "angles": angles,
             "video_output_path": video_output_path,
+            "draw_target_outline_overlay": draw_target_outline_overlay,
+            "pov_overlay": pov_overlay,
         },
         daemon=False  # Keep as non-daemon but with proper cleanup
     )
@@ -116,21 +136,37 @@ def add_active_agent(screen, active_agent_num: int):
     screen.blit(text_surface, (300, 300))
 
 
-def draw_target_outline(frame, target_idx, obj_x, obj_y, obj_w, obj_h, active):
+def draw_target_outline(
+    frame,
+    target_idx,
+    obj_x,
+    obj_y,
+    obj_w,
+    obj_h,
+    active,
+    *,
+    min_game_px: int = 1,
+):
     """
     Draw a red outline around the current target object on a single frame.
     frame: (3, H, W) numpy uint8 RGB
     target_idx: int index into object arrays
     obj_x, obj_y, obj_w, obj_h, active: 1D arrays of length max_objects
+    min_game_px: minimum bbox width/height in game pixels (centred on object)
     """
     if target_idx < 0 or target_idx >= len(active) or not active[target_idx]:
         return frame
     x = int(obj_x[target_idx])
     y = int(obj_y[target_idx])
-    w = int(obj_w[target_idx])
-    h = int(obj_h[target_idx])
+    w = max(int(obj_w[target_idx]), int(min_game_px))
+    h = max(int(obj_h[target_idx]), int(min_game_px))
     if w <= 0 or h <= 0:
         return frame
+    # Centre inflated rect on the object's geometric centre.
+    cx = float(obj_x[target_idx]) + float(obj_w[target_idx]) / 2.0
+    cy = float(obj_y[target_idx]) + float(obj_h[target_idx]) / 2.0
+    x = int(round(cx - w / 2.0))
+    y = int(round(cy - h / 2.0))
     _, H, W = frame.shape
     # Clip to frame bounds
     x1 = max(0, min(x, W - 1))
@@ -156,9 +192,6 @@ def add_distance_angle_text(frame, distance, angle):
     if distance is None or np.isnan(distance):
         return frame
 
-    pygame.init()
-    pygame.font.init()
-
     _, H, W = frame.shape
     surf = pygame.surfarray.make_surface(frame.transpose(2, 1, 0))
 
@@ -177,33 +210,47 @@ def add_distance_angle_text(frame, distance, angle):
 
 def _write_frames_mp4(frames_chw: np.ndarray, path: str, fps: int = 30) -> None:
     """frames_chw: (T, C, H, W) uint8 RGB."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    frames_thwc = np.transpose(frames_chw, (0, 2, 3, 1)).astype(np.uint8)
     try:
         import cv2
+
+        _, _, h, w = frames_chw.shape
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
+        if not writer.isOpened():
+            raise RuntimeError(f"cv2.VideoWriter could not open path {path!r}")
+        for fr in frames_thwc:
+            writer.write(cv2.cvtColor(fr, cv2.COLOR_RGB2BGR))
+        writer.release()
+        print(f"Saved video to {path}")
+        return
     except ImportError:
-        print(
-            "Warning: OpenCV (cv2) not installed; cannot save video to disk. "
-            "Install opencv-python or enable wandb logging."
-        )
-        return
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    _, _, h, w = frames_chw.shape
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
-    if not writer.isOpened():
-        print(f"Warning: cv2.VideoWriter could not open path {path!r}")
-        return
-    for i in range(len(frames_chw)):
-        fr = np.transpose(frames_chw[i], (1, 2, 0))
-        fr_bgr = cv2.cvtColor(fr, cv2.COLOR_RGB2BGR)
-        writer.write(fr_bgr)
-    writer.release()
-    print(f"Saved video to {path}")
+        pass
+    except Exception as e:
+        print(f"Warning: cv2 video write failed ({e}); trying imageio.")
+
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        try:
+            import imageio
+        except ImportError:
+            print(
+                "Warning: neither OpenCV nor imageio is available; "
+                "cannot save video to disk."
+            )
+            return
+    imageio.mimsave(path, frames_thwc, fps=fps)
+    print(f"Saved video to {path} (imageio)")
 
 
 def collect_video(states, active_agents, combined_qs, dones, step, renderer, modif=False,
                   target_obj_idxs=None, objects_bbox=None, video_key: str | None = None,
                   wandb_step: int | None = None, distances=None, angles=None,
-                  video_output_path: str | None = None):
+                  video_output_path: str | None = None,
+                  draw_target_outline_overlay: bool = True,
+                  pov_overlay=None):
     try:
         use_wandb = wandb.run is not None
         if not use_wandb and not video_output_path:
@@ -213,11 +260,10 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             video_folder = f"{wandb.run.dir}/media/videos/"
             os.makedirs(video_folder, exist_ok=True)
         
-        # Unwrap the exact wrapper chain: LogWrapper -> SubPolicyAdapter -> SeaquestConceptWrapper -> AtariWrapper -> base state
-        # LogWrapper stores the next env's state in .env_state
-        states = states.atari_state
-        # AtariWrapper (nested after SeaquestConceptWrapper) stores the base state in .env_state
-        states = states.env_state
+        # SemanticState.atari_state may be AtariState or PixelAndObjectCentricState
+        # (when pixel_embed adds PixelAndObjectObsWrapper). Unwrap recursively.
+        atari_state = states.atari_state if hasattr(states, "atari_state") else states
+        states = unwrap_base_env_state(atari_state)
 
         # Handle 'dones' to determine video length
         # If dones is (Time, Envs), take the first environment
@@ -260,7 +306,7 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
             # Note: If the video is rotated/flipped, the transpose may need adjustment.
 
         # [Optional: Target outline] Draw red outline around current target object per frame
-        if target_obj_idxs is not None and objects_bbox is not None:
+        if draw_target_outline_overlay and target_obj_idxs is not None and objects_bbox is not None:
             ox, oy, ow, oh, oactive = objects_bbox
             for i in range(len(frames)):
                 idx = int(target_obj_idxs[i])
@@ -268,6 +314,54 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
                     frames[i], idx,
                     ox[i], oy[i], ow[i], oh[i], oactive[i],
                 )
+
+        # [Optional: POV overlay] facing cone / direction arrow / line to selected target
+        # (same drawing as live visualizer detail mode via apply_pov_overlay).
+        if pov_overlay is not None and target_obj_idxs is not None:
+            from concept_based_learning.visualizer_debug_panel import (
+                LiveVizSnapshot,
+                apply_pov_overlay,
+            )
+
+            no_target_idx = int(pov_overlay.get("no_target_idx", -1))
+            player_xy = pov_overlay["player_xy"]
+            target_xy_list = pov_overlay["target_xy"]
+            facing_deg = pov_overlay["facing_deg"]
+            chosen_ego = pov_overlay["chosen_ego"]
+            virtual_facing_deg = pov_overlay.get("virtual_facing_deg")
+            for i in range(len(frames)):
+                f = float(facing_deg[i]) if i < len(facing_deg) else float("nan")
+                vf = (
+                    float(virtual_facing_deg[i])
+                    if virtual_facing_deg is not None and i < len(virtual_facing_deg)
+                    else float("nan")
+                )
+                t_xy = target_xy_list[i] if i < len(target_xy_list) else None
+                ang = float(angles[i]) if angles is not None else 0.0
+                if np.isnan(ang):
+                    ang = 0.0
+                snap = LiveVizSnapshot(
+                    frame_rgb=np.transpose(frames[i], (1, 2, 0)),
+                    overlay_text="",
+                    target_obj_idx=int(target_obj_idxs[i]),
+                    no_target_idx=no_target_idx,
+                    global_action=0,
+                    active_skill_idx=int(active_agents[i]) if active_agents is not None else 0,
+                    chosen_ego=int(chosen_ego[i]) if i < len(chosen_ego) else 0,
+                    distance=float(distances[i]) if distances is not None else float("nan"),
+                    angle_rad=ang,
+                    ego_obs=None,
+                    q_vals_active=None,
+                    skill_name="",
+                    ego_name="",
+                    facing_deg=None if np.isnan(f) else f,
+                    player_xy=tuple(map(float, player_xy[i])),
+                    target_xy=None if t_xy is None else (float(t_xy[0]), float(t_xy[1])),
+                    frame_idx=i,
+                    virtual_facing_deg=None if np.isnan(vf) else vf,
+                )
+                overlaid = apply_pov_overlay(snap.frame_rgb, snap, show_fov_wedge=True)
+                frames[i] = np.transpose(overlaid, (2, 0, 1))
 
         # [Optional: Skill input overlay] Show distance and angle at bottom-center
         if distances is not None and angles is not None:
@@ -308,16 +402,24 @@ def collect_video(states, active_agents, combined_qs, dones, step, renderer, mod
         traceback.print_exc()
 
 
-def wait_for_video_finish():
-    """Call this at the end of your script to prevent crashing."""
+def wait_for_video_finish(timeout: float | None = 600.0):
+    """Block until the background video thread finishes (or ``timeout`` seconds).
+
+    End-of-run videos (esp. skills_only with long episodes + sidebar) often take
+    well over 30s; a short timeout caused ``wandb.finish()`` to close the run
+    before ``wandb.Video`` was logged, so skills_only runs appeared to have no
+    videos. Default timeout is 10 minutes; pass ``None`` to wait indefinitely.
+    """
     global CURRENT_VIDEO_THREAD
     if CURRENT_VIDEO_THREAD is not None and CURRENT_VIDEO_THREAD.is_alive():
         print("Waiting for background video rendering to finish...")
         try:
-            # Use timeout to prevent hanging
-            CURRENT_VIDEO_THREAD.join(timeout=30)
+            CURRENT_VIDEO_THREAD.join(timeout=timeout)
             if CURRENT_VIDEO_THREAD.is_alive():
-                print("Warning: Video rendering still in progress but timeout reached.")
+                print(
+                    "Warning: Video rendering still in progress but timeout "
+                    f"reached ({timeout}s)."
+                )
             else:
                 print("Video rendering done.")
         except Exception as e:

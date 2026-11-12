@@ -2,6 +2,13 @@ import argparse
 import os
 from pathlib import Path
 
+# Pin a real SDL video driver *before* importing pygame. If this is left unset
+# (or set to "dummy"), pygame can initialize a headless surface and never show
+# a window — which looks like "pygame is running but nothing spawns".
+_sdl_driver = str(os.environ.get("SDL_VIDEODRIVER", "")).lower().strip()
+if _sdl_driver in ("", "dummy", "auto"):
+    os.environ["SDL_VIDEODRIVER"] = "x11"
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,23 +18,124 @@ from omegaconf import OmegaConf
 from safetensors.flax import load_file
 from flax.traverse_util import unflatten_dict
 
-from concept_based_learning.ego_action_space import fire_ego_action_indices
-from concept_based_learning.egocentric_transformation import (
-    EGO_OBS_CHANNELS_PER_FRAME,
-    get_ego_obs,
+from concept_based_learning.baselines.fixed_ego_skills import (
+    select_fixed_ego_action,
+    uses_fixed_skill_policy,
 )
-from concept_based_learning.environments.datatypes import ConceptObservation
-from concept_based_learning.environments.env_manager import EnvManager
+from concept_based_learning.observations.action_space import (
+    fire_ego_action_indices,
+    make_realized_ego_mask_fn,
+    make_legal_ego_mask_fn,
+    legal_ego_mask_mode_from_config,
+    mask_q_with_legal_ego,
+)
+from concept_based_learning.observations.egocentric import (
+    MAX_DIST,
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT,
+    aabb_surface_gap_px,
+    ego_distance_bins,
+    ego_distance_flag_thresholds_px,
+    ego_obs_channels_per_frame,
+    ego_pose_channels_per_frame,
+    _get_player,
+    _center_y,
+    _uses_bottom_edge_y,
+    configure_ego_obs_from_config,
+    distance_pixels_from_feature,
+    get_ego_obs,
+    slice_skill_ego,
+    using_legacy_ego_obs,
+)
+from concept_based_learning.training.skill_params import (
+    as_per_skill_param_list,
+    dense0_in_dim,
+)
+from concept_based_learning.environments.datatypes import (
+    ConceptObservation,
+    EgocentricAction,
+    LABEL_AVOID,
+    configure_label_routing_from_config,
+)
+from concept_based_learning.environments.env_manager import (
+    EnvManager,
+    align_config_max_objects,
+    resolve_no_target_game_action,
+)
+from concept_based_learning.environments.heuristics import (
+    initial_policy_state,
+    resolve_heuristic_target_fn,
+    resolve_heuristic_with_mission_fn,
+    resolve_heuristic_with_state_fn,
+)
 from concept_based_learning.environments.choppercommand.choppercommand_policy import (
     debug_heuristic_snapshot,
 )
-#from concept_based_learning.basic_mlp_network import MetaQNetwork
-from concept_based_learning.affordance_pointer_network import MetaQNetwork
-from concept_based_learning.train_agent import QNetwork
+from concept_based_learning.networks.meta_factory import create_meta_network
+from concept_based_learning.networks.meta_network import flatten_raw_observation
+from concept_based_learning.paper_eval.env_metrics import (
+    aggregate_episode_metrics,
+    init_episode_metrics,
+    make_metric_fns,
+    metrics_to_python,
+)
+from concept_based_learning.environments.meta_target_mask import (
+    build_meta_target_mask,
+    is_meta_fire_target,
+    is_meta_noop_target,
+    meta_fire_game_action,
+    meta_fire_target_enabled,
+    meta_fire_target_idx as resolve_meta_fire_target_idx,
+    meta_noop_target_enabled,
+    meta_noop_target_idx as resolve_meta_noop_target_idx,
+)
+from concept_based_learning.environments.meta_target_persistence import (
+    commit_meta_targets,
+    compute_meta_target_locked,
+    meta_q_stickiness_enabled,
+    meta_target_persist_enabled,
+)
+from concept_based_learning.networks.skill_network import (
+    FLAT_OC_SKILL_INPUT_MODES,
+    PIXEL_SKILL_INPUT_MODES,
+    QNetwork,
+    q_network_from_config,
+)
+from concept_based_learning.observations.meta_oc_simple import build_flat_oc_skill_obs
+from concept_based_learning.observations.ego_context import (
+    EGO_CONTEXT_SKILL_INPUT_MODES,
+    EGO_OC_NATIVE,
+    OC_NATIVE_TARGET_FRONT,
+    build_ego_context_skill_obs,
+    build_ego_oc_native_obs,
+    build_oc_native_target_front_obs,
+)
+from concept_based_learning.observations.pov_relative import (
+    resolve_action_mappers,
+    using_pov_relative,
+)
+from concept_based_learning.observations.target_conditioning import build_oc_psi_features
+from concept_based_learning.observations.pov_fixed_bilateral import using_pov_fixed_bilateral
+from concept_based_learning.observations.pov_facing_frame import (
+    using_ego_pose_xy,
+    using_pov_facing_frame,
+)
+from concept_based_learning.training.episode_stats import unwrap_base_env_state
 from concept_based_learning.video_recorder import (
     video_callback,
     wait_for_video_finish,
     draw_target_outline,
+)
+from concept_based_learning.visualizer_debug_panel import (
+    LiveVizSnapshot,
+    PANEL_WIDTH,
+    apply_pov_overlay,
+    blank_detail_panel,
+    compute_facing_frame_viz,
+    compute_fixed_bilateral_viz,
+    compose_display,
+    player_facing_deg,
+    render_detail_panel,
 )
 
 
@@ -36,9 +144,222 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def load_base_config():
+POV_MODE_CHOICES = ("auto", "relative", "fixed-bilateral", "facing")
+
+
+def apply_visualizer_config_overrides(
+    config: dict,
+    *,
+    no_outline: bool = False,
+    black_pixel: bool = False,
+    heuristic_mode: str | None = None,
+    pov_mode: str = "auto",
+    pov_bilateral_axis: str | None = None,
+    ego_phi_bins: int | None = None,
+    ego_pose_xy: bool | None = None,
+    legal_action_mask: bool | None = None,
+) -> dict:
+    """Apply CLI ablation flags for live/recorded visualizer runs."""
+    if no_outline:
+        config["SKILL_PIXEL_PAINT_TARGET_OUTLINE"] = False
+        config["VISUALIZER_DRAW_TARGET_OUTLINE"] = False
+    if black_pixel:
+        config["SKILL_PIXEL_BLACKOUT"] = True
+    if heuristic_mode is not None:
+        config["HEURISTIC_MODE"] = str(heuristic_mode)
+
+    mode = str(pov_mode or "auto").lower().strip()
+    if mode not in POV_MODE_CHOICES:
+        raise ValueError(
+            f"Unknown pov_mode={pov_mode!r} (expected one of {POV_MODE_CHOICES})"
+        )
+    if mode == "relative":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = False
+        config["USE_POV_FACING_FRAME"] = False
+    elif mode == "fixed-bilateral":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = True
+        config["USE_POV_FACING_FRAME"] = False
+        config["USE_EGO_VELOCITY_FEATURES"] = False
+    elif mode == "facing":
+        config["USE_POV_RELATIVE_MAPPER"] = True
+        config["USE_POV_FIXED_BILATERAL"] = False
+        config["USE_POV_FACING_FRAME"] = True
+        config["USE_EGO_VELOCITY_FEATURES"] = False
+
+    if pov_bilateral_axis is not None:
+        config["POV_BILATERAL_AXIS"] = str(pov_bilateral_axis).lower().strip()
+
+    if ego_phi_bins is not None:
+        if int(ego_phi_bins) <= 0:
+            config["EGO_PSI_ANGLE_BINS"] = None
+        else:
+            config["EGO_PSI_ANGLE_BINS"] = int(ego_phi_bins)
+
+    if ego_pose_xy is not None:
+        config["EGO_POSE_XY"] = bool(ego_pose_xy)
+
+    if legal_action_mask is not None:
+        config["EGO_LEGAL_ACTION_MASK"] = bool(legal_action_mask)
+
+    return config
+
+
+def _prepare_pygame_env() -> None:
+    """Strip IME hooks and pin a real SDL video driver before display init."""
+    for key in ("SDL_IM_MODULE", "XMODIFIERS", "GTK_IM_MODULE", "QT_IM_MODULE"):
+        os.environ.pop(key, None)
+    # "dummy" creates no window; force a real driver unless the user set one.
+    current = str(os.environ.get("SDL_VIDEODRIVER", "")).lower().strip()
+    if current in ("", "dummy", "auto"):
+        if (
+            os.environ.get("WAYLAND_DISPLAY")
+            and str(os.environ.get("XDG_SESSION_TYPE", "")).lower() == "wayland"
+            and not os.environ.get("DISPLAY")
+        ):
+            os.environ["SDL_VIDEODRIVER"] = "wayland"
+        else:
+            os.environ["SDL_VIDEODRIVER"] = "x11"
+    # Prefer a centered window on multi-monitor setups (left-edge is easy to miss).
+    os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+
+
+def _raise_pygame_window() -> None:
+    """Best-effort focus/raise so the SDL window is not buried under other apps."""
+    import subprocess
+
+    try:
+        wm = pygame.display.get_wm_info()
+    except pygame.error:
+        return
+    wid = wm.get("window")
+    if not wid:
+        return
+    hex_id = hex(int(wid))
+    for argv in (
+        ["wmctrl", "-i", "-a", hex_id],
+        ["xdotool", "windowactivate", "--sync", str(int(wid))],
+        ["xdotool", "windowraise", str(int(wid))],
+    ):
+        try:
+            subprocess.run(
+                argv,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            continue
+
+
+def bootstrap_pygame_window(
+    window_name: str = "Hierarchical PQN Live Visualization",
+    window_size: tuple[int, int] = (480, 630),
+) -> tuple:
     """
-    Load the global config and the default Seaquest experiment config,
+    Create the pygame window *before* heavy JAX/GPU work / OpenCV import.
+
+    Returns ``(screen, font)``. Calling this early avoids SDL picking the
+    ``dummy`` driver (no window) once JAX or OpenCV have touched the process.
+    """
+    _prepare_pygame_env()
+    # If a previous init selected the wrong driver, tear it down and retry.
+    if pygame.get_init() or pygame.display.get_init():
+        try:
+            if pygame.display.get_init() and pygame.display.get_driver() == "dummy":
+                pygame.display.quit()
+                pygame.quit()
+        except pygame.error:
+            pygame.quit()
+
+    if not pygame.get_init():
+        pygame.init()
+    elif not pygame.display.get_init():
+        pygame.display.init()
+
+    pygame.display.set_caption(window_name)
+    flags = pygame.SHOWN | pygame.RESIZABLE
+    screen = pygame.display.set_mode(window_size, flags)
+    font = pygame.font.Font(None, 28)
+    screen.fill((20, 20, 20))
+    splash = font.render("Starting visualizer...", True, (240, 240, 240))
+    screen.blit(splash, (16, window_size[1] // 2 - 10))
+    pygame.display.flip()
+    pygame.event.pump()
+    _raise_pygame_window()
+
+    driver = pygame.display.get_driver()
+    active = pygame.display.get_active()
+    print(
+        f"[live-viz] pygame window opened "
+        f"(driver={driver}, size={screen.get_size()}, active={active}, "
+        f"DISPLAY={os.environ.get('DISPLAY')}, "
+        f"SDL_VIDEODRIVER={os.environ.get('SDL_VIDEODRIVER')})",
+        flush=True,
+    )
+    if driver == "dummy":
+        raise RuntimeError(
+            "pygame selected the SDL 'dummy' video driver, so no window will appear. "
+            "Unset SDL_VIDEODRIVER (or set it to x11), ensure DISPLAY is set, "
+            "or re-run with --display opencv."
+        )
+    if not active:
+        print(
+            "[live-viz] warning: pygame window reports inactive — "
+            "it may be on another monitor/workspace; try Alt-Tab",
+            flush=True,
+        )
+    return screen, font
+
+
+def _print_ego_runtime_summary(config: dict) -> None:
+    """Log ego/mapper knobs actually wired into globals (debug OOD visualizer runs)."""
+    from concept_based_learning.observations.pov_fixed_bilateral import (
+        active_bilateral_axis,
+        using_pov_fixed_bilateral,
+    )
+
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    clip_note = f"distance_clip={clip_px}px" if clip_px is not None else "distance_clip=off"
+    stack = int(config.get("FRAME_STACK_SIZE", 4))
+    ch = ego_obs_channels_per_frame()
+    if using_pov_facing_frame():
+        if using_ego_pose_xy():
+            pose_note = "pose=xy(fwd,lat)"
+        elif config.get("EGO_PSI_ANGLE_BINS"):
+            pose_note = f"pose=polar(phi_bins{config.get('EGO_PSI_ANGLE_BINS')})"
+        elif config.get("EGO_PSI_ANGLE_SCALAR"):
+            pose_note = "pose=polar(phi_deg_scalar)"
+        else:
+            pose_note = "pose=polar(phi_sincos)"
+        pov_note = f"POV=facing_fps({pose_note})"
+    elif using_pov_fixed_bilateral():
+        phi_note = (
+            f"phi_bins{config.get('EGO_PSI_ANGLE_BINS')}"
+            if config.get("EGO_PSI_ANGLE_BINS")
+            else "phi_sincos"
+        )
+        pov_note = (
+            f"POV=fixed_bilateral(axis={active_bilateral_axis()}, {phi_note})"
+        )
+    else:
+        pov_note = f"POV=relative({using_pov_relative()})"
+    print(
+        "Visualizer ego runtime: "
+        f"{ch} ch/frame × stack {stack} = {ch * stack} dim | "
+        f"{pov_note} | {clip_note} | "
+        f"blocking={config.get('USE_EGO_BLOCKING_FEATURES')} | "
+        f"weapon={config.get('USE_EGO_WEAPON_FEATURES')} | "
+        f"legal_ego_mask={config.get('EGO_LEGAL_ACTION_MASK')} | "
+        f"heuristic={config.get('HEURISTIC_MODE')} | "
+        f"env={config.get('ENV_NAME')}"
+    )
+
+def load_base_config(experiment: str | None = None):
+    """
+    Load the global config and an experiment config,
     then merge them into a single flat dict similar to `single_run` in main.py.
     """
     root = _project_root()
@@ -47,18 +368,16 @@ def load_base_config():
     global_cfg_path = root / "configs" / "config.yaml"
     global_cfg = OmegaConf.load(global_cfg_path)
 
-    # Determine default experiment from Hydra-style defaults list
-    # Hydra-style defaults is a list of DictConfig entries.
-    # They are not plain dicts, so we must not restrict the type check.
-    defaults = global_cfg.get("defaults", [])
-    exp_name = None
-    for entry in defaults:
-        # `entry` is typically a DictConfig; use .get instead of isinstance(..., dict).
-        if hasattr(entry, "get"):
-            maybe_exp = entry.get("experiment", None)
-            if maybe_exp is not None:
-                exp_name = maybe_exp
-                break
+    exp_name = experiment
+    if exp_name is None:
+        # Determine default experiment from Hydra-style defaults list
+        defaults = global_cfg.get("defaults", [])
+        for entry in defaults:
+            if hasattr(entry, "get"):
+                maybe_exp = entry.get("experiment", None)
+                if maybe_exp is not None:
+                    exp_name = maybe_exp
+                    break
     if exp_name is None:
         raise ValueError("Could not find an 'experiment' entry in configs/config.yaml defaults.")
 
@@ -125,6 +444,337 @@ def load_params_from_file(filename):
     return unflatten_dict(flattened_dict, sep=",")
 
 
+def _checkpoint_base_stem(stem: str) -> str:
+    """Strip a skills suffix so sibling meta/config files share the same base name."""
+    if stem.endswith("_skills"):
+        return stem[: -len("_skills")]
+    return stem
+
+
+def find_checkpoint_config_path(model_path: str) -> str | None:
+    """
+    Locate the training config saved next to a checkpoint by main.py
+    (``{base}_config.yaml``).
+    """
+    resolved = resolve_config_path(model_path)
+    if resolved is None:
+        return None
+    candidate = Path(resolved).parent / f"{_checkpoint_base_stem(Path(resolved).stem)}_config.yaml"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _infer_env_name_from_checkpoint_path(model_path: str) -> str | None:
+    """Guess ENV_NAME from ``.../outputs/models/<env>/...`` layout used by main.py."""
+    resolved = resolve_config_path(model_path)
+    if resolved is None:
+        return None
+    parent = Path(resolved).parent.name
+    known = {
+        "seaquest",
+        "phoenix",
+        "choppercommand",
+        "spaceinvaders",
+        "montezumarevenge",
+        "montezuma_revenge",
+        "venture",
+        "asterix",
+        "asteroids",
+        "namethisgame",
+        "name_this_game",
+        "timepilot",
+        "time_pilot",
+        # "kaboom",  # deferred: not in upstream jaxatari yet
+        "beamrider",
+        "kangaroo",
+        "freeway",
+        "pong",
+        "tennis",
+        "breakout",
+        "skiing",
+    }
+    return parent if parent in known else None
+
+
+def load_config_for_checkpoint(model_path: str, base_config: dict) -> tuple[dict, bool]:
+    """Merge a saved training config over the visualizer defaults when available."""
+    cfg_path = find_checkpoint_config_path(model_path)
+    if cfg_path is not None:
+        exp_cfg = OmegaConf.load(cfg_path)
+        exp_dict = OmegaConf.to_container(exp_cfg, resolve=True)
+        merged = {**base_config, **exp_dict, **exp_dict.get("alg", {})}
+        print(f"Loaded training config from: {cfg_path}")
+        return merged, True
+
+    env_guess = _infer_env_name_from_checkpoint_path(model_path)
+    if env_guess is not None and base_config.get("ENV_NAME") != env_guess:
+        print(
+            f"No *_config.yaml next to checkpoint; using ENV_NAME={env_guess!r} "
+            f"from parent directory (was {base_config.get('ENV_NAME')!r})."
+        )
+        return {**base_config, "ENV_NAME": env_guess}, False
+    return base_config, False
+
+
+def resolve_tandem_checkpoint_paths(
+    skill_path: str | None,
+    meta_path: str | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve skill and meta checkpoint paths for tandem runs.
+
+    Tandem training writes ``*_skills.safetensors`` and ``*_meta.safetensors``.
+    When only the skills file is passed, auto-load the sibling meta file if present.
+    """
+    if skill_path is None:
+        return None, resolve_config_path(meta_path) if meta_path else None
+    skill_resolved = resolve_config_path(skill_path)
+    if meta_path is not None:
+        return skill_resolved, resolve_config_path(meta_path)
+    meta_candidate = (
+        Path(skill_resolved).parent
+        / f"{_checkpoint_base_stem(Path(skill_resolved).stem)}_meta.safetensors"
+    )
+    if meta_candidate.is_file():
+        print(f"Auto-detected meta checkpoint: {meta_candidate}")
+        return skill_resolved, str(meta_candidate)
+    return skill_resolved, None
+
+
+def _destroy_skill_idx(config: dict) -> int:
+    names = [str(n) for n in (config.get("SKILL_NAMES") or [])]
+    return names.index("DESTROY") if "DESTROY" in names else 0
+
+
+def _unwrap_stacked_skill_params(params_tree):
+    """Return a single-skill param subtree and the number of stacked skills."""
+    packed = as_per_skill_param_list(params_tree)
+    if packed is not None:
+        return packed[0], len(packed)
+    kernel = params_tree["Dense_0"]["kernel"]
+    arr = np.asarray(kernel)
+    if arr.ndim == 3:
+        num_skills = int(arr.shape[0])
+        single = jax.tree_util.tree_map(lambda x: x[0], params_tree)
+        return single, num_skills
+    return params_tree, 1
+
+
+def infer_skill_hparams_from_params(
+    params_tree,
+    *,
+    skill_input_mode: str = "ego",
+) -> dict:
+    """
+    Infer skill Q-network hyperparameters from a checkpoint parameter tree.
+
+    Expects Flax ``QNetwork`` param keys ``Dense_0`` … ``Dense_{NUM_LAYERS}``.
+
+    ``Dense_0`` input size is egocentric length only for ``ego`` / ``ego_embed``.
+    For ``oc_flat_rel`` it is the flattened relative object-list width (latest
+    frame). For ``oc_embed`` / ``pixel_embed`` it is the embedding width — do
+    **not** treat it as ``channels × FRAME_STACK_SIZE``.
+    """
+    sample, num_skills = _unwrap_stacked_skill_params(params_tree)
+    packed = as_per_skill_param_list(params_tree)
+    dense_indices = sorted(
+        int(key.split("_", 1)[1])
+        for key in sample
+        if key.startswith("Dense_") and key.split("_", 1)[1].isdigit()
+    )
+    if not dense_indices:
+        raise ValueError("Skill checkpoint has no Dense_* layers; cannot infer architecture.")
+
+    first = np.asarray(sample[f"Dense_{dense_indices[0]}"]["kernel"])
+    last = np.asarray(sample[f"Dense_{dense_indices[-1]}"]["kernel"])
+    if packed is not None:
+        in_dims = [dense0_in_dim(p) for p in packed]
+        first_in = max(in_dims)
+    else:
+        in_dims = None
+        first_in = int(first.shape[0])
+    hidden_size = int(first.shape[-1])
+    ego_action_dim = int(last.shape[-1])
+    num_layers = len(dense_indices) - 1
+
+    mode = str(skill_input_mode or "ego").lower().strip()
+    frame_stack_size = None
+    ckpt_ego_in = None
+    if mode in ("ego", "ego_embed"):
+        channels_per_frame = ego_obs_channels_per_frame()
+        # Only infer stack from Dense_0 when the *full* ego channel count divides
+        # the checkpoint width. Falling back to pose-only channels invents bogus
+        # stacks when eval drops weapon extras (e.g. 20 / pose2 → 10 instead of 4).
+        if channels_per_frame > 0 and first_in % channels_per_frame == 0:
+            frame_stack_size = first_in // channels_per_frame
+        ckpt_ego_in = first_in
+    elif mode in FLAT_OC_SKILL_INPUT_MODES or mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+        # Prebuilt vector (flat OC / ego + context) — exact width check only.
+        ckpt_ego_in = first_in
+
+    out = {
+        "HIDDEN_SIZE": hidden_size,
+        "NUM_LAYERS": num_layers,
+        "EGO_ACTION_DIM": ego_action_dim,
+        "NUM_SKILLS": num_skills,
+        "FRAME_STACK_SIZE": frame_stack_size,
+        "_ckpt_ego_in": ckpt_ego_in,
+        "_ckpt_dense0_in": first_in,
+    }
+    if in_dims is not None:
+        out["_ckpt_skill_in_dims"] = in_dims
+    return out
+
+
+def ensure_skill_params_stack(params_tree, num_skills: int):
+    """Ensure skill params are stacked along axis 0 for ``jax.vmap`` over skills.
+
+    Packed per-skill checkpoints (different ``Dense_0`` widths) stay a tuple.
+    """
+    packed = as_per_skill_param_list(params_tree)
+    if packed is not None:
+        if len(packed) != int(num_skills):
+            raise ValueError(
+                f"Packed skill checkpoint has {len(packed)} heads, config NUM_SKILLS={num_skills}"
+            )
+        return tuple(packed)
+    kernel = np.asarray(params_tree["Dense_0"]["kernel"])
+    if kernel.ndim == 2:
+        return jax.tree_util.tree_map(
+            lambda p: jnp.stack([p] * num_skills, axis=0),
+            params_tree,
+        )
+    return params_tree
+
+
+def apply_skill_q_all(
+    skill_network,
+    params_tree,
+    ego_full,
+    *,
+    target_idx,
+    pixel_obs=None,
+    objects=None,
+    raw_obs=None,
+    oc_psi=None,
+    stack_size: int,
+    destroy_skill_idx: int = 0,
+):
+    """Apply every skill head. Slices pose-only ego for non-DESTROY when packed."""
+    packed = as_per_skill_param_list(params_tree)
+    if packed is None:
+
+        def apply_one(params_for_skill):
+            return skill_network.apply(
+                {"params": params_for_skill},
+                ego_full,
+                train=False,
+                target_idx=target_idx,
+                pixel_obs=pixel_obs,
+                objects=objects,
+                raw_obs=raw_obs,
+                oc_psi=oc_psi,
+            )
+
+        return jax.vmap(apply_one)(params_tree)
+
+    qs = []
+    for i, params_for_skill in enumerate(packed):
+        ego_i = slice_skill_ego(
+            ego_full,
+            i,
+            stack_size=int(stack_size),
+            destroy_skill_idx=int(destroy_skill_idx),
+        )
+        qs.append(
+            skill_network.apply(
+                {"params": params_for_skill},
+                ego_i,
+                train=False,
+                target_idx=target_idx,
+                pixel_obs=pixel_obs,
+                objects=objects,
+                raw_obs=raw_obs,
+                oc_psi=oc_psi,
+            )
+        )
+    return jnp.stack(qs)
+
+
+def align_config_with_skill_checkpoint(config: dict, params_tree) -> dict:
+    """Override skill architecture fields so the network matches the checkpoint."""
+    # Sync ego channel globals before inferring stack size from Dense_0.
+    configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    inferred = infer_skill_hparams_from_params(params_tree, skill_input_mode=mode)
+    ckpt_ego_in = inferred.pop("_ckpt_ego_in", None)
+    inferred.pop("_ckpt_dense0_in", None)
+    inferred.pop("_ckpt_skill_in_dims", None)
+    frame_stack_size = inferred.get("FRAME_STACK_SIZE")
+    # Never clobber FRAME_STACK_SIZE with a bogus embed_dim / channel quotient.
+    updated = {
+        **config,
+        **{
+            k: v
+            for k, v in inferred.items()
+            if v is not None and k != "FRAME_STACK_SIZE"
+        },
+    }
+    if frame_stack_size is not None:
+        prev = int(config.get("FRAME_STACK_SIZE", frame_stack_size))
+        if prev != int(frame_stack_size):
+            print(
+                f"Using checkpoint FRAME_STACK_SIZE={frame_stack_size} "
+                f"(default config had {config.get('FRAME_STACK_SIZE')})."
+            )
+        updated["FRAME_STACK_SIZE"] = int(frame_stack_size)
+    if int(config.get("HIDDEN_SIZE", -1)) != int(updated["HIDDEN_SIZE"]):
+        print(
+            f"Using checkpoint HIDDEN_SIZE={updated['HIDDEN_SIZE']} "
+            f"(default config had {config.get('HIDDEN_SIZE')})."
+        )
+    if ckpt_ego_in is not None:
+        updated["_ckpt_ego_in"] = ckpt_ego_in
+    return updated
+
+
+def validate_skill_checkpoint_ego_dim(config: dict, ego_feat_dim: int) -> None:
+    """Fail fast when the eval env's skill observation length does not match the checkpoint."""
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    ckpt_in = config.pop("_ckpt_ego_in", None)
+    # oc_embed / pixel Dense_0 is embed width — not comparable to feat length.
+    if mode not in (
+        "ego", "ego_embed", *FLAT_OC_SKILL_INPUT_MODES, *EGO_CONTEXT_SKILL_INPUT_MODES
+    ):
+        return
+    if ckpt_in is None:
+        return
+    if int(ego_feat_dim) == int(ckpt_in):
+        return
+    if mode in FLAT_OC_SKILL_INPUT_MODES or mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+        raise ValueError(
+            f"Skill checkpoint expects MLP input size {ckpt_in}, but this environment's "
+            f"{mode} observation length is {ego_feat_dim}."
+        )
+    channels_per_frame = ego_obs_channels_per_frame()
+    need_stack = (
+        ckpt_in // channels_per_frame
+        if ckpt_in % channels_per_frame == 0
+        else "?"
+    )
+    raise ValueError(
+        f"Skill checkpoint expects MLP input size {ckpt_in}, but this environment's "
+        f"egocentric observation length is {ego_feat_dim}. "
+        f"Ego length is {channels_per_frame} × frame stack "
+        f"(FRAME_STACK_SIZE={config.get('FRAME_STACK_SIZE')}). "
+        f"Set FRAME_STACK_SIZE to {need_stack} if the stack is wrong, and keep "
+        "USE_EGO_WEAPON_FEATURES / USE_EGO_BLOCKING_FEATURES / EGO_POSE_XY / "
+        "EGO_PSI_ANGLE_BINS matching the Seaquest training checkpoint "
+        "(weapon extras still emit 2 channels on Pong/Beamrider). "
+        "Prefer --paper-config with PAPER_EVAL_ARCHITECTURE_OF so train knobs stay aligned."
+    )
+
+
 def create_eval_env(config):
     """
     Create the evaluation environment + renderer using the same semantic
@@ -132,19 +782,223 @@ def create_eval_env(config):
 
     The choice of environment (Seaquest vs others) is driven by
     `config["ENV_NAME"]`, which can be overridden on the command line.
+
+    Paper / greedy metrics always use **unclipped** env rewards so hierarchical
+    skill evals are comparable to flat PQN and to ``avg_game_return``.
     """
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
-    env, renderer = manager.make_env(env_name, config, train=False)
+    eval_cfg = dict(config)
+    eval_cfg["CLIP_REWARD"] = False
+    env, renderer = manager.make_env(env_name, eval_cfg, train=False)
+    align_config_max_objects(config, env, env_name=env_name)
     return env, renderer
 
 
 def label_to_skill_idx(label, num_skills: int):
+    """Delegate to the shared mapping in ``environments.datatypes``."""
+    from concept_based_learning.environments.datatypes import (
+        label_to_skill_idx as _shared,
+    )
+
+    return _shared(label, num_skills)
+
+
+def _is_idle_meta_target(
+    target_obj_idx: int,
+    *,
+    no_target_idx: int,
+    meta_noop_idx: int,
+    meta_use_noop: bool,
+    max_objects: int,
+) -> bool:
+    """True for sentinel / trailing meta-NOOP (empty-scene idle).
+
+    Skills-only configs often omit ``META_USE_NOOP_TARGET`` while the heuristic
+    still returns the last slot as idle (synthetic xy=(0,0)). Treat that like
+    ``NO_TARGET`` so we do not aim / outline at the top-left corner.
     """
-    Map semantic labels to skill indices, matching the convention in train_agent.make_train:
-    0 = NOOP, 1 = DESTROY, 2 = COLLECT, 3 = AVOID  → skills 0..num_skills-1 (no NOOP skill).
+    t = int(target_obj_idx)
+    if t == int(no_target_idx):
+        return True
+    if meta_use_noop and t == int(meta_noop_idx):
+        return True
+    mo = int(max_objects)
+    if mo > 0 and t == mo - 1:
+        return True
+    return False
+
+
+def _hud_target_distance_px(raw_obs, objects, target_obj_idx: int, last_frame_ego) -> float:
+    """True AABB surface-gap px for overlays (bins/flags make ego[0] non-invertible)."""
+    if ego_distance_bins() is not None or ego_distance_flag_thresholds_px():
+        player = _get_player(raw_obs)
+        y_bottom = _uses_bottom_edge_y(raw_obs)
+        return float(
+            aabb_surface_gap_px(
+                player.x[-1],
+                player.y[-1],
+                player.width[-1],
+                player.height[-1],
+                objects.x[-1, target_obj_idx],
+                objects.y[-1, target_obj_idx],
+                objects.width[-1, target_obj_idx],
+                objects.height[-1, target_obj_idx],
+                y_is_bottom_edge=y_bottom,
+            )
+        )
+    return distance_pixels_from_feature(float(last_frame_ego[0]))
+
+
+def _skill_input_from_obs(config: dict, raw_obs, objects, target_idx, native_vec=None):
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode == EGO_OC_NATIVE:
+        return build_ego_oc_native_obs(
+            raw_obs,
+            objects,
+            target_idx,
+            native_vec,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+    if mode == OC_NATIVE_TARGET_FRONT:
+        return build_oc_native_target_front_obs(
+            objects,
+            target_idx,
+            native_vec,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+    if mode == "oc_native":
+        from concept_based_learning.observations.native_oc_stack import (
+            oc_native_skill_features,
+        )
+
+        if native_vec is None:
+            raise ValueError("oc_native skills require the aligned native OC vector.")
+        return oc_native_skill_features(
+            native_vec, target_idx, int(config.get("MAX_OBJECTS", 35))
+        )
+    if mode in ("ego", "ego_embed", *PIXEL_SKILL_INPUT_MODES):
+        return get_ego_obs(raw_obs, objects, target_idx)
+    if mode in EGO_CONTEXT_SKILL_INPUT_MODES:
+        return build_ego_context_skill_obs(
+            raw_obs,
+            objects,
+            target_idx,
+            mode=mode,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+    if mode in FLAT_OC_SKILL_INPUT_MODES:
+        max_objects = int(config.get("MAX_OBJECTS", 35))
+        return build_flat_oc_skill_obs(
+            raw_obs, objects, target_idx, max_objects=max_objects, mode=mode
+        )
+    if mode == "oc_embed":
+        return flatten_raw_observation(raw_obs)
+    raise ValueError(
+        f"Unknown SKILL_INPUT_MODE={mode!r}. "
+        "Expected one of: ego, ego_embed, ego_scene_rel, ego_abs_pos, ego_abs_target, oc_embed, "
+        "oc_flat_rel, oc_flat_rel_role, "
+        "pixel_embed, pixel_embed_cond."
+    )
+
+
+def _skill_pixel_obs_from_obs(config: dict, obs):
     """
-    return jnp.clip(label - 1, 0, num_skills - 1)
+    Pixel tensor for skill Q-network forward passes during eval/visualization.
+
+    Only pixel modes read this input; ego/oc modes must pass None (not raw_observation,
+    which is a structured game observation object).
+    """
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode not in PIXEL_SKILL_INPUT_MODES:
+        return None
+    if obs.pixel_observation is None:
+        raise ValueError(
+            f"SKILL_INPUT_MODE={mode!r} requires pixel_observation from "
+            "PixelAndObjectObsWrapper, but it is missing."
+        )
+    return obs.pixel_observation
+
+
+def _skill_oc_psi_from_obs(config: dict, raw_obs, objects, target_idx, max_objects: int):
+    """Aim-offset sin/cos(ψ) for OC POV skill heads (player facing vs target bearing)."""
+    mode = str(config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+    if mode != "oc_embed" or not bool(config.get("SKILL_OC_PSI_FEATURES", False)):
+        return None
+    return build_oc_psi_features(
+        raw_obs,
+        objects,
+        target_idx,
+        max_objects=max_objects,
+    )
+
+
+def _propose_meta_target(
+    obs,
+    config,
+    meta_network,
+    meta_params,
+    meta_mask_hook,
+    forced_target_hook,
+    no_target_idx,
+    *,
+    last_target_idx=None,
+    suspended_mission_idx=None,
+    persist_steps_remaining=None,
+):
+    """Greedy meta proposal before optional persistence override."""
+    if last_target_idx is None:
+        last_target_idx = no_target_idx
+    if suspended_mission_idx is None:
+        suspended_mission_idx = no_target_idx
+    if persist_steps_remaining is None:
+        persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+
+    last_b = jnp.asarray([last_target_idx], dtype=jnp.int32)
+    suspended_b = jnp.asarray([suspended_mission_idx], dtype=jnp.int32)
+    steps_b = jnp.asarray([persist_steps_remaining], dtype=jnp.int32)
+    target_locked = compute_meta_target_locked(
+        last_b,
+        suspended_b,
+        obs.objects,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=int(config["MAX_OBJECTS"]),
+        persist_steps_remaining=steps_b,
+    )[0]
+
+    meta_in = (
+        obs.native_oc_vector
+        if str(config.get("META_INPUT_MODE", "")).lower().strip() == "oc_native"
+        else obs.raw_observation
+    )
+    meta_q_vals = meta_network.apply(
+        {"params": meta_params},
+        meta_in,
+        obs.objects,
+        train=False,
+        target_locked=target_locked,
+        pixel_obs=obs.pixel_observation,
+    )
+    active_mask = build_meta_target_mask(
+        obs.objects,
+        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+        config,
+        hook=meta_mask_hook,
+    )
+    if active_mask.ndim > 1:
+        active_mask = active_mask[0]
+
+    any_active = jnp.any(active_mask)
+    valid_qs = jnp.where(active_mask, meta_q_vals, -jnp.inf)
+    target_idx = jnp.argmax(valid_qs)
+    target_idx = forced_target_hook(
+        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
+        jnp.expand_dims(target_idx, 0),
+        config,
+    )[0]
+    proposed = jnp.where(any_active, target_idx, no_target_idx).astype(jnp.int32)
+    return proposed, meta_q_vals, active_mask
 
 
 def _select_target_with_meta(
@@ -155,35 +1009,564 @@ def _select_target_with_meta(
     meta_mask_hook,
     forced_target_hook,
     no_target_idx,
+    *,
+    last_target_idx=None,
+    persist_steps_remaining=None,
+    suspended_mission_idx=None,
 ):
     """Select a target index using a learned meta-policy checkpoint."""
-    meta_q_vals = meta_network.apply(
-        {"params": meta_params},
+    if last_target_idx is None:
+        last_target_idx = no_target_idx
+    if persist_steps_remaining is None:
+        persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+    if suspended_mission_idx is None:
+        suspended_mission_idx = no_target_idx
+
+    proposed, meta_q_vals, active_mask = _propose_meta_target(
+        obs,
+        config,
+        meta_network,
+        meta_params,
+        meta_mask_hook,
+        forced_target_hook,
+        no_target_idx,
+        last_target_idx=last_target_idx,
+        suspended_mission_idx=suspended_mission_idx,
+        persist_steps_remaining=persist_steps_remaining,
+    )
+    if not (meta_target_persist_enabled(config) or meta_q_stickiness_enabled(config)):
+        return proposed, persist_steps_remaining, suspended_mission_idx
+
+    last_b = jnp.asarray([last_target_idx], dtype=jnp.int32)
+    proposed_b = jnp.asarray([proposed], dtype=jnp.int32)
+    q_b = meta_q_vals[jnp.newaxis, ...] if meta_q_vals.ndim == 1 else meta_q_vals
+    mask_b = active_mask[jnp.newaxis, ...] if active_mask.ndim == 1 else active_mask
+    steps_b = jnp.asarray([persist_steps_remaining], dtype=jnp.int32)
+    suspended_b = jnp.asarray([suspended_mission_idx], dtype=jnp.int32)
+
+    committed, new_steps, new_suspended = commit_meta_targets(
+        proposed_b,
+        last_b,
+        obs.objects,
+        q_b,
+        mask_b,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=int(config["MAX_OBJECTS"]),
+        persist_steps_remaining=steps_b,
+        suspended_mission_idxs=suspended_b,
+    )
+    return committed[0], new_steps[0], new_suspended[0]
+
+
+def _jax_select_target_with_meta(
+    obs,
+    config,
+    meta_network,
+    meta_params,
+    meta_mask_hook,
+    forced_target_hook,
+    no_target_idx,
+    *,
+    last_target_idx,
+    persist_steps_remaining,
+    suspended_mission_idx,
+):
+    """JAX-traced target selection (no host sync), with optional persistence."""
+    proposed, meta_q_vals, active_mask = _propose_meta_target(
+        obs,
+        config,
+        meta_network,
+        meta_params,
+        meta_mask_hook,
+        forced_target_hook,
+        no_target_idx,
+        last_target_idx=last_target_idx,
+        suspended_mission_idx=suspended_mission_idx,
+        persist_steps_remaining=persist_steps_remaining,
+    )
+    if not meta_target_persist_enabled(config):
+        return proposed, persist_steps_remaining, suspended_mission_idx
+
+    last_b = jnp.asarray([last_target_idx], dtype=jnp.int32)
+    proposed_b = jnp.asarray([proposed], dtype=jnp.int32)
+    q_b = meta_q_vals[jnp.newaxis, ...] if meta_q_vals.ndim == 1 else meta_q_vals
+    mask_b = active_mask[jnp.newaxis, ...] if active_mask.ndim == 1 else active_mask
+    steps_b = jnp.asarray([persist_steps_remaining], dtype=jnp.int32)
+    suspended_b = jnp.asarray([suspended_mission_idx], dtype=jnp.int32)
+    committed, new_steps, new_suspended = apply_meta_target_persistence(
+        proposed_b,
+        last_b,
+        obs.objects,
+        q_b,
+        mask_b,
+        config,
+        no_target_idx=no_target_idx,
+        max_objects=int(config["MAX_OBJECTS"]),
+        persist_steps_remaining=steps_b,
+        suspended_mission_idxs=suspended_b,
+    )
+    return committed[0], new_steps[0], new_suspended[0]
+
+
+def _make_jitted_greedy_episode_runner(
+    env,
+    skill_network,
+    skill_params,
+    config,
+    components,
+    *,
+    meta_network,
+    meta_params,
+    max_frames: int,
+    num_skills: int,
+    ego_action_dim: int,
+    restrict_fire_for_non_destroy: bool,
+):
+    """Compile one full greedy episode (env + meta + skills) into a single JIT call."""
+    env_name = config.get("ENV_NAME", "Seaquest")
+    heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
+    heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
+    use_policy_state = heuristic_with_state is not None
+    no_target_idx = int(components.no_target_idx)
+    action_mapper, _ = resolve_action_mappers(components, config)
+    forced_target_hook = components.forced_target_hook
+    meta_mask_hook = components.meta_mask_hook
+
+    noop_enabled = meta_noop_target_enabled(config)
+    fire_enabled = meta_fire_target_enabled(config)
+    noop_idx = jnp.int32(resolve_meta_noop_target_idx(config))
+    fire_idx = jnp.int32(resolve_meta_fire_target_idx(config))
+    fire_action = jnp.int32(meta_fire_game_action(config))
+    no_target = jnp.int32(no_target_idx)
+    fire_indices = fire_ego_action_indices(ego_action_dim)
+    use_meta = meta_network is not None
+    update_metrics, finalize_metrics = make_metric_fns(env_name, has_semantic_obs=True)
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
+        action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
+        noop_action=int(components.ego_mapper_noop_action),
+        fire_action=int(components.ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
+    fixed_skill_policy = uses_fixed_skill_policy(config)
+
+    def _skill_game_action(obs, target):
+        is_noop = is_meta_noop_target(
+            target, config, noop_idx=int(noop_idx), enabled=noop_enabled
+        )
+        is_fire = is_meta_fire_target(
+            target, config, fire_idx=int(fire_idx), enabled=fire_enabled
+        )
+        idle_action = jnp.int32(resolve_no_target_game_action(config, components))
+        safe_target = jnp.where(target == no_target, 0, target)
+        raw_label = obs.objects.semantic_label[-1, safe_target]
+        sk_idx = label_to_skill_idx(raw_label, num_skills)
+
+        if fixed_skill_policy:
+            ego_a = select_fixed_ego_action(
+                config,
+                sk_idx,
+                obs.raw_observation,
+                obs.objects,
+                safe_target,
+            )
+            if use_legal_ego_mask:
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation, safe_target, obs.objects
+                )
+                # Fall back to NOOP if the chosen intention cannot be realized.
+                ego_a = jnp.where(legal[ego_a], ego_a, jnp.int32(0))
+        else:
+            ego_obs = _skill_input_from_obs(
+                config,
+                obs.raw_observation,
+                obs.objects,
+                safe_target,
+                native_vec=obs.native_oc_vector,
+            )
+            pixel_obs = _skill_pixel_obs_from_obs(config, obs)
+
+            q_all = apply_skill_q_all(
+                skill_network,
+                skill_params,
+                ego_obs,
+                target_idx=safe_target,
+                pixel_obs=pixel_obs,
+                objects=obs.objects,
+                raw_obs=obs.raw_observation,
+                oc_psi=_skill_oc_psi_from_obs(
+                    config,
+                    obs.raw_observation,
+                    obs.objects,
+                    safe_target,
+                    int(config.get("MAX_OBJECTS", 35)),
+                ),
+                stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+                destroy_skill_idx=_destroy_skill_idx(config),
+            )
+            q_skill = q_all[sk_idx]
+            if restrict_fire_for_non_destroy:
+                q_skill = jax.lax.cond(
+                    sk_idx == 0,
+                    lambda q: q,
+                    lambda q: q.at[fire_indices].set(-jnp.inf),
+                    q_skill,
+                )
+            if use_legal_ego_mask:
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation, safe_target, obs.objects
+                )
+                q_skill = mask_q_with_legal_ego(q_skill, legal)
+            ego_a = jnp.argmax(q_skill)
+        # Match the final thesis reruns: a heuristic selecting the trailing
+        # NOOP slot must idle before action mapping. Learned tandem selectors
+        # retain their original evaluation behavior.
+        if not use_meta:
+            trailing_noop = jnp.int32(int(config["MAX_OBJECTS"]) - 1)
+            ego_a = jnp.where(target == trailing_noop, jnp.int32(0), ego_a)
+        game_a = action_mapper(ego_a, obs.raw_observation, target, obs.objects)
+        game_a = jnp.where(is_fire, fire_action, game_a)
+        # Idle / no-target: BeamRider needs FIRE to advance levels; default NOOP.
+        game_a = jnp.where(target == no_target, idle_action, game_a)
+        game_a = jnp.where(is_noop, 0, game_a)
+        return game_a.astype(jnp.int32)
+
+    def run_episode(rng):
+        rng, reset_key = jax.random.split(rng)
+        obs, state = env.reset(reset_key)
+        prev_target = no_target
+        mission_target = no_target
+        persist_steps = jnp.array(0, dtype=jnp.int32)
+        suspended_mission = jnp.array(no_target, dtype=jnp.int32)
+
+        def cond(carry):
+            (
+                _state,
+                _obs,
+                _rng,
+                _ret,
+                done,
+                _prev,
+                _mission,
+                _policy_state,
+                _steps,
+                _suspended,
+                step,
+                _metrics,
+            ) = carry
+            return jnp.logical_and(step < max_frames, jnp.logical_not(done))
+
+        def body(carry):
+            (
+                state,
+                obs,
+                rng,
+                ret,
+                done,
+                prev_target,
+                mission_target,
+                policy_state,
+                persist_steps,
+                suspended_mission,
+                step,
+                metrics,
+            ) = carry
+            rng, step_key = jax.random.split(rng)
+
+            if use_meta:
+                target, persist_steps, suspended_mission = _jax_select_target_with_meta(
+                    obs,
+                    config,
+                    meta_network,
+                    meta_params,
+                    meta_mask_hook,
+                    forced_target_hook,
+                    no_target,
+                    last_target_idx=prev_target,
+                    persist_steps_remaining=persist_steps,
+                    suspended_mission_idx=suspended_mission,
+                )
+            elif use_policy_state:
+                target, policy_state = heuristic_with_state(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target,
+                    policy_state,
+                    step_key,
+                )
+                target = target.astype(jnp.int32)
+                target = forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.expand_dims(target, 0),
+                    config,
+                )[0].astype(jnp.int32)
+            elif heuristic_with_mission is not None:
+                target, mission_target = heuristic_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target,
+                    mission_target,
+                    step_key,
+                )
+                target = target.astype(jnp.int32)
+                mission_target = mission_target.astype(jnp.int32)
+                target = forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.expand_dims(target, 0),
+                    config,
+                )[0].astype(jnp.int32)
+            else:
+                target = jnp.ravel(
+                    heuristic_target(
+                        obs.raw_observation,
+                        obs.objects,
+                        prev_target,
+                        step_key,
+                    )
+                )[0].astype(jnp.int32)
+                target = forced_target_hook(
+                    jax.tree_util.tree_map(
+                        lambda x: jnp.expand_dims(x, 0), obs.raw_observation
+                    ),
+                    jnp.expand_dims(target, 0),
+                    config,
+                )[0].astype(jnp.int32)
+
+            game_a = _skill_game_action(obs, target)
+            new_obs, new_state, reward, step_done, _info = env.step(state, game_a)
+            metrics = update_metrics(metrics, state, new_state, new_obs, reward)
+            new_done = jnp.logical_or(done, step_done)
+            target = jnp.where(new_done, no_target, target)
+            mission_target = jnp.where(new_done, no_target, mission_target)
+            policy_state = jax.lax.cond(
+                new_done,
+                lambda ps: initial_policy_state(no_target_idx),
+                lambda ps: policy_state,
+                policy_state,
+            )
+            persist_steps = jnp.where(new_done, jnp.array(0, dtype=jnp.int32), persist_steps)
+            suspended_mission = jnp.where(
+                new_done, jnp.array(no_target, dtype=jnp.int32), suspended_mission
+            )
+            return (
+                new_state,
+                new_obs,
+                rng,
+                ret + reward,
+                new_done,
+                target,
+                mission_target,
+                policy_state,
+                persist_steps,
+                suspended_mission,
+                step + 1,
+                metrics,
+            )
+
+        init_policy_state = initial_policy_state(no_target_idx)
+        init = (
+            state,
+            obs,
+            rng,
+            jnp.array(0.0),
+            False,
+            prev_target,
+            mission_target,
+            init_policy_state,
+            persist_steps,
+            suspended_mission,
+            0,
+            init_episode_metrics(),
+        )
+        final = jax.lax.while_loop(cond, body, init)
+        metrics = finalize_metrics(final[11], final[0])
+        return final[3], metrics
+
+    return jax.jit(run_episode)
+
+
+def run_greedy_eval_episodes(
+    config,
+    params_tree=None,
+    meta_params=None,
+    *,
+    num_episodes: int = 5,
+    num_seeds: int = 3,
+    base_seed: int | None = None,
+    max_frames: int | None = None,
+    progress: bool = True,
+    on_episode_done=None,
+) -> dict:
+    """
+    Greedy hierarchical eval on the fair eval wrapper (no sticky actions, no episodic life).
+
+    Runs ``num_seeds * num_episodes`` full episodes and returns aggregate score stats.
+    Meta is greedy argmax when ``meta_params`` is set; otherwise the env heuristic is used.
+
+    Each episode is one JIT-compiled ``while_loop`` (not a slow Python step loop).
+    """
+    configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
+
+    num_skills = int(config["NUM_SKILLS"])
+    ego_action_dim = int(config["EGO_ACTION_DIM"])
+    hidden_size = int(config["HIDDEN_SIZE"])
+    num_layers = int(config["NUM_LAYERS"])
+    base_seed = int(config["SEED"] if base_seed is None else base_seed)
+    restrict_fire_for_non_destroy = bool(
+        config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
+    )
+    # Match video rollout cap; 27000 Python steps × NN forward ≈ hours per env.
+    max_frames = int(max_frames or config.get("EVAL_MAX_FRAMES", 2000))
+
+    env, _renderer = create_eval_env(config)
+    env_name = config.get("ENV_NAME", "Seaquest")
+    manager = EnvManager()
+    components = manager.get_components(env_name)
+
+    skill_network = q_network_from_config(config)
+    meta_network = create_meta_network(config) if meta_params is not None else None
+
+    rng = jax.random.PRNGKey(base_seed)
+    obs, _state = env.reset(rng)
+    dummy_ego = _skill_input_from_obs(
+        config,
         obs.raw_observation,
         obs.objects,
-        train=False,
+        jnp.array(0, dtype=jnp.int32),
+        native_vec=obs.native_oc_vector,
     )
-    active_mask = obs.objects.active[-1] > 0.5
-    active_mask = meta_mask_hook(
-        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
-        jnp.expand_dims(active_mask, 0),
-        config,
-    )[0]
-    meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
-    if meta_use_noop_target and 0 <= meta_noop_target_idx < int(config["MAX_OBJECTS"]):
-        active_mask = active_mask.at[meta_noop_target_idx].set(True)
+    validate_skill_checkpoint_ego_dim(config, int(dummy_ego.shape[-1]))
+    if params_tree is not None:
+        params_tree = ensure_skill_params_stack(params_tree, num_skills)
+    else:
+        skill_vars = skill_network.init(
+            jax.random.PRNGKey(base_seed + 1), dummy_ego, train=False
+        )
+        params_tree = jax.tree_util.tree_map(
+            lambda p: jnp.stack([p] * num_skills, axis=0),
+            skill_vars["params"],
+        )
 
-    any_active = jnp.any(active_mask)
-    valid_qs = jnp.where(active_mask, meta_q_vals, -jnp.inf)
-    target_idx = jnp.argmax(valid_qs)
-    target_idx = forced_target_hook(
-        jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), obs.raw_observation),
-        jnp.expand_dims(target_idx, 0),
+    run_episode = _make_jitted_greedy_episode_runner(
+        env,
+        skill_network,
+        params_tree,
         config,
-    )[0]
-    target_idx = jnp.where(any_active, target_idx, no_target_idx)
-    return int(target_idx)
+        components,
+        meta_network=meta_network,
+        meta_params=meta_params,
+        max_frames=max_frames,
+        num_skills=num_skills,
+        ego_action_dim=ego_action_dim,
+        restrict_fire_for_non_destroy=restrict_fire_for_non_destroy,
+    )
+
+    total_runs = num_seeds * num_episodes
+    ep_seeds = [
+        base_seed + seed_idx * 10_000 + ep_idx * 997
+        for seed_idx in range(num_seeds)
+        for ep_idx in range(num_episodes)
+    ]
+    # Batch all eval episodes on one GPU. Same seed formula as the sequential
+    # path. Cross-game transfers still need separate processes / GPUs.
+    parallel = bool(config.get("EVAL_PARALLEL_EPISODES", True)) and total_runs > 1
+    if progress:
+        mode = str(config.get("SKILL_POLICY_MODE", "learned"))
+        how = f"{total_runs} episodes in parallel" if parallel else "sequential episodes"
+        print(
+            f"  Compiling greedy eval (max {max_frames} steps/episode, "
+            f"skill_policy={mode}, {how})...",
+            flush=True,
+        )
+
+    episode_returns: list[float] = []
+    episode_metrics: list[dict[str, float]] = []
+    if parallel:
+        keys = jnp.stack([jax.random.PRNGKey(s) for s in ep_seeds])
+        run_batch = jax.jit(jax.vmap(run_episode))
+        if progress:
+            print(
+                f"  Greedy eval batch {total_runs}/{total_runs} "
+                f"({num_seeds} seeds × {num_episodes} eps)...",
+                flush=True,
+            )
+        returns_j, metrics_j = run_batch(keys)
+        returns_j, metrics_j = jax.device_get((returns_j, metrics_j))
+        for i, ep_return in enumerate(np.asarray(returns_j).tolist()):
+            ep_metrics = metrics_to_python(
+                {k: np.asarray(v)[i] for k, v in metrics_j.items()}
+                if isinstance(metrics_j, dict)
+                else jax.tree_util.tree_map(lambda x, i=i: x[i], metrics_j)
+            )
+            episode_returns.append(float(ep_return))
+            episode_metrics.append(ep_metrics)
+            if on_episode_done is not None:
+                on_episode_done()
+            if progress:
+                seed_idx = i // max(1, num_episodes)
+                ep_idx = i % max(1, num_episodes)
+                extra = ""
+                if "seaquest" in str(env_name).lower():
+                    extra = (
+                        f" kills={ep_metrics.get('env_kills', 0):.0f}"
+                        f" rescues={ep_metrics.get('env_rescues', 0):.0f}"
+                        f" divers_max={ep_metrics.get('env_divers_max', 0):.0f}"
+                    )
+                print(
+                    f"    [{seed_idx + 1}/{num_seeds} ep {ep_idx + 1}/{num_episodes}] "
+                    f"return={float(ep_return):.2f}{extra}",
+                    flush=True,
+                )
+    else:
+        _ = jax.block_until_ready(run_episode(jax.random.PRNGKey(base_seed + 999))[0])
+        for run_idx, ep_seed in enumerate(ep_seeds, start=1):
+            seed_idx = (run_idx - 1) // max(1, num_episodes)
+            ep_idx = (run_idx - 1) % max(1, num_episodes)
+            if progress:
+                print(
+                    f"  Greedy eval episode {run_idx}/{total_runs} "
+                    f"(seed {seed_idx + 1}/{num_seeds}, ep {ep_idx + 1}/{num_episodes})...",
+                    flush=True,
+                )
+            ep_return_j, ep_metrics_j = run_episode(jax.random.PRNGKey(ep_seed))
+            ep_return = float(jax.device_get(ep_return_j))
+            ep_metrics = metrics_to_python(jax.device_get(ep_metrics_j))
+            episode_returns.append(ep_return)
+            episode_metrics.append(ep_metrics)
+            if on_episode_done is not None:
+                on_episode_done()
+            if progress:
+                extra = ""
+                if "seaquest" in str(env_name).lower():
+                    extra = (
+                        f" kills={ep_metrics.get('env_kills', 0):.0f}"
+                        f" rescues={ep_metrics.get('env_rescues', 0):.0f}"
+                        f" divers_max={ep_metrics.get('env_divers_max', 0):.0f}"
+                    )
+                print(f"    return={ep_return:.2f}{extra}", flush=True)
+
+    arr = np.asarray(episode_returns, dtype=np.float64)
+    return {
+        "mean": float(arr.mean()) if arr.size else float("nan"),
+        "std": float(arr.std()) if arr.size > 1 else 0.0,
+        "min": float(arr.min()) if arr.size else float("nan"),
+        "max": float(arr.max()) if arr.size else float("nan"),
+        "returns": episode_returns,
+        "episode_metrics": episode_metrics,
+        "num_episodes": int(arr.size),
+        "num_seeds": int(num_seeds),
+        "episodes_per_seed": int(num_episodes),
+        "max_frames_per_episode": max_frames,
+        **aggregate_episode_metrics(episode_metrics),
+    }
 
 
 def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None):
@@ -195,6 +1578,8 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
 
     Returns the same tensors that `video_recorder.video_callback` expects.
     """
+    configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -204,11 +1589,17 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
+    meta_noop_target_idx = int(resolve_meta_noop_target_idx(config))
+    meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
+    meta_fire_target_idx = int(resolve_meta_fire_target_idx(config))
+    meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
     restrict_fire_for_non_destroy = bool(
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
     max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
+    frame_stride = max(1, int(config.get("VIDEO_FRAME_STRIDE", 1)))
+    max_env_steps = int(max_frames) * frame_stride
+    stop_on_done = bool(config.get("VIDEO_STOP_ON_DONE", False))
 
     env, renderer = create_eval_env(config)
 
@@ -216,45 +1607,80 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
     components = manager.get_components(env_name)
-    heuristic_target = components.get_heuristic_target
+    heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
+    heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
-    action_mapper = components.action_mapper
+    action_mapper, _ = resolve_action_mappers(components, config)
     forced_target_hook = components.forced_target_hook
-    idle_action_hook = components.idle_action_hook
     meta_mask_hook = components.meta_mask_hook
+    reset_policy_on_life_lost = bool(
+        getattr(components, "reset_policy_on_life_lost", False)
+    )
+    extract_life_lost = components.extract_life_lost
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
+        action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
+        noop_action=int(components.ego_mapper_noop_action),
+        fire_action=int(components.ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
+    fixed_skill_policy = uses_fixed_skill_policy(config)
+    if fixed_skill_policy:
+        print(
+            f"Skill policy mode: {config.get('SKILL_POLICY_MODE')} "
+            "(fixed ego rules; Q-heads unused for action)"
+        )
 
     meta_network = None
     if meta_params is not None:
-        meta_network = MetaQNetwork(
-            action_dim=config["MAX_OBJECTS"],
-            hidden_size=config.get("META_HIDDEN_SIZE", 256),
-            num_skills=num_skills  
-        )
+        meta_network = create_meta_network(config)
 
     # Build the shared skill Q-network (one set of params per skill)
-    skill_network = QNetwork(
-        action_dim=ego_action_dim,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-    )
+    skill_network = q_network_from_config(config)
 
     rng = jax.random.PRNGKey(seed)
     rng, rng_reset = jax.random.split(rng)
     obs, state = env.reset(rng_reset)
 
-    # Infer ego feature dimension from a dummy egocentric observation
-    # using target index 0 as a placeholder.
-    dummy_ego = get_ego_obs(
+    # Infer skill-input feature dimension (ego / oc_flat_rel / …) from a
+    # dummy observation using target index 0 as a placeholder.
+    dummy_ego = _skill_input_from_obs(
+        config,
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        native_vec=obs.native_oc_vector,
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
+    validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
+    if params_tree is not None:
+        params_tree = ensure_skill_params_stack(params_tree, int(config["NUM_SKILLS"]))
 
     # Initialize parameters if none were provided.
     if params_tree is None:
         init_x = jnp.zeros(ego_feat_dim)
-        network_vars = skill_network.init(jax.random.PRNGKey(seed + 1), init_x, train=False)
+        init_pixel = _skill_pixel_obs_from_obs(config, obs)
+        if init_pixel is not None:
+            init_pixel = jnp.expand_dims(init_pixel, 0)
+        init_oc_psi = _skill_oc_psi_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            jnp.array(0, dtype=jnp.int32),
+            int(config.get("MAX_OBJECTS", 35)),
+        )
+        network_vars = skill_network.init(
+            jax.random.PRNGKey(seed + 1),
+            init_x,
+            train=False,
+            target_idx=jnp.array(0, dtype=jnp.int32),
+            pixel_obs=init_pixel,
+            objects=obs.objects,
+            raw_obs=obs.raw_observation if init_oc_psi is not None else None,
+            oc_psi=init_oc_psi,
+        )
         base_params = network_vars["params"]
 
         # Replicate the same initialization across all skills.
@@ -262,6 +1688,32 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             lambda p: jnp.stack([p] * num_skills, axis=0),
             base_params,
         )
+
+    # JIT skill Q eval once — the old per-step jax.vmap.apply was the reason
+    # skills_only end videos appeared to hang after "Recording...".
+    def _apply_all_skills(
+        params_stack,
+        ego_batch,
+        target_idx_arr,
+        pixel_batch,
+        objects_batch,
+        raw_obs_batch,
+        oc_psi_batch,
+    ):
+        return apply_skill_q_all(
+            skill_network,
+            params_stack,
+            ego_batch,
+            target_idx=target_idx_arr,
+            pixel_obs=pixel_batch,
+            objects=objects_batch,
+            raw_obs=raw_obs_batch,
+            oc_psi=oc_psi_batch,
+            stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            destroy_skill_idx=_destroy_skill_idx(config),
+        )
+
+    apply_all_skills = jax.jit(_apply_all_skills)
 
     # Rollout storage
     states_list = []
@@ -276,21 +1728,59 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
     obj_w_list = []
     obj_h_list = []
     obj_active_list = []
+    # POV overlay fields (same geometry as live visualizer detail mode)
+    player_xy_list = []
+    target_xy_list = []
+    facing_deg_list = []
+    chosen_ego_list = []
+    virtual_facing_deg_list = []
 
     # Persistent target index for the heuristic meta-policy
     prev_target_idx = no_target_idx
-    for _ in range(max_frames):
+    mission_target_idx = no_target_idx
+    policy_state = initial_policy_state(no_target_idx)
+    persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+    suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+    print(
+        f"Eval rollout: up to {max_env_steps} env steps, "
+        f"log every {frame_stride} → ≤{max_frames} video frames..."
+    )
+    for step_i in range(max_env_steps):
+        if step_i > 0 and step_i % max(100 * frame_stride, 100) == 0:
+            print(
+                f"  eval step {step_i}/{max_env_steps} "
+                f"(logged {len(states_list)}/{max_frames})..."
+            )
         rng, step_key = jax.random.split(rng)
 
         if meta_network is None:
-            # Heuristic meta-policy selects a target object
-            target_obj_idx = heuristic_target(
-                obs.raw_observation,
-                obs.objects,
-                prev_target_idx,
-                step_key,
-            )
-            target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            if heuristic_with_state is not None:
+                target_obj_idx, policy_state = heuristic_with_state(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    policy_state,
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            elif heuristic_with_mission is not None:
+                target_obj_idx, mission_target_idx = heuristic_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    jnp.array(mission_target_idx, dtype=jnp.int32),
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+                mission_target_idx = int(jnp.ravel(mission_target_idx)[0])
+            else:
+                target_obj_idx = heuristic_target(
+                    obs.raw_observation,
+                    obs.objects,
+                    prev_target_idx,
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
             target_obj_idx = int(
                 forced_target_hook(
                     jax.tree_util.tree_map(
@@ -301,7 +1791,7 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 )[0]
             )
         else:
-            target_obj_idx = _select_target_with_meta(
+            target_obj_idx, persist_steps_remaining, suspended_mission_idx = _select_target_with_meta(
                 obs,
                 config,
                 meta_network,
@@ -309,26 +1799,37 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
                 meta_mask_hook,
                 forced_target_hook,
                 no_target_idx,
+                last_target_idx=prev_target_idx,
+                persist_steps_remaining=persist_steps_remaining,
+                suspended_mission_idx=suspended_mission_idx,
             )
+            target_obj_idx = int(target_obj_idx)
         prev_target_idx = target_obj_idx
 
-        is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
-        if target_obj_idx == no_target_idx or is_meta_noop:
-            # No valid target on screen → NOOP, unless env hook requests an idle override.
-            global_action = 0
-            use_idle_override = idle_action_hook(
-                state,
-                jnp.asarray([0], dtype=jnp.int32),
-                jnp.asarray([True], dtype=jnp.bool_),
-                config,
-            )[0]
-            if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
-                ga = action_mapper(
-                    jnp.asarray(1, dtype=jnp.int32),
-                    obs.raw_observation,
-                    jnp.asarray(0, dtype=jnp.int32),
-                )
-                global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
+        is_idle = _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+        is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
+        chosen_ego = 0
+        if is_idle:
+            # Trailing meta-NOOP → game NOOP; sentinel → env idle action.
+            global_action = (
+                0
+                if int(target_obj_idx) == int(meta_noop_target_idx)
+                or int(target_obj_idx)
+                == int(config.get("MAX_OBJECTS", 35)) - 1
+                else resolve_no_target_game_action(config, components)
+            )
+            active_skill_idx = -1  # HUD: idle, not DESTROY
+            combined_q = np.zeros(num_skills, dtype=np.float32)
+            distance = np.nan
+            angle = np.nan
+        elif is_meta_fire:
+            global_action = meta_fire_game_action
             active_skill_idx = 0
             combined_q = np.zeros(num_skills, dtype=np.float32)
             distance = np.nan
@@ -339,73 +1840,238 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
             active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
 
             # Egocentric observation relative to the target
-            ego_obs = get_ego_obs(
+            ego_obs = _skill_input_from_obs(
+                config,
                 obs.raw_observation,
                 obs.objects,
                 jnp.array(target_obj_idx, dtype=jnp.int32),
+                native_vec=obs.native_oc_vector,
             )
             ego_obs_batch = ego_obs[jnp.newaxis, ...]
+            pixel_obs = _skill_pixel_obs_from_obs(config, obs)
 
             # Extract the most recent frame's distance and angle from the ego features.
             # See `get_ego_obs` / `EGO_OBS_CHANNELS_PER_FRAME` for the per-frame layout.
-            last_frame_ego = ego_obs[-EGO_OBS_CHANNELS_PER_FRAME:]
-            dx_norm = last_frame_ego[0]
-            dy_norm = last_frame_ego[1]
-            # Recover approximate pixel-space dx, dy and distance
-            dx_pix = dx_norm * 160.0
-            dy_pix = dy_norm * 210.0
-            distance = float(jnp.sqrt(dx_pix**2 + dy_pix**2))
-            angle = float(jnp.arctan2(dy_pix, dx_pix))
-
-            # Evaluate all skills' Q-values on the current ego observation.
-            def apply_one(params_for_skill):
-                return skill_network.apply(
-                    {"params": params_for_skill},
-                    ego_obs_batch,
-                    train=False,
+            channels_per_frame = ego_obs_channels_per_frame()
+            last_frame_ego = ego_obs[-channels_per_frame:]
+            if using_legacy_ego_obs():
+                dx_pix = float(last_frame_ego[0] * SCREEN_WIDTH)
+                dy_pix = float(last_frame_ego[1] * SCREEN_HEIGHT)
+                distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
+                angle = float(jnp.arctan2(dy_pix, dx_pix))
+            else:
+                distance = _hud_target_distance_px(
+                    obs.raw_observation,
+                    obs.objects,
+                    int(target_obj_idx),
+                    last_frame_ego,
                 )
+                player = _get_player(obs.raw_observation)
+                y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+                p_cx = float(
+                    player.x[-1]
+                    + player.width[-1] / 2.0
+                )
+                p_cy = float(
+                    _center_y(
+                        player.y[-1],
+                        player.height[-1],
+                        y_is_bottom_edge=y_is_bottom_edge,
+                    )
+                )
+                t_cx = float(
+                    obs.objects.x[-1, target_obj_idx]
+                    + obs.objects.width[-1, target_obj_idx] / 2.0
+                )
+                t_cy = float(
+                    _center_y(
+                        obs.objects.y[-1, target_obj_idx],
+                        obs.objects.height[-1, target_obj_idx],
+                        y_is_bottom_edge=y_is_bottom_edge,
+                    )
+                )
+                angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
-            q_vals = jax.vmap(apply_one)(params_tree)  # [num_skills, 1, ego_action_dim]
-            q_vals = jnp.squeeze(q_vals, axis=1)      # [num_skills, ego_action_dim]
+            target_idx_arr = jnp.asarray([target_obj_idx], dtype=jnp.int32)
+            if fixed_skill_policy:
+                chosen_ego = int(
+                    select_fixed_ego_action(
+                        config,
+                        active_skill_idx,
+                        obs.raw_observation,
+                        obs.objects,
+                        target_idx_arr[0],
+                    )
+                )
+                if use_legal_ego_mask:
+                    legal = legal_ego_mask_fn(
+                        obs.raw_observation,
+                        target_idx_arr[0],
+                        obs.objects,
+                    )
+                    if not bool(legal[chosen_ego]):
+                        chosen_ego = 0
+                combined_q = np.zeros(num_skills, dtype=np.float32)
+            else:
+                # Evaluate all skills' Q-values on the current ego observation.
+                pixel_batch = (
+                    jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
+                )
+                q_vals = apply_all_skills(
+                    params_tree,
+                    ego_obs_batch,
+                    target_idx_arr,
+                    pixel_batch,
+                    obs.objects,
+                    obs.raw_observation,
+                    _skill_oc_psi_from_obs(
+                        config,
+                        obs.raw_observation,
+                        obs.objects,
+                        target_idx_arr[0],
+                        int(config.get("MAX_OBJECTS", 35)),
+                    ),
+                )  # [num_skills, 1, ego_action_dim]
+                q_vals = jnp.squeeze(q_vals, axis=1)  # [num_skills, ego_action_dim]
 
-            combined_q = np.array(jnp.max(q_vals, axis=-1))
+                combined_q = np.array(jnp.max(q_vals, axis=-1))
 
-            fire_indices = fire_ego_action_indices(ego_action_dim)
-            q_active = q_vals[active_skill_idx]
-            if restrict_fire_for_non_destroy and active_skill_idx != 0:
-                q_active = q_active.at[fire_indices].set(-jnp.inf)
+                fire_indices = fire_ego_action_indices(ego_action_dim)
+                q_active = q_vals[active_skill_idx]
+                if restrict_fire_for_non_destroy and active_skill_idx != 0:
+                    q_active = q_active.at[fire_indices].set(-jnp.inf)
+                if use_legal_ego_mask:
+                    legal = legal_ego_mask_fn(
+                        obs.raw_observation,
+                        jnp.array(target_obj_idx, dtype=jnp.int32),
+                        obs.objects,
+                    )
+                    q_active = mask_q_with_legal_ego(q_active, legal)
 
-            chosen_ego = int(jnp.argmax(q_active))
+                chosen_ego = int(jnp.argmax(q_active))
             global_action = int(
                 action_mapper(
                     chosen_ego,
                     obs.raw_observation,
                     jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
                 )
             )
-
         # Step the environment
+        prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
+        obs, state = jax.device_get((obs, state))
+        done = bool(done)
+        life_lost = 0
+        if reset_policy_on_life_lost:
+            life_lost = int(
+                jax.device_get(extract_life_lost(prev_env_state, state))
+            )
 
-        # Record state & debug info
-        states_list.append(state)
-        active_list.append(active_skill_idx)
-        combined_qs_list.append(combined_q.astype(np.float32))
-        dones_list.append(float(done))
-        distances_list.append(distance)
-        angles_list.append(angle)
-        target_obj_idxs_list.append(target_obj_idx)
+        # Keep video length = VIDEO_MAX_FRAMES; subsample env steps via stride.
+        log_frame = (step_i % frame_stride == 0) or done
+        if log_frame:
+            if len(states_list) >= max_frames:
+                break
+            states_list.append(state)
+            active_list.append(active_skill_idx)
+            combined_qs_list.append(combined_q.astype(np.float32))
+            dones_list.append(float(done))
+            distances_list.append(distance)
+            angles_list.append(angle)
+            target_obj_idxs_list.append(target_obj_idx)
 
-        # Object bounding boxes after the step
-        obj_x_list.append(np.array(obs.objects.x[-1]))
-        obj_y_list.append(np.array(obs.objects.y[-1]))
-        obj_w_list.append(np.array(obs.objects.width[-1]))
-        obj_h_list.append(np.array(obs.objects.height[-1]))
-        obj_active_list.append(np.array(obs.objects.active[-1]))
+            # Object bounding boxes after the step
+            obj_x_list.append(np.array(obs.objects.x[-1]))
+            obj_y_list.append(np.array(obs.objects.y[-1]))
+            obj_w_list.append(np.array(obs.objects.width[-1]))
+            obj_h_list.append(np.array(obs.objects.height[-1]))
+            obj_active_list.append(np.array(obs.objects.active[-1]))
+
+            # Mirror live-viz POV overlay inputs (cone / facing arrow / target line).
+            player = _get_player(obs.raw_observation)
+            y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+            p_cx = float(player.x[-1] + player.width[-1] / 2.0)
+            p_cy = float(
+                _center_y(
+                    player.y[-1],
+                    player.height[-1],
+                    y_is_bottom_edge=y_is_bottom_edge,
+                )
+            )
+            t_xy = None
+            if not _is_idle_meta_target(
+                target_obj_idx,
+                no_target_idx=no_target_idx,
+                meta_noop_idx=meta_noop_target_idx,
+                meta_use_noop=meta_use_noop_target,
+                max_objects=int(config.get("MAX_OBJECTS", 35)),
+            ):
+                t_xy = (
+                    float(
+                        obs.objects.x[-1, target_obj_idx]
+                        + obs.objects.width[-1, target_obj_idx] / 2.0
+                    ),
+                    float(
+                        _center_y(
+                            obs.objects.y[-1, target_obj_idx],
+                            obs.objects.height[-1, target_obj_idx],
+                            y_is_bottom_edge=y_is_bottom_edge,
+                        )
+                    ),
+                )
+            facing = None
+            virtual_facing = None
+            if using_pov_facing_frame():
+                facing, _, _, _ = compute_facing_frame_viz(
+                    obs.raw_observation,
+                    env_name,
+                    (p_cx, p_cy),
+                    t_xy,
+                )
+            elif using_pov_fixed_bilateral() and t_xy is not None:
+                _, _, virtual_facing, _ = compute_fixed_bilateral_viz(
+                    env_name, (p_cx, p_cy), t_xy
+                )
+            elif using_pov_relative():
+                try:
+                    facing = player_facing_deg(obs.raw_observation, env_name)
+                except Exception:
+                    facing = None
+            player_xy_list.append((p_cx, p_cy))
+            target_xy_list.append(t_xy)
+            facing_deg_list.append(
+                float(facing) if facing is not None else float("nan")
+            )
+            chosen_ego_list.append(int(chosen_ego))
+            virtual_facing_deg_list.append(
+                float(virtual_facing) if virtual_facing is not None else float("nan")
+            )
 
         if done:
-            break
+            if stop_on_done:
+                break
+            # Keep filling the video budget across lives / episodes (demo rollouts).
+            rng, rng_reset = jax.random.split(rng)
+            obs, state = env.reset(rng_reset)
+            obs, state = jax.device_get((obs, state))
+            prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+        elif life_lost > 0:
+            # Kangaroo etc.: life loss respawns in-env without done=True.
+            prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
+    print(
+        f"Eval rollout done ({len(states_list)} video frames "
+        f"from ≤{max_env_steps} env steps, stride={frame_stride})."
+    )
     if not states_list:
         raise RuntimeError("No frames collected during evaluation rollout.")
 
@@ -426,6 +2092,14 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         np.stack(obj_h_list),
         np.stack(obj_active_list),
     )
+    pov_overlay = {
+        "no_target_idx": int(no_target_idx),
+        "player_xy": np.asarray(player_xy_list, dtype=np.float32),
+        "target_xy": target_xy_list,  # list of (x,y)|None — keep object identity
+        "facing_deg": np.asarray(facing_deg_list, dtype=np.float32),
+        "chosen_ego": np.asarray(chosen_ego_list, dtype=np.int32),
+        "virtual_facing_deg": np.asarray(virtual_facing_deg_list, dtype=np.float32),
+    }
 
     return (
         stacked_states,
@@ -437,15 +2111,34 @@ def run_eval_rollout(config, params_tree=None, meta_params=None, max_frames=None
         distances,
         angles,
         renderer,
+        pov_overlay,
     )
 
 
-def run_live_visualization(config, params_tree=None, meta_params=None, max_frames=None):
+def run_live_visualization(
+    config,
+    params_tree=None,
+    meta_params=None,
+    max_frames=None,
+    fps: int | None = None,
+    display_backend: str = "pygame",
+    pygame_screen=None,
+    pygame_font=None,
+    step_mode: bool = False,
+):
     """
-    Run a live, interactive visualization loop using pygame.
-    The agent acts in the environment step-by-step and the current frame is
-    rendered to a window, with the skill input (distance, angle) shown at the bottom.
+    Run a live, interactive visualization loop.
+
+    Default display backend is Pygame. Prefer calling ``bootstrap_pygame_window``
+    before loading JAX weights so the SDL window can map; pass the resulting
+    screen/font via ``pygame_screen`` / ``pygame_font``. Use
+    ``display_backend="opencv"`` if Pygame still fails to show a window.
     """
+    def _log(msg: str) -> None:
+        print(f"[live-viz] {msg}", flush=True)
+
+    configure_ego_obs_from_config(config)
+    configure_label_routing_from_config(config)
     num_skills = config["NUM_SKILLS"]
     ego_action_dim = config["EGO_ACTION_DIM"]
     hidden_size = config["HIDDEN_SIZE"]
@@ -455,116 +2148,385 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
         config.get("RESTRICT_FIRE_FOR_NON_DESTROY", False)
     )
     meta_use_noop_target = bool(config.get("META_USE_NOOP_TARGET", False))
-    meta_noop_target_idx = int(config.get("META_NOOP_TARGET_IDX", 0))
-    max_frames = max_frames or config.get("VIDEO_MAX_FRAMES", 2000)
+    meta_noop_target_idx = int(resolve_meta_noop_target_idx(config))
+    meta_use_fire_target = bool(config.get("META_USE_FIRE_TARGET", False))
+    meta_fire_target_idx = int(resolve_meta_fire_target_idx(config))
+    meta_fire_game_action = int(config.get("META_FIRE_GAME_ACTION", 1))
+    # VIDEO_MAX_FRAMES is for recorded rollouts; live mode runs until quit unless capped.
+    frame_limit = max_frames
+    display_fps = int(fps if fps is not None else config.get("VISUALIZER_FPS", 15))
+    display_backend = str(display_backend or "pygame").lower().strip()
+    if display_backend not in ("opencv", "pygame"):
+        raise ValueError(f"Unknown display_backend={display_backend!r} (use opencv|pygame)")
 
+    _log(f"JAX backend={jax.default_backend()} devices={jax.devices()}")
+    _log(f"display_backend={display_backend}")
+
+    window_name = "Hierarchical PQN Live Visualization"
+    scale = 3
+    window_size = (160 * scale, 210 * scale)
+    screen = pygame_screen
+    font = pygame_font
+    clock = None
+    wait_ms = max(1, int(round(1000.0 / max(display_fps, 1))))
+    cv2 = None
+    W, H = 160, 210
+    detail_mode = False
+    last_snapshot: LiveVizSnapshot | None = None
+    paused = bool(step_mode)
+
+    if display_backend == "pygame":
+        if screen is None or font is None:
+            screen, font = bootstrap_pygame_window(window_name, window_size)
+        else:
+            pygame.display.set_caption(window_name)
+            if screen.get_size() != window_size:
+                screen = pygame.display.set_mode(
+                    window_size, pygame.SHOWN | pygame.RESIZABLE
+                )
+            pygame.display.flip()
+            pygame.event.pump()
+            _raise_pygame_window()
+    else:
+        # Import OpenCV only for this backend — importing cv2 before pygame
+        # display init can leave SDL on the dummy driver (no window).
+        import cv2 as _cv2
+
+        cv2 = _cv2
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, window_size[0], window_size[1])
+
+    def _show_status(text: str) -> None:
+        if display_backend == "pygame":
+            screen.fill((20, 20, 20))
+            surf = font.render(text, True, (240, 240, 240))
+            screen.blit(surf, (16, window_size[1] // 2 - 10))
+            pygame.display.flip()
+            pygame.event.pump()
+            return
+        canvas = np.zeros((window_size[1], window_size[0], 3), dtype=np.uint8)
+        canvas[:] = (20, 20, 20)
+        cv2.putText(
+            canvas,
+            text[:90],
+            (16, window_size[1] // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (240, 240, 240),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.imshow(window_name, canvas)
+        cv2.waitKey(1)
+
+    def _game_window_size() -> tuple[int, int]:
+        return (W * scale + PANEL_WIDTH, H * scale)
+
+    def _resize_window() -> None:
+        nonlocal window_size, screen
+        window_size = _game_window_size()
+        if display_backend == "pygame":
+            screen = pygame.display.set_mode(
+                window_size, pygame.SHOWN | pygame.RESIZABLE
+            )
+            _raise_pygame_window()
+        else:
+            cv2.resizeWindow(window_name, window_size[0], window_size[1])
+
+    def _show_canvas(canvas_rgb: np.ndarray) -> None:
+        """Show a pre-composited HxWx3 RGB uint8 canvas."""
+        nonlocal window_size, screen
+        if canvas_rgb.dtype != np.uint8:
+            canvas_rgb = canvas_rgb.astype(np.uint8)
+        if not canvas_rgb.flags["C_CONTIGUOUS"]:
+            canvas_rgb = np.ascontiguousarray(canvas_rgb)
+        canvas_h, canvas_w = canvas_rgb.shape[:2]
+        target_size = (canvas_w, canvas_h)
+        if display_backend == "pygame":
+            if target_size != window_size:
+                window_size = target_size
+                screen = pygame.display.set_mode(
+                    window_size, pygame.SHOWN | pygame.RESIZABLE
+                )
+            surf = pygame.surfarray.make_surface(
+                np.ascontiguousarray(canvas_rgb.transpose(1, 0, 2))
+            )
+            screen.fill((20, 20, 20))
+            screen.blit(surf, (0, 0))
+            pygame.display.flip()
+            pygame.event.pump()
+            return
+        if target_size != window_size:
+            window_size = target_size
+            cv2.resizeWindow(window_name, window_size[0], window_size[1])
+        bgr = cv2.cvtColor(canvas_rgb, cv2.COLOR_RGB2BGR)
+        cv2.imshow(window_name, bgr)
+        cv2.waitKey(1)
+
+    def _show_rgb_frame(frame_rgb: np.ndarray, overlay: str | None = None) -> None:
+        if detail_mode and last_snapshot is not None:
+            panel = render_detail_panel(
+                last_snapshot,
+                ego_action_names=_ego_action_names,
+                stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            )
+        else:
+            panel = blank_detail_panel(H)
+        canvas = compose_display(
+            frame_rgb,
+            scale=scale,
+            panel_rgb=panel,
+            overlay=overlay,
+        )
+        _show_canvas(canvas)
+
+    def _poll_input(*, blocking: bool = False) -> str | None:
+        """Poll UI input.
+
+        Returns one of: quit, reset, step, toggle_pause, toggle_detail, debug, or None.
+        """
+        step_keys_pygame = (
+            pygame.K_SPACE,
+            pygame.K_n,
+            pygame.K_PERIOD,
+            pygame.K_RIGHT,
+            pygame.K_RETURN,
+        )
+        if display_backend == "pygame":
+            if blocking:
+                while True:
+                    for event in pygame.event.get():
+                        cmd = _handle_pygame_event(event, step_keys_pygame)
+                        if cmd is not None:
+                            return cmd
+                    pygame.time.wait(16)
+            for event in pygame.event.get():
+                cmd = _handle_pygame_event(event, step_keys_pygame)
+                if cmd is not None:
+                    return cmd
+            return None
+
+        delay = 0 if blocking else wait_ms
+        key = cv2.waitKey(max(1, delay)) & 0xFF
+        if key in (ord("q"), ord("Q"), 27):
+            return "quit"
+        if key in (ord("r"), ord("R")):
+            return "reset"
+        if key in (ord("s"), ord("S")):
+            return "debug"
+        if key in (ord("f"), ord("F")):
+            return "toggle_pause"
+        if key in (ord("m"), ord("M")):
+            return "toggle_detail"
+        if key in (ord(" "), ord("n"), ord("N"), ord("."), 13, 83):
+            return "step"
+        return None
+
+    def _handle_pygame_event(event, step_keys) -> str | None:
+        if event.type == pygame.QUIT:
+            return "quit"
+        if event.type != pygame.KEYDOWN:
+            return None
+        if event.key in (pygame.K_q, pygame.K_ESCAPE):
+            return "quit"
+        if event.key == pygame.K_r:
+            return "reset"
+        if event.key == pygame.K_s:
+            return "debug"
+        if event.key == pygame.K_f:
+            return "toggle_pause"
+        if event.key == pygame.K_m:
+            return "toggle_detail"
+        if event.key in step_keys:
+            return "step"
+        return None
+
+    _show_status("Creating environment...")
+    _log("Creating eval env...")
     env, renderer = create_eval_env(config)
 
     # Environment-specific hooks (meta-policy, action mapping, NO_TARGET sentinel)
     env_name = config.get("ENV_NAME", "Seaquest")
     manager = EnvManager()
     components = manager.get_components(env_name)
-    heuristic_target = components.get_heuristic_target
+    heuristic_target = resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_mission = resolve_heuristic_with_mission_fn(config, env_name)
+    heuristic_with_state = resolve_heuristic_with_state_fn(config, env_name, components)
     no_target_idx = components.no_target_idx
-    action_mapper = components.action_mapper
+    action_mapper, _ = resolve_action_mappers(components, config)
     forced_target_hook = components.forced_target_hook
-    idle_action_hook = components.idle_action_hook
     meta_mask_hook = components.meta_mask_hook
+    reset_policy_on_life_lost = bool(
+        getattr(components, "reset_policy_on_life_lost", False)
+    )
+    extract_life_lost = components.extract_life_lost
+    use_legal_ego_mask = bool(config.get("EGO_LEGAL_ACTION_MASK", False))
+    legal_ego_mask_fn = make_legal_ego_mask_fn(
+        action_mapper,
+        mode=legal_ego_mask_mode_from_config(config) or "realized",
+        noop_action=int(components.ego_mapper_noop_action),
+        fire_action=int(components.ego_mapper_fire_action),
+        ego_action_dim=int(ego_action_dim),
+    )
+    fixed_skill_policy = uses_fixed_skill_policy(config)
+    if fixed_skill_policy:
+        _log(
+            f"Skill policy mode: {config.get('SKILL_POLICY_MODE')} "
+            "(fixed ego rules; Q-heads unused for action)"
+        )
 
     meta_network = None
     if meta_params is not None:
-        meta_network = MetaQNetwork(
-            action_dim=config["MAX_OBJECTS"],
-            hidden_size=config.get("META_HIDDEN_SIZE", 256),
-            num_skills=num_skills  
-        )
+        meta_network = create_meta_network(config)
 
-    skill_network = QNetwork(
-        action_dim=ego_action_dim,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-    )
+    skill_network = q_network_from_config(config)
 
     rng = jax.random.PRNGKey(seed)
     rng, rng_reset = jax.random.split(rng)
+    _show_status("Compiling env.reset (first call can take a while)...")
+    _log("Resetting env (compiling)...")
     obs, state = env.reset(rng_reset)
+    obs, state = jax.device_get((obs, state))
+    _log("env.reset ready")
 
-    dummy_ego = get_ego_obs(
+    dummy_ego = _skill_input_from_obs(
+        config,
         obs.raw_observation,
         obs.objects,
         jnp.array(0, dtype=jnp.int32),
+        native_vec=obs.native_oc_vector,
     )
     ego_feat_dim = int(dummy_ego.shape[-1])
+    validate_skill_checkpoint_ego_dim(config, ego_feat_dim)
+    if params_tree is not None:
+        params_tree = ensure_skill_params_stack(params_tree, int(config["NUM_SKILLS"]))
 
     if params_tree is None:
         init_x = jnp.zeros(ego_feat_dim)
-        network_vars = skill_network.init(jax.random.PRNGKey(seed + 1), init_x, train=False)
+        init_pixel = _skill_pixel_obs_from_obs(config, obs)
+        if init_pixel is not None:
+            init_pixel = jnp.expand_dims(init_pixel, 0)
+        init_oc_psi = _skill_oc_psi_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            jnp.array(0, dtype=jnp.int32),
+            int(config.get("MAX_OBJECTS", 35)),
+        )
+        network_vars = skill_network.init(
+            jax.random.PRNGKey(seed + 1),
+            init_x,
+            train=False,
+            target_idx=jnp.array(0, dtype=jnp.int32),
+            pixel_obs=init_pixel,
+            objects=obs.objects,
+            raw_obs=obs.raw_observation if init_oc_psi is not None else None,
+            oc_psi=init_oc_psi,
+        )
         base_params = network_vars["params"]
         params_tree = jax.tree_util.tree_map(
             lambda p: jnp.stack([p] * num_skills, axis=0),
             base_params,
         )
 
-    # Pygame setup
-    pygame.init()
-    pygame.display.set_caption("Hierarchical PQN Live Visualization")
-    font = pygame.font.Font(None, 20)
+    # JIT skill Q eval once (same fix as record-mode eval rollouts).
+    def _apply_all_skills(
+        params_stack,
+        ego_batch,
+        target_idx_arr,
+        pixel_batch,
+        objects_batch,
+        raw_obs_batch,
+        oc_psi_batch,
+    ):
+        return apply_skill_q_all(
+            skill_network,
+            params_stack,
+            ego_batch,
+            target_idx=target_idx_arr,
+            pixel_obs=pixel_batch,
+            objects=objects_batch,
+            raw_obs=raw_obs_batch,
+            oc_psi=oc_psi_batch,
+            stack_size=int(config.get("FRAME_STACK_SIZE", 4)),
+            destroy_skill_idx=_destroy_skill_idx(config),
+        )
 
-    # Get one rendered frame to determine window size
-    base_state = state.atari_state.env_state
+    apply_all_skills = jax.jit(_apply_all_skills)
+
+    _show_status("Compiling renderer...")
+    _log("Rendering first frame (compiling)...")
+    base_state = unwrap_base_env_state(state.atari_state)
     sample_frame = renderer.render(base_state)
     sample_frame = np.array(jax.device_get(sample_frame), dtype=np.uint8)
     if sample_frame.ndim == 2:
         sample_frame = np.stack([sample_frame] * 3, axis=-1)
     H, W, _ = sample_frame.shape
-    scale = 2
-    window_size = (W * scale, H * scale)
-    screen = pygame.display.set_mode(window_size)
+    _resize_window()
 
-    clock = pygame.time.Clock()
+    _show_rgb_frame(sample_frame, overlay="Warming up first step compiles...")
+    _log("First frame shown in window")
+
+    if display_backend == "pygame" and clock is None:
+        font = pygame.font.Font(None, 20)
+        clock = pygame.time.Clock()
+        _raise_pygame_window()
+
     running = True
     prev_target_idx = no_target_idx
+    mission_target_idx = no_target_idx
+    policy_state = initial_policy_state(no_target_idx)
+    persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+    suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
     frame_count = 0
 
     def reset_env_episode():
-        nonlocal obs, state, prev_target_idx, rng
+        nonlocal obs, state, prev_target_idx, mission_target_idx, policy_state
+        nonlocal persist_steps_remaining, suspended_mission_idx, rng, last_snapshot
         rng_local, rng_reset_local = jax.random.split(rng)
         obs_local, state_local = env.reset(rng_reset_local)
         obs = obs_local
         state = state_local
         rng = rng_local
         prev_target_idx = no_target_idx
+        mission_target_idx = no_target_idx
+        policy_state = initial_policy_state(no_target_idx)
+        persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+        suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+        last_snapshot = None
+        last_snapshot = None
 
-    while running and frame_count < max_frames:
-        # Handle quit events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key in (pygame.K_q, pygame.K_ESCAPE):
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-                reset_env_episode()
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_s:
-                # Snapshot the current heuristic view of the scene.
-                # This is especially useful for ChopperCommand debugging, but will run
-                # for any env that provides compatible observations.
-                snap = debug_heuristic_snapshot(
+    def _select_target(step_key):
+        nonlocal mission_target_idx, persist_steps_remaining, suspended_mission_idx
+        nonlocal policy_state
+        if meta_network is None:
+            if heuristic_with_state is not None:
+                target_obj_idx, policy_state = heuristic_with_state(
                     obs.raw_observation,
                     obs.objects,
                     jnp.array(prev_target_idx, dtype=jnp.int32),
+                    policy_state,
+                    step_key,
                 )
-
-        rng, step_key = jax.random.split(rng)
-
-        if meta_network is None:
-            # Heuristic meta-policy selects a target object
-            target_obj_idx = heuristic_target(
-                obs.raw_observation,
-                obs.objects,
-                prev_target_idx,
-                step_key,
-            )
-            target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+            elif heuristic_with_mission is not None:
+                target_obj_idx, mission_target_idx = heuristic_with_mission(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(prev_target_idx, dtype=jnp.int32),
+                    jnp.array(mission_target_idx, dtype=jnp.int32),
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
+                mission_target_idx = int(jnp.ravel(mission_target_idx)[0])
+            else:
+                target_obj_idx = heuristic_target(
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.asarray(prev_target_idx, dtype=jnp.int32),
+                    step_key,
+                )
+                target_obj_idx = int(jnp.ravel(target_obj_idx)[0])
             target_obj_idx = int(
                 forced_target_hook(
                     jax.tree_util.tree_map(
@@ -574,97 +2536,395 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
                     config,
                 )[0]
             )
-        else:
-            target_obj_idx = _select_target_with_meta(
-                obs,
-                config,
-                meta_network,
-                meta_params,
-                meta_mask_hook,
-                forced_target_hook,
-                no_target_idx,
+            return target_obj_idx
+        target_obj_idx, persist_steps_remaining, suspended_mission_idx = _select_target_with_meta(
+            obs,
+            config,
+            meta_network,
+            meta_params,
+            meta_mask_hook,
+            forced_target_hook,
+            no_target_idx,
+            last_target_idx=prev_target_idx,
+            persist_steps_remaining=persist_steps_remaining,
+            suspended_mission_idx=suspended_mission_idx,
+        )
+        return int(target_obj_idx)
+
+    skill_names = [str(n) for n in (config.get("SKILL_NAMES") or [])]
+    _ego_action_names = {a.value: a.name for a in EgocentricAction}
+
+    def _policy_action(target_obj_idx):
+        nonlocal policy_state
+        is_idle = _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+        is_meta_fire = meta_use_fire_target and target_obj_idx == meta_fire_target_idx
+        if is_idle:
+            # Trailing meta-NOOP → game NOOP; sentinel → env idle action.
+            trailing = int(config.get("MAX_OBJECTS", 35)) - 1
+            idle = (
+                0
+                if int(target_obj_idx) in (int(meta_noop_target_idx), trailing)
+                else resolve_no_target_game_action(config, components)
             )
-        prev_target_idx = target_obj_idx
+            return idle, -1, 0, np.nan, np.nan, None, None
+        if is_meta_fire:
+            return meta_fire_game_action, -1, 1, np.nan, np.nan, None, None
 
-        is_meta_noop = meta_use_noop_target and target_obj_idx == meta_noop_target_idx
-        if target_obj_idx == no_target_idx or is_meta_noop:
-            global_action = 0
-            use_idle_override = idle_action_hook(
-                state,
-                jnp.asarray([0], dtype=jnp.int32),
-                jnp.asarray([True], dtype=jnp.bool_),
-                config,
-            )[0]
-            if bool(np.asarray(jax.device_get(use_idle_override)).ravel()[0]):
-                ga = action_mapper(
-                    jnp.asarray(1, dtype=jnp.int32),
-                    obs.raw_observation,
-                    jnp.asarray(0, dtype=jnp.int32),
-                )
-                global_action = int(np.asarray(jax.device_get(ga)).ravel()[0])
-            active_skill_idx = 0
-            distance = np.nan
-            angle = np.nan
+        raw_label = obs.objects.semantic_label[-1, target_obj_idx]
+        active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
+
+        ego_obs = _skill_input_from_obs(
+            config,
+            obs.raw_observation,
+            obs.objects,
+            jnp.array(target_obj_idx, dtype=jnp.int32),
+            native_vec=obs.native_oc_vector,
+        )
+        ego_obs_batch = ego_obs[jnp.newaxis, ...]
+        pixel_obs = _skill_pixel_obs_from_obs(config, obs)
+
+        channels_per_frame = ego_obs_channels_per_frame()
+        last_frame_ego = ego_obs[-channels_per_frame:]
+        if using_legacy_ego_obs():
+            dx_pix = float(last_frame_ego[0] * SCREEN_WIDTH)
+            dy_pix = float(last_frame_ego[1] * SCREEN_HEIGHT)
+            distance = float(jnp.sqrt(dx_pix ** 2 + dy_pix ** 2))
+            angle = float(jnp.arctan2(dy_pix, dx_pix))
         else:
-            raw_label = obs.objects.semantic_label[-1, target_obj_idx]
-            active_skill_idx = int(label_to_skill_idx(raw_label, num_skills))
-
-            ego_obs = get_ego_obs(
+            distance = _hud_target_distance_px(
                 obs.raw_observation,
                 obs.objects,
-                jnp.array(target_obj_idx, dtype=jnp.int32),
+                int(target_obj_idx),
+                last_frame_ego,
             )
-            ego_obs_batch = ego_obs[jnp.newaxis, ...]
-
-            last_frame_ego = ego_obs[-EGO_OBS_CHANNELS_PER_FRAME:]
-            dx_norm = last_frame_ego[0]
-            dy_norm = last_frame_ego[1]
-            dx_pix = dx_norm * 160.0
-            dy_pix = dy_norm * 210.0
-            distance = float(jnp.sqrt(dx_pix**2 + dy_pix**2))
-            angle = float(jnp.arctan2(dy_pix, dx_pix))
-
-            def apply_one(params_for_skill):
-                return skill_network.apply(
-                    {"params": params_for_skill},
-                    ego_obs_batch,
-                    train=False,
+            player = _get_player(obs.raw_observation)
+            y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+            p_cx = float(player.x[-1] + player.width[-1] / 2.0)
+            p_cy = float(
+                _center_y(
+                    player.y[-1],
+                    player.height[-1],
+                    y_is_bottom_edge=y_is_bottom_edge,
                 )
+            )
+            t_cx = float(
+                obs.objects.x[-1, target_obj_idx]
+                + obs.objects.width[-1, target_obj_idx] / 2.0
+            )
+            t_cy = float(
+                _center_y(
+                    obs.objects.y[-1, target_obj_idx],
+                    obs.objects.height[-1, target_obj_idx],
+                    y_is_bottom_edge=y_is_bottom_edge,
+                )
+            )
+            angle = float(jnp.arctan2(t_cy - p_cy, t_cx - p_cx))
 
-            q_vals = jax.vmap(apply_one)(params_tree)
+        pixel_batch = jnp.expand_dims(pixel_obs, 0) if pixel_obs is not None else None
+        if fixed_skill_policy:
+            chosen_ego = int(
+                select_fixed_ego_action(
+                    config,
+                    active_skill_idx,
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                )
+            )
+            if use_legal_ego_mask:
+                legal = legal_ego_mask_fn(
+                    obs.raw_observation,
+                    jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
+                )
+                if not bool(legal[chosen_ego]):
+                    chosen_ego = 0
+            q_active = jnp.zeros((ego_action_dim,), dtype=jnp.float32)
+        else:
+            q_vals = apply_all_skills(
+                params_tree,
+                ego_obs_batch,
+                jnp.asarray([target_obj_idx], dtype=jnp.int32),
+                pixel_batch,
+                obs.objects,
+                obs.raw_observation,
+                _skill_oc_psi_from_obs(
+                    config,
+                    obs.raw_observation,
+                    obs.objects,
+                    jnp.asarray(target_obj_idx, dtype=jnp.int32),
+                    int(config.get("MAX_OBJECTS", 35)),
+                ),
+            )
             q_vals = jnp.squeeze(q_vals, axis=1)
 
             fire_indices = fire_ego_action_indices(ego_action_dim)
             q_active = q_vals[active_skill_idx]
             if restrict_fire_for_non_destroy and active_skill_idx != 0:
                 q_active = q_active.at[fire_indices].set(-jnp.inf)
-
-            chosen_ego = int(jnp.argmax(q_active))
-            global_action = int(
-                action_mapper(
-                    chosen_ego,
+            if use_legal_ego_mask:
+                legal = legal_ego_mask_fn(
                     obs.raw_observation,
                     jnp.array(target_obj_idx, dtype=jnp.int32),
+                    obs.objects,
+                )
+                q_active = mask_q_with_legal_ego(q_active, legal)
+
+            chosen_ego = int(jnp.argmax(q_active))
+        global_action = int(
+            action_mapper(
+                chosen_ego,
+                obs.raw_observation,
+                jnp.array(target_obj_idx, dtype=jnp.int32),
+                obs.objects,
+            )
+        )
+        return (
+            global_action,
+            active_skill_idx,
+            chosen_ego,
+            distance,
+            angle,
+            np.asarray(ego_obs, dtype=np.float32),
+            np.asarray(q_active, dtype=np.float32),
+        )
+
+    def _control_overlay(base: str) -> str:
+        mode = "STEP" if paused else f"PLAY {display_fps}fps"
+        detail = " detail=ON" if detail_mode else ""
+        return (
+            f"{base} | {mode}{detail} | space/. step  f play/pause  m detail  r reset  q quit"
+        )
+
+    def _build_snapshot(
+        frame: np.ndarray,
+        overlay: str,
+        target_obj_idx: int,
+        global_action: int,
+        active_skill_idx: int,
+        chosen_ego: int,
+        distance: float,
+        angle: float,
+        ego_obs: np.ndarray | None,
+        q_vals_active: np.ndarray | None,
+        skill_name: str,
+        ego_name: str,
+    ) -> LiveVizSnapshot:
+        player = _get_player(obs.raw_observation)
+        y_is_bottom_edge = _uses_bottom_edge_y(obs.raw_observation)
+        p_cx = float(player.x[-1] + player.width[-1] / 2.0)
+        p_cy = float(
+            _center_y(
+                player.y[-1],
+                player.height[-1],
+                y_is_bottom_edge=y_is_bottom_edge,
+            )
+        )
+        target_xy = None
+        if not _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        ):
+            t_cx = float(
+                obs.objects.x[-1, target_obj_idx]
+                + obs.objects.width[-1, target_obj_idx] / 2.0
+            )
+            t_cy = float(
+                _center_y(
+                    obs.objects.y[-1, target_obj_idx],
+                    obs.objects.height[-1, target_obj_idx],
+                    y_is_bottom_edge=y_is_bottom_edge,
                 )
             )
+            target_xy = (t_cx, t_cy)
 
-        # Step env
+        facing = None
+        sector_idx = None
+        phi_rad = None
+        virtual_facing_deg = None
+        bilateral_axis = None
+        fwd_px = None
+        lat_px = None
+        if using_pov_facing_frame():
+            facing, phi_rad, fwd_px, lat_px = compute_facing_frame_viz(
+                obs.raw_observation,
+                env_name,
+                (p_cx, p_cy),
+                target_xy,
+            )
+        elif using_pov_fixed_bilateral() and target_xy is not None:
+            sector_idx, phi_rad, virtual_facing_deg, bilateral_axis = (
+                compute_fixed_bilateral_viz(env_name, (p_cx, p_cy), target_xy)
+            )
+        elif using_pov_relative():
+            try:
+                facing = player_facing_deg(obs.raw_observation, env_name)
+            except Exception:
+                facing = None
+        return LiveVizSnapshot(
+            frame_rgb=frame,
+            overlay_text=overlay,
+            target_obj_idx=int(target_obj_idx),
+            no_target_idx=int(no_target_idx),
+            global_action=int(global_action),
+            active_skill_idx=int(active_skill_idx),
+            chosen_ego=int(chosen_ego),
+            distance=float(distance),
+            angle_rad=float(angle) if not np.isnan(angle) else 0.0,
+            ego_obs=ego_obs,
+            q_vals_active=q_vals_active,
+            skill_name=skill_name,
+            ego_name=ego_name,
+            facing_deg=facing,
+            player_xy=(p_cx, p_cy),
+            target_xy=target_xy,
+            frame_idx=int(frame_count),
+            sector_idx=sector_idx,
+            phi_rad=phi_rad,
+            virtual_facing_deg=virtual_facing_deg,
+            bilateral_axis=bilateral_axis,
+            fwd_px=fwd_px,
+            lat_px=lat_px,
+        )
+
+    def _redraw_last() -> None:
+        if last_snapshot is None:
+            return
+        frame = last_snapshot.frame_rgb
+        if detail_mode:
+            frame = apply_pov_overlay(frame, last_snapshot)
+        _show_rgb_frame(frame, overlay=last_snapshot.overlay_text)
+
+    # Warm first-frame compiles while the window stays responsive/visible.
+    _show_status("Compiling heuristic / policy / env.step...")
+    _log("Warmup: heuristic + policy + env.step (can take a bit)...")
+    rng, warm_key = jax.random.split(rng)
+    warm_target = _select_target(warm_key)
+    warm_action, _, _, _, _, _, _ = _policy_action(warm_target)
+    obs, state, _reward, _done, _info = env.step(state, int(warm_action))
+    obs, state = jax.device_get((obs, state))
+    prev_target_idx = warm_target
+    _log("Warmup done — entering live loop")
+    if step_mode:
+        _log(
+            "Step mode — space/. advance one frame, f toggle play, m detail panel, "
+            "r reset, q quit"
+        )
+    else:
+        _log(
+            f"Auto-play at {display_fps} FPS (f pause, space step while paused, "
+            "m detail, q quit, r reset)"
+        )
+
+    while running and (frame_limit is None or frame_count < frame_limit):
+        advance = not paused
+        cmd = _poll_input(blocking=paused and not advance)
+        if cmd == "quit":
+            running = False
+            break
+        if cmd == "reset":
+            reset_env_episode()
+            continue
+        if cmd == "debug":
+            debug_heuristic_snapshot(
+                obs.raw_observation,
+                obs.objects,
+                jnp.array(prev_target_idx, dtype=jnp.int32),
+            )
+            _redraw_last()
+            continue
+        if cmd == "toggle_pause":
+            paused = not paused
+            _redraw_last()
+            continue
+        if cmd == "toggle_detail":
+            detail_mode = not detail_mode
+            _redraw_last()
+            continue
+        if cmd == "step":
+            advance = True
+
+        if not advance:
+            _redraw_last()
+            continue
+
+        if frame_count < 5:
+            _log(f"frame {frame_count}: select target...")
+        rng, step_key = jax.random.split(rng)
+        target_obj_idx = _select_target(step_key)
+        prev_target_idx = target_obj_idx
+
+        if frame_count < 5:
+            _log(f"frame {frame_count}: policy action (target={target_obj_idx})...")
+        (
+            global_action,
+            active_skill_idx,
+            chosen_ego,
+            distance,
+            angle,
+            ego_obs_np,
+            q_active_np,
+        ) = _policy_action(target_obj_idx)
+        skill_name = (
+            skill_names[active_skill_idx]
+            if 0 <= active_skill_idx < len(skill_names)
+            else str(active_skill_idx)
+        )
+        ego_name = _ego_action_names.get(chosen_ego, str(chosen_ego))
+
+        if frame_count < 5:
+            _log(
+                f"frame {frame_count}: env.step(action={global_action}) "
+                f"skill={skill_name} ego={ego_name}..."
+            )
+        prev_env_state = state
         obs, state, _reward, done, _info = env.step(state, global_action)
+        obs, state = jax.device_get((obs, state))
+        done = bool(done)
+        life_lost = 0
+        if reset_policy_on_life_lost:
+            life_lost = int(
+                jax.device_get(extract_life_lost(prev_env_state, state))
+            )
 
-        # Render current frame
-        base_state = state.atari_state.env_state
+        if frame_count < 5:
+            _log(f"frame {frame_count}: render...")
+        base_state = unwrap_base_env_state(state.atari_state)
         frame = renderer.render(base_state)
         frame = np.array(jax.device_get(frame), dtype=np.uint8)
         if frame.ndim == 2:
             frame = np.stack([frame] * 3, axis=-1)
 
-        # Add a red border around the selected target object (same style as videos).
-        if target_obj_idx != no_target_idx:
+        draw_viz_outline = bool(config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True))
+        idle_target = _is_idle_meta_target(
+            target_obj_idx,
+            no_target_idx=no_target_idx,
+            meta_noop_idx=meta_noop_target_idx,
+            meta_use_noop=meta_use_noop_target,
+            max_objects=int(config.get("MAX_OBJECTS", 35)),
+        )
+        if draw_viz_outline and not idle_target:
             ox = np.array(obs.objects.x[-1])
             oy = np.array(obs.objects.y[-1])
             ow = np.array(obs.objects.width[-1])
             oh = np.array(obs.objects.height[-1])
             oactive = np.array(obs.objects.active[-1])
+            olabels = np.array(obs.objects.semantic_label[-1])
+            outline_min_px = 1
+            if (
+                0 <= int(target_obj_idx) < len(olabels)
+                and int(olabels[int(target_obj_idx)]) == LABEL_AVOID
+            ):
+                outline_min_px = 10
 
             frame_chw = np.transpose(frame, (2, 0, 1))
             frame_chw = draw_target_outline(
@@ -675,31 +2935,78 @@ def run_live_visualization(config, params_tree=None, meta_params=None, max_frame
                 ow,
                 oh,
                 oactive,
+                min_game_px=outline_min_px,
             )
             frame = np.transpose(frame_chw, (1, 2, 0))
 
-        surf = pygame.surfarray.make_surface(frame.transpose(1, 0, 2))
-        surf = pygame.transform.scale(surf, window_size)
-        screen.blit(surf, (0, 0))
-
-        # Draw distance/angle text at bottom-center (if a valid target exists)
+        skill_name = (
+            "NOOP"
+            if idle_target or active_skill_idx < 0
+            else (
+                skill_names[active_skill_idx]
+                if 0 <= active_skill_idx < len(skill_names)
+                else str(active_skill_idx)
+            )
+        )
+        overlay_base = f"{skill_name} ego={ego_name} game={global_action}"
         if not np.isnan(distance):
-            text = f"skill: d={distance:.1f}px, a={angle:.2f} rad"
-            text_surface = font.render(text, True, (255, 255, 255))
-            tx = (window_size[0] - text_surface.get_width()) // 2
-            ty = window_size[1] - text_surface.get_height() - 10
-            screen.blit(text_surface, (tx, ty))
+            overlay_base = f"{overlay_base} d={distance:.1f}px a={angle:.2f}"
+        overlay = _control_overlay(overlay_base)
 
-        pygame.display.flip()
-        clock.tick(10)
+        last_snapshot = _build_snapshot(
+            frame,
+            overlay,
+            target_obj_idx,
+            global_action,
+            active_skill_idx,
+            chosen_ego,
+            distance,
+            angle,
+            ego_obs_np,
+            q_active_np,
+            skill_name,
+            ego_name,
+        )
+        display_frame = (
+            apply_pov_overlay(frame, last_snapshot) if detail_mode else frame
+        )
+        if frame_count < 5:
+            _log(f"frame {frame_count}: display...")
+        _show_rgb_frame(display_frame, overlay=overlay)
+        if not paused and display_backend == "pygame" and clock is not None:
+            clock.tick(display_fps)
         frame_count += 1
+        if step_mode and cmd == "step":
+            paused = True
+        if frame_count < 5:
+            _log(f"frame {frame_count - 1}: done")
 
         if done:
+            _log("episode done — env + waypoint plan reset")
             rng, rng_reset = jax.random.split(rng)
             obs, state = env.reset(rng_reset)
+            obs, state = jax.device_get((obs, state))
             prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
+        elif life_lost > 0:
+            # Kangaroo: lives drop on crash without done=True; restart the climb plan.
+            _log(f"life lost (livesΔ={life_lost}) — waypoint plan reset")
+            prev_target_idx = no_target_idx
+            mission_target_idx = no_target_idx
+            policy_state = initial_policy_state(no_target_idx)
+            persist_steps_remaining = jnp.array(0, dtype=jnp.int32)
+            suspended_mission_idx = jnp.array(no_target_idx, dtype=jnp.int32)
 
-    pygame.quit()
+    if frame_limit is not None and frame_count >= frame_limit:
+        print(f"Live visualization stopped after {frame_count} frames (--max-frames={frame_limit}).")
+    if display_backend == "pygame":
+        pygame.quit()
+    else:
+        cv2.destroyWindow(window_name)
+        cv2.waitKey(1)
 
 
 def main():
@@ -717,7 +3024,25 @@ def main():
         "--max-frames",
         type=int,
         default=None,
-        help="Maximum number of frames to render in the video (defaults to VIDEO_MAX_FRAMES from config).",
+        help=(
+            "Cap total frames. Record mode defaults to VIDEO_MAX_FRAMES from config (600). "
+            "Live pygame mode runs until you close the window unless this is set."
+        ),
+    )
+    parser.add_argument(
+        "--step",
+        action="store_true",
+        default=False,
+        help=(
+            "Start paused in frame-step mode (space/. advances one frame). "
+            "Default is auto-play at --fps."
+        ),
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Live window refresh rate in frames per second (default: 15, or VISUALIZER_FPS in config).",
     )
     parser.add_argument(
         "--seed",
@@ -756,18 +3081,171 @@ def main():
         ),
     )
     parser.add_argument(
+        "--remap-navigate-to-collect",
+        action="store_true",
+        default=False,
+        help=(
+            "Route LABEL_NAVIGATE targets through the COLLECT skill head "
+            "(same fold as NUM_SKILLS<4). Useful for transfer smoke tests "
+            "when the NAVIGATE head fails to generalize."
+        ),
+    )
+    parser.add_argument(
+        "--pong-ball-destroy",
+        action="store_true",
+        default=False,
+        help=(
+            "Label the Pong ball as DESTROY instead of COLLECT so the DESTROY "
+            "skill head is used (fun transfer ablation)."
+        ),
+    )
+    parser.add_argument(
+        "--no-outline",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable target-outline painting for pixel_embed CNN input and skip "
+            "the red target box overlay in live/recorded visualization."
+        ),
+    )
+    parser.add_argument(
+        "--black-pixel",
+        action="store_true",
+        default=False,
+        help=(
+            "Zero out pixel_obs before the skill CNN (ablation: policy without vision)."
+        ),
+    )
+    parser.add_argument(
+        "--heuristic-mode",
+        type=str,
+        default=None,
+        help="Override HEURISTIC_MODE (e.g. nearest for RQ2 transfer eval).",
+    )
+    parser.add_argument(
+        "--video-out",
+        type=str,
+        default=None,
+        help=(
+            "When --record is set, also write an mp4 to this path "
+            "(works with --wandb-mode disabled)."
+        ),
+    )
+    parser.add_argument(
         "--meta-model",
         type=str,
         default=None,
         help=(
             "Optional path to a learned meta-policy checkpoint "
             "(*_meta.safetensors). If set, target selection uses MetaQNetwork "
-            "instead of the heuristic meta-policy."
+            "instead of the heuristic meta-policy. When loading a tandem "
+            "*_skills.safetensors file, the sibling *_meta.safetensors is "
+            "auto-detected if present."
+        ),
+    )
+    parser.add_argument(
+        "--display",
+        type=str,
+        choices=["opencv", "pygame"],
+        default="pygame",
+        help=(
+            "Live window backend. Default pygame. "
+            "Use opencv if pygame fails to map a window once JAX threads are running."
+        ),
+    )
+    parser.add_argument(
+        "--pov-mode",
+        type=str,
+        choices=list(POV_MODE_CHOICES),
+        default="auto",
+        help=(
+            "Override ego obs + action mapper mode. "
+            "'relative' = sprite-facing POV with view locked on target; "
+            "'fixed-bilateral' = virtual L/R (or U/D) sectors + forward-hemisphere φ; "
+            "'facing' = FPS body frame (view=player facing); "
+            "'auto' = use checkpoint/paper-config as-is."
+        ),
+    )
+    parser.add_argument(
+        "--pov-bilateral-axis",
+        type=str,
+        choices=["horizontal", "vertical"],
+        default=None,
+        help=(
+            "Virtual sector axis for --pov-mode fixed-bilateral. "
+            "Default follows the env profile (seaquest=horizontal, pong=vertical)."
+        ),
+    )
+    parser.add_argument(
+        "--ego-phi-bins",
+        type=int,
+        default=None,
+        help=(
+            "Angle encoding bins for fixed-bilateral / facing FPS: N triangular "
+            "bins (e.g. 8) or 0 for sin/cos. Only applied when set."
+        ),
+    )
+    parser.add_argument(
+        "--ego-pose-xy",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Facing FPS pose encoding: --ego-pose-xy for body-frame (fwd, lat); "
+            "--no-ego-pose-xy for polar (distance, φ). Default follows config."
+        ),
+    )
+    parser.add_argument(
+        "--legal-action-mask",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Realizable-ego decode: mask Q for ego actions that map to NOOP "
+            "(e.g. FORWARD on honest Pong transfer). "
+            "--legal-action-mask enables; --no-legal-action-mask disables. "
+            "Default follows config."
+        ),
+    )
+    parser.add_argument(
+        "--paper-config",
+        type=str,
+        default=None,
+        help=(
+            "Paper-eval train/eval YAML merged after the checkpoint sidecar "
+            "(ego clip, POV mapper, transfer MAX_OBJECTS, heuristic, etc.). "
+            "Facing FPS examples: "
+            "seaquest_skills_ego_pov_clip50_facing_psibins8_eval_full.yaml, "
+            "seaquest_skills_ego_pov_clip50_facing_xy_eval_full.yaml."
+        ),
+    )
+    parser.add_argument(
+        "--game-mods",
+        nargs="*",
+        default=None,
+        metavar="MOD",
+        help=(
+            "Override GAME_MODS for this run (e.g. --game-mods only_sharks). "
+            "Applied after --paper-config. Use with no values for an empty list."
+        ),
+    )
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help=(
+            "Override the experiment yaml from configs/config.yaml defaults "
+            "(e.g. phoenix_tandem, phoenix_skills). Ignored when a *_config.yaml "
+            "is found next to the checkpoint."
         ),
     )
     args = parser.parse_args()
 
-    base_config = load_base_config()
+    # Open the pygame window before JAX weight loading so SDL can map it.
+    pygame_screen = None
+    pygame_font = None
+    if (not args.record) and str(args.display).lower().strip() == "pygame":
+        pygame_screen, pygame_font = bootstrap_pygame_window()
+
+    base_config = load_base_config(experiment=args.experiment)
 
     # Optionally override the environment used for visualization.
     if args.env_name is not None:
@@ -790,17 +3268,88 @@ def main():
             )
         base_config["GAME_MODS"] = game_mods
 
-    # Optional parameter loading
+    # Optional parameter loading (skills + optional tandem meta head)
     params_tree = None
-    if args.model is not None:
-        if not os.path.exists(args.model):
-            raise FileNotFoundError(f"Model not found: {args.model}")
-        params_tree = load_params_from_file(args.model)
     meta_params = None
-    if args.meta_model is not None:
-        if not os.path.exists(args.meta_model):
-            raise FileNotFoundError(f"Meta model not found: {args.meta_model}")
-        meta_params = load_params_from_file(args.meta_model)
+    skill_path, meta_path = resolve_tandem_checkpoint_paths(args.model, args.meta_model)
+    if skill_path is not None:
+        base_config, _ = load_config_for_checkpoint(skill_path, base_config)
+        params_tree = load_params_from_file(skill_path)
+    if meta_path is not None:
+        if meta_params is None:
+            base_config, _ = load_config_for_checkpoint(meta_path, base_config)
+        meta_params = load_params_from_file(meta_path)
+    if args.paper_config is not None:
+        from concept_based_learning.paper_eval.config_merge import merge_paper_eval_yaml
+
+        base_config = merge_paper_eval_yaml(
+            base_config, args.paper_config, project_root=_project_root()
+        )
+        print(f"Merged paper-eval config: {args.paper_config}")
+    if args.game_mods is not None:
+        base_config["GAME_MODS"] = list(args.game_mods)
+        base_config["EVAL_GAME_MODS"] = list(args.game_mods)
+        print(f"GAME_MODS override: {base_config['GAME_MODS']}")
+    # Same as mod-eval harness: transfer YAMLs can disagree with the source
+    # skill ego layout (e.g. weapon channels). Sidecar wins for obs dim.
+    if skill_path is not None:
+        from concept_based_learning.paper_eval.eval_harness import (
+            _overlay_ego_flags_from_skill_config,
+        )
+
+        base_config = _overlay_ego_flags_from_skill_config(base_config, skill_path)
+    if params_tree is not None:
+        base_config = align_config_with_skill_checkpoint(base_config, params_tree)
+
+    # Checkpoint *_config.yaml may set WANDB_MODE=online; keep the CLI default
+    # (disabled) authoritative for local visualization.
+    if args.wandb_mode is not None:
+        base_config["WANDB_MODE"] = args.wandb_mode
+
+    # Keep explicit CLI env / seed overrides authoritative after checkpoint +
+    # paper-config merges (sidecar always carries train SEED=44).
+    if args.env_name is not None:
+        base_config["ENV_NAME"] = args.env_name
+    if args.seed is not None:
+        base_config["SEED"] = int(args.seed)
+        print(f"SEED override: {base_config['SEED']}")
+    if args.remap_navigate_to_collect:
+        base_config["REMAP_NAVIGATE_TO_COLLECT"] = True
+        print(
+            "REMAP_NAVIGATE_TO_COLLECT=True — NAVIGATE waypoints use the COLLECT skill head"
+        )
+    if args.pong_ball_destroy:
+        base_config["PONG_BALL_AS_DESTROY"] = True
+        print("PONG_BALL_AS_DESTROY=True — Pong ball labeled DESTROY (uses DESTROY skill)")
+    apply_visualizer_config_overrides(
+        base_config,
+        no_outline=bool(args.no_outline),
+        black_pixel=bool(args.black_pixel),
+        heuristic_mode=args.heuristic_mode,
+        pov_mode=args.pov_mode,
+        pov_bilateral_axis=args.pov_bilateral_axis,
+        ego_phi_bins=args.ego_phi_bins,
+        ego_pose_xy=args.ego_pose_xy,
+        legal_action_mask=args.legal_action_mask,
+    )
+    if args.pov_mode != "auto":
+        print(f"POV mode override: {args.pov_mode}")
+    if args.pov_bilateral_axis is not None:
+        print(f"POV bilateral axis override: {args.pov_bilateral_axis}")
+    if args.ego_phi_bins is not None:
+        enc = f"phi_bins{args.ego_phi_bins}" if args.ego_phi_bins > 0 else "phi_sincos"
+        print(f"Ego φ encoding override: {enc}")
+    if args.ego_pose_xy is not None:
+        print(f"Ego pose XY override: {args.ego_pose_xy}")
+    if args.legal_action_mask is not None:
+        print(f"EGO_LEGAL_ACTION_MASK override: {args.legal_action_mask}")
+    configure_ego_obs_from_config(base_config)
+    configure_label_routing_from_config(base_config)
+    _print_ego_runtime_summary(base_config)
+    if args.no_outline:
+        print("SKILL_PIXEL_PAINT_TARGET_OUTLINE=False — no target ring for CNN or viz overlay")
+    if args.black_pixel:
+        print("SKILL_PIXEL_BLACKOUT=True — pixel_obs zeroed before skill CNN")
 
     # If requested, run live interactive visualization and exit.
     if not args.record:
@@ -809,6 +3358,11 @@ def main():
             params_tree=params_tree,
             meta_params=meta_params,
             max_frames=args.max_frames,
+            fps=args.fps,
+            display_backend=args.display,
+            pygame_screen=pygame_screen,
+            pygame_font=pygame_font,
+            step_mode=args.step,
         )
         return
 
@@ -838,6 +3392,7 @@ def main():
         distances,
         angles,
         renderer,
+        pov_overlay,
     ) = run_eval_rollout(
         base_config,
         params_tree=params_tree,
@@ -847,6 +3402,14 @@ def main():
 
     # Use the existing video logging utility to create and log the video.
     step = 0
+    video_out = args.video_out
+    if video_out is None and base_config.get("WANDB_MODE", "disabled") == "disabled":
+        video_out = str(
+            Path("outputs")
+            / "videos"
+            / f"{base_config.get('ENV_NAME', 'env')}_transfer_viz.mp4"
+        )
+        print(f"No --video-out set; writing local mp4 to {video_out}")
     video_callback(
         states,
         active_agents,
@@ -858,6 +3421,11 @@ def main():
         objects_bbox=objects_bbox,
         distances=distances,
         angles=angles,
+        video_output_path=video_out,
+        draw_target_outline_overlay=bool(
+            base_config.get("VISUALIZER_DRAW_TARGET_OUTLINE", True)
+        ),
+        pov_overlay=pov_overlay,
     )
     wait_for_video_finish()
 

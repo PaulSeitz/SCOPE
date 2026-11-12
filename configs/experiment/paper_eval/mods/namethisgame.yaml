@@ -1,0 +1,33 @@
+# Name This Game short strip: S / Dₚ / Dₜ / A (paper showcase).
+env: namethisgame
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_tentacle_spawn_x
+    mods: [shift_tentacle_spawn_x]
+    category: layout
+  - key: slower_player
+    mods: [slower_player]
+    category: dynamics
+  - key: faster_shark
+    mods: [faster_shark]
+    category: dynamics
+  - key: no_shark_short_tentacles
+    mods: [no_shark_short_tentacles]
+    category: semantic
+  - key: no_shark
+    mods: [no_shark]
+    category: semantic
+  - key: change_background_color
+    mods: [change_background_color]
+    category: visual
+
+paper_core:
+  - base
+  - shift_tentacle_spawn_x
+  - slower_player
+  - faster_shark
+  - no_shark_short_tentacles

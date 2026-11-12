@@ -3,6 +3,9 @@ results/
 wandb/
 models/
 outputs/
+# Root-only artifact dump (do NOT use bare paper_eval/ — that also ignores
+# configs/experiment/paper_eval/*.yaml and blocks new suite configs from git).
+/paper_eval/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -212,3 +215,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Large local result snapshots, checkpoints and generated reports stay out of the repository.
+/tmp/
+/paper_eval_report_*
+# Personal probes that are not part of the thesis results.
+configs/experiment/paper_eval/personal_probes/
+configs/experiment/paper_eval/mods/kangaroo.yaml

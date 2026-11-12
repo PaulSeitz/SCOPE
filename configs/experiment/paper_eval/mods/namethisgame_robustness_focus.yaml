@@ -1,0 +1,19 @@
+# Opt-in robustness candidates: independent layout and simplification cells.
+env: namethisgame
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: shift_tentacle_columns
+    mods: [shift_tentacle_columns]
+    category: layout
+  - key: infinite_oxygen
+    mods: [infinite_oxygen]
+    category: simplification
+
+paper_core:
+  - base
+  - shift_tentacle_columns
+  - infinite_oxygen

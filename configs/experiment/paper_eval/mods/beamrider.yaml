@@ -1,0 +1,54 @@
+# Beamrider short strip: S / Dₚ / Dₜ / A (paper showcase).
+# Older fork entries kept below paper_core for opportunistic evals.
+env: beamrider
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: three_lanes
+    mods: [three_lanes]
+    category: layout
+  - key: slow_strafe
+    mods: [slow_strafe]
+    category: dynamics
+  - key: double_enemy_speed
+    mods: [double_enemy_speed]
+    category: dynamics
+  - key: idle_at_range
+    mods: [idle_at_range]
+    category: semantic
+  - key: top_idle_no_shoot
+    mods: [idle_at_range]
+    category: semantic
+  # only_rejuvenator / rejuvenator_and_coins were never registered in
+  # BeamRiderEnvMod.REGISTRY. Dropped from paper_core so eval does not
+  # abort the stem.
+  # legacy / opportunistic (not in paper_core)
+  - key: hardcore
+    mods: [hardcore]
+    category: dynamics
+  - key: mothership_laser
+    mods: [mothership_laser]
+    category: semantic
+  - key: same_enemies
+    mods: [same_enemies]
+    category: semantic
+  - key: teleport_ufos
+    mods: [teleport_ufos]
+    category: dynamics
+  - key: toaster
+    mods: [toaster]
+    category: visual
+  - key: fog_of_war
+    mods: [fog_of_war]
+    category: dynamics
+    skip_eval: true  # fog palette missing under native downscale
+
+paper_core:
+  - base
+  - three_lanes
+  - slow_strafe
+  - double_enemy_speed
+  - idle_at_range

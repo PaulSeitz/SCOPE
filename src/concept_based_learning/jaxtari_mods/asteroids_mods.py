@@ -1,0 +1,45 @@
+import os
+from jaxtari.modification import JaxtariModController
+from concept_based_learning.jaxtari_mods.asteroids.asteroids_mod_plugins import (
+    DontShootMod, MatrixMod, SlowAsteroidsMod, InstantTurnMod,
+    XDominantRocksMod, NoMomentumMod, FasterAsteroidsMod, FrozenAsteroidsMod,
+)
+
+from concept_based_learning.jaxtari_mods.robustness_probes import (
+    AsteroidsShiftInitialRocksMod,
+    AsteroidsNoShipCollisionsMod,
+)
+
+class AsteroidsEnvMod(JaxtariModController):
+    """
+    Game-specific Mod Controller for Asteroids.
+    """
+
+    REGISTRY = {
+        "shift_initial_rocks": AsteroidsShiftInitialRocksMod,
+        "no_ship_collisions": AsteroidsNoShipCollisionsMod,
+
+        "dont_shoot": DontShootMod,
+        "matrix_theme": MatrixMod,
+        "slow_asteroids": SlowAsteroidsMod,
+        "instant_turn": InstantTurnMod,
+        "x_dominant_rocks": XDominantRocksMod,
+        "no_momentum": NoMomentumMod,
+        "faster_asteroids": FasterAsteroidsMod,
+        "frozen_asteroids": FrozenAsteroidsMod,
+    }
+
+    _mod_sprite_dir = os.path.join(os.path.dirname(__file__), "asteroids", "sprites")
+
+    def __init__(self,
+                 env,
+                 mods_config: list = [],
+                 allow_conflicts: bool = False
+                 ):
+
+        super().__init__(
+            env=env,
+            mods_config=mods_config,
+            allow_conflicts=allow_conflicts,
+            registry=self.REGISTRY
+        )

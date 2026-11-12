@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scope-atari"
+version = "1.0.0"
+description = "SCOPE: target-conditioned hierarchical reinforcement learning in JAXtari"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "src/concept_based_learning/jaxtari_mods/LICENSE-JAXTARI"]
+dependencies = [
+    "chex", "flax", "hydra-core>=1.3.2", "jax", "jaxtari==0.2.0",
+    "numpy", "omegaconf>=2.3.0", "optax", "pygame", "PyYAML",
+    "rtpt", "safetensors>=0.7.0", "wandb",
+]
+
+[project.optional-dependencies]
+analysis = ["matplotlib", "pypdf"]
+video = ["imageio[ffmpeg]", "opencv-python", "wandb[media]"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["concept_based_learning*"]
+
+[tool.setuptools.package-data]
+"concept_based_learning.jaxtari_mods" = ["LICENSE-JAXTARI", "*/sprites/*.npy"]
+
+[tool.pytest.ini_options]
+markers = ["slow: long-running compile / training smoketests"]

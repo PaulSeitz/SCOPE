@@ -4,15 +4,23 @@ import chex
 import functools
 import jax
 import jax.numpy as jnp
-import jaxatari.spaces as spaces
-from jaxatari.environment import ObjectObservation
-from jaxatari.wrappers import JaxatariWrapper
+import jaxtari.spaces as spaces
+from jaxtari.environment import ObjectObservation
+from jaxtari.wrappers import JaxatariWrapper
 
-from .datatypes import (
+from concept_based_learning.environments.datatypes import (
     SemanticObservation,
     SemanticState,
     LabeledObjectObservation,
     NUM_LABELS,
+)
+from concept_based_learning.environments.meta_object_layout import append_meta_reserved_slots
+from concept_based_learning.observations.native_oc_stack import (
+    init_native_frame_stack,
+    native_frame_bounds,
+    normalize_native_stack,
+    push_native_frame_stack,
+    ravel_native_frame,
 )
 
 
@@ -21,16 +29,34 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
     Base wrapper that standardizes game-specific observations into SemanticObservations.
     """
 
-    def __init__(self, env, max_objects: int):
+    def __init__(self, env, max_objects: int, meta_reserved_slots: int = 1):
         super().__init__(env)
         self.stack_size = self._infer_stack_size()
+        self._native_oc = bool(getattr(self._env, "_cbl_native_oc_stack", False))
+        if self._native_oc:
+            low, high = native_frame_bounds(self._env.observation_space())
+            self._native_low = jnp.asarray(low, dtype=jnp.float32)
+            self._native_high = jnp.asarray(high, dtype=jnp.float32)
+        else:
+            self._native_low = None
+            self._native_high = None
         self.frame_skip = int(getattr(self._env, "_cbl_frame_skip", 1))
         self.clip_reward = bool(getattr(self._env, "_cbl_clip_reward", False))
         self._single_frame_api = not hasattr(self._env, "frame_stack_size")
+        # Trailing slots: synthetic meta actions (NOOP last; optional FIRE before it).
+        self.meta_reserved_slots = int(meta_reserved_slots)
         self.max_objects = max_objects
+        self.game_max_objects = max_objects - self.meta_reserved_slots
+        # Game entities occupy [0, game_max_objects); meta slots follow.
+        self.game_slot_origin = 0
 
         # Note: We wrap the original observation space inside a Dict space
         self._observation_space = self._make_observation_space()
+
+    def _with_meta_event_padding(self, game_event_mask):
+        """Pad a length-``game_max_objects`` event mask with trailing meta zeros."""
+        meta_z = jnp.zeros(self.meta_reserved_slots, dtype=jnp.int32)
+        return jnp.concatenate([game_event_mask.astype(jnp.int32), meta_z])
 
     def _infer_stack_size(self) -> int:
         """
@@ -87,10 +113,10 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
                         "visual_id": spaces.Box(0, 255, obj_shape, jnp.int32),
                         "state": spaces.Box(0, 255, obj_shape, jnp.int32),
                         "orientation": spaces.Box(-180, 180, obj_shape, jnp.int32),
+                        "semantic_label": spaces.Box(
+                            0, NUM_LABELS - 1, obj_shape, jnp.int32
+                        ),
                     }
-                ),
-                "object_labels": spaces.Box(
-                    0, NUM_LABELS - 1, obj_shape, jnp.int32
                 ),
             }
         )
@@ -114,13 +140,64 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
         """
         Applies the extraction across the frame stack using vmap.
         """
+        pixel_stack = None
+        raw_stack = obs_stack
+        if isinstance(obs_stack, tuple) and len(obs_stack) == 2:
+            pixel_stack, raw_stack = obs_stack
+
         # We vmap over the first axis (the frame stack)
-        objects_stack = jax.vmap(self._extract_frame_objects)(obs_stack)
+        objects_stack = jax.vmap(self._extract_frame_objects)(raw_stack)
+        append_meta = lambda objs: append_meta_reserved_slots(
+            objs, num_reserved=self.meta_reserved_slots
+        )
+        objects_stack = jax.vmap(append_meta)(objects_stack)
 
         return SemanticObservation(
-            raw_observation=obs_stack,  # Pass through the raw stacked observation
+            raw_observation=raw_stack,  # Pass through the stacked object-centric observation
             objects=objects_stack,
+            pixel_observation=pixel_stack,
+            native_oc_vector=self._native_vector_or_placeholder(None),
         )
+
+    def _native_vector_or_placeholder(self, flat_stack):
+        if not self._native_oc or flat_stack is None:
+            return jnp.zeros((1,), dtype=jnp.float32)
+        return normalize_native_stack(flat_stack, self._native_low, self._native_high)
+
+    def _native_stack_from_frame(self, frame, previous):
+        if not self._native_oc:
+            return None
+        if previous is None:
+            return init_native_frame_stack(frame, self.stack_size)
+        return push_native_frame_stack(previous, frame)
+
+    def _substep_env_state_events(self, prev_env_state, next_env_state):
+        """
+        Optional per-substep transition events (OR-accumulated across frame_skip).
+
+        Subclasses return an env-specific mask (e.g. confirmed kills); default None.
+        """
+        del prev_env_state, next_env_state
+        return None
+
+    def _substep_collect_events(self, prev_env_state, next_env_state):
+        """
+        Optional per-substep COLLECT success events (OR-accumulated across frame_skip).
+
+        Subclasses return a game-layout mask for ``was_collected``; default None.
+        """
+        del prev_env_state, next_env_state
+        return None
+
+    def _stamp_events_on_observation(self, semantic_obs, accumulated_events):
+        """Apply accumulated substep kill events onto the stacked semantic observation."""
+        del accumulated_events
+        return semantic_obs
+
+    def _stamp_collect_events_on_observation(self, semantic_obs, accumulated_events):
+        """Apply accumulated substep collect events onto the stacked semantic observation."""
+        del accumulated_events
+        return semantic_obs
 
     def _step_env_compat(self, state: Any, action: int):
         """
@@ -136,6 +213,24 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             return obs, new_state, reward, done, info
         raise ValueError(f"Unexpected step() return length: {len(step_out)}")
 
+    def _unwrap_env_state(self, wrapper_state: Any):
+        """
+        Recursively unwrap nested wrapper state containers until we reach an env_state.
+        Works for AtariState and compound states like PixelAndObjectCentricState.
+        """
+        cur = wrapper_state
+        for _ in range(8):  # defensive cap against accidental cycles
+            if hasattr(cur, "env_state"):
+                return cur.env_state
+            if hasattr(cur, "atari_state"):
+                cur = cur.atari_state
+                continue
+            break
+        raise AttributeError(
+            "Could not unwrap env_state from wrapper state; "
+            f"received type {type(wrapper_state)!r}."
+        )
+
     @functools.partial(jax.jit, static_argnums=(0,))
     def reset(self, key: chex.PRNGKey) -> Tuple[SemanticObservation, SemanticState]:
         obs, atari_state = self._env.reset(key)
@@ -147,6 +242,13 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             state = SemanticState(atari_state=atari_state)
 
         semantic_obs = self._process_stack(obs_stack)
+        native_stack = None
+        if self._native_oc and self._single_frame_api:
+            native_stack = self._native_stack_from_frame(ravel_native_frame(obs), None)
+            semantic_obs = semantic_obs.replace(
+                native_oc_vector=self._native_vector_or_placeholder(native_stack)
+            )
+            state = state.replace(native_flat_stack=native_stack)
 
         return semantic_obs, state
 
@@ -154,6 +256,8 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
     def step(
         self, state: SemanticState, action: int
     ) -> Tuple[SemanticObservation, SemanticState, float, bool, Dict]:
+        accumulated_events = None
+        accumulated_collect_events = None
         if self._single_frame_api:
             obs_stack = state.obs_stack
             atari_state = state.atari_state
@@ -161,23 +265,67 @@ class JaxatariSemanticBaseWrapper(JaxatariWrapper):
             done = jnp.array(False, dtype=jnp.bool_)
             info = {}
             for _ in range(self.frame_skip):
+                prev_env_state = atari_state.env_state
                 obs_single, atari_state, step_reward, step_done, step_info = self._step_env_compat(
                     atari_state, action
                 )
+                sub_events = self._substep_env_state_events(
+                    prev_env_state, atari_state.env_state
+                )
+                if sub_events is not None:
+                    accumulated_events = (
+                        sub_events
+                        if accumulated_events is None
+                        else jnp.logical_or(accumulated_events, sub_events)
+                    )
+                sub_collect = self._substep_collect_events(
+                    prev_env_state, atari_state.env_state
+                )
+                if sub_collect is not None:
+                    accumulated_collect_events = (
+                        sub_collect
+                        if accumulated_collect_events is None
+                        else jnp.logical_or(accumulated_collect_events, sub_collect)
+                    )
                 obs_stack = self._push_obs_stack(obs_stack, obs_single)
                 total_reward = total_reward + step_reward
                 done = jnp.logical_or(done, step_done)
                 info = step_info
+            # JAXAtari convention: info["env_reward"] is the unclipped frame-skip sum
+            # (see AtariWrapper / LogWrapper). Overwrite the last-substep value so
+            # trainers can log true Atari score while still clipping the step reward.
+            if isinstance(info, dict):
+                info = {**info, "env_reward": total_reward}
             reward = jnp.sign(total_reward) if self.clip_reward else total_reward
             new_atari_state = atari_state
             new_state = SemanticState(atari_state=new_atari_state, obs_stack=obs_stack)
+            if self._native_oc:
+                native_stack = self._native_stack_from_frame(
+                    ravel_native_frame(obs_single), state.native_flat_stack
+                )
+                new_state = new_state.replace(native_flat_stack=native_stack)
         else:
+            prev_env_state = self._unwrap_env_state(state.atari_state)
             obs_stack, new_atari_state, reward, done, info = self._step_env_compat(
                 state.atari_state, action
+            )
+            accumulated_events = self._substep_env_state_events(
+                prev_env_state, self._unwrap_env_state(new_atari_state)
+            )
+            accumulated_collect_events = self._substep_collect_events(
+                prev_env_state, self._unwrap_env_state(new_atari_state)
             )
             new_state = SemanticState(atari_state=new_atari_state)
 
         semantic_obs = self._process_stack(obs_stack)
+        semantic_obs = self._stamp_events_on_observation(semantic_obs, accumulated_events)
+        semantic_obs = self._stamp_collect_events_on_observation(
+            semantic_obs, accumulated_collect_events
+        )
+        if self._native_oc and new_state.native_flat_stack is not None:
+            semantic_obs = semantic_obs.replace(
+                native_oc_vector=self._native_vector_or_placeholder(new_state.native_flat_stack)
+            )
 
         return semantic_obs, new_state, reward, done, info
 

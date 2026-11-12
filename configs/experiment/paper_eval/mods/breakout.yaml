@@ -1,0 +1,11 @@
+# Minimal allowlist for breakout — base only until mods workshop.
+env: breakout
+status: draft
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+
+paper_core:
+  - base

@@ -1,0 +1,55 @@
+# Default HRL, pixel CNN. Same NO_REWARDS recipe as the OC HRL arm.
+# Seaquest, seeds 44-48 via scripts/run_nexus.py --seed. Not launched.
+NAME_INITIALS: "CBL"
+ALG_NAME: "pqn_hier_baseline_pixel"
+TOTAL_TIMESTEPS: 5.0e7
+TOTAL_TIMESTEPS_DECAY: 5.0e7
+NUM_ENVS: 1024
+NUM_STEPS: 32
+EPS_START: 1.0
+EPS_FINISH: 0.001
+EPS_DECAY: 0.1
+META_EPS_START: 1.0
+META_EPS_FINISH: 0.001
+META_EPS_DECAY: 0.3
+NUM_EPOCHS: 2
+NUM_MINIBATCHES: 256
+NORM_TYPE: "layer_norm"
+NORM_INPUT: false
+LR: 2.5e-4
+MAX_GRAD_NORM: 10
+LR_LINEAR_DECAY: true
+GAMMA: 0.99
+LAMBDA: 0.5
+META_LAMBDA: 0.9
+HIDDEN_SIZE: 64
+NUM_LAYERS: 3
+STICKY_ACTIONS: false
+EPISODIC_LIFE: true
+
+HIERARCHICAL: true
+NUM_AGENTS: 3
+META_POLICY: "learned"
+META_GREEDY: false
+META_SHAPED_REWARD: false
+LLM_PRETRAIN: false
+RANDOM_PRETRAIN: false
+PRETRAIN_LEN: 3700
+NO_REWARDS: true
+
+ENV_NAME: "Seaquest"
+ENV_KWARGS: {}
+OBJECT_CENTRIC: false
+
+# Frozen mod-eval is the reported test. In-training rollouts are off so the
+# 50M budget is not multiplied, and so pixel and OC spend the same wall time.
+TEST_DURING_TRAINING: false
+TEST_INTERVAL: 0.1
+TEST_NUM_ENVS: 128
+TEST_NUM_STEPS: 1000
+EPS_TEST: 0.0
+RECORD_VIDEO: false
+eval_envs:
+  - label: "clean"
+    noisy_eval: false
+    no_enemies: false

@@ -1,0 +1,56 @@
+# Tennis mod allowlists for paper_eval RQ2.
+env: tennis
+status: ready
+
+eval_mods:
+  - key: base
+    mods: []
+    category: control
+  - key: random_ball_speed
+    mods: [random_ball_speed]
+    category: dynamics
+  - key: random_walk_speed
+    mods: [random_walk_speed]
+    category: dynamics
+  - key: fast_player
+    mods: [fast_player]
+    category: dynamics
+  - key: fast_enemy
+    mods: [fast_enemy]
+    category: dynamics
+  - key: lazy_enemy
+    mods: [lazy_enemy]
+    category: dynamics
+  - key: super_gravity
+    mods: [super_gravity]
+    category: dynamics
+  - key: high_bounce
+    mods: [high_bounce]
+    category: dynamics
+  - key: clay_court
+    mods: [clay_court]
+    category: visual
+  - key: grass_court
+    mods: [grass_court]
+    category: visual
+  - key: hard_court
+    mods: [hard_court]
+    category: visual
+  - key: night_mode
+    mods: [night_mode]
+    category: visual
+  - key: grayscale
+    mods: [grayscale]
+    category: visual
+  - key: inverted_colors
+    mods: [inverted_colors]
+    category: visual
+
+paper_core:
+  - base
+  - random_ball_speed
+  - fast_enemy
+  - lazy_enemy
+  - super_gravity
+  - high_bounce
+  - night_mode  # one visual

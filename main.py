@@ -2,6 +2,18 @@ import os
 import time
 import copy
 import warnings
+
+# Must run before jax init: disable Triton GEMM to avoid XLA CHECK failures
+# (triton_tiling_propagation.cc dst_remaining_size) on some jaxlib builds.
+_xla = os.environ.get("XLA_FLAGS", "").strip()
+_triton_off = "--xla_gpu_enable_triton_gemm=false"
+if not _xla:
+    os.environ["XLA_FLAGS"] = (
+        f"--xla_gpu_strict_conv_algorithm_picker=false {_triton_off}"
+    )
+elif "--xla_gpu_enable_triton_gemm" not in _xla:
+    os.environ["XLA_FLAGS"] = f"{_xla} {_triton_off}"
+
 import jax
 import jax.numpy as jnp
 import wandb
@@ -10,16 +22,33 @@ from safetensors.flax import save_file
 import hydra
 from omegaconf import OmegaConf
 
-from src.concept_based_learning.environments.env_manager import EnvManager
-from src.concept_based_learning.curriculum import build_skill_phases
-from src.concept_based_learning.train_agent import make_train
-from src.concept_based_learning.train_meta_agent import make_meta_train
-from src.concept_based_learning.train_tandem import make_tandem_train
-from src.concept_based_learning.video_recorder import video_callback, wait_for_video_finish
-from src.concept_based_learning.pqn_visualizer import (
+from concept_based_learning.environments.env_manager import (
+    EnvManager,
+    align_config_max_objects,
+)
+from concept_based_learning.environments.heuristics import (
+    resolve_heuristic_target_fn,
+    resolve_heuristic_with_state_fn,
+)
+from concept_based_learning.curriculum import build_skill_phases
+from concept_based_learning.training.train_skills import make_train
+from concept_based_learning._legacy.train_meta_agent import make_meta_train
+from concept_based_learning.training.train_tandem import make_tandem_train
+from concept_based_learning.training.rtpt_progress import start_rtpt
+from concept_based_learning.observations.egocentric import (
+    configure_ego_obs_from_config,
+    destroy_only_extras_active,
+    ego_obs_channels_per_frame,
+    skill_ego_flat_dim,
+)
+from concept_based_learning.observations.pov_relative import resolve_action_mappers
+from concept_based_learning.training.skill_params import flatten_skill_params
+from concept_based_learning.video_recorder import video_callback, wait_for_video_finish
+from concept_based_learning.pqn_visualizer import (
     load_params_from_file,
     resolve_config_path,
     run_eval_rollout,
+    infer_skill_hparams_from_params,
 )
 
 
@@ -44,6 +73,57 @@ def _safe_checkpoint_path(base_path, init_model_path=None):
     return f"{root}_finetuned{ext}"
 
 
+def _configure_ego_obs_format(config: dict) -> None:
+    """Select ego observation format and feature toggles for this run."""
+    configure_ego_obs_from_config(config)
+    stack = int(config.get("FRAME_STACK_SIZE", 4))
+    ch = ego_obs_channels_per_frame()
+    clip_px = config.get("EGO_DISTANCE_CLIP_MAX_PX", None)
+    clip_note = (
+        f"distance_clip={clip_px}px"
+        if clip_px is not None
+        else "distance_clip=off"
+    )
+    print(
+        f"Ego observations: {ch} channels/frame × {stack} stack = {ch * stack} "
+        f"(legacy={config.get('USE_LEGACY_EGO_OBS', False)}, "
+        f"size={config.get('USE_EGO_SIZE_FEATURES', True)}, "
+        f"velocity={config.get('USE_EGO_VELOCITY_FEATURES', True)}, "
+        f"weapon={config.get('USE_EGO_WEAPON_FEATURES', config.get('USE_SKILL_EGO_FEATURES', False))}, "
+        f"blocking={config.get('USE_EGO_BLOCKING_FEATURES', config.get('USE_EGO_LOS_FEATURES', False))}, "
+        f"destroy_only_extras={config.get('USE_DESTROY_ONLY_EGO_EXTRAS', False)}, "
+        f"{clip_note})"
+    )
+    if destroy_only_extras_active():
+        names = config.get("SKILL_NAMES") or []
+        n_skills = int(config.get("NUM_SKILLS", len(names) or 4))
+        destroy_idx = 0
+        if isinstance(names, (list, tuple)) and "DESTROY" in [str(n) for n in names]:
+            destroy_idx = [str(n) for n in names].index("DESTROY")
+        dims = [
+            skill_ego_flat_dim(i, stack_size=stack, destroy_skill_idx=destroy_idx)
+            for i in range(n_skills)
+        ]
+        print(f"  per-skill ego in-dim @ stack {stack}: {dims} (DESTROY extras not shared)")
+
+
+def _resolve_heuristic_target_fn(config, env_name: str, components):
+    return resolve_heuristic_target_fn(config, env_name, components)
+
+
+def _wandb_env_step(config: dict, timesteps: int, *, step_offset_updates: int = 0) -> int:
+    """Map local training timesteps to the global ``env/step`` used in wandb metrics."""
+    num_steps = int(config.get("NUM_STEPS", 128))
+    num_envs = int(config.get("NUM_ENVS", 512))
+    step_offset_timesteps = int(
+        config.get(
+            "STEP_OFFSET_TIMESTEPS",
+            step_offset_updates * num_steps * num_envs,
+        )
+    )
+    return step_offset_timesteps + int(timesteps)
+
+
 def outer_make_train(config, frozen_meta_params=None):
     """
     Constructs the environments with the custom semantic wrappers defined
@@ -53,11 +133,9 @@ def outer_make_train(config, frozen_meta_params=None):
     `EVAL_GAME_MODS` is null or omitted) so end-of-phase videos and eval
     rollouts match the environment actually trained on (e.g. curriculum mods).
 
-    Skillbootcamp: set ``EGO_ACTION_DIM`` to **18** (full egocentric table) or **6**
-    (primitives only) so skill Q-heads match ``bootcamp_action_mapper``; the mapper
-    supports both (see ``bootcamp_action_mapper`` module docstring).
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(config)
 
     manager = EnvManager()
     components = manager.get_components(env_name)
@@ -79,6 +157,13 @@ def outer_make_train(config, frozen_meta_params=None):
 
     env, _ = create_env_with_mods(train_game_mods, train=True)
     test_env, renderer = create_env_with_mods(eval_game_mods, train=False)
+    align_config_max_objects(config, env, env_name=env_name)
+
+    heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
+    heuristic_with_state_fn = resolve_heuristic_with_state_fn(
+        config, env_name, components
+    )
+    action_mapper, inverse_action_mapper = resolve_action_mappers(components, config)
 
     # Call the hierarchical training loop; returns (train_fn, eval_rollout_fn)
     train_fn, eval_rollout_fn = make_train(
@@ -87,15 +172,22 @@ def outer_make_train(config, frozen_meta_params=None):
         test_env,
         renderer,
         frozen_meta_params=frozen_meta_params,
-        get_heuristic_target=components.get_heuristic_target,
+        get_heuristic_target=heuristic_fn,
         no_target_idx=components.no_target_idx,
-        action_mapper=components.action_mapper,
+        action_mapper=action_mapper,
+        inverse_action_mapper=inverse_action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         fixed_target_idx_from_config=components.fixed_target_idx_from_config,
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
-        idle_action_hook=components.idle_action_hook,
+        get_heuristic_with_state=heuristic_with_state_fn,
+        reset_policy_on_life_lost=bool(
+            getattr(components, "reset_policy_on_life_lost", False)
+        ),
+        ego_mapper_noop_action=int(components.ego_mapper_noop_action),
+        ego_mapper_fire_action=int(components.ego_mapper_fire_action),
+        no_target_game_action=int(components.no_target_game_action),
     )
     return train_fn, eval_rollout_fn, renderer
 
@@ -106,6 +198,7 @@ def outer_make_meta_train(config, frozen_skill_params):
     Meta training is intentionally forced onto the unmodified base environment.
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(config)
 
     manager = EnvManager()
     components = manager.get_components(env_name)
@@ -117,6 +210,7 @@ def outer_make_meta_train(config, frozen_skill_params):
 
     env, _ = manager.make_env(env_name, local_cfg, train=True)
     test_env, renderer = manager.make_env(env_name, local_cfg, train=False)
+    align_config_max_objects(local_cfg, env, env_name=env_name)
 
     train_fn, eval_rollout_fn = make_meta_train(
         local_cfg,
@@ -135,53 +229,84 @@ def outer_make_meta_train(config, frozen_skill_params):
 
 def outer_make_tandem_train(config):
     """
-    Constructs base environments and returns the tandem trainer.
-    Tandem training runs on the configured base environment without curriculum phases.
+    Constructs base environments and returns the tandem JIT region bundle.
+
+    ``make_tandem_train`` returns separate compiled regions (init, collect, meta,
+    skills) each wrapped in ``jax.jit(jax.vmap(...))`` over seeds. Training is
+    orchestrated in Python via ``run_training`` (one region launch per update).
     """
     env_name = str(config.get("ENV_NAME", "Seaquest"))
+    _configure_ego_obs_format(config)
 
     manager = EnvManager()
     components = manager.get_components(env_name)
     env, _ = manager.make_env(env_name, config, train=True)
     test_env, renderer = manager.make_env(env_name, config, train=False)
+    align_config_max_objects(config, env, env_name=env_name)
 
-    train_fn = make_tandem_train(
+    heuristic_fn = _resolve_heuristic_target_fn(config, env_name, components)
+    action_mapper, inverse_action_mapper = resolve_action_mappers(components, config)
+
+    tandem_regions = make_tandem_train(
         config,
         env,
         test_env,
         renderer,
         no_target_idx=components.no_target_idx,
-        get_heuristic_target=components.get_heuristic_target,
-        action_mapper=components.action_mapper,
+        get_heuristic_target=heuristic_fn,
+        action_mapper=action_mapper,
+        inverse_action_mapper=inverse_action_mapper,
         extract_all_skills_rewards=components.reward_extractor,
         extract_life_lost=components.extract_life_lost,
         meta_mask_hook=components.meta_mask_hook,
         forced_target_hook=components.forced_target_hook,
-        idle_action_hook=components.idle_action_hook,
+        ego_mapper_noop_action=int(components.ego_mapper_noop_action),
+        ego_mapper_fire_action=int(components.ego_mapper_fire_action),
     )
-    return train_fn, renderer
+    return tandem_regions, renderer
 
 
 def single_run(config):
     """
     Executes a single training run with Weights & Biases logging.
     """
-    # Flatten: Hydra puts experiment config under "experiment", alg params under "experiment.alg"
+    # Flatten: experiment yaml -> ``experiment`` group; alg block merged on top.
     exp = config.get("experiment", {})
-    base_config = {**config, **exp, **exp.get("alg", {})}
+    root = {k: v for k, v in config.items() if k != "experiment"}
+    base_config = {
+        **root,
+        **{k: v for k, v in exp.items() if k != "alg"},
+        **exp.get("alg", {}),
+    }
 
     alg_name = base_config.get("ALG_NAME", "hierarchical_pqn")
     env_name = str(base_config.get("ENV_NAME", "Seaquest"))
+    from concept_based_learning.paper_eval.config_merge import snapshot_ego_persist_keys
+
+    ego_persist_snapshot = snapshot_ego_persist_keys(base_config)
+    _configure_ego_obs_format(base_config)
 
     if base_config.get("WANDB_MODE", "disabled") != "disabled":
         wandb.init(
             entity=base_config.get("ENTITY", None),
             project=base_config.get("PROJECT", "concept_based_learning"),
-            tags=[alg_name.upper(), env_name.upper(), f"jax_{jax.__version__}"],
-            name=f'{alg_name}_{env_name}',
+            tags=[alg_name.upper(), env_name.upper(), f"jax_{jax.__version__}"]
+                 + list(base_config.get("WANDB_TAGS", [])),
+            name=base_config.get("WANDB_RUN_NAME", f'{alg_name}_{env_name}'),
             config=base_config,
             mode=base_config["WANDB_MODE"],
         )
+        # Persist run id early so a crashed train still leaves a resumable pointer.
+        save_path_early = resolve_config_path(base_config.get("SAVE_PATH", None))
+        if save_path_early is not None and wandb.run is not None:
+            from concept_based_learning.paper_eval.wandb_run_meta import (
+                persist_wandb_run_meta,
+            )
+
+            early_dir = os.path.join(save_path_early, env_name)
+            meta_path = persist_wandb_run_meta(early_dir)
+            if meta_path is not None:
+                print(f"Wandb run meta saved to {meta_path}")
 
     rng = jax.random.PRNGKey(base_config["SEED"])
     eval_seed = base_config.get("EVAL_SEED", base_config["SEED"] + 1)
@@ -191,13 +316,38 @@ def single_run(config):
     train_mode = str(base_config.get("TRAIN_MODE", "skills_only"))
     print(f"\n=== Starting Training Run in Mode: {train_mode.upper()} ===")
 
+    if start_rtpt(base_config):
+        print("RTPT progress tracking enabled.")
+
     # Optional: initialize skill network weights from a pre-trained model
     # to enable few-shot / transfer learning across environments.
     init_model_path = base_config.get("INIT_MODEL_PATH", None)
     prev_params = None
     if init_model_path is not None:
+        _configure_ego_obs_format(base_config)
         print(f"Initializing skills from pre-trained model: {init_model_path}")
         prev_params = load_params_from_file(init_model_path)
+        skill_mode = str(base_config.get("SKILL_INPUT_MODE", "ego")).lower().strip()
+        inferred = infer_skill_hparams_from_params(
+            prev_params, skill_input_mode=skill_mode
+        )
+        ckpt_ego_in = inferred.get("_ckpt_ego_in")
+        if skill_mode in ("ego", "ego_embed") and ckpt_ego_in is not None:
+            expected_ego_in = int(ego_obs_channels_per_frame()) * int(
+                base_config.get("FRAME_STACK_SIZE", 4)
+            )
+            if int(ckpt_ego_in) != expected_ego_in:
+                warnings.warn(
+                    "Checkpoint ego feature length mismatch: "
+                    f"checkpoint expects {ckpt_ego_in}, current config expects "
+                    f"{expected_ego_in} (channels/frame={ego_obs_channels_per_frame()}, "
+                    f"FRAME_STACK_SIZE={base_config.get('FRAME_STACK_SIZE', 4)}). "
+                    "This commonly happens when USE_EGO_SIZE_FEATURES / "
+                    "USE_EGO_VELOCITY_FEATURES / USE_LEGACY_EGO_OBS differ between "
+                    "checkpoint training and current run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     def run_skill_curriculum(params_to_start_with, steps_to_run):
         """Runs System 1 training with optional curriculum phases."""
@@ -267,23 +417,30 @@ def single_run(config):
             runner_state = outs["runner_state"]
             train_states, *_ = runner_state
             first_train_states = jax.tree_util.tree_map(lambda x: x[0], train_states)
-            current_params = first_train_states.params
+            if isinstance(first_train_states, tuple):
+                current_params = tuple(s.params for s in first_train_states)
+                timesteps0 = first_train_states[0].timesteps
+            else:
+                current_params = first_train_states.params
+                timesteps0 = first_train_states.timesteps[0]
 
-            global_step_end_of_phase = int(phase.step_offset_updates) + int(num_updates_this_phase)
+            # Skill trainer vmaps over skills; timesteps is [num_skills] after seed[0]
+            # unless heads have different ego widths (tuple of TrainStates).
+            global_step_end_of_phase = _wandb_env_step(
+                phase_config,
+                int(jax.device_get(timesteps0)),
+                step_offset_updates=int(phase.step_offset_updates),
+            )
             if (
                 phase_config.get("RECORD_VIDEO")
                 and phase_config.get("VIDEO_AT_END", True)
-                and eval_rollout_fn is not None
             ):
                 video_key = f"video/{phase_idx + 1:02d}_{phase.name}"
                 video_output_path = None
-                if (
-                    phase_config.get("WANDB_MODE", "disabled") == "disabled"
-                    or wandb.run is None
-                ):
-                    save_root = resolve_config_path(
-                        phase_config.get("SAVE_PATH", "./outputs/models")
-                    )
+                save_root = resolve_config_path(
+                    phase_config.get("SAVE_PATH", "./outputs/models")
+                )
+                if save_root is not None:
                     vdir = os.path.join(
                         save_root,
                         "curriculum_videos",
@@ -306,7 +463,9 @@ def single_run(config):
                 )
                 if use_wandb_video or video_output_path:
                     print(f"Recording end-of-phase video for '{phase.name}'...")
-                    eval_rng = jax.random.PRNGKey(eval_seed)
+                    # Use the shared visualizer rollout (same path as tandem videos).
+                    # train_skills.eval_rollout is an unjitted Python loop that can
+                    # appear to hang for many minutes on Seaquest heuristics.
                     (
                         states,
                         active_agents,
@@ -314,11 +473,15 @@ def single_run(config):
                         dones,
                         target_obj_idxs,
                         objects_bbox,
-                    ) = eval_rollout_fn(
-                        runner_state,
-                        eval_rng,
-                        global_step_end_of_phase,
-                        phase_config.get("VIDEO_MAX_FRAMES", 2000),
+                        distances,
+                        angles,
+                        renderer,
+                        pov_overlay,
+                    ) = run_eval_rollout(
+                        phase_config,
+                        params_tree=current_params,
+                        meta_params=None,
+                        max_frames=phase_config.get("VIDEO_MAX_FRAMES", 600),
                     )
                     video_callback(
                         states,
@@ -329,13 +492,15 @@ def single_run(config):
                         renderer,
                         target_obj_idxs=target_obj_idxs,
                         objects_bbox=objects_bbox,
+                        distances=distances,
+                        angles=angles,
                         video_key=video_key,
                         wandb_step=global_step_end_of_phase,
-                        video_output_path=(
-                            video_output_path if not use_wandb_video else None
-                        ),
+                        video_output_path=video_output_path,
+                        pov_overlay=pov_overlay,
                     )
                     wait_for_video_finish()
+                    print(f"End-of-phase video for '{phase.name}' finished.")
                 else:
                     print(
                         f"RECORD_VIDEO/VIDEO_AT_END set for phase '{phase.name}' "
@@ -343,7 +508,9 @@ def single_run(config):
                         "skipping video."
                     )
         last_global_step = int(phases[-1].step_offset_updates) + int(
-            base_config.get("TOTAL_TIMESTEPS", 0) // base_config.get("NUM_STEPS", 128) // base_config.get("NUM_ENVS", 512)
+            base_config.get("TOTAL_TIMESTEPS", 0)
+            // base_config.get("NUM_STEPS", 128)
+            // base_config.get("NUM_ENVS", 512)
         )
         # More robust: return the computed end step from the last phase
         last_global_step = global_step_end_of_phase if phases else 0
@@ -361,12 +528,6 @@ def single_run(config):
         meta_config["STEP_OFFSET"] = int(step_offset)
         meta_config.pop("GAME_MODS", None)
         meta_config.pop("EVAL_GAME_MODS", None)
-
-        num_updates = (
-            meta_config["TOTAL_TIMESTEPS"]
-            // meta_config.get("NUM_STEPS", 128)
-            // meta_config.get("NUM_ENVS", 512)
-        )
 
         rng, rng_meta = jax.random.split(rng)
         rngs = jax.random.split(rng_meta, num_seeds)
@@ -388,7 +549,11 @@ def single_run(config):
         first_train_state = jax.tree_util.tree_map(lambda x: x[0], train_state)
         meta_params = first_train_state.params
 
-        global_step_end = step_offset + num_updates
+        global_step_end = _wandb_env_step(
+            meta_config,
+            int(jax.device_get(first_train_state.timesteps)),
+            step_offset_updates=step_offset,
+        )
         if (
             meta_config.get("RECORD_VIDEO")
             and meta_config.get("VIDEO_AT_END", True)
@@ -485,13 +650,14 @@ def single_run(config):
 
         print("\n=== Tandem Training (Joint Skills + Meta-Policy) ===")
         start_compile = time.time()
-        train_fn, _ = outer_make_tandem_train(tandem_config)
-        train_vjit = jax.jit(jax.vmap(train_fn, in_axes=(0, None, None)))
-        train_vjit.lower(rngs, init_meta_params, init_skill_params).compile()
-        print(f"Tandem compilation took {time.time() - start_compile:.2f} seconds.")
+        tandem_regions, _ = outer_make_tandem_train(tandem_config)
+        tandem_regions["compile_regions"](rngs, init_meta_params, init_skill_params)
+        print(f"Tandem region compilation took {time.time() - start_compile:.2f} seconds.")
 
         tandem_t0 = time.time()
-        outs = jax.block_until_ready(train_vjit(rngs, init_meta_params, init_skill_params))
+        outs = jax.block_until_ready(
+            tandem_regions["run_training"](rngs, init_meta_params, init_skill_params)
+        )
         print(f"Tandem training completed in {time.time() - tandem_t0:.2f} seconds.")
 
         meta_state, skill_states, *_ = outs["runner_state"]
@@ -500,12 +666,7 @@ def single_run(config):
         final_skill_params = first_skill_states.params
         final_meta_params = first_meta_state.params
 
-        num_updates = (
-            int(tandem_config["TOTAL_TIMESTEPS"])
-            // int(tandem_config.get("NUM_STEPS", 128))
-            // int(tandem_config.get("NUM_ENVS", 512))
-        )
-        global_step_end = num_updates
+        global_step_end = int(jax.device_get(first_meta_state.timesteps))
         if tandem_config.get("RECORD_VIDEO") and tandem_config.get("VIDEO_AT_END", True):
             video_output_path = None
             if (
@@ -546,6 +707,7 @@ def single_run(config):
                     distances,
                     angles,
                     renderer,
+                    pov_overlay,
                 ) = run_eval_rollout(
                     tandem_config,
                     params_tree=final_skill_params,
@@ -568,6 +730,7 @@ def single_run(config):
                     video_output_path=(
                         video_output_path if not use_wandb_video else None
                     ),
+                    pov_overlay=pov_overlay,
                 )
                 wait_for_video_finish()
             else:
@@ -582,81 +745,106 @@ def single_run(config):
     final_skill_params = None
     final_meta_params = None
 
-    total_timesteps = int(base_config.get("TOTAL_TIMESTEPS", 0))
-    if train_mode == "skills_only":
-        final_skill_params, _ = run_skill_curriculum(prev_params, total_timesteps)
-    elif train_mode == "meta_only":
-        if prev_params is None:
-            raise ValueError(
-                "Mode 'meta_only' requires INIT_MODEL_PATH containing skill parameters."
-            )
-        final_skill_params = prev_params
-        meta_divisor = int(base_config.get("NUM_STEPS", 128)) * int(
-            base_config.get("NUM_ENVS", 512)
-        )
-        dropped = int(total_timesteps) % max(1, meta_divisor)
-        if dropped != 0:
-            warnings.warn(
-                f"TOTAL_TIMESTEPS={total_timesteps} is not divisible by NUM_STEPS*NUM_ENVS="
-                f"{meta_divisor}; dropping {dropped} timesteps in meta training.",
-                UserWarning,
-                stacklevel=2,
-            )
-        final_meta_params, _, final_skill_params = run_meta_training(
-            final_skill_params, total_timesteps, step_offset=0
-        )
-    elif train_mode == "tandem":
-        final_skill_params, final_meta_params = run_tandem_training(
-            total_timesteps,
-            init_meta_params=None,
-            init_skill_params=prev_params,
-        )
-    else:
-        raise ValueError(
-            f"Unknown TRAIN_MODE: {train_mode}. Supported modes: skills_only, meta_only, tandem."
-        )
-
-    print(f"\nTraining run completed in {time.time() - global_t0:.2f} seconds.")
-
-    # Optional: Save final config (hyperparameters) and model parameters to disk
-    save_path = resolve_config_path(base_config.get("SAVE_PATH", None))
-    if save_path is not None:
-        save_dir = os.path.join(save_path, env_name)
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Save config
-        OmegaConf.save(
-            base_config,
-            os.path.join(save_dir, f'{alg_name}_{env_name}_seed{base_config["SEED"]}_config.yaml'),
-        )
-        print(f"Config saved to {save_dir}")
-
-        if final_skill_params is not None:
-            flat_skill_params = flatten_dict(final_skill_params, sep=",")
-            if final_meta_params is None:
-                skills_filename = f'{alg_name}_{env_name}_seed{base_config["SEED"]}.safetensors'
-            else:
-                skills_filename = (
-                    f'{alg_name}_{env_name}_seed{base_config["SEED"]}_skills.safetensors'
+    final_skill_params = None
+    final_meta_params = None
+    try:
+        total_timesteps = int(base_config.get("TOTAL_TIMESTEPS", 0))
+        if train_mode == "skills_only":
+            final_skill_params, _ = run_skill_curriculum(prev_params, total_timesteps)
+        elif train_mode == "meta_only":
+            if prev_params is None:
+                raise ValueError(
+                    "Mode 'meta_only' requires INIT_MODEL_PATH containing skill parameters."
                 )
-            skills_model_path = _safe_checkpoint_path(
-                os.path.join(save_dir, skills_filename),
-                init_model_path=init_model_path,
+            final_skill_params = prev_params
+            meta_divisor = int(base_config.get("NUM_STEPS", 128)) * int(
+                base_config.get("NUM_ENVS", 512)
             )
-            save_file(flat_skill_params, skills_model_path)
-            print(f"Skill model parameters saved to {skills_model_path}")
+            dropped = int(total_timesteps) % max(1, meta_divisor)
+            if dropped != 0:
+                warnings.warn(
+                    f"TOTAL_TIMESTEPS={total_timesteps} is not divisible by NUM_STEPS*NUM_ENVS="
+                    f"{meta_divisor}; dropping {dropped} timesteps in meta training.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            final_meta_params, _, final_skill_params = run_meta_training(
+                final_skill_params, total_timesteps, step_offset=0
+            )
+        elif train_mode == "tandem":
+            init_meta_params = None
+            init_meta_path = base_config.get("INIT_META_MODEL_PATH")
+            if init_meta_path is not None:
+                print(f"Initializing meta-policy from checkpoint: {init_meta_path}")
+                init_meta_params = load_params_from_file(init_meta_path)
+            final_skill_params, final_meta_params = run_tandem_training(
+                total_timesteps,
+                init_meta_params=init_meta_params,
+                init_skill_params=prev_params,
+            )
+        else:
+            raise ValueError(
+                f"Unknown TRAIN_MODE: {train_mode}. Supported modes: skills_only, meta_only, tandem."
+            )
 
-        if final_meta_params is not None:
-            flat_meta_params = flatten_dict(final_meta_params, sep=",")
-            meta_model_path = _safe_checkpoint_path(
-                os.path.join(
-                    save_dir,
-                    f'{alg_name}_{env_name}_seed{base_config["SEED"]}_meta.safetensors',
-                ),
-                init_model_path=init_model_path,
+        print(f"\nTraining run completed in {time.time() - global_t0:.2f} seconds.")
+
+        # Optional: Save final config (hyperparameters) and model parameters to disk
+        save_path = resolve_config_path(base_config.get("SAVE_PATH", None))
+        if save_path is not None:
+            save_dir = os.path.join(save_path, env_name)
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Save config (restore ego/mapper flags from run start — training must not
+            # clobber clip / POV knobs in the sidecar yaml).
+            from concept_based_learning.paper_eval.config_merge import restore_ego_persist_keys
+
+            restore_ego_persist_keys(base_config, ego_persist_snapshot)
+            OmegaConf.save(
+                base_config,
+                os.path.join(save_dir, f'{alg_name}_{env_name}_seed{base_config["SEED"]}_config.yaml'),
             )
-            save_file(flat_meta_params, meta_model_path)
-            print(f"Meta-policy parameters saved to {meta_model_path}")
+            print(f"Config saved to {save_dir}")
+
+            # Refresh wandb run id next to the final checkpoints (same dir).
+            if wandb.run is not None:
+                from concept_based_learning.paper_eval.wandb_run_meta import (
+                    persist_wandb_run_meta,
+                )
+
+                persist_wandb_run_meta(save_dir)
+
+            if final_skill_params is not None:
+                flat_skill_params = flatten_skill_params(final_skill_params)
+                if final_meta_params is None:
+                    skills_filename = f'{alg_name}_{env_name}_seed{base_config["SEED"]}.safetensors'
+                else:
+                    skills_filename = (
+                        f'{alg_name}_{env_name}_seed{base_config["SEED"]}_skills.safetensors'
+                    )
+                skills_model_path = _safe_checkpoint_path(
+                    os.path.join(save_dir, skills_filename),
+                    init_model_path=init_model_path,
+                )
+                save_file(flat_skill_params, skills_model_path)
+                print(f"Skill model parameters saved to {skills_model_path}")
+
+            if final_meta_params is not None:
+                flat_meta_params = flatten_dict(final_meta_params, sep=",")
+                meta_model_path = _safe_checkpoint_path(
+                    os.path.join(
+                        save_dir,
+                        f'{alg_name}_{env_name}_seed{base_config["SEED"]}_meta.safetensors',
+                    ),
+                    init_model_path=init_model_path,
+                )
+                save_file(flat_meta_params, meta_model_path)
+                print(f"Meta-policy parameters saved to {meta_model_path}")
+    finally:
+        # Ensure background video threads finish before closing the wandb run.
+        wait_for_video_finish()
+        if wandb.run is not None:
+            wandb.finish()
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="config")

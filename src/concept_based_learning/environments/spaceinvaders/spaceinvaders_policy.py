@@ -3,95 +3,120 @@ import jax.numpy as jnp
 
 from concept_based_learning.environments.datatypes import (
     LABEL_AVOID,
-    LABEL_COLLECT,
     LABEL_DESTROY,
 )
+from concept_based_learning.observations.egocentric import player_object_aabb_gaps
 
 # When no object is on screen, return this; downstream should execute NOOP.
 NO_TARGET_IDX = -1
 
-# Distance (in pixels) that counts as "immediate danger" for dodging bullets
+# AABB surface-gap (px) that counts as "immediate danger" for dodging bullets.
 CLOSE_DANGER_RANGE = 20.0
 
-# Set x-axis weight to normal Euclidean distance
-X_AXIS_WEIGHT = 1.0
+NUM_ENEMIES = 36
+NUM_ENEMY_BULLETS = 3
+ENEMY_COLS = 6
+FIRST_ENEMY_SLOT = 1  # slot 0 = reserved meta NOOP
+# Layout after meta NOOP: [36 enemies | 3 bullets | 1 UFO]
+UFO_SLOT = FIRST_ENEMY_SLOT + NUM_ENEMIES + NUM_ENEMY_BULLETS  # 40
 
 
 def get_heuristic_target(raw_observation, objects, prev_target_idx, rng):
     """
-    Simpler Space Invaders targeting rule:
+    Legacy Space Invaders targeting: uniform-random sticky DESTROY on the
+    bottom formation row.
 
-    - By default, always pursue the **closest DESTROY object** (enemy / UFO).
-    - If an incoming bullet (AVOID object) is within `CLOSE_DANGER_RANGE`,
-      temporarily switch target to that bullet to dodge.
-    - If the topmost enemy/UFO is present, prefer it over the nearest enemy.
+    Prefer ``HEURISTIC_MODE: sweep`` / ``env_specific`` (resolved to the
+    bottom-row L→R sweep with mission stickiness). Keep this available via
+    ``HEURISTIC_MODE: random_bottom``.
+
+    - When choosing a new DESTROY target, pick uniformly at random among
+      enemies on the current bottom formation row.
+    - If no formation DESTROY remains, select the saucer (UFO) when it is
+      an active DESTROY (needed for ``saucer_only`` and end-of-wave).
+    - Keep that target until it is destroyed / goes inactive (sticky also
+      covers the UFO).
+    - If a bullet (AVOID) enters CLOSE_DANGER_RANGE (AABB surface gap),
+      temporarily override the target to that bullet.  After the dodge,
+      stickiness resumes only if ``prev_target_idx`` is still an active
+      DESTROY object; otherwise a new random bottom-row enemy (or UFO) is
+      chosen.
     """
-    # Extract current frame data
-    px = raw_observation.player.x[-1]
-    py = raw_observation.player.y[-1]
-
-    ox = objects.x[-1]
-    oy = objects.y[-1]
+    distances, _, _, _, _ = player_object_aabb_gaps(raw_observation, objects)
     active_mask = objects.active[-1] > 0.5
-    idxs = jnp.arange(active_mask.shape[0])
-
-    # Calculate distances from the centers of the objects
-    px_center = px + (raw_observation.player.width[-1] / 2.0)
-    py_center = py + (raw_observation.player.height[-1] / 2.0)
-    ox_center = ox + (objects.width[-1] / 2.0)
-    oy_center = oy + (objects.height[-1] / 2.0)
-
-    dx = px_center - ox_center
-    dy = py_center - oy_center
-
-    # True Euclidean distance for immediate danger checks
-    distances = jnp.sqrt(dx**2 + dy**2)
-
-    # Weighted distance (keep standard Euclidean here)
-    weighted_distances = jnp.sqrt((X_AXIS_WEIGHT * dx) ** 2 + dy**2)
-
     labels = objects.semantic_label[-1]
+    n = active_mask.shape[0]
+    idxs = jnp.arange(n, dtype=jnp.int32)
 
     # ------------------------------------------------------------------
-    # Base target: closest DESTROY object (enemy or UFO)
+    # Bottom-row DESTROY candidates (formation enemies); UFO is fallback
     # ------------------------------------------------------------------
-    destroy_mask = jnp.logical_and(active_mask, labels == LABEL_DESTROY)
-    any_destroy = jnp.any(destroy_mask)
+    enemy_slot_mask = jnp.logical_and(
+        idxs >= FIRST_ENEMY_SLOT,
+        idxs < FIRST_ENEMY_SLOT + NUM_ENEMIES,
+    )
+    destroy_enemy_mask = jnp.logical_and(
+        jnp.logical_and(active_mask, labels == LABEL_DESTROY),
+        enemy_slot_mask,
+    )
+    any_formation_destroy = jnp.any(destroy_enemy_mask)
 
-    # Nearest DESTROY object by distance
-    destroy_distances = jnp.where(destroy_mask, weighted_distances, jnp.inf)
-    nearest_destroy_idx = jnp.argmin(destroy_distances).astype(jnp.int32)
+    ufo_in_range = jnp.logical_and(UFO_SLOT >= 0, UFO_SLOT < n)
+    ufo_destroy = jnp.logical_and(
+        ufo_in_range,
+        jnp.logical_and(
+            active_mask[UFO_SLOT],
+            labels[UFO_SLOT] == LABEL_DESTROY,
+        ),
+    )
+    ufo_idx = jnp.array(UFO_SLOT, dtype=jnp.int32)
 
-    # "Top enemy": smallest y-center among DESTROY objects (includes UFO)
-    destroy_oy = jnp.where(destroy_mask, oy_center, jnp.inf)
-    top_destroy_idx = jnp.argmin(destroy_oy).astype(jnp.int32)
+    enemy_rows = (idxs - FIRST_ENEMY_SLOT) // ENEMY_COLS
+    enemy_rows_for_bottom = jnp.where(destroy_enemy_mask, enemy_rows, -1)
+    bottom_row = jnp.max(enemy_rows_for_bottom)
+    bottom_mask = jnp.logical_and(destroy_enemy_mask, enemy_rows == bottom_row)
 
-    # Prefer the topmost enemy when any DESTROY object exists.
-    # (UFO lives at the very top and will naturally be selected here.)
-    base_destroy_idx = jnp.where(any_destroy, top_destroy_idx, nearest_destroy_idx)
+    # Uniform random pick among current bottom-row enemies.
+    scores = jnp.where(
+        bottom_mask, jax.random.uniform(rng, (n,)), jnp.asarray(-1.0)
+    )
+    random_bottom_idx = jnp.argmax(scores).astype(jnp.int32)
 
-    # ------------------------------------------------------------------
-    # Danger override: bullets (AVOID) very close to the player
-    # ------------------------------------------------------------------
-    avoid_mask = jnp.logical_and(active_mask, labels == LABEL_AVOID)
-    close_avoid_mask = jnp.logical_and(avoid_mask, distances <= CLOSE_DANGER_RANGE)
-    have_close_avoid = jnp.any(close_avoid_mask)
+    # Sticky: keep prev_target_idx if it is still an active DESTROY object
+    # (formation enemy or saucer).
+    prev_valid = jnp.logical_and(
+        prev_target_idx >= 0,
+        prev_target_idx < n,
+    )
+    prev_active = jnp.where(prev_valid, active_mask[prev_target_idx], False)
+    prev_is_destroy = jnp.where(
+        prev_valid, labels[prev_target_idx] == LABEL_DESTROY, False
+    )
+    keep_prev_destroy = jnp.logical_and(prev_active, prev_is_destroy)
 
-    # Among close bullets, pick the nearest one
-    avoid_distances = jnp.where(close_avoid_mask, distances, jnp.inf)
-    best_avoid_idx = jnp.argmin(avoid_distances).astype(jnp.int32)
-
-    # ------------------------------------------------------------------
-    # Final target selection
-    # ------------------------------------------------------------------
-    # 1) Default to DESTROY target if any exist, otherwise "no target"
-    target_idx = jnp.where(
+    formation_or_ufo = jnp.where(
+        any_formation_destroy,
+        random_bottom_idx,
+        jnp.where(ufo_destroy, ufo_idx, jnp.array(NO_TARGET_IDX, dtype=jnp.int32)),
+    )
+    base_destroy_idx = jnp.where(keep_prev_destroy, prev_target_idx, formation_or_ufo)
+    any_destroy = jnp.logical_or(any_formation_destroy, ufo_destroy)
+    base_destroy_idx = jnp.where(
         any_destroy,
         base_destroy_idx,
         jnp.array(NO_TARGET_IDX, dtype=jnp.int32),
     )
 
-    # 2) If there is an immediate danger bullet, override with that AVOID object
-    target_idx = jnp.where(have_close_avoid, best_avoid_idx, target_idx)
+    # ------------------------------------------------------------------
+    # AVOID danger override
+    # ------------------------------------------------------------------
+    avoid_mask = jnp.logical_and(active_mask, labels == LABEL_AVOID)
+    close_avoid_mask = jnp.logical_and(avoid_mask, distances <= CLOSE_DANGER_RANGE)
+    have_close_avoid = jnp.any(close_avoid_mask)
+
+    avoid_distances = jnp.where(close_avoid_mask, distances, jnp.inf)
+    best_avoid_idx = jnp.argmin(avoid_distances).astype(jnp.int32)
+
+    target_idx = jnp.where(have_close_avoid, best_avoid_idx, base_destroy_idx)
 
     return target_idx.astype(jnp.int32)
